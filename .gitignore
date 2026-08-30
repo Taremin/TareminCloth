@@ -1,0 +1,44 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Blender backup & temp files
+*.blend1
+*.blend2
+*.blend3
+*.blend4
+*.blend5
+*.blend6
+*.blend7
+*.blend8
+*.blend9
+*.blend10
+*.blend11
+*.blend12
+*.blend@
+
+# Temporary & workspace scratch directories
+/tmp/
+/scratch/
+/frame_logs/
+memo.md
+*.tmp
+*.log
+*.old*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Agent internal files
+.agents/

@@ -1,0 +1,20 @@
+[package]
+name = "cloth_core"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+
+[dependencies]
+wgpu = "24.0"
+bytemuck = { version = "1.21", features = ["derive"] }
+pollster = "0.4"
+futures-intrusive = "0.5"
+thiserror = "2.0"
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+pollster = "0.4"

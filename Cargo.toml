@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/cloth_core",
+    "crates/cloth_py",
+]
+resolver = "2"

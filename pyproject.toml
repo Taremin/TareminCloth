@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "taremin_cloth_core"
+version = "0.1.0"
+description = "GPU-accelerated XPBD Cloth Simulation core for Blender"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Unlicense OR GPL-3.0-or-later" }
+dependencies = [
+    "numpy",
+]
+
+[tool.maturin]
+manifest-path = "crates/cloth_py/Cargo.toml"
+module-name = "taremin_cloth_core"

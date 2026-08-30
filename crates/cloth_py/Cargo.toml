@@ -1,0 +1,17 @@
+[package]
+name = "taremin_cloth_core"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense OR GPL-3.0-or-later"
+
+[lib]
+name = "taremin_cloth_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cloth_core = { path = "../cloth_core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+numpy = "0.23"
+pollster = "0.4"
+log = "0.4"
+env_logger = "0.11"
