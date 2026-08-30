@@ -1,0 +1,85 @@
+name: Release Addon
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            target: x86_64-pc-windows-msvc
+            maturin_args: ""
+            manylinux: "off"
+          - os: ubuntu-latest
+            platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            maturin_args: "--compatibility manylinux2014"
+            manylinux: "auto"
+          - os: macos-latest
+            platform: macos-universal
+            target: universal2-apple-darwin
+            maturin_args: ""
+            manylinux: "off"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build wheel using maturin-action
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist ${{ matrix.maturin_args }}
+          manylinux: ${{ matrix.manylinux }}
+
+      - name: Package Blender Addon
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME:-v0.1.0}
+          OUTPUT_ZIP="dist/taremin_cloth-${VERSION}-${{ matrix.platform }}.zip"
+          python tools/package_addon.py --wheel dist --output "$OUTPUT_ZIP" --version "${VERSION#v}"
+          echo "ZIP_FILE=$OUTPUT_ZIP" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: addon-${{ matrix.platform }}
+          path: ${{ env.ZIP_FILE }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false

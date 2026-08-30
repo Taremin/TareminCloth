@@ -51,16 +51,17 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
 
 ## 📦 インストール / 導入手順
 
-### 1. リポジトリを Blender のアドオンフォルダに配置
+### 1. 配布用 zip からインストールする場合（推奨・一般ユーザー向け）
 
-Blender のアドオンディレクトリ（例: Windows の場合は `%APPDATA%\Blender Foundation\Blender\5.2\scripts\addons\`）に本フォルダを配置、またはシンボリックリンクを作成します。
+1. GitHub の [Releases](https://github.com/taremin/taremin_cloth/releases) ページから、お使いの環境に合った最新の zip ファイルをダウンロードします：
+   - **Windows**: `taremin_cloth-vX.Y.Z-windows-x64.zip`
+   - **Linux**: `taremin_cloth-vX.Y.Z-linux-x64.zip`
+   - **macOS**: `taremin_cloth-vX.Y.Z-macos-universal.zip` (Apple Silicon / Intel 両対応)
+2. Blender を起動し、**「編集 (Edit)」 > 「プリファレンス (Preferences)」 > 「アドオン (Add-ons)」** を開きます。
+3. 右上の **「ディスクからインストール... (Install from Disk...)」** をクリックし、ダウンロードした zip ファイルを選択します。
+4. リストに表示された **Taremin Cloth** のチェックボックスをオンにして有効化します。
 
-```powershell
-# 例: アドオンディレクトリへシンボリックリンクを作成
-New-Item -ItemType SymbolicLink -Path "$env:APPDATA\Blender Foundation\Blender\5.2\scripts\addons\taremin_cloth" -Target "(Get-Location).Path"
-```
-
-### 2. ソースコードからビルドする場合
+### 2. ソースコードから開発 / ビルドする場合
 
 Rust ツールチェーンがインストールされている環境で以下を実行します：
 
@@ -68,14 +69,22 @@ Rust ツールチェーンがインストールされている環境で以下を
 # プロジェクトルートでビルド
 cargo build --release
 
-# 生成された DLL を .pyd として配置
+# 生成された DLL を .pyd として配置（Windowsの場合）
 Copy-Item target\release\taremin_cloth_core.dll taremin_cloth_core.pyd
 ```
 
-### 3. Blender でアドオンを有効化
+アドオンディレクトリ（例: Windows の場合は `%APPDATA%\Blender Foundation\Blender\5.2\scripts\addons\`）に本フォルダを配置、またはシンボリックリンクを作成して有効化します：
 
-1. Blender を起動し、**「編集 (Edit)」 > 「プリファレンス (Preferences)」 > 「アドオン (Add-ons)」** を開きます。
-2. 検索バーに **Taremin Cloth** と入力し、チェックボックスをオンにして有効化します。
+```powershell
+# 例: アドオンディレクトリへシンボリックリンクを作成
+New-Item -ItemType SymbolicLink -Path "$env:APPDATA\Blender Foundation\Blender\5.2\scripts\addons\taremin_cloth" -Target "(Get-Location).Path"
+```
+
+#### 配布用 zip をローカルで作成する場合:
+```powershell
+# ローカルのバイナリを含めた配布用 zip を dist/ に生成
+python tools/package_addon.py
+```
 
 ---
 
