@@ -55,7 +55,7 @@ def cache_rest_positions(obj, force=False):
     has_cache = "_taremin_rest_positions" in obj
     is_deformed = obj.get("_taremin_is_deformed", False)
 
-    # シミュレーションによる変形が起きている最中は、変形座標でレストポーズを汚染しないよう上書きを拒否
+    # シミュレーションによる変形が起きている最中は、force=Trueであっても変形座標でレストポーズを汚染しないよう上書きを拒否
     if is_deformed:
         logger.debug(f"[Cache] Refusing to cache rest positions for deformed object '{obj.name}' (is_deformed=True)")
         return
@@ -88,6 +88,7 @@ def cache_rest_positions(obj, force=False):
         obj["_taremin_rest_positions"] = coords.tobytes()
         obj["_taremin_rest_signature"] = list(sig)
         obj["_taremin_is_deformed"] = False
+
         logger.info(f"[Cache] Cached rest positions for '{obj.name}' ({n_verts} verts, sig={sig})")
     else:
         logger.debug(f"[Cache] Rest positions update skipped for '{obj.name}'")
@@ -352,8 +353,17 @@ def get_or_create_simulator(obj):
     s_mode = 1 if getattr(settings, "solver_mode", "COLORING") == 'ATOMIC' else 0
     compact_rb = getattr(settings, "enable_compact_readback", True)
 
+    is_deformed = obj.get("_taremin_is_deformed", False)
+    rest_pos_2d = None
+    if is_deformed and "_taremin_rest_positions" in obj:
+        raw_rest = obj["_taremin_rest_positions"]
+        if len(raw_rest) == n_verts * 3 * 4:
+            rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3))
+
+    sim_init_pos = rest_pos_2d if rest_pos_2d is not None else pos_2d
+
     sim = taremin_cloth_core.ClothSimulator(
-        positions=pos_2d,
+        positions=sim_init_pos,
         edges=edges_2d,
         faces=faces_2d,
         inv_masses=inv_masses,
@@ -369,6 +379,11 @@ def get_or_create_simulator(obj):
         solver_mode=s_mode,
         enable_compact_readback=compact_rb,
     )
+
+    # Cold Resume: レスト座標で自然長を初期化した後、現在の変形頂点座標をGPUにセットして停止位置から再開
+    if rest_pos_2d is not None:
+        sim.set_positions_and_velocities(pos_2d)
+        logger.info(f"[Simulator] Cold resume: Restored positions to previous paused state for '{obj.name}'")
 
     # メッシュ特性長 (最小エッジ長と布厚み) を計算してキャッシュ
     if len(edges_2d) > 0:
@@ -1495,23 +1510,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
                 sim.stop_debug_recording()
 
-        if obj and obj.type == 'MESH':
-            settings = getattr(obj, "taremin_cloth", None)
-            if settings:
-                # 1. 十字分割モードの後処理
-                if (settings.triangulation_mode == 'CROSS_SUBDIV' or settings.enable_cross_subdivision) and settings.auto_post_process and topology.is_cross_subdivided(obj):
-                    clear_simulator_for_object(obj.name)
-                    topology.apply_post_process(obj, mode=settings.post_process_mode, flatness_threshold=settings.adaptive_flatness_threshold)
-                # 2. 動的対角線分割モード（アプローチA: 歪み率による自動2分割）
-                elif settings.triangulation_mode == 'DYNAMIC_DIAGONAL' and settings.auto_triangulate_on_stop:
-                    clear_simulator_for_object(obj.name)
-                    topology.apply_dynamic_diagonal_triangulation(
-                        obj,
-                        preserve_flat=settings.dynamic_preserve_flat,
-                        flatness_threshold=settings.dynamic_flatness_threshold
-                    )
-
-        self.report({'INFO'}, "Interactive Simulation Stopped")
+        # インタラクティブモード停止時は、次回スムーズに停止位置から再開（Warm Resume）できるよう
+        # シミュレータインスタンスおよびQuadトポロジーをそのまま保持する
+        self.report({'INFO'}, "Interactive Simulation Stopped (Paused)")
 
 
 class TAREMIN_CLOTH_OT_create_seam(bpy.types.Operator):
@@ -1797,16 +1798,16 @@ class TAREMIN_CLOTH_OT_restore_quad_topology(bpy.types.Operator):
             return {'CANCELLED'}
 
 
-class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
-    """キャッシュとバックアップを破棄し、現在のメッシュ形状を初期レストポーズとして再設定する"""
-    bl_idname = "taremin_cloth.clear_cache"
-    bl_label = "Clear Cache"
-    bl_description = "古いキャッシュやバックアップを破棄し、現在のメッシュ形状をシミュレーションの初期状態として再記憶します"
+class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
+    """現在の変形メッシュ形状をシミュレーションの新しい初期レスト形状（自然長）として確定する"""
+    bl_idname = "taremin_cloth.apply_rest_shape"
+    bl_label = "Apply Rest Shape"
+    bl_description = "現在の変形メッシュ形状をシミュレーションの新しい初期状態（レストポーズ）として確定します"
     bl_options = {'REGISTER', 'UNDO'}
 
     all_objects: bpy.props.BoolProperty(
         name="All Objects",
-        description="シーン内のすべてのClothオブジェクトのキャッシュをクリアする",
+        description="シーン内のすべてのClothオブジェクトに適用する",
         default=False,
     )
 
@@ -1841,14 +1842,34 @@ class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
                         pass
             cache_rest_positions(o, force=True)
             o.update_tag()
-            logger.info(f"[Cache] Cleared and refreshed rest positions for '{o.name}' (verts={len(o.data.vertices)})")
+            logger.info(f"[Cache] Applied current shape as rest positions for '{o.name}' (verts={len(o.data.vertices)})")
 
         if self.all_objects:
-            self.report({'INFO'}, f"全 {len(targets)} 個のClothキャッシュをクリアし、最新形状を記憶しました")
+            self.report({'INFO'}, f"全 {len(targets)} 個のClothの現在形状を新しいレスト形状として確定しました")
         else:
-            self.report({'INFO'}, f"'{targets[0].name}' のキャッシュをクリアし、最新形状を記憶しました")
+            self.report({'INFO'}, f"'{targets[0].name}' の現在形状を新しいレスト形状として確定しました")
 
         return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
+    """【互換用】古いキャッシュやバックアップを破棄し、現在のメッシュ形状を初期状態として再記憶します"""
+    bl_idname = "taremin_cloth.clear_cache"
+    bl_label = "Clear Cache"
+    bl_description = "古いキャッシュやバックアップを破棄し、現在のメッシュ形状を初期状態として再記憶します（Apply Rest Shapeと同等）"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    all_objects: bpy.props.BoolProperty(
+        name="All Objects",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return TAREMIN_CLOTH_OT_apply_rest_shape.poll(context)
+
+    def execute(self, context):
+        return bpy.ops.taremin_cloth.apply_rest_shape(all_objects=self.all_objects)
 
 
 class TAREMIN_CLOTH_OT_apply_gpu_settings(bpy.types.Operator):
@@ -2100,6 +2121,7 @@ classes = (
     TAREMIN_CLOTH_OT_reset_selected,
     TAREMIN_CLOTH_OT_reset_all,
     TAREMIN_CLOTH_OT_reset_simulation,
+    TAREMIN_CLOTH_OT_apply_rest_shape,
     TAREMIN_CLOTH_OT_clear_cache,
     TAREMIN_CLOTH_OT_apply_gpu_settings,
     TAREMIN_CLOTH_OT_interactive,

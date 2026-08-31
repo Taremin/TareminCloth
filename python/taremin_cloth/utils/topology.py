@@ -26,9 +26,16 @@ def backup_pre_subdivision_mesh(obj):
         mesh_name = obj["_taremin_backup_mesh"]
         old_backup = bpy.data.meshes.get(mesh_name)
         if old_backup:
+            # 変形中（is_deformed=True）の場合は初期状態保護のため上書きしない
+            if obj.get("_taremin_is_deformed", False):
+                return
             if len(old_backup.vertices) == len(obj.data.vertices) and len(old_backup.polygons) == len(obj.data.polygons):
                 return
             bpy.data.meshes.remove(old_backup, do_unlink=True)
+
+    # 変形中に新規バックアップを作成することは避ける（すでに変形しているため）
+    if obj.get("_taremin_is_deformed", False) and "_taremin_backup_mesh" in obj:
+        return
 
     backup = obj.data.copy()
     backup.name = f".taremin_backup_{obj.name}"

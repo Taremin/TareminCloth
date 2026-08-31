@@ -203,7 +203,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 box_global.label(text="Scene Simulation", icon='PHYSICS')
                 row_glob = box_global.row(align=True)
                 row_glob.operator("taremin_cloth.reset_all", text="Reset All", icon='RECOVER_LAST')
-                op_clr_all = row_glob.operator("taremin_cloth.clear_cache", text="Clear All Cache", icon='TRASH')
+                op_clr_all = row_glob.operator("taremin_cloth.apply_rest_shape", text="Apply All Shapes", icon='CHECKMARK')
                 if op_clr_all:
                     op_clr_all.all_objects = True
             _draw_diagnostics_box(layout, context)
@@ -219,7 +219,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 box_global.label(text="Scene Simulation", icon='PHYSICS')
                 row_glob = box_global.row(align=True)
                 row_glob.operator("taremin_cloth.reset_all", text="Reset All", icon='RECOVER_LAST')
-                op_clr_all = row_glob.operator("taremin_cloth.clear_cache", text="Clear All Cache", icon='TRASH')
+                op_clr_all = row_glob.operator("taremin_cloth.apply_rest_shape", text="Apply All Shapes", icon='CHECKMARK')
                 if op_clr_all:
                     op_clr_all.all_objects = True
             _draw_diagnostics_box(layout, context)
@@ -237,7 +237,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sel.operator("taremin_cloth.interactive", text="Interactive Mode (Grab/Drag)", icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
             row_sel.operator("taremin_cloth.reset_selected", text="Reset Cloth", icon='FILE_REFRESH')
-            op_clr = row_sel.operator("taremin_cloth.clear_cache", text="Clear Cache", icon='TRASH')
+            op_clr = row_sel.operator("taremin_cloth.apply_rest_shape", text="Apply Rest Shape", icon='CHECKMARK')
             if op_clr:
                 op_clr.all_objects = False
 
@@ -246,7 +246,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             box_global.label(text="Scene Simulation", icon='PHYSICS')
             row_glob = box_global.row(align=True)
             row_glob.operator("taremin_cloth.reset_all", text="Reset All", icon='RECOVER_LAST')
-            op_clr_all = row_glob.operator("taremin_cloth.clear_cache", text="Clear All Cache", icon='TRASH')
+            op_clr_all = row_glob.operator("taremin_cloth.apply_rest_shape", text="Apply All Shapes", icon='CHECKMARK')
             if op_clr_all:
                 op_clr_all.all_objects = True
 
