@@ -71,6 +71,54 @@ fn get_current_gpu_device<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> 
     Ok(dict)
 }
 
+/// メッシュをUnlit（表面:白、裏面:赤）で描画してPNG画像として保存する（Blender非依存・高速ソフトウェアラスタライザ）
+/// 戻り値: 赤色（裏面露出）ピクセル数
+#[pyfunction]
+#[pyo3(signature = (filepath, positions, faces, width=800, height=600, camera_pos=None, camera_target=None, fov=45.0))]
+fn render_mesh_to_png<'py>(
+    _py: Python<'py>,
+    filepath: &str,
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    width: u32,
+    height: u32,
+    camera_pos: Option<[f32; 3]>,
+    camera_target: Option<[f32; 3]>,
+    fov: f32,
+) -> PyResult<usize> {
+    let pos_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(pos_view.shape()[0]);
+    for row in pos_view.outer_iter() {
+        if row.len() >= 3 {
+            pos_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let face_view = faces.as_array();
+    let mut face_vec = Vec::with_capacity(face_view.shape()[0]);
+    for row in face_view.outer_iter() {
+        if row.len() >= 3 {
+            face_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let options = cloth_core::RenderOptions {
+        width,
+        height,
+        camera_pos,
+        camera_target,
+        fov_deg: fov,
+        bg_color: [35, 35, 35],
+        front_color: [255, 255, 255],
+        back_color: [255, 0, 0],
+    };
+
+    let result = cloth_core::render_mesh_to_png_file(filepath, &pos_vec, &face_vec, &options)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("PNG描画保存に失敗しました: {e}")))?;
+
+    Ok(result.red_pixels)
+}
+
 /// GPU Cloth シミュレータ PyClass
 #[pyclass]
 pub struct ClothSimulator {
@@ -201,6 +249,12 @@ impl ClothSimulator {
         self.simulator.step(dt, substeps);
     }
 
+    /// 単一サブステップのみ計算を進める（オンデマンド・サブステップ顕微鏡解析用）
+    #[pyo3(signature = (dt_sub=0.0016666667))]
+    fn step_single_substep(&mut self, dt_sub: f32) {
+        self.simulator.step_single_substep(dt_sub);
+    }
+
     /// シミュレーションを非同期に 1 フレーム進める（GPU計算を発行しCPUブロックなしで即座に復帰）
     #[pyo3(signature = (dt=0.016666667, substeps=20, solver_iterations=None))]
     fn step_async(&mut self, dt: f32, substeps: u32, solver_iterations: Option<u32>) {
@@ -307,6 +361,39 @@ impl ClothSimulator {
     fn get_positions<'py>(&self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<()> {
         let mut out_slice = unsafe { out_array.as_slice_mut()? };
         self.simulator.get_positions_flat(&mut out_slice);
+        Ok(())
+    }
+
+    /// 頂点座標および速度ベクトルを直接設定し、シミュレーション状態を任意フレームへ復元する
+    #[pyo3(signature = (positions, velocities=None))]
+    fn set_positions_and_velocities<'py>(
+        &mut self,
+        _py: Python<'py>,
+        positions: PyReadonlyArray2<f32>,
+        velocities: Option<PyReadonlyArray2<f32>>,
+    ) -> PyResult<()> {
+        let pos_view = positions.as_array();
+        let mut pos_vec = Vec::with_capacity(pos_view.shape()[0]);
+        for row in pos_view.outer_iter() {
+            if row.len() >= 3 {
+                pos_vec.push([row[0], row[1], row[2]]);
+            }
+        }
+
+        let vel_vec = if let Some(vels) = velocities {
+            let vel_view = vels.as_array();
+            let mut v_vec = Vec::with_capacity(vel_view.shape()[0]);
+            for row in vel_view.outer_iter() {
+                if row.len() >= 3 {
+                    v_vec.push([row[0], row[1], row[2]]);
+                }
+            }
+            Some(v_vec)
+        } else {
+            None
+        };
+
+        self.simulator.set_positions_and_velocities(&pos_vec, vel_vec.as_deref());
         Ok(())
     }
 
@@ -551,6 +638,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_available_gpu_devices, m)?)?;
     m.add_function(wrap_pyfunction!(set_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(get_current_gpu_device, m)?)?;
+    m.add_function(wrap_pyfunction!(render_mesh_to_png, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

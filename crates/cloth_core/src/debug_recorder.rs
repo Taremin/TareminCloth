@@ -1,12 +1,56 @@
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
 
+/// 動的ピン留め（Grab操作など）の記録
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PinRecord {
+    pub vertex_idx: u32,
+    pub target_pos: [f32; 3],
+    pub weight: f32,
+}
+
+/// コライダー（球・カプセル・平面・メッシュ）の記録
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ColliderRecord {
+    #[serde(rename = "sphere")]
+    Sphere {
+        center: [f32; 3],
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    },
+    #[serde(rename = "capsule")]
+    Capsule {
+        point_a: [f32; 3],
+        point_b: [f32; 3],
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    },
+    #[serde(rename = "plane")]
+    Plane {
+        point: [f32; 3],
+        normal: [f32; 3],
+        friction: f32,
+        restitution: f32,
+    },
+    #[serde(rename = "mesh")]
+    Mesh {
+        triangles: Vec<[f32; 9]>, // [p0x, p0y, p0z, p1x, p1y, p1z, p2x, p2y, p2z]
+        friction: f32,
+        thickness: f32,
+        restitution: f32,
+        single_sided: bool,
+    },
+}
+
 /// シミュレーション初期設定およびメッシュトポロジーのメタデータ
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SimulationMetadata {
     pub object_name: String,
     pub num_vertices: u32,
@@ -14,15 +58,30 @@ pub struct SimulationMetadata {
     pub num_faces: u32,
     pub edges: Vec<[u32; 2]>,
     pub faces: Vec<[u32; 3]>,
+    pub inv_masses: Vec<f32>,
+    pub initial_rest_lengths: Vec<f32>,
+    // 物理パラメータ
     pub stiffness: f32,
     pub bending_stiffness: f32,
     pub thickness: f32,
+    pub gravity: [f32; 3],
+    pub damping: f32,
     pub solver_mode: u32,
+    pub solver_iterations: u32,
     pub workgroup_size: u32,
+    // セルフコリジョン & Untangling パラメータ
+    pub enable_self_collision: bool,
+    pub self_collision_relief_factor: f32,
+    pub self_collision_max_displacement_ratio: f32,
+    pub self_collision_exclude_neighbors: bool,
+    pub enable_normal_untangling: bool,
+    pub enable_edge_collision: bool,
+    pub edge_margin_scale: f32,
+    pub edge_margin_offset: f32,
 }
 
 /// 単一フレーム内の統計情報（異常値検知・境界箱など）
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FrameStats {
     pub max_velocity: f32,
     pub max_displacement: f32,
@@ -31,8 +90,8 @@ pub struct FrameStats {
     pub aabb_max: [f32; 3],
 }
 
-/// 単一フレームの状態記録
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// 単一フレームの状態記録（入出力を含む）
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FrameRecord {
     pub frame_index: u32,
     pub dt: f32,
@@ -40,17 +99,24 @@ pub struct FrameRecord {
     pub solver_iterations: u32,
     pub positions: Vec<[f32; 3]>,
     pub velocities: Vec<[f32; 3]>,
-    pub pinned_indices: Vec<u32>,
+    pub pinned_indices: Vec<u32>, // 互換性用
+    pub pins: Vec<PinRecord>,
+    pub colliders: Vec<ColliderRecord>,
     pub stats: FrameStats,
 }
 
-/// 全体のトレースデータ（ファイル保存用ルート構造体）
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SimulationTrace {
-    pub version: u32,
-    pub created_at: String,
-    pub metadata: SimulationMetadata,
-    pub frames: Vec<FrameRecord>,
+/// JSONL 形式の 1 行を表すレコード
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "record_type")]
+pub enum JsonlRecord {
+    #[serde(rename = "metadata")]
+    Metadata {
+        version: u32,
+        created_at: String,
+        metadata: SimulationMetadata,
+    },
+    #[serde(rename = "frame")]
+    Frame(FrameRecord),
 }
 
 /// シミュレーションデバッグ記録マネージャー
@@ -106,7 +172,8 @@ impl SimulationDebugRecorder {
         solver_iterations: u32,
         positions: &[[f32; 3]],
         velocities: &[[f32; 3]],
-        pinned_indices: &[u32],
+        pins: &[PinRecord],
+        colliders: &[ColliderRecord],
     ) {
         if !self.enabled || self.metadata.is_none() {
             return;
@@ -178,6 +245,8 @@ impl SimulationDebugRecorder {
             aabb_max,
         };
 
+        let pinned_indices: Vec<u32> = pins.iter().map(|p| p.vertex_idx).collect();
+
         self.frames.push(FrameRecord {
             frame_index,
             dt,
@@ -185,12 +254,14 @@ impl SimulationDebugRecorder {
             solver_iterations,
             positions: positions.to_vec(),
             velocities: velocities.to_vec(),
-            pinned_indices: pinned_indices.to_vec(),
+            pinned_indices,
+            pins: pins.to_vec(),
+            colliders: colliders.to_vec(),
             stats,
         });
     }
 
-    /// 記録されたトレースデータをgzip圧縮JSONファイルとして保存する
+    /// 記録されたトレースデータをgzip圧縮JSON Linesファイル (.jsonl.gz) として保存する
     pub fn save_to_file(&self, file_path: &Path) -> Result<String, String> {
         let metadata = match &self.metadata {
             Some(m) => m.clone(),
@@ -206,22 +277,31 @@ impl SimulationDebugRecorder {
             }
         }
 
-        let trace = SimulationTrace {
-            version: 1,
-            created_at: chrono_timestamp(),
-            metadata,
-            frames: self.frames.clone(),
-        };
-
         let file = File::create(file_path).map_err(|e| {
             format!("保存先ファイルの作成に失敗しました ({}): {e}", file_path.display())
         })?;
         let buf_writer = BufWriter::new(file);
         let mut gz_encoder = GzEncoder::new(buf_writer, Compression::default());
 
-        serde_json::to_writer(&mut gz_encoder, &trace).map_err(|e| {
-            format!("JSONシリアライズに失敗しました: {e}")
+        // 1行目: メタデータレコード
+        let meta_record = JsonlRecord::Metadata {
+            version: 2,
+            created_at: chrono_timestamp(),
+            metadata,
+        };
+        serde_json::to_writer(&mut gz_encoder, &meta_record).map_err(|e| {
+            format!("メタデータのJSONシリアライズに失敗しました: {e}")
         })?;
+        gz_encoder.write_all(b"\n").map_err(|e| format!("改行の書き込みに失敗しました: {e}"))?;
+
+        // 2行目以降: 各フレームレコード
+        for frame in &self.frames {
+            let frame_record = JsonlRecord::Frame(frame.clone());
+            serde_json::to_writer(&mut gz_encoder, &frame_record).map_err(|e| {
+                format!("フレーム {} のJSONシリアライズに失敗しました: {e}", frame.frame_index)
+            })?;
+            gz_encoder.write_all(b"\n").map_err(|e| format!("改行の書き込みに失敗しました: {e}"))?;
+        }
 
         gz_encoder.finish().map_err(|e| {
             format!("gzip圧縮ストリームの書き出しフラッシュに失敗しました: {e}")
@@ -256,7 +336,8 @@ fn chrono_timestamp() -> String {
 mod tests {
     use super::*;
     use flate2::read::GzDecoder;
-    use std::io::Read;
+    use std::io::BufRead;
+    use std::io::BufReader;
 
     #[test]
     fn test_debug_recorder_lifecycle() {
@@ -271,11 +352,24 @@ mod tests {
             num_faces: 0,
             edges: vec![[0, 1]],
             faces: vec![],
+            inv_masses: vec![1.0, 1.0],
+            initial_rest_lengths: vec![1.0],
             stiffness: 500.0,
             bending_stiffness: 5.0,
             thickness: 0.01,
+            gravity: [0.0, 0.0, -9.81],
+            damping: 0.01,
             solver_mode: 0,
+            solver_iterations: 2,
             workgroup_size: 32,
+            enable_self_collision: true,
+            self_collision_relief_factor: 0.2,
+            self_collision_max_displacement_ratio: 0.2,
+            self_collision_exclude_neighbors: true,
+            enable_normal_untangling: true,
+            enable_edge_collision: false,
+            edge_margin_scale: 1.0,
+            edge_margin_offset: 0.0,
         };
 
         recorder.start_recording(meta, Some(5));
@@ -284,34 +378,65 @@ mod tests {
         // 2フレーム記録
         let pos1 = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let vel1 = vec![[0.0, 0.0, 0.0], [0.0, 0.1, 0.0]];
-        recorder.record_frame(0.016, 10, 2, &pos1, &vel1, &[0]);
+        let pins = vec![PinRecord {
+            vertex_idx: 0,
+            target_pos: [0.0, 0.0, 0.0],
+            weight: 1.0,
+        }];
+        let cols = vec![ColliderRecord::Sphere {
+            center: [0.0, -1.0, 0.0],
+            radius: 0.5,
+            friction: 0.2,
+            restitution: 0.0,
+        }];
+
+        recorder.record_frame(0.016, 10, 2, &pos1, &vel1, &pins, &cols);
 
         let pos2 = vec![[0.0, 0.0, 0.0], [1.0, 0.1, 0.0]];
         let vel2 = vec![[0.0, 0.0, 0.0], [0.0, 0.2, 0.0]];
-        recorder.record_frame(0.016, 10, 2, &pos2, &vel2, &[0]);
+        recorder.record_frame(0.016, 10, 2, &pos2, &vel2, &pins, &cols);
 
         assert_eq!(recorder.frame_count(), 2);
         assert_eq!(recorder.frames[1].stats.max_displacement, 0.1);
         assert!(!recorder.frames[1].stats.has_nan_or_inf);
 
-        // 一時ファイルに保存して読み戻し検証
+        // 一時ファイルに保存して読み戻し検証 (.jsonl.gz)
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join("test_cloth_debug_trace.json.gz");
+        let test_file = temp_dir.join("test_cloth_debug_trace.jsonl.gz");
 
         let _ = recorder.save_to_file(&test_file).expect("save_to_file should succeed");
         assert!(test_file.exists());
 
-        // 解凍してJSONパース
+        // 解凍して各行をJSONLパース
         let f = File::open(&test_file).unwrap();
-        let mut gz = GzDecoder::new(f);
-        let mut json_str = String::new();
-        gz.read_to_string(&mut json_str).unwrap();
+        let gz = GzDecoder::new(f);
+        let reader = BufReader::new(gz);
+        let lines: Vec<String> = reader.lines().map(|l| l.unwrap()).collect();
 
-        let trace: SimulationTrace = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(trace.version, 1);
-        assert_eq!(trace.metadata.object_name, "TestCloth");
-        assert_eq!(trace.frames.len(), 2);
-        assert_eq!(trace.frames[0].positions.len(), 2);
+        assert_eq!(lines.len(), 3); // 1行目: metadata, 2行目: frame 0, 3行目: frame 1
+
+        // 1行目のパース
+        let meta_rec: JsonlRecord = serde_json::from_str(&lines[0]).unwrap();
+        match meta_rec {
+            JsonlRecord::Metadata { version, metadata, .. } => {
+                assert_eq!(version, 2);
+                assert_eq!(metadata.object_name, "TestCloth");
+                assert_eq!(metadata.gravity, [0.0, 0.0, -9.81]);
+            }
+            _ => panic!("Expected metadata record on line 1"),
+        }
+
+        // 2行目のパース
+        let f0_rec: JsonlRecord = serde_json::from_str(&lines[1]).unwrap();
+        match f0_rec {
+            JsonlRecord::Frame(f) => {
+                assert_eq!(f.frame_index, 0);
+                assert_eq!(f.positions.len(), 2);
+                assert_eq!(f.pins.len(), 1);
+                assert_eq!(f.colliders.len(), 1);
+            }
+            _ => panic!("Expected frame record on line 2"),
+        }
 
         // クリーンアップ
         let _ = std::fs::remove_file(&test_file);

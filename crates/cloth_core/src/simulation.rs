@@ -3,7 +3,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 use crate::context::GpuContext;
-use crate::debug_recorder::{SimulationDebugRecorder, SimulationMetadata};
+use crate::debug_recorder::{ColliderRecord, PinRecord, SimulationDebugRecorder, SimulationMetadata};
 use crate::mesh::{
     ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle,
     GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
@@ -159,7 +159,9 @@ pub struct GpuClothSimulator {
     pub mesh_edges: Vec<[u32; 2]>,
     pub mesh_faces: Vec<[u32; 3]>,
     pub debug_recorder: SimulationDebugRecorder,
+    pub original_inv_masses: Vec<f32>,
 }
+
 
 fn create_shader_with_wg_size(device: &wgpu::Device, label: &str, src: &str, wg_size: u32) -> wgpu::ShaderModule {
     let source = if wg_size != 64 {
@@ -1604,6 +1606,26 @@ impl GpuClothSimulator {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1663,6 +1685,14 @@ impl GpuClothSimulator {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: island_ids_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: star_offsets_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: star_indices_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1866,8 +1896,10 @@ impl GpuClothSimulator {
             mesh_edges,
             mesh_faces,
             debug_recorder: SimulationDebugRecorder::default(),
+            original_inv_masses: mesh.vertices.iter().map(|v| v.inv_mass).collect(),
         }
     }
+
 
     /// 自己衝突および貫通解消オプションを設定する
     pub fn set_self_collision_options(
@@ -2212,6 +2244,11 @@ impl GpuClothSimulator {
                 },
             );
             self.upload_pins();
+
+            // ピン留め頂点は動的コライダー(固定点)として振る舞うため、GPU上の inv_mass を 0.0 に更新
+            let new_inv_m = if weight > 0.5 { 0.0f32 } else { self.original_inv_masses[vertex_idx as usize] };
+            let offset = (vertex_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+            self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&new_inv_m));
         }
     }
 
@@ -2219,14 +2256,27 @@ impl GpuClothSimulator {
     pub fn release_pin(&mut self, vertex_idx: u32) {
         if self.dynamic_pins.remove(&vertex_idx).is_some() {
             self.upload_pins();
+            if (vertex_idx as usize) < self.original_inv_masses.len() {
+                let orig_m = self.original_inv_masses[vertex_idx as usize];
+                let offset = (vertex_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+                self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&orig_m));
+            }
         }
     }
 
     /// すべての動的ピンを解除する
     pub fn clear_dynamic_pins(&mut self) {
+        for &v_idx in self.dynamic_pins.keys() {
+            if (v_idx as usize) < self.original_inv_masses.len() {
+                let orig_m = self.original_inv_masses[v_idx as usize];
+                let offset = (v_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+                self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&orig_m));
+            }
+        }
         self.dynamic_pins.clear();
         self.upload_pins();
     }
+
 
     fn upload_pins(&self) {
         let pin_vec: Vec<GpuPinConstraint> = self.dynamic_pins.values().copied().collect();
@@ -2313,75 +2363,6 @@ impl GpuClothSimulator {
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }
 
-            // 1.5 Compute Normals Pass (自己衝突 & 法線Untangling用)
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Compute Normals Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.compute_normals_pipeline);
-                cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-
-            // 1.6 Self & Layer Collision Pass (GPU空間ハッシュ: 有効時のみ実行)
-            // 拘束解決（Distance/Bending）の前にめり込みを解消することで、
-            // 自己衝突で生じた変位をバネ拘束が滑らかに吸収・調停し、自励振動を防止する
-            if self.enable_self_collision {
-                let hash_clear_workgroups = (self.spatial_hash.table_size + wg_size - 1) / wg_size;
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpatialHash Clear Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.spatial_hash.clear_pipeline);
-                cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
-                cpass.dispatch_workgroups(hash_clear_workgroups, 1, 1);
-            }
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpatialHash Build Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.spatial_hash.build_pipeline);
-                cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Self Collision Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.self_collision_pipeline);
-                cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-
-            // 2. Collision Constraints Pass (1サブステップあたり1回実行)
-            if has_colliders {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Collision Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.collision_pipeline);
-                cpass.set_bind_group(0, &self.collider_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-
-            // 2.5. Edge Collision Constraints Pass (オプション有効時のみ実行)
-            if has_colliders && self.enable_edge_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Edge Collision Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.edge_collision_pipeline);
-                for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
-                    if count > 0 {
-                        cpass.set_bind_group(0, &self.edge_collision_bind_groups[color_idx], &[]);
-                        cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
-                    }
-                }
-            }
-
             // 拘束解決反復ループ (Solver Iterations)
             for _ in 0..self.solver_iterations {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2440,7 +2421,7 @@ impl GpuClothSimulator {
                 }
             }
 
-            // 5. 反復終了後にピン位置を厳密に固定
+            // 5. 反復終了後にピン位置を適用 (Grab等)
             if num_pins > 0 {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Final Pin Pass"),
@@ -2450,6 +2431,78 @@ impl GpuClothSimulator {
                 cpass.set_bind_group(0, &self.pin_bind_group, &[]);
                 cpass.dispatch_workgroups(pin_workgroups, 1, 1);
             }
+
+            // =========================================================================
+            // 6. コライダー衝突 & 自己衝突パス (パイプライン順序適正化)
+            //    拘束解決（Distance/Sewing/Pin）によって動かされた頂点の貫通を最終調停
+            // =========================================================================
+            // 6.1 Collision Constraints Pass (コライダー衝突)
+            if has_colliders {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Collision Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.collision_pipeline);
+                cpass.set_bind_group(0, &self.collider_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+
+            // 6.2 Edge Collision Constraints Pass (エッジコライダー衝突)
+            if has_colliders && self.enable_edge_collision {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Edge Collision Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.edge_collision_pipeline);
+                for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
+                    if count > 0 {
+                        cpass.set_bind_group(0, &self.edge_collision_bind_groups[color_idx], &[]);
+                        cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                    }
+                }
+            }
+
+            // 6.3 法線計算パス (自己衝突用)
+            if self.enable_self_collision {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Normals Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.compute_normals_pipeline);
+                cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+
+            // 6.4 GPU空間ハッシュ構築 & 自己衝突パス (トポロジーCCD & 幾何反発)
+            if self.enable_self_collision {
+                let hash_clear_workgroups = (self.spatial_hash.table_size + wg_size - 1) / wg_size;
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SpatialHash Clear Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.spatial_hash.clear_pipeline);
+                cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
+                cpass.dispatch_workgroups(hash_clear_workgroups, 1, 1);
+            }
+            if self.enable_self_collision {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SpatialHash Build Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.spatial_hash.build_pipeline);
+                cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+            if self.enable_self_collision {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Self Collision Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.self_collision_pipeline);
+                cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+
 
             // 6. Update Vel & Commit Positions Pass
             {
@@ -2482,6 +2535,23 @@ impl GpuClothSimulator {
         if self.debug_recorder.is_recording() {
             self.record_current_frame(dt, substeps);
         }
+    }
+
+    /// 単一サブステップのみ計算を進める（オンデマンド・サブステップ顕微鏡解析用）
+    pub fn step_single_substep(&mut self, dt_sub: f32) {
+        if self.num_vertices == 0 {
+            return;
+        }
+
+        let mut encoder = self.context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("Single Substep Encoder"),
+            },
+        );
+
+        self.encode_simulation_steps(&mut encoder, dt_sub, 1);
+        self.context.queue.submit(Some(encoder.finish()));
+        self.context.device.poll(wgpu::Maintain::Wait);
     }
 
     /// 頂点座標抽出パスをエンコード (GpuVertex から連続 f32 座標配列へ抽出)
@@ -2659,6 +2729,36 @@ impl GpuClothSimulator {
         self.staging_buffer.unmap();
 
         result
+    }
+
+    /// 頂点座標および速度ベクトルをGPUバッファに直接書き込み、シミュレーション状態を任意フレームの状態へ復元する
+    pub fn set_positions_and_velocities(
+        &mut self,
+        positions: &[[f32; 3]],
+        velocities: Option<&[[f32; 3]]>,
+    ) {
+        if self.num_vertices == 0 || positions.len() != self.num_vertices as usize {
+            return;
+        }
+
+        let mut verts = self.initial_vertices.clone();
+        for (i, v) in verts.iter_mut().enumerate() {
+            v.position = positions[i];
+            v.prev_pos = positions[i];
+            if let Some(vels) = velocities {
+                if i < vels.len() {
+                    v.velocity = vels[i];
+                }
+            } else {
+                v.velocity = [0.0, 0.0, 0.0];
+            }
+        }
+
+        self.context.queue.write_buffer(
+            &self.vertex_buffer,
+            0,
+            bytemuck::cast_slice(&verts),
+        );
     }
 
     /// 頂点座標を flat array に直接書き込む（ヒープアロケーションなし）
@@ -2877,11 +2977,24 @@ impl GpuClothSimulator {
             num_faces: self.mesh_faces.len() as u32,
             edges: self.mesh_edges.clone(),
             faces: self.mesh_faces.clone(),
+            inv_masses: self.original_inv_masses.clone(),
+            initial_rest_lengths: self.initial_distance_rest_lengths.clone(),
             stiffness,
             bending_stiffness,
             thickness,
+            gravity: self.gravity,
+            damping: self.damping,
             solver_mode: self.solver_mode,
+            solver_iterations: self.solver_iterations,
             workgroup_size: self.workgroup_size,
+            enable_self_collision: self.enable_self_collision,
+            self_collision_relief_factor: self.self_collision_relief_factor,
+            self_collision_max_displacement_ratio: self.self_collision_max_displacement_ratio,
+            self_collision_exclude_neighbors: self.self_collision_exclude_neighbors,
+            enable_normal_untangling: self.enable_normal_untangling,
+            enable_edge_collision: self.enable_edge_collision,
+            edge_margin_scale: self.edge_margin_scale,
+            edge_margin_offset: self.edge_margin_offset,
         };
 
         self.debug_recorder.start_recording(metadata, max_frames);
@@ -2911,14 +3024,75 @@ impl GpuClothSimulator {
             velocities.push(v.velocity);
         }
 
-        let pinned: Vec<u32> = self.dynamic_pins.keys().copied().collect();
+        let pins: Vec<PinRecord> = self
+            .dynamic_pins
+            .values()
+            .map(|p| PinRecord {
+                vertex_idx: p.vertex_idx,
+                target_pos: p.target_pos,
+                weight: p.weight,
+            })
+            .collect();
+
+        let mut colliders: Vec<ColliderRecord> = self
+            .colliders
+            .iter()
+            .map(|c| match c.collider_type {
+                0 => ColliderRecord::Sphere {
+                    center: c.point_a,
+                    radius: c.radius,
+                    friction: c.friction,
+                    restitution: c.restitution,
+                },
+                1 => ColliderRecord::Capsule {
+                    point_a: c.point_a,
+                    point_b: c.point_b,
+                    radius: c.radius,
+                    friction: c.friction,
+                    restitution: c.restitution,
+                },
+                2 => ColliderRecord::Plane {
+                    point: c.point_a,
+                    normal: c.point_b,
+                    friction: c.friction,
+                    restitution: c.restitution,
+                },
+                _ => ColliderRecord::Sphere {
+                    center: c.point_a,
+                    radius: c.radius,
+                    friction: c.friction,
+                    restitution: c.restitution,
+                },
+            })
+            .collect();
+
+        if !self.mesh_triangles.is_empty() {
+            let mut tris: Vec<[f32; 9]> = Vec::with_capacity(self.mesh_triangles.len());
+            for tri in &self.mesh_triangles {
+                tris.push([
+                    tri.p0[0], tri.p0[1], tri.p0[2],
+                    tri.p1[0], tri.p1[1], tri.p1[2],
+                    tri.p2[0], tri.p2[1], tri.p2[2],
+                ]);
+            }
+            let first = &self.mesh_triangles[0];
+            colliders.push(ColliderRecord::Mesh {
+                triangles: tris,
+                friction: first.friction,
+                thickness: first.thickness,
+                restitution: first.restitution,
+                single_sided: (first.flags & 1) != 0,
+            });
+        }
+
         self.debug_recorder.record_frame(
             dt,
             substeps,
             self.solver_iterations,
             &positions,
             &velocities,
-            &pinned,
+            &pins,
+            &colliders,
         );
     }
 

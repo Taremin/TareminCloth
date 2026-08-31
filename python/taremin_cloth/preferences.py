@@ -312,7 +312,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
         row_prev = col_debug.row()
         row_prev.alignment = 'RIGHT'
-        row_prev.label(text="Format: gzip JSON (.json.gz)", icon='INFO')
+        row_prev.label(text="Format: gzip JSON Lines (.jsonl.gz)", icon='INFO')
 
 
 

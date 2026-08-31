@@ -911,7 +911,7 @@ def stop_interactive_if_running():
         _interactive_operator_instance._stop_requested = True
 
 
-def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "json.gz") -> str:
+def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "jsonl.gz") -> str:
     """プレファレンスの設定値と現在のオブジェクト名・日時からデバッグ出力先ファイルパスを解決・生成する"""
     now = datetime.now()
     date_str = now.strftime("%Y%m%d")
@@ -1323,7 +1323,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 frame_count = sim.get_debug_frame_count()
                 if frame_count > 0:
                     prefs = get_preferences(context)
-                    filepath = resolve_debug_filepath(prefs, obj.name, frame_count, ext="json.gz")
+                    filepath = resolve_debug_filepath(prefs, obj.name, frame_count, ext="jsonl.gz")
                     try:
                         saved_path = sim.save_debug_recording(filepath)
                         file_size = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0

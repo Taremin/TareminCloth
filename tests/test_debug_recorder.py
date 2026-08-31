@@ -81,25 +81,28 @@ class TestDebugRecorder(unittest.TestCase):
 
         self.assertEqual(sim.get_debug_frame_count(), 3)
 
-        # ファイル保存
-        output_file = os.path.join(self.temp_dir, "test_trace.json.gz")
+        # ファイル保存 (.jsonl.gz)
+        output_file = os.path.join(self.temp_dir, "test_trace.jsonl.gz")
         saved_path = sim.save_debug_recording(output_file)
         self.assertTrue(os.path.exists(saved_path))
         self.assertTrue(os.path.getsize(saved_path) > 0)
 
-        # gzip解凍とJSON検証
+        # gzip解凍とJSON Lines検証
         with gzip.open(saved_path, "rt", encoding="utf-8") as f:
-            data = json.load(f)
+            lines = [json.loads(line) for line in f if line.strip()]
 
-        self.assertEqual(data["version"], 1)
-        self.assertEqual(data["metadata"]["object_name"], "TestClothMesh")
-        self.assertEqual(data["metadata"]["num_vertices"], 4)
-        self.assertEqual(data["metadata"]["num_edges"], len(data["metadata"]["edges"]))
-        self.assertEqual(data["metadata"]["num_faces"], 2)
-        self.assertEqual(len(data["frames"]), 3)
+        self.assertEqual(len(lines), 4) # 1行目: metadata, 2~4行目: frames 0..2
+        meta_rec = lines[0]
+        self.assertEqual(meta_rec["version"], 2)
+        self.assertEqual(meta_rec["metadata"]["object_name"], "TestClothMesh")
+        self.assertEqual(meta_rec["metadata"]["num_vertices"], 4)
+        self.assertEqual(meta_rec["metadata"]["num_edges"], len(meta_rec["metadata"]["edges"]))
+        self.assertEqual(meta_rec["metadata"]["num_faces"], 2)
+        self.assertIn("gravity", meta_rec["metadata"])
 
         # 各フレームの構造検証
-        for idx, frame in enumerate(data["frames"]):
+        for idx, frame_rec in enumerate(lines[1:]):
+            frame = frame_rec
             self.assertEqual(frame["frame_index"], idx)
             self.assertAlmostEqual(frame["dt"], 1.0 / 60.0, places=5)
             self.assertEqual(frame["substeps"], 10)
@@ -122,14 +125,14 @@ class TestDebugRecorder(unittest.TestCase):
             debug_output_dir = self.temp_dir
             debug_filename_template = "dump_{date}_{time}_{object}_{frames}f.{ext}"
 
-        filepath = resolve_debug_filepath(DummyPrefs(), "Cloth:Special/1", frame_count=120, ext="json.gz")
+        filepath = resolve_debug_filepath(DummyPrefs(), "Cloth:Special/1", frame_count=120, ext="jsonl.gz")
         self.assertTrue(filepath.startswith(self.temp_dir))
         filename = os.path.basename(filepath)
 
         # 特殊文字 (:) や (/) がサニタイズされていること
         self.assertIn("Cloth_Special_1", filename)
         self.assertIn("120f", filename)
-        self.assertTrue(filename.endswith(".json.gz"))
+        self.assertTrue(filename.endswith(".jsonl.gz"))
 
     def test_max_frames_protection(self):
         """最大記録フレーム数（メモリ保護上限）の動作検証"""

@@ -270,38 +270,30 @@ N パネルの最上部にある **「Cloth & Collider Objects」** パネルで
    - 検出された物理GPU一覧（例: `NVIDIA GeForce RTX 4090 (DirectX 12)`, `AMD Radeon RX 9070 XT (Vulkan)` 等）から明示的に選択
 4. **「Apply GPU Settings」** ボタンをクリックすると、GPUコンテキストが安全に再初期化され、`Active: [GPU名] ([Backend])` に稼働状態が表示されます。
 
-### 14. シミュレーション状態のデバッグ記録 (Simulation Frame Debug Recorder)
+### 14. シミュレーション状態のデバッグ記録と完全再現 (Debug Recorder & Replayer)
 
-シミュレーション中の物理挙動の解析や異常値（NaN、速度爆発、貫通など）の調査用として、各フレームの状態をRust側でメモリ記録し、終了時にgzip圧縮JSON（`.json.gz`）として出力できます。
+シミュレーション中の物理挙動の解析や異常値（NaN、速度爆発、貫通など）の調査用として、各フレームの状態（位置・速度・動的ピン目標座標・コライダー情報・物理パラメータ一式）をRust側でメモリ記録し、終了時にgzip圧縮JSON Lines（`.jsonl.gz`）として出力できます。
 
 1. **有効化**:
    - `編集 > プリファレンス > アドオン > Taremin Cloth` を開き、**Console Log Level** を **`DEBUG`** に設定します。
    - **Simulation Frame Debug Recorder** の **「Enable Debug Recording」** にチェックを入れます。
 2. **出力設定**:
    - **Output Folder**: 保存先ディレクトリ（空欄時はBlenderテンポラリフォルダを使用）。
-   - **Template**: ファイル名テンプレート。以下の変数を任意に設定可能です。
-     - `{date}`: `YYYYMMDD` (例: `20260829`)
-     - `{time}`: `HHMMSS` (例: `130500`)
-     - `{datetime}`: `YYYYMMDD_HHMMSS` (例: `20260829_130500`)
-     - `{object}`: オブジェクト名 (例: `Cloth`)
-     - `{frames}`: 記録フレーム数 (例: `120`)
-     - `{ext}`: 拡張子 (`json.gz`)
-     - デフォルト: `cloth_debug_{datetime}_{object}.{ext}`
+   - **Template**: ファイル名テンプレート。デフォルト: `cloth_debug_{datetime}_{object}.{ext}`（拡張子 `{ext}` は自動的に `jsonl.gz` となります）。
    - **Max Frames**: メモリ保護用の最大記録フレーム数（デフォルト: 3600フレーム = 60FPSで約1分間）。
 3. **実行と出力**:
-   - インタラクティブモードを実行し、ESC または右クリックで終了すると、自動的に指定フォルダへ `.json.gz` が保存され、コンソールおよび情報ヘッダーに保存パスとフレーム数が通知されます。
-4. **Pythonでの読み込み例**:
-   ```python
-   import gzip, json
+   - インタラクティブモードを実行し、ESC または右クリックで終了すると、自動的に指定フォルダへ `.jsonl.gz` が保存され、コンソールおよび情報ヘッダーに保存パスとフレーム数が通知されます。
+4. **Blender非依存の解析・再現・可視化CLI (`log_tools`)**:
+   Blenderを一切起動することなく、ログの異常検知、貫通レンダリング、最小テストケース生成が可能です（詳細は [AGENTS.md](AGENTS.md) 参照）。
+   ```bash
+   # ログ全体の異常値を走査
+   python -m taremin_cloth.log_tools inspect cloth_debug.jsonl.gz
 
-   with gzip.open("cloth_debug_20260829_130500_Cloth.json.gz", "rt", encoding="utf-8") as f:
-       data = json.load(f)
+   # 問題フレームの貫通・裏返り確認（表面:白、裏面:赤の0.1秒超軽量レンダリング）
+   python -m taremin_cloth.log_tools render cloth_debug.jsonl.gz --frame 71 --output scratch/f71.png
 
-   print(f"Object: {data['metadata']['object_name']}")
-   print(f"Total Frames: {len(data['frames'])}")
-   print(f"Initial Vertices: {data['metadata']['num_vertices']}")
-   for frame in data['frames']:
-       print(f"Frame #{frame['frame_index']}: max_vel={frame['stats']['max_velocity']:.3f}, nan={frame['stats']['has_nan_or_inf']}")
+   # 問題直前のフレームから始まる自己完結型 unittest スクリプトを自動生成
+   python -m taremin_cloth.log_tools make-test cloth_debug.jsonl.gz --frame 71 --lookback 3 --output tests/test_issue_f71.py
    ```
 
 
