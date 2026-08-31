@@ -213,14 +213,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     // 2. メッシュコライダー判定 (中点判定 + コライダー頂点最近傍点判定)
+    let mid_old = (vertices[c.v0].position + vertices[c.v1].position) * 0.5;
+    let mid_new = (prev0 + prev1) * 0.5;
+    let mid_sweep = (mid_old + mid_new) * 0.5;
+    let sweep_move_r = length(mid_new - mid_old) * 0.5;
+    let edge_len = length(prev1 - prev0);
+
     for (var i = 0u; i < params.num_mesh_triangles; i = i + 1u) {
         let b = mesh_bounds[i];
-        let mid = (prev0 + prev1) * 0.5;
-        let diff = mid - b.xyz;
-        let edge_len = length(prev1 - prev0);
-        let bound_r = b.w + thickness + edge_len * 0.5;
+        let diff = mid_sweep - b.xyz;
+        // 三角形境界球半径 b.w + エッジ半長 + 移動マージン + 厚み
+        let bound_r = b.w + thickness + edge_len * 0.5 + sweep_move_r;
         if (dot(diff, diff) > bound_r * bound_r) {
-            continue; // エッジが三角形の近傍球外にある場合はスキップ
+            continue; // エッジの移動軌跡全体（Sweep AABB）が三角形の近傍球外にある場合は安全にスキップ
         }
 
         let tri = mesh_triangles[i];
@@ -234,8 +239,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let face_normal = cross_prod / cross_len;
 
         // (A) エッジ中点からコライダー面への最近傍押し戻し (弦の沈み込み防止)
-        let q_mid = closest_point_on_triangle(mid, tri.p0, tri.p1, tri.p2);
-        let delta_mid = mid - q_mid;
+        let q_mid = closest_point_on_triangle(mid_new, tri.p0, tri.p1, tri.p2);
+        let delta_mid = mid_new - q_mid;
         let dist_mid = length(delta_mid);
         let signed_dist_mid = dot(delta_mid, face_normal);
 

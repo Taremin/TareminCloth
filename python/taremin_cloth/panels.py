@@ -315,8 +315,19 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             if hasattr(context.scene, "taremin_cloth_fast_playback"):
                 p_col.prop(context.scene, "taremin_cloth_fast_playback")
 
+            # コライダー接触設定 (Collider Interaction)
+            box_col = layout.box()
+            box_col.label(text="Collider Interaction", icon='PHYSICS')
+            c_col = box_col.column(align=True)
+            c_col.prop(settings, "enable_edge_collision")
+            if settings.enable_edge_collision:
+                edge_sub = c_col.column(align=True)
+                edge_sub.prop(settings, "edge_margin_scale", text="  Margin Scale")
+                edge_sub.prop(settings, "edge_margin_offset", text="  Margin Offset")
+
+            # 自己・レイヤー衝突設定 (Self & Layer Collision)
             box_layer = layout.box()
-            box_layer.label(text="Layer & Collision", icon='RENDERLAYERS')
+            box_layer.label(text="Self & Layer Collision", icon='RENDERLAYERS')
             l_col = box_layer.column(align=True)
             l_col.prop(settings, "enable_self_collision")
             if settings.enable_self_collision:
@@ -324,11 +335,8 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 self_sub.prop(settings, "self_collision_relief_factor", text="  Relief Factor")
                 self_sub.prop(settings, "self_collision_max_displacement_ratio", text="  Max Step Ratio")
                 self_sub.prop(settings, "self_collision_max_iterations", text="  Search Limit")
-            l_col.prop(settings, "enable_edge_collision")
-            if settings.enable_edge_collision:
-                edge_sub = l_col.column(align=True)
-                edge_sub.prop(settings, "edge_margin_scale", text="  Margin Scale")
-                edge_sub.prop(settings, "edge_margin_offset", text="  Margin Offset")
+                self_sub.prop(settings, "enable_normal_untangling", text="  Normal Untangling")
+            l_col.separator()
             l_col.prop(settings, "layer_id")
             row_thick = l_col.row(align=True)
             row_thick.prop(settings, "thickness")
@@ -342,13 +350,22 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             row_pin_opts = a_col.row(align=True)
             row_pin_opts.prop(settings, "pin_overlay_interactive_only", text="Interactive Only")
             row_pin_opts.prop(settings, "overlay_depth_test", text="Depth Test (Z)")
-            row_pin_opts.prop(settings, "show_fps_overlay", text="Show FPS")
-            if settings.show_fps_overlay:
-                a_col.prop(settings, "fps_overlay_position", text="Position")
             a_col.separator()
             a_col.prop(settings, "pin_target_object")
             if settings.pin_target_object and settings.pin_target_object.type == 'ARMATURE':
                 a_col.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones")
+
+            # インタラクティブシミュレーション設定 (Interactive Simulation)
+            box_inter = layout.box()
+            box_inter.label(text="Interactive Simulation", icon='PLAY')
+            col_inter = box_inter.column(align=True)
+            col_inter.prop(settings, "interactive_realtime_sync", text="Real-time Sync")
+            if settings.interactive_realtime_sync:
+                col_inter.prop(settings, "interactive_max_steps", text="Max Steps / Frame")
+            row_fps = col_inter.row(align=True)
+            row_fps.prop(settings, "show_fps_overlay", text="Show FPS")
+            if settings.show_fps_overlay:
+                row_fps.prop(settings, "fps_overlay_position", text="")
 
             # 伸縮グループ (Elastic Bands / Edge Scaling)
             box_elastic = layout.box()

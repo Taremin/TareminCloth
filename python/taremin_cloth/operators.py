@@ -508,13 +508,13 @@ def get_effective_substeps(obj, coords, dt, scene=None):
         target_steps = max(min_steps, min(max_steps, computed_steps))
 
     # 4. ヒステリシス制御（スムージング / ジッター防止）
-    # 急激なステップ降下による剛性・ダンピングの揺らぎや布のピクつきを防止
+    # 急激なステップ降下による剛性・ダンピングの揺らぎや布のピクつき、および急上昇による極端なFPSドロップを防止
     prev_steps = _effective_substeps_cache.get(obj_name, base_steps)
     if target_steps >= prev_steps:
-        # 上昇時（急な加速・衝突）は即時反映（安全優先）
-        current_steps = target_steps
+        # 上昇時: 局所的な微小振動で一度に跳ね上がらないよう最大+4ステップずつ滑らかに追従
+        current_steps = min(target_steps, prev_steps + 4)
     else:
-        # 下降時（減速・整定）は最大2ステップずつ緩やかに降下
+        # 下降時: 減速・整定時は最大2ステップずつ緩やかに降下
         current_steps = max(target_steps, prev_steps - 2)
 
     current_steps = max(min_steps, min(max_steps, current_steps))
@@ -1038,6 +1038,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     _stop_requested = False
     _pinned_verts = set()
     _anim_frame_counter = 0
+    _accumulator = 0.0
+    _last_step_time = 0.0
 
     @classmethod
     def poll(cls, context):
@@ -1049,6 +1051,114 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             and obj.taremin_cloth.is_cloth
             and getattr(obj.taremin_cloth, "enabled", True)
         )
+
+    def step_simulation(self, context):
+        """シミュレーションを実時間同期で進め、メッシュとオーバーレイを更新する"""
+        obj = context.active_object
+        if not obj or not obj.taremin_cloth.is_cloth:
+            return
+
+        sim, coords = get_or_create_simulator(obj)
+        settings = getattr(obj, "taremin_cloth", None)
+
+        t_start = time.perf_counter()
+        now = t_start
+        delta_time = now - (self._last_step_time or now)
+        self._last_step_time = now
+
+        # 固定時間刻み (60 FPS基準)
+        FIXED_DT = 1.0 / 60.0
+
+        realtime_sync = getattr(settings, "interactive_realtime_sync", True) if settings else True
+        max_steps = getattr(settings, "interactive_max_steps", 4) if settings else 4
+
+        if realtime_sync:
+            # スパイラル・オブ・デス（処理落ち累積の無限ループ）を防ぐため最大0.1秒蓄積
+            self._accumulator += min(delta_time, 0.1)
+            step_limit = max_steps
+        else:
+            self._accumulator = FIXED_DT
+            step_limit = 1
+
+        step_count = 0
+        t_anim_total = 0.0
+        t_col_total = 0.0
+        t_param_total = 0.0
+        t_step_total = 0.0
+
+        # アキュムレータが 1/60 秒以上蓄積されている間、必要な分だけ物理ステップを進める
+        while self._accumulator >= FIXED_DT and step_count < step_limit:
+            # コライダーのアニメーション駆動ステップ
+            t0 = time.perf_counter()
+            any_collider_deformed = False
+            for col_o in context.scene.objects:
+                c_set = getattr(col_o, "taremin_collider", None)
+                if c_set and c_set.is_collider and getattr(c_set, "enabled", True) and getattr(c_set, "anim", None) and c_set.anim.enabled:
+                    _, deformed = anim_driver.step_collider_animation(col_o, self._anim_frame_counter)
+                    if deformed:
+                        any_collider_deformed = True
+            self._anim_frame_counter += 1
+
+            depsgraph = context.evaluated_depsgraph_get()
+            if any_collider_deformed:
+                context.view_layer.update()
+                depsgraph = context.evaluated_depsgraph_get()
+            t_anim_total += (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            sync_colliders(sim, context.scene, depsgraph=depsgraph, force=any_collider_deformed, cloth_obj=obj)
+            t_col_total += (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            sync_cloth_parameters(sim, obj, context.scene)
+            actual_substeps = get_effective_substeps(obj, coords, FIXED_DT, scene=context.scene)
+            t_param_total += (time.perf_counter() - t0) * 1000.0
+
+            t0 = time.perf_counter()
+            sim.step(dt=FIXED_DT, substeps=actual_substeps, solver_iterations=settings.solver_iterations if settings else 1)
+            t_step_total += (time.perf_counter() - t0) * 1000.0
+
+            self._accumulator -= FIXED_DT
+            step_count += 1
+
+        # 実時間同期が上限に達した場合、残余アキュムレータをリセットして遅延蓄積を防止
+        if step_count >= step_limit:
+            self._accumulator = min(self._accumulator, FIXED_DT * 0.5)
+
+        # 全ステップ完了後、1回だけGPUリードバックとメッシュ頂点更新を実行
+        t0 = time.perf_counter()
+        sim.get_positions(coords)
+        t_get = (time.perf_counter() - t0) * 1000.0
+
+        t0 = time.perf_counter()
+        obj.data.vertices.foreach_set("co", coords)
+        obj.data.update()
+        obj["_taremin_is_deformed"] = True
+        t_mesh = (time.perf_counter() - t0) * 1000.0
+
+        # FPS計測とオーバーレイ更新
+        if self._fps_counter is not None:
+            fps, frame_ms = self._fps_counter.tick()
+            show_overlay = getattr(settings, "show_fps_overlay", True) if settings else True
+            position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
+            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position)
+
+            # 5フレームごとにコンソールへ詳細内訳ログを出力
+            if self._anim_frame_counter % 5 == 0:
+                t_work = (time.perf_counter() - t_start) * 1000.0
+                logger.info(
+                    f"[Interactive Details] Render FPS: {fps:4.1f} ({frame_ms:5.1f}ms) | Sim Steps: {step_count}x | Work: {t_work:4.1f}ms (step:{t_step_total:3.1f}, get:{t_get:3.1f}, mesh:{t_mesh:3.1f})"
+                )
+
+        # 3Dビューポートの再描画要求
+        has_redrawn = False
+        if context.screen:
+            for a in context.screen.areas:
+                if a.type == 'VIEW_3D':
+                    a.tag_redraw()
+                    has_redrawn = True
+        if not has_redrawn and context.area:
+            context.area.tag_redraw()
 
     def modal(self, context, event):
         global _interactive_running, _interactive_operator_instance
@@ -1064,37 +1174,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         sim, coords = get_or_create_simulator(obj)
 
         if event.type == 'TIMER':
-            # コライダーのアニメーション駆動ステップ
-            any_collider_deformed = False
-            for col_o in context.scene.objects:
-                c_set = getattr(col_o, "taremin_collider", None)
-                if c_set and c_set.is_collider and getattr(c_set, "enabled", True) and getattr(c_set, "anim", None) and c_set.anim.enabled:
-                    _, deformed = anim_driver.step_collider_animation(col_o, self._anim_frame_counter)
-                    if deformed:
-                        any_collider_deformed = True
-            self._anim_frame_counter += 1
-
-            depsgraph = context.evaluated_depsgraph_get()
-            if any_collider_deformed:
-                context.view_layer.update()
-                depsgraph = context.evaluated_depsgraph_get()
-
-            sync_colliders(sim, context.scene, depsgraph=depsgraph, force=any_collider_deformed, cloth_obj=obj)
-            sync_cloth_parameters(sim, obj, context.scene)
-            actual_substeps = get_effective_substeps(obj, coords, 1.0 / 60.0, scene=context.scene)
-            sim.step(dt=1.0 / 60.0, substeps=actual_substeps, solver_iterations=obj.taremin_cloth.solver_iterations)
-            sim.get_positions(coords)
-            obj.data.vertices.foreach_set("co", coords)
-            obj.data.update()
-            obj["_taremin_is_deformed"] = True
-
-            # FPS計測とオーバーレイ更新
-            if self._fps_counter is not None:
-                fps, frame_ms = self._fps_counter.tick()
-                settings = getattr(obj, "taremin_cloth", None)
-                show_overlay = getattr(settings, "show_fps_overlay", True) if settings else True
-                position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
-                drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position)
+            self.step_simulation(context)
+            return {'PASS_THROUGH'}
 
         elif event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
@@ -1320,14 +1401,16 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 vg_name = settings.pin_vertex_group or "Pin"
                 vg = obj.vertex_groups.get(vg_name)
                 if vg:
+                    vg_idx = vg.index
                     for v in obj.data.vertices:
-                        try:
-                            if vg.weight(v.index) > 0.0:
+                        for g in v.groups:
+                            if g.group == vg_idx and g.weight > 0.0:
                                 self._pinned_verts.add(v.index)
-                        except RuntimeError:
-                            pass
+                                break
 
         self._anim_frame_counter = 0
+        self._accumulator = 0.0
+        self._last_step_time = time.perf_counter()
 
         # デバッグ状態記録の開始判定 (Console Log Level が DEBUG のとき、かつデバッグ記録設定有効時)
         prefs = get_preferences(context)
@@ -1340,7 +1423,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames})")
 
         wm = context.window_manager
-        self._timer = wm.event_timer_add(1.0 / 60.0, window=context.window)
+        # 60 FPS相当 (約16.6ms) の高精度タイマーを登録
+        self._timer = wm.event_timer_add(0.016, window=context.window)
         wm.modal_handler_add(self)
         _interactive_running = True
         _interactive_operator_instance = self

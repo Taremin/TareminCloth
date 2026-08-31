@@ -195,14 +195,13 @@ def draw_callback_3d():
             vg = obj.vertex_groups.get(vg_name)
             if show_pin and vg and point_shader:
                 pin_coords = []
+                vg_idx = vg.index
                 for v in mesh.vertices:
-                    try:
-                        w = vg.weight(v.index)
-                    except RuntimeError:
-                        w = 0.0
-                    if w > 0.0:
-                        w_pos = world_mat @ v.co
-                        pin_coords.append([w_pos.x, w_pos.y, w_pos.z])
+                    for g in v.groups:
+                        if g.group == vg_idx and g.weight > 0.0:
+                            w_pos = world_mat @ v.co
+                            pin_coords.append([w_pos.x, w_pos.y, w_pos.z])
+                            break
 
                 if pin_coords:
                     draw_pin_coords = apply_view_depth_bias(pin_coords, region_3d) if use_depth_test else pin_coords

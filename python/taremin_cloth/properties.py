@@ -301,8 +301,8 @@ class TareminClothObjectSettings(PropertyGroup):
         default=True,
     )
     enable_edge_collision: BoolProperty(
-        name="Edge Collision",
-        description="エッジ中点およびコライダー頂点の詳細接触判定を有効化し、多面体コライダーの角の突き抜けを防止します",
+        name="Edge-Collider Collision",
+        description="布のエッジ（線分）と外部コライダーの詳細接触判定を有効化し、尖ったコライダーの角抜け・線分貫通を防止します",
         default=False,
     )
     edge_margin_scale: FloatProperty(
@@ -371,6 +371,18 @@ class TareminClothObjectSettings(PropertyGroup):
         name="Depth Test (Z)",
         description="ハイライト表示（ピン留め・ドラッグ頂点・伸縮ライン等）に深度テストを適用し、メッシュや物陰に隠れるようにします",
         default=False,
+    )
+    interactive_realtime_sync: BoolProperty(
+        name="Real-time Sync",
+        description="描画フレームレートが低下しても、経過時間に応じてシミュレーションステップをまとめて進め、布の動きを実時間通りの自然な速度に保ちます",
+        default=True,
+    )
+    interactive_max_steps: IntProperty(
+        name="Max Steps / Frame",
+        description="1描画フレームあたりに進める最大シミュレーションステップ数 (1〜8)。急激な負荷スパイク時の無限ループを防止します",
+        default=4,
+        min=1,
+        max=8,
     )
     show_fps_overlay: BoolProperty(
         name="Show FPS Overlay",
