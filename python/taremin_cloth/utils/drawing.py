@@ -9,8 +9,10 @@ import numpy as np
 from gpu_extras.batch import batch_for_shader
 
 _draw_handler = None
+_draw_handler_2d = None
 _interactive_active = False
 _active_grabbed_info = None  # {"obj_name": str, "vert_idx": int, "target_world_pos": Vector or None}
+_interactive_fps_info = None  # {"fps": float, "frame_ms": float, "show_overlay": bool}
 
 
 def set_interactive_active(active: bool):
@@ -22,6 +24,28 @@ def set_interactive_active(active: bool):
 def is_interactive_active() -> bool:
     """インタラクティブモードが実行中かどうかを取得する"""
     return _interactive_active
+
+
+def set_interactive_fps_info(fps: float, frame_ms: float, show_overlay: bool = True, position: str = 'TOP_CENTER'):
+    """インタラクティブモード中のFPS計測情報を更新する"""
+    global _interactive_fps_info
+    _interactive_fps_info = {
+        "fps": float(fps),
+        "frame_ms": float(frame_ms),
+        "show_overlay": bool(show_overlay),
+        "position": str(position),
+    }
+
+
+def clear_interactive_fps_info():
+    """インタラクティブモード中のFPS計測情報をクリアする"""
+    global _interactive_fps_info
+    _interactive_fps_info = None
+
+
+def get_interactive_fps_info():
+    """現在のFPS計測情報を取得する（テストまたはUI用）"""
+    return _interactive_fps_info
 
 
 def set_active_grabbed_vertex(obj_name: str, vert_idx: int, target_world_pos=None):
@@ -87,6 +111,15 @@ def get_point_shader():
 
 def get_line_shader():
     for name in ('POLYLINE_UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
+        try:
+            return gpu.shader.from_builtin(name)
+        except Exception:
+            pass
+    return None
+
+
+def get_2d_uniform_color_shader():
+    for name in ('2D_UNIFORM_COLOR', 'UNIFORM_COLOR'):
         try:
             return gpu.shader.from_builtin(name)
         except Exception:
@@ -324,18 +357,129 @@ def draw_callback_3d():
             gpu.state.depth_mask_set(orig_depth_mask)
 
 
+def draw_callback_2d():
+    """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
+    if not _interactive_active or not _interactive_fps_info:
+        return
+
+    if not _interactive_fps_info.get("show_overlay", True):
+        return
+
+    fps = _interactive_fps_info.get("fps", 0.0)
+    frame_ms = _interactive_fps_info.get("frame_ms", 0.0)
+    position = _interactive_fps_info.get("position", 'TOP_CENTER')
+
+    context = bpy.context
+    region = getattr(context, "region", None)
+    if not region:
+        return
+
+    # バッジのサイズ設定
+    box_w = 175.0
+    box_h = 28.0
+
+    # 配置座標の算出
+    if position == 'TOP_CENTER':
+        # 画面中央上部（ヘッダーと重ならないよう、上端から40px下げ、左右中央に配置）
+        margin_x = (region.width - box_w) / 2.0
+        y_top = region.height - 40.0
+    elif position == 'TOP_RIGHT':
+        # 画面右上（ナビゲーションギズモの左側を想定）
+        margin_x = region.width - box_w - 90.0
+        y_top = region.height - 40.0
+    elif position == 'BOTTOM_RIGHT':
+        # 画面右下
+        margin_x = region.width - box_w - 24.0
+        y_top = 24.0 + box_h
+    elif position == 'BOTTOM_LEFT':
+        # 画面左下（ツールバーの右下など）
+        margin_x = 80.0
+        y_top = 24.0 + box_h
+    else:  # TOP_LEFT
+        # 左上（ツールバー幅70pxの右側にオフセット）
+        margin_x = 80.0
+        y_top = region.height - 50.0
+
+    y_bottom = y_top - box_h
+
+    # 1. 半透明ダーク背景（クアッド）の描画
+    shader_2d = get_2d_uniform_color_shader()
+    if shader_2d:
+        orig_blend = gpu.state.blend_get()
+        try:
+            gpu.state.blend_set('ALPHA')
+            # 2つの三角形で四角形を構成
+            vertices = [
+                (margin_x, y_bottom),
+                (margin_x + box_w, y_bottom),
+                (margin_x + box_w, y_top),
+                (margin_x, y_bottom),
+                (margin_x + box_w, y_top),
+                (margin_x, y_top),
+            ]
+            batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
+            shader_2d.bind()
+            # 背景色: ダークグレー (0.12, 0.12, 0.14, 0.75)
+            shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
+            batch.draw(shader_2d)
+        finally:
+            gpu.state.blend_set(orig_blend)
+
+    # 2. テキスト描画 (blf)
+    try:
+        import blf
+        font_id = 0
+        font_size = 13
+
+        # blf.size の互換性対応 (Blenderバージョン差対応)
+        try:
+            blf.size(font_id, font_size)
+        except (TypeError, ValueError):
+            try:
+                blf.size(font_id, font_size, 72)
+            except Exception:
+                pass
+
+        # FPSステータスに応じた文字色判定
+        if fps >= 50.0:
+            text_color = (0.3, 0.95, 0.4, 1.0)   # 鮮やかなグリーン
+        elif fps >= 30.0:
+            text_color = (1.0, 0.85, 0.2, 1.0)   # イエロー
+        elif fps > 0.0:
+            text_color = (1.0, 0.35, 0.25, 1.0)  # オレンジレッド
+        else:
+            text_color = (0.7, 0.7, 0.7, 1.0)    # グレー（初期状態）
+
+        text_str = f"FPS: {fps:5.1f} ({frame_ms:4.1f} ms)"
+        text_x = margin_x + 12.0
+        text_y = y_bottom + 8.0
+
+        blf.position(font_id, text_x, text_y, 0.0)
+        blf.color(font_id, text_color[0], text_color[1], text_color[2], text_color[3])
+        blf.draw(font_id, text_str)
+    except Exception:
+        pass
+
+
 def register_draw_handler():
-    """描画ハンドラーを登録する"""
-    global _draw_handler
+    """描画ハンドラーを登録する (3D POST_VIEW および 2D POST_PIXEL)"""
+    global _draw_handler, _draw_handler_2d
     if _draw_handler is None and hasattr(bpy.types, "SpaceView3D"):
         _draw_handler = bpy.types.SpaceView3D.draw_handler_add(
             draw_callback_3d, (), 'WINDOW', 'POST_VIEW'
+        )
+    if _draw_handler_2d is None and hasattr(bpy.types, "SpaceView3D"):
+        _draw_handler_2d = bpy.types.SpaceView3D.draw_handler_add(
+            draw_callback_2d, (), 'WINDOW', 'POST_PIXEL'
         )
 
 
 def unregister_draw_handler():
     """描画ハンドラーを解除する"""
-    global _draw_handler
+    global _draw_handler, _draw_handler_2d
     if _draw_handler is not None and hasattr(bpy.types, "SpaceView3D"):
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, 'WINDOW')
         _draw_handler = None
+    if _draw_handler_2d is not None and hasattr(bpy.types, "SpaceView3D"):
+        bpy.types.SpaceView3D.draw_handler_remove(_draw_handler_2d, 'WINDOW')
+        _draw_handler_2d = None

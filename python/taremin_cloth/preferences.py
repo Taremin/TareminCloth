@@ -319,7 +319,9 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 def get_preferences(context=None):
     """アドオンのプレファレンスインスタンスを取得する"""
     if context is None:
-        context = bpy.context
+        context = getattr(bpy, "context", None)
+    if not context or not hasattr(context, "preferences") or not context.preferences:
+        return None
     addon_name = __package__.split('.')[0] if __package__ else "taremin_cloth"
     addon = context.preferences.addons.get(addon_name)
     if addon:

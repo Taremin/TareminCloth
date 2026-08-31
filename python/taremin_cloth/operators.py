@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime
 import bpy
 import mathutils
@@ -980,6 +981,46 @@ def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "j
     return os.path.join(dir_path, filename)
 
 
+class FPSCounter:
+    """フレーム間隔から指数移動平均（EMA）を用いて安定したFPSおよびフレーム時間を算出する軽量カウンター"""
+    def __init__(self, ema_alpha: float = 0.15):
+        self.ema_alpha = ema_alpha
+        self.last_time = None
+        self.fps = 0.0
+        self.frame_ms = 0.0
+
+    def tick(self, current_time: float = None):
+        if current_time is None:
+            current_time = time.perf_counter()
+
+        if self.last_time is None:
+            self.last_time = current_time
+            return self.fps, self.frame_ms
+
+        dt = current_time - self.last_time
+        self.last_time = current_time
+
+        if dt <= 0.0:
+            return self.fps, self.frame_ms
+
+        instant_fps = 1.0 / dt
+        instant_ms = dt * 1000.0
+
+        if self.fps <= 0.0:
+            self.fps = instant_fps
+            self.frame_ms = instant_ms
+        else:
+            self.fps = self.ema_alpha * instant_fps + (1.0 - self.ema_alpha) * self.fps
+            self.frame_ms = self.ema_alpha * instant_ms + (1.0 - self.ema_alpha) * self.frame_ms
+
+        return self.fps, self.frame_ms
+
+    def reset(self):
+        self.last_time = None
+        self.fps = 0.0
+        self.frame_ms = 0.0
+
+
 class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     """3Dビューポート上でリアルタイムに布を掴んで動かすモーダルオペレーター"""
     bl_idname = "taremin_cloth.interactive"
@@ -987,6 +1028,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     bl_options = {'REGISTER'}
 
     _timer = None
+    _fps_counter = None
     _grabbed_vert = None
     _grab_initial_pos_local = None
     _grab_plane_point = None
@@ -1045,6 +1087,14 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             obj.data.vertices.foreach_set("co", coords)
             obj.data.update()
             obj["_taremin_is_deformed"] = True
+
+            # FPS計測とオーバーレイ更新
+            if self._fps_counter is not None:
+                fps, frame_ms = self._fps_counter.tick()
+                settings = getattr(obj, "taremin_cloth", None)
+                show_overlay = getattr(settings, "show_fps_overlay", True) if settings else True
+                position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
+                drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position)
 
         elif event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
@@ -1251,6 +1301,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         obj = context.active_object
         self._stop_requested = False
         self._pinned_verts = set()
+        self._fps_counter = FPSCounter(ema_alpha=0.15)
+        drawing.clear_interactive_fps_info()
 
         # 十字分割の自動適用（未適用の四角面がある場合）
         if obj and obj.type == 'MESH':
@@ -1311,7 +1363,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             self._timer = None
 
         drawing.clear_active_grabbed_vertex()
+        drawing.clear_interactive_fps_info()
         drawing.set_interactive_active(False)
+        self._fps_counter = None
 
         if self._grabbed_vert is not None:
             if self._grabbed_vert not in self._pinned_verts:
@@ -1941,13 +1995,17 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    if cloth_frame_handler not in bpy.app.handlers.frame_change_post:
-        bpy.app.handlers.frame_change_post.append(cloth_frame_handler)
+    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    if handlers and hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
+        if cloth_frame_handler not in handlers.frame_change_post:
+            handlers.frame_change_post.append(cloth_frame_handler)
 
 
 def unregister():
-    if cloth_frame_handler in bpy.app.handlers.frame_change_post:
-        bpy.app.handlers.frame_change_post.remove(cloth_frame_handler)
+    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    if handlers and hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
+        if cloth_frame_handler in handlers.frame_change_post:
+            handlers.frame_change_post.remove(cloth_frame_handler)
     clear_simulators()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

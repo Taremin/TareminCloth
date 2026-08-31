@@ -342,6 +342,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             row_pin_opts = a_col.row(align=True)
             row_pin_opts.prop(settings, "pin_overlay_interactive_only", text="Interactive Only")
             row_pin_opts.prop(settings, "overlay_depth_test", text="Depth Test (Z)")
+            row_pin_opts.prop(settings, "show_fps_overlay", text="Show FPS")
+            if settings.show_fps_overlay:
+                a_col.prop(settings, "fps_overlay_position", text="Position")
             a_col.separator()
             a_col.prop(settings, "pin_target_object")
             if settings.pin_target_object and settings.pin_target_object.type == 'ARMATURE':

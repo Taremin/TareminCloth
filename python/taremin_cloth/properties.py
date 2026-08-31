@@ -372,6 +372,23 @@ class TareminClothObjectSettings(PropertyGroup):
         description="ハイライト表示（ピン留め・ドラッグ頂点・伸縮ライン等）に深度テストを適用し、メッシュや物陰に隠れるようにします",
         default=False,
     )
+    show_fps_overlay: BoolProperty(
+        name="Show FPS Overlay",
+        description="インタラクティブシミュレーション実行中に3DビューポートにFPSとフレーム時間を表示します",
+        default=True,
+    )
+    fps_overlay_position: EnumProperty(
+        name="FPS Position",
+        description="3Dビューポート内のFPS表示位置",
+        items=[
+            ('TOP_CENTER', "Top Center", "画面中央上部"),
+            ('TOP_RIGHT', "Top Right", "画面右上"),
+            ('BOTTOM_RIGHT', "Bottom Right", "画面右下"),
+            ('BOTTOM_LEFT', "Bottom Left", "画面左下"),
+            ('TOP_LEFT', "Top Left", "画面左上"),
+        ],
+        default='TOP_CENTER',
+    )
     # 伸縮グループ (Elastic Bands / Edge Scaling)
     elastic_groups: CollectionProperty(
         type=TareminClothElasticGroup,
