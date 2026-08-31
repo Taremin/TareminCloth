@@ -174,9 +174,9 @@ pub fn render_mesh_to_buffer(
 
     let target = options.camera_target.unwrap_or(center);
     let eye = options.camera_pos.unwrap_or([
-        center[0] + size * 1.5,
-        center[1] - size * 2.0,
-        center[2] + size * 1.4,
+        center[0] + size * 0.9,
+        center[1] - size * 1.3,
+        center[2] + size * 0.8,
     ]);
 
     let dist = vec3_norm(vec3_sub(eye, target));
@@ -236,11 +236,45 @@ pub fn render_mesh_to_buffer(
         // 符号付きスクリーン面積（カリング・表裏判定）
         let cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
         let is_front = cross < 0.0;
-        let color = if is_front {
+        let base_color = if is_front {
             options.front_color
         } else {
             options.back_color
         };
+
+        // 面法線の計算 (ワールド座標系) によるディレクショナル・シェーディング
+        let p0_w = positions[i0];
+        let p1_w = positions[i1];
+        let p2_w = positions[i2];
+        let e1 = [p1_w[0] - p0_w[0], p1_w[1] - p0_w[1], p1_w[2] - p0_w[2]];
+        let e2 = [p2_w[0] - p0_w[0], p2_w[1] - p0_w[1], p2_w[2] - p0_w[2]];
+        let mut norm = vec3_cross(e1, e2);
+        let norm_len = vec3_norm(norm);
+        if norm_len > 1e-7 {
+            norm = [norm[0] / norm_len, norm[1] / norm_len, norm[2] / norm_len];
+        }
+
+        // 光源方向 (カメラ斜め上方からのキーライト)
+        let light_dir = vec3_normalize([
+            eye[0] - target[0] + size * 0.5,
+            eye[1] - target[1] - size * 0.5,
+            eye[2] - target[2] + size * 1.0,
+        ]);
+        let mut ndotl = vec3_dot(norm, light_dir).abs(); // 表裏両面で適切な陰影を付ける
+        ndotl = ndotl * 0.5 + 0.5; // 半球ライティング (0.5〜1.0) で暗くなりすぎないようにする
+
+        let shaded_color = [
+            (base_color[0] as f32 * ndotl).min(255.0) as u8,
+            (base_color[1] as f32 * ndotl).min(255.0) as u8,
+            (base_color[2] as f32 * ndotl).min(255.0) as u8,
+        ];
+
+        // ワイヤーフレーム色 (エッジ境界線)
+        let wire_color = [
+            (shaded_color[0] as f32 * 0.45) as u8,
+            (shaded_color[1] as f32 * 0.45) as u8,
+            (shaded_color[2] as f32 * 0.45) as u8,
+        ];
 
         // バウンディングボックス
         let min_x = (p0[0].min(p1[0]).min(p2[0]).floor() as i32).max(0).min((width - 1) as i32) as u32;
@@ -262,6 +296,10 @@ pub fn render_mesh_to_buffer(
         let z1 = ndc_zs[i1];
         let z2 = ndc_zs[i2];
 
+        // ワイヤーフレームの太さ判定用 (スクリーン上での三角形サイズに応じた重心座標閾値)
+        let tri_area = denom.abs() * 0.5;
+        let wire_thresh = (1.2 / tri_area.sqrt()).min(0.12).max(0.02);
+
         for y in min_y..=max_y {
             let py = y as f32 + 0.5;
             let row_offset = (y * width) as usize;
@@ -278,9 +316,14 @@ pub fn render_mesh_to_buffer(
                     if pz < z_buffer[pixel_idx] {
                         z_buffer[pixel_idx] = pz;
                         let rgb_idx = pixel_idx * 3;
-                        fb[rgb_idx] = color[0];
-                        fb[rgb_idx + 1] = color[1];
-                        fb[rgb_idx + 2] = color[2];
+
+                        // エッジ付近（重心座標の最小値が閾値以下）であればワイヤーフレーム色にする
+                        let is_wire = w0 < wire_thresh || w1 < wire_thresh || w2 < wire_thresh;
+                        let final_pix = if is_wire { wire_color } else { shaded_color };
+
+                        fb[rgb_idx] = final_pix[0];
+                        fb[rgb_idx + 1] = final_pix[1];
+                        fb[rgb_idx + 2] = final_pix[2];
                     }
                 }
             }
@@ -290,10 +333,10 @@ pub fn render_mesh_to_buffer(
     // 赤色ピクセル数（裏面露出面）をカウント
     let mut red_pixels = 0;
     for i in 0..total_pixels {
-        let r = fb[i * 3];
-        let g = fb[i * 3 + 1];
-        let b = fb[i * 3 + 2];
-        if r >= 200 && g <= 50 && b <= 50 {
+        let r = fb[i * 3] as u32;
+        let g = fb[i * 3 + 1] as u32;
+        let b = fb[i * 3 + 2] as u32;
+        if r >= 90 && r > (g + b + 1) * 2 {
             red_pixels += 1;
         }
     }

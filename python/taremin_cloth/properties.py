@@ -187,6 +187,13 @@ class TareminClothObjectSettings(PropertyGroup):
         min=1,
         max=50,
     )
+    max_substeps: IntProperty(
+        name="Max Steps",
+        description="適応型ステップにおける最大細分化ステップ数（激突・高速移動時のCFL緊急上限）",
+        default=64,
+        min=10,
+        max=200,
+    )
     solver_iterations: IntProperty(
         name="Solver Iterations",
         description="1サブステップあたりの拘束反復回数。肩紐など細長いパーツの伸びを抑制します",
@@ -270,6 +277,18 @@ class TareminClothObjectSettings(PropertyGroup):
         min=0.01,
         max=1.0,
         precision=2,
+    )
+    self_collision_max_iterations: EnumProperty(
+        name="Max Search Iterations",
+        description="GPU空間ハッシュでの1セルあたりの最大探索反復回数。密集時の貫通・すり抜けを防ぐには大きな値を指定します",
+        items=[
+            ('128', "128 (Fast)", "高速プレビュー・軽量メッシュ向け (標準)"),
+            ('256', "256 (Balanced)", "バランス設定。衝突時のすり抜けを抑制"),
+            ('512', "512 (High Quality)", "高品質設定。折り畳みや高密度メッシュ向け"),
+            ('1024', "1024 (Ultra)", "超高密度・複雑なシワの貫通防止"),
+            ('4096', "4096 (No Limit)", "実質無制限。時間をかけて確実に貫通を防ぎます"),
+        ],
+        default='256',
     )
     self_collision_exclude_neighbors: BoolProperty(
         name="Exclude Neighbors",

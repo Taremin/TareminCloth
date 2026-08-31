@@ -299,7 +299,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             sim_col.prop(settings, "solver_iterations")
             sim_col.prop(settings, "enable_adaptive_substep")
             if settings.enable_adaptive_substep:
-                sim_col.prop(settings, "min_substeps")
+                row_steps = sim_col.row(align=True)
+                row_steps.prop(settings, "min_substeps", text="Min")
+                row_steps.prop(settings, "max_substeps", text="Max")
 
             # パフォーマンス & チューニング設定 (Performance Tuning)
             box_perf = layout.box()
@@ -321,13 +323,16 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 self_sub = l_col.column(align=True)
                 self_sub.prop(settings, "self_collision_relief_factor", text="  Relief Factor")
                 self_sub.prop(settings, "self_collision_max_displacement_ratio", text="  Max Step Ratio")
+                self_sub.prop(settings, "self_collision_max_iterations", text="  Search Limit")
             l_col.prop(settings, "enable_edge_collision")
             if settings.enable_edge_collision:
                 edge_sub = l_col.column(align=True)
                 edge_sub.prop(settings, "edge_margin_scale", text="  Margin Scale")
                 edge_sub.prop(settings, "edge_margin_offset", text="  Margin Offset")
             l_col.prop(settings, "layer_id")
-            l_col.prop(settings, "thickness")
+            row_thick = l_col.row(align=True)
+            row_thick.prop(settings, "thickness")
+            row_thick.operator("taremin_cloth.auto_fit_thickness", text="Auto Fit", icon='FIXED_SIZE')
 
             box_attach = layout.box()
             box_attach.label(text="Attachment & Pinning", icon='PINNED')

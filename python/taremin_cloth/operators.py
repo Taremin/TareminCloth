@@ -492,16 +492,19 @@ def get_effective_substeps(obj, coords, dt, scene=None):
 
     max_disp = max(cloth_max_disp, collider_max_disp)
 
-    # 3. メッシュ特性長 (CFL条件) による目標ステップ数の決定
+    # 3. メッシュ特性長および厚み (CFL条件) による目標ステップ数の決定
     char_len = _mesh_char_len_cache.get(obj_name, 0.01)
-    # 安全係数 0.5: 1サブステップあたりの移動量が特性長の半分以下になるように分割
-    cfl_margin = 0.5 * char_len
+    thickness = getattr(settings, "thickness", 0.01)
+    # 安全係数: 1サブステップあたりの移動量が、エッジ長だけでなく布の厚み（貫通閾値）に対しても過大にならないよう考慮
+    # 厚みが極端に薄い場合でも、最低限の安全マージンを確保
+    cfl_margin = min(0.5 * char_len, max(thickness * 1.5, 0.002))
+    max_steps = getattr(settings, "max_substeps", max(base_steps, 64))
 
     if max_disp <= 1e-6:
         target_steps = min_steps
     else:
         computed_steps = int(np.ceil(max_disp / cfl_margin))
-        target_steps = max(min_steps, min(base_steps, computed_steps))
+        target_steps = max(min_steps, min(max_steps, computed_steps))
 
     # 4. ヒステリシス制御（スムージング / ジッター防止）
     # 急激なステップ降下による剛性・ダンピングの揺らぎや布のピクつきを防止
@@ -513,7 +516,7 @@ def get_effective_substeps(obj, coords, dt, scene=None):
         # 下降時（減速・整定）は最大2ステップずつ緩やかに降下
         current_steps = max(target_steps, prev_steps - 2)
 
-    current_steps = max(min_steps, min(base_steps, current_steps))
+    current_steps = max(min_steps, min(max_steps, current_steps))
     _effective_substeps_cache[obj_name] = current_steps
     return current_steps
 
@@ -563,11 +566,16 @@ def sync_cloth_parameters(sim, obj, scene=None):
     if hasattr(sim, "set_enable_self_collision"):
         sim.set_enable_self_collision(getattr(settings, "enable_self_collision", False))
     if hasattr(sim, "set_self_collision_options"):
+        try:
+            max_iters = int(getattr(settings, "self_collision_max_iterations", 256))
+        except (ValueError, TypeError):
+            max_iters = 256
         sim.set_self_collision_options(
             relief_factor=getattr(settings, "self_collision_relief_factor", 0.2),
             max_displacement_ratio=getattr(settings, "self_collision_max_displacement_ratio", 0.2),
             exclude_neighbors=getattr(settings, "self_collision_exclude_neighbors", True),
             enable_normal_untangling=getattr(settings, "enable_normal_untangling", True),
+            max_iterations=max_iters,
         )
 
     # 5.5. エッジ詳細接触判定
@@ -1872,6 +1880,41 @@ class TAREMIN_CLOTH_OT_select_object(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class TAREMIN_CLOTH_OT_auto_fit_thickness(bpy.types.Operator):
+    """メッシュのエッジ長スケールに基づき、貫通・破綻を起こさない適正な布の厚みを自動設定する"""
+    bl_idname = "taremin_cloth.auto_fit_thickness"
+    bl_label = "Auto Fit Thickness"
+    bl_description = "メッシュの平均エッジ長を測定し、貫通を防ぐ推奨の厚みを自動算出・適用します"
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or obj.type != 'MESH' or not hasattr(obj, "taremin_cloth"):
+            self.report({'WARNING'}, "有効な布メッシュオブジェクトを選択してください")
+            return {'CANCELLED'}
+
+        mesh = obj.data
+        if len(mesh.edges) == 0:
+            self.report({'WARNING'}, "メッシュにエッジが存在しません")
+            return {'CANCELLED'}
+
+        # ワールドスケールを考慮した平均エッジ長を計算
+        mat = obj.matrix_world
+        edge_lengths = []
+        for e in mesh.edges:
+            v0 = mat @ mesh.vertices[e.vertices[0]].co
+            v1 = mat @ mesh.vertices[e.vertices[1]].co
+            edge_lengths.append((v1 - v0).length)
+
+        avg_len = float(np.mean(edge_lengths))
+        # 推奨厚み: 平均エッジ長の 4%〜6%（最小 1mm、最大 5cm）
+        recommended_thick = max(0.001, min(0.05, avg_len * 0.05))
+
+        obj.taremin_cloth.thickness = recommended_thick
+        self.report({'INFO'}, f"推奨厚み {recommended_thick * 1000.0:.1f} mm を設定しました (平均エッジ長: {avg_len * 1000.0:.1f} mm)")
+        return {'FINISHED'}
+
+
 classes = (
     TAREMIN_CLOTH_OT_toggle_cloth,
     TAREMIN_CLOTH_OT_reset_selected,
@@ -1891,6 +1934,7 @@ classes = (
     TAREMIN_CLOTH_OT_record_pose,
     TAREMIN_CLOTH_OT_apply_pose_preview,
     TAREMIN_CLOTH_OT_select_object,
+    TAREMIN_CLOTH_OT_auto_fit_thickness,
 )
 
 

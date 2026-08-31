@@ -331,19 +331,21 @@ impl ClothSimulator {
     }
 
     /// 自己衝突および貫通解消 (Untangling) オプションを設定
-    #[pyo3(signature = (relief_factor=0.2, max_displacement_ratio=0.2, exclude_neighbors=true, enable_normal_untangling=true))]
+    #[pyo3(signature = (relief_factor=0.2, max_displacement_ratio=0.2, exclude_neighbors=true, enable_normal_untangling=true, max_iterations=128))]
     fn set_self_collision_options(
         &mut self,
         relief_factor: f32,
         max_displacement_ratio: f32,
         exclude_neighbors: bool,
         enable_normal_untangling: bool,
+        max_iterations: u32,
     ) {
         self.simulator.set_self_collision_options(
             relief_factor,
             max_displacement_ratio,
             exclude_neighbors,
             enable_normal_untangling,
+            max_iterations,
         );
     }
 

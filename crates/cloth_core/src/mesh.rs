@@ -116,7 +116,7 @@ pub struct SelfCollisionParams {
     pub enable_relief: u32,
     pub enable_normal_untangling: u32,
     pub exclude_neighbors: u32,
-    pub _pad1: u32,
+    pub max_search_iterations: u32,
     pub _pad2: u32,
     pub _pad3: u32,
 }
@@ -419,6 +419,7 @@ impl ClothMesh {
                 }
             }
         }
+
 
         let mut local_edge_lengths = Vec::with_capacity(n_verts);
         for i in 0..n_verts {

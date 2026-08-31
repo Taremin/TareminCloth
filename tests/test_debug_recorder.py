@@ -99,6 +99,8 @@ class TestDebugRecorder(unittest.TestCase):
         self.assertEqual(meta_rec["metadata"]["num_edges"], len(meta_rec["metadata"]["edges"]))
         self.assertEqual(meta_rec["metadata"]["num_faces"], 2)
         self.assertIn("gravity", meta_rec["metadata"])
+        self.assertIn("self_collision_max_iterations", meta_rec["metadata"])
+        self.assertEqual(meta_rec["metadata"]["self_collision_max_iterations"], 128)
 
         # 各フレームの構造検証
         for idx, frame_rec in enumerate(lines[1:]):

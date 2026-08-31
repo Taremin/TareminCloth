@@ -78,6 +78,12 @@ pub struct SimulationMetadata {
     pub enable_edge_collision: bool,
     pub edge_margin_scale: f32,
     pub edge_margin_offset: f32,
+    #[serde(default = "default_max_iterations")]
+    pub self_collision_max_iterations: u32,
+}
+
+fn default_max_iterations() -> u32 {
+    128
 }
 
 /// 単一フレーム内の統計情報（異常値検知・境界箱など）
@@ -370,6 +376,7 @@ mod tests {
             enable_edge_collision: false,
             edge_margin_scale: 1.0,
             edge_margin_offset: 0.0,
+            self_collision_max_iterations: 128,
         };
 
         recorder.start_recording(meta, Some(5));

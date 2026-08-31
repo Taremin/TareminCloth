@@ -163,12 +163,16 @@ impl GpuContext {
             }
         };
 
+        let mut required_limits = wgpu::Limits::default();
+        let adapter_limits = adapter.limits();
+        required_limits.max_storage_buffers_per_shader_stage = adapter_limits.max_storage_buffers_per_shader_stage.min(16).max(8);
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("TareminCloth Device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits,
                     memory_hints: Default::default(),
                 },
                 None,

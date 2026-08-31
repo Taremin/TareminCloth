@@ -9,7 +9,10 @@ import json
 from typing import Any, Dict, Generator, List, Optional, Tuple
 import numpy as np
 
-import taremin_cloth_core
+try:
+    import taremin_cloth_core
+except ImportError:
+    from . import taremin_cloth_core
 
 
 def read_metadata(log_path: str) -> Dict[str, Any]:
@@ -97,6 +100,7 @@ class ClothReplayer:
                 max_displacement_ratio=float(self.metadata.get("self_collision_max_displacement_ratio", 0.2)),
                 exclude_neighbors=bool(self.metadata.get("self_collision_exclude_neighbors", True)),
                 enable_normal_untangling=bool(self.metadata.get("enable_normal_untangling", True)),
+                max_iterations=int(self.metadata.get("self_collision_max_iterations", 128)),
             )
 
         # エッジコリジョン設定

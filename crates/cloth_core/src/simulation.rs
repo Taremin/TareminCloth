@@ -152,6 +152,7 @@ pub struct GpuClothSimulator {
     pub enable_edge_collision: bool,
     pub edge_margin_scale: f32,
     pub edge_margin_offset: f32,
+    pub self_collision_max_iterations: u32,
     edge_collision_pipeline: wgpu::ComputePipeline,
     edge_collision_bind_groups: Vec<wgpu::BindGroup>,
 
@@ -1491,6 +1492,7 @@ impl GpuClothSimulator {
         let self_collision_max_displacement_ratio = 0.2f32;
         let self_collision_exclude_neighbors = true;
         let enable_normal_untangling = true;
+        let self_collision_max_iterations = 128u32;
 
         let self_collision_params = SelfCollisionParams {
             cell_size: spatial_hash.cell_size,
@@ -1502,7 +1504,7 @@ impl GpuClothSimulator {
             enable_relief: 1,
             enable_normal_untangling: 1,
             exclude_neighbors: 1,
-            _pad1: 0,
+            max_search_iterations: self_collision_max_iterations,
             _pad2: 0,
             _pad3: 0,
         };
@@ -1887,6 +1889,7 @@ impl GpuClothSimulator {
             self_collision_relief_factor,
             self_collision_max_displacement_ratio,
             self_collision_exclude_neighbors,
+            self_collision_max_iterations,
             enable_normal_untangling,
             enable_edge_collision: false,
             edge_margin_scale: 1.0,
@@ -1908,11 +1911,13 @@ impl GpuClothSimulator {
         max_displacement_ratio: f32,
         exclude_neighbors: bool,
         enable_normal_untangling: bool,
+        max_iterations: u32,
     ) {
         self.self_collision_relief_factor = relief_factor;
         self.self_collision_max_displacement_ratio = max_displacement_ratio;
         self.self_collision_exclude_neighbors = exclude_neighbors;
         self.enable_normal_untangling = enable_normal_untangling;
+        self.self_collision_max_iterations = max_iterations;
 
         let params = SelfCollisionParams {
             cell_size: self.spatial_hash.cell_size,
@@ -1924,7 +1929,7 @@ impl GpuClothSimulator {
             enable_relief: if relief_factor < 0.999 { 1 } else { 0 },
             enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
             exclude_neighbors: if exclude_neighbors { 1 } else { 0 },
-            _pad1: 0,
+            max_search_iterations: max_iterations,
             _pad2: 0,
             _pad3: 0,
         };
@@ -2995,6 +3000,7 @@ impl GpuClothSimulator {
             enable_edge_collision: self.enable_edge_collision,
             edge_margin_scale: self.edge_margin_scale,
             edge_margin_offset: self.edge_margin_offset,
+            self_collision_max_iterations: self.self_collision_max_iterations,
         };
 
         self.debug_recorder.start_recording(metadata, max_frames);
@@ -3315,11 +3321,12 @@ mod tests {
         sim.set_enable_self_collision(true);
 
         // 新オプションの設定
-        sim.set_self_collision_options(0.1, 0.2, true, true);
+        sim.set_self_collision_options(0.1, 0.2, true, true, 256);
         assert_eq!(sim.self_collision_relief_factor, 0.1);
         assert_eq!(sim.self_collision_max_displacement_ratio, 0.2);
         assert!(sim.self_collision_exclude_neighbors);
         assert!(sim.enable_normal_untangling);
+        assert_eq!(sim.self_collision_max_iterations, 256);
 
         // シミュレーションを実行してクラッシュやNaNが生じないこと
         for _ in 0..10 {

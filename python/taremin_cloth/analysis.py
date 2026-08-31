@@ -36,6 +36,24 @@ def tri_tri_intersection_sat(
     if (d_p[0] > eps and d_p[1] > eps and d_p[2] > eps) or (d_p[0] < -eps and d_p[1] < -eps and d_p[2] < -eps):
         return False
 
+    # 同一平面判定: 両方の三角形の全頂点が他方の平面上にある場合 (|d| <= eps)
+    is_coplanar = all(abs(d) <= eps for d in d_q) and all(abs(d) <= eps for d in d_p)
+    if is_coplanar:
+        # 同一平面上の場合は、各辺に垂直な平面内法線（計6軸）で分離できるか判定
+        edges1 = [p1 - p0, p2 - p1, p0 - p2]
+        edges2 = [q1 - q0, q2 - q1, q0 - q2]
+        for e in edges1 + edges2:
+            axis = np.cross(e, n1)
+            norm = np.linalg.norm(axis)
+            if norm < 1e-6:
+                continue
+            axis /= norm
+            p_proj = [np.dot(axis, p0), np.dot(axis, p1), np.dot(axis, p2)]
+            q_proj = [np.dot(axis, q0), np.dot(axis, q1), np.dot(axis, q2)]
+            if min(p_proj) > max(q_proj) + eps or min(q_proj) > max(p_proj) + eps:
+                return False
+        return True
+
     # 3. 各エッジの外積軸（9軸）に対する射影重複判定
     edges1 = [p1 - p0, p2 - p1, p0 - p2]
     edges2 = [q1 - q0, q2 - q1, q0 - q2]
