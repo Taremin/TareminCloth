@@ -278,7 +278,7 @@ N パネルの最上部にある **「Cloth & Collider Objects」** パネルで
    - `編集 > プリファレンス > アドオン > Taremin Cloth` を開き、**Console Log Level** を **`DEBUG`** に設定します。
    - **Simulation Frame Debug Recorder** の **「Enable Debug Recording」** にチェックを入れます。
 2. **出力設定**:
-   - **Output Folder**: 保存先ディレクトリ（空欄時はBlenderテンポラリフォルダを使用）。
+   - **Output Folder**: 保存先ディレクトリ（空欄時はアドオン内の `frame_logs` フォルダを使用）。
    - **Template**: ファイル名テンプレート。デフォルト: `cloth_debug_{datetime}_{object}.{ext}`（拡張子 `{ext}` は自動的に `jsonl.gz` となります）。
    - **Max Frames**: メモリ保護用の最大記録フレーム数（デフォルト: 3600フレーム = 60FPSで約1分間）。
 3. **実行と出力**:

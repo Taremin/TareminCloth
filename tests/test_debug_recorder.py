@@ -134,6 +134,15 @@ class TestDebugRecorder(unittest.TestCase):
         self.assertIn("120f", filename)
         self.assertTrue(filename.endswith(".jsonl.gz"))
 
+        # 出力先空欄（デフォルト）の場合に frame_logs ディレクトリに解決されること
+        class EmptyPrefs:
+            debug_output_dir = ""
+            debug_filename_template = "cloth_debug_{datetime}_{object}.{ext}"
+
+        default_filepath = resolve_debug_filepath(EmptyPrefs(), "Cloth", frame_count=10, ext="jsonl.gz")
+        self.assertIn(os.path.join("taremin_cloth", "frame_logs"), default_filepath)
+        self.assertTrue(default_filepath.endswith(".jsonl.gz"))
+
     def test_max_frames_protection(self):
         """最大記録フレーム数（メモリ保護上限）の動作検証"""
         positions = np.array([

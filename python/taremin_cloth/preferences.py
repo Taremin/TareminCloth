@@ -249,7 +249,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
     debug_output_dir: StringProperty(
         name="Output Directory",
-        description="デバッグ記録ファイルの保存先ディレクトリ（空欄時はBlenderテンポラリフォルダを使用）",
+        description="デバッグ記録ファイルの保存先ディレクトリ（空欄時はアドオン内の frame_logs フォルダを使用）",
         default="",
         subtype='DIR_PATH',
         update=_on_debug_pref_update,

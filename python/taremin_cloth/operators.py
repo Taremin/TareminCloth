@@ -950,8 +950,23 @@ def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "j
         if not dir_path:
             dir_path = os.path.abspath(out_dir)
     if not dir_path:
-        import tempfile
-        dir_path = getattr(getattr(bpy, "app", None), "tempdir", None) or tempfile.gettempdir()
+        # デフォルト(空欄)時はアドオンルート直下の frame_logs ディレクトリを使用
+        # __file__ は <addon_root>/python/taremin_cloth/operators.py または <addon_root>/taremin_cloth/operators.py
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # python/taremin_cloth -> addon_root
+        parent = os.path.dirname(current_dir)
+        if os.path.basename(parent) == "python":
+            addon_dir = os.path.dirname(parent)
+        else:
+            addon_dir = parent
+
+        default_frame_logs = os.path.join(addon_dir, "frame_logs")
+        try:
+            os.makedirs(default_frame_logs, exist_ok=True)
+            dir_path = default_frame_logs
+        except Exception:
+            import tempfile
+            dir_path = getattr(getattr(bpy, "app", None), "tempdir", None) or tempfile.gettempdir()
 
     os.makedirs(dir_path, exist_ok=True)
     return os.path.join(dir_path, filename)
