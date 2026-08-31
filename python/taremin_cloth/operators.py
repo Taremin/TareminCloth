@@ -1385,10 +1385,11 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._fps_counter = FPSCounter(ema_alpha=0.15)
         drawing.clear_interactive_fps_info()
 
-        # 十字分割の自動適用（未適用の四角面がある場合）
+        # 十字分割の自動適用（未適用の四角面がある場合、かつCROSS_SUBDIVモード時のみ）
         if obj and obj.type == 'MESH':
             settings = getattr(obj, "taremin_cloth", None)
-            if settings and settings.enable_cross_subdivision and not topology.is_cross_subdivided(obj):
+            is_cross_subdiv_mode = (settings and (settings.triangulation_mode == 'CROSS_SUBDIV' or (settings.triangulation_mode == 'DYNAMIC_DIAGONAL' and settings.enable_cross_subdivision and False)))
+            if settings and settings.triangulation_mode == 'CROSS_SUBDIV' and not topology.is_cross_subdivided(obj):
                 cache_rest_positions(obj, force=True)
                 if topology.apply_cross_subdivision(obj):
                     clear_simulator_for_object(obj.name)
@@ -1496,9 +1497,19 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         if obj and obj.type == 'MESH':
             settings = getattr(obj, "taremin_cloth", None)
-            if settings and settings.enable_cross_subdivision and settings.auto_post_process and topology.is_cross_subdivided(obj):
-                clear_simulator_for_object(obj.name)
-                topology.apply_post_process(obj, mode=settings.post_process_mode, flatness_threshold=settings.adaptive_flatness_threshold)
+            if settings:
+                # 1. 十字分割モードの後処理
+                if (settings.triangulation_mode == 'CROSS_SUBDIV' or settings.enable_cross_subdivision) and settings.auto_post_process and topology.is_cross_subdivided(obj):
+                    clear_simulator_for_object(obj.name)
+                    topology.apply_post_process(obj, mode=settings.post_process_mode, flatness_threshold=settings.adaptive_flatness_threshold)
+                # 2. 動的対角線分割モード（アプローチA: 歪み率による自動2分割）
+                elif settings.triangulation_mode == 'DYNAMIC_DIAGONAL' and settings.auto_triangulate_on_stop:
+                    clear_simulator_for_object(obj.name)
+                    topology.apply_dynamic_diagonal_triangulation(
+                        obj,
+                        preserve_flat=settings.dynamic_preserve_flat,
+                        flatness_threshold=settings.dynamic_flatness_threshold
+                    )
 
         self.report({'INFO'}, "Interactive Simulation Stopped")
 
@@ -1732,8 +1743,39 @@ class TAREMIN_CLOTH_OT_apply_post_process(bpy.types.Operator):
             return {'CANCELLED'}
 
 
+class TAREMIN_CLOTH_OT_apply_dynamic_diagonal(bpy.types.Operator):
+    """歪み（Strain）に基づいて四角面をシワの稜線に沿った最適な2つの三角形に分割する"""
+    bl_idname = "taremin_cloth.apply_dynamic_diagonal"
+    bl_label = "Split by Strain"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(obj and obj.type == 'MESH')
+
+    def execute(self, context):
+        obj = context.active_object
+        settings = getattr(obj, "taremin_cloth", None)
+        preserve_flat = settings.dynamic_preserve_flat if settings else False
+        flatness = settings.dynamic_flatness_threshold if settings else 5.0
+
+        clear_simulator_for_object(obj.name)
+        success = topology.apply_dynamic_diagonal_triangulation(
+            obj,
+            preserve_flat=preserve_flat,
+            flatness_threshold=flatness
+        )
+        if success:
+            self.report({'INFO'}, "歪み（Strain）に基づいて最適な2三角面に分割しました")
+            return {'FINISHED'}
+        else:
+            self.report({'WARNING'}, "分割対象の四角面が見つからないか、処理に失敗しました")
+            return {'CANCELLED'}
+
+
 class TAREMIN_CLOTH_OT_restore_quad_topology(bpy.types.Operator):
-    """十字分割の中心頂点を削除して四角面（Quad）に復元する"""
+    """十字分割または動的分割されたメッシュを元の四角面（Quad）に復元する"""
     bl_idname = "taremin_cloth.restore_quad_topology"
     bl_label = "Restore Quad Topology"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1741,7 +1783,7 @@ class TAREMIN_CLOTH_OT_restore_quad_topology(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return bool(obj and obj.type == 'MESH' and topology.is_cross_subdivided(obj))
+        return bool(obj and obj.type == 'MESH' and (topology.is_cross_subdivided(obj) or "_taremin_backup_mesh" in obj))
 
     def execute(self, context):
         obj = context.active_object
@@ -2068,6 +2110,7 @@ classes = (
     TAREMIN_CLOTH_OT_select_elastic_edges,
     TAREMIN_CLOTH_OT_apply_cross_subdivision,
     TAREMIN_CLOTH_OT_apply_post_process,
+    TAREMIN_CLOTH_OT_apply_dynamic_diagonal,
     TAREMIN_CLOTH_OT_restore_quad_topology,
     TAREMIN_CLOTH_OT_record_pose,
     TAREMIN_CLOTH_OT_apply_pose_preview,

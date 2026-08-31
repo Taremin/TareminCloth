@@ -419,11 +419,47 @@ class TareminClothObjectSettings(PropertyGroup):
         description="伸縮ラインのハイライトをインタラクティブモード中のみ表示する",
         default=True,
     )
-    # トポロジー・十字分割 (Cross Subdivision & Post-Processing)
+    # トポロジー・分割モード (Triangulation & Topology)
+    triangulation_mode: EnumProperty(
+        name="Triangulation Mode",
+        description="四角面（Quad）メッシュの対角線バイアス対策と分割モード",
+        items=[
+            ('DYNAMIC_DIAGONAL', "Dynamic Diagonal (Lightweight)", "【推奨】シミュレーション中は頂点数増加ゼロ。終了時に歪み（Strain）から最適な対角線で2分割"),
+            ('CROSS_SUBDIV', "Cross Subdivision (Poke)", "【高精度】中心頂点を追加して4分割。ドーム状の強い突起も表現可能だが負荷は高め"),
+            ('NONE', "None (Original)", "四角面のまま（Blenderの標準対角線で計算）"),
+        ],
+        default='DYNAMIC_DIAGONAL',
+    )
+    # 動的対角線分割オプション
+    dynamic_preserve_flat: BoolProperty(
+        name="Preserve Flat Quads",
+        description="平坦な四角面は2分割せず四角面のまま保持する",
+        default=False,
+    )
+    dynamic_flatness_threshold: FloatProperty(
+        name="Flatness Angle",
+        description="平坦と判定する最大角度（度）",
+        default=5.0,
+        min=0.5,
+        max=45.0,
+    )
+    auto_triangulate_on_stop: BoolProperty(
+        name="Auto Triangulate on Stop",
+        description="シミュレーション停止時に自動で最適対角線分割を実行する",
+        default=True,
+    )
+    # 十字分割用（互換性維持）
+    def _update_cross_subdiv(self, context):
+        if self.enable_cross_subdivision:
+            self.triangulation_mode = 'CROSS_SUBDIV'
+        elif self.triangulation_mode == 'CROSS_SUBDIV':
+            self.triangulation_mode = 'DYNAMIC_DIAGONAL'
+
     enable_cross_subdivision: BoolProperty(
         name="Cross Subdivision",
         description="四角面を中心点で4分割し、対角線バイアスを解消して等方的なシワを表現する",
         default=False,
+        update=_update_cross_subdiv,
     )
     post_process_mode: EnumProperty(
         name="Post-Process",

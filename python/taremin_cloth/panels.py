@@ -410,12 +410,23 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 s_col.prop(settings, "sewing_shrink_speed")
                 s_col.operator("taremin_cloth.create_seam", text="Create Seam Between 2 Verts", icon='EDGESEL')
 
-            # メッシュトポロジー・十字分割 (Mesh & Topology / Cross Subdivision)
+            # メッシュトポロジー・分割 (Mesh & Topology / Triangulation)
             box_topo = layout.box()
-            box_topo.label(text="Topology & Cross-Subdivision", icon='MOD_TRIANGULATE')
+            box_topo.label(text="Topology & Triangulation", icon='MOD_TRIANGULATE')
             t_col = box_topo.column(align=True)
-            t_col.prop(settings, "enable_cross_subdivision")
-            if settings.enable_cross_subdivision:
+            t_col.prop(settings, "triangulation_mode", text="Mode")
+
+            if settings.triangulation_mode == 'DYNAMIC_DIAGONAL':
+                t_col.prop(settings, "dynamic_preserve_flat")
+                if settings.dynamic_preserve_flat:
+                    t_col.prop(settings, "dynamic_flatness_threshold")
+                t_col.prop(settings, "auto_triangulate_on_stop")
+
+                row_topo_ops = t_col.row(align=True)
+                row_topo_ops.operator("taremin_cloth.apply_dynamic_diagonal", text="Split by Strain", icon='MOD_TRIANGULATE')
+                row_topo_ops.operator("taremin_cloth.restore_quad_topology", text="Restore Quad", icon='RECOVER_LAST')
+
+            elif settings.triangulation_mode == 'CROSS_SUBDIV':
                 t_col.prop(settings, "post_process_mode")
                 if settings.post_process_mode == 'ADAPTIVE':
                     t_col.prop(settings, "adaptive_flatness_threshold")

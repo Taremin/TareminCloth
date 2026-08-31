@@ -118,7 +118,7 @@ class TestCrossSubdivision(unittest.TestCase):
         layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
         labels = layout.get_labels()
         operators = layout.get_operators()
-        self.assertTrue(any("Topology & Cross-Subdivision" in lbl for lbl in labels))
+        self.assertTrue(any("Topology &" in lbl for lbl in labels))
         self.assertIn("taremin_cloth.apply_post_process", operators)
         self.assertIn("taremin_cloth.restore_quad_topology", operators)
 

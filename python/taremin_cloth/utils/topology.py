@@ -114,6 +114,38 @@ def evaluate_optimal_diagonal(p0, p1, p2, p3, pc):
     return d02 <= d13
 
 
+def evaluate_quad_diagonal_by_strain(p0_rest, p1_rest, p2_rest, p3_rest, p0_curr, p1_curr, p2_curr, p3_curr):
+    """
+    四角面の初期（レスト）座標と現在座標から、対角線の歪み（伸び縮み率: Strain）を計算し、
+    シワの稜線に沿う最適な対角線を判定する。
+
+    物理的背景:
+    面内が圧縮されたとき、圧縮方向（歪み率 eps が小さく負になる方向）がシワの幅・谷となり、
+    保たれている/伸びている方向（歪み率 eps が大きい方向）が折り目の稜線となる。
+    したがって、歪み率が大きい方の対角線を選択する。
+
+    引数:
+        p0_rest, p1_rest, p2_rest, p3_rest: 時計回りまたは反時計回りの四角面4頂点のレスト座標
+        p0_curr, p1_curr, p2_curr, p3_curr: 同4頂点の現在（変形後）座標
+    戻り値:
+        bool: Trueなら対角線 (v0, v2)、Falseなら対角線 (v1, v3) を選択
+    """
+    # レスト長
+    L02 = float(np.linalg.norm(p2_rest - p0_rest))
+    L13 = float(np.linalg.norm(p3_rest - p1_rest))
+
+    # 現在長
+    l02 = float(np.linalg.norm(p2_curr - p0_curr))
+    l13 = float(np.linalg.norm(p3_curr - p1_curr))
+
+    # 歪み率 (Engineering Strain): (l - L) / L
+    eps02 = (l02 - L02) / max(L02, 1e-7)
+    eps13 = (l13 - L13) / max(L13, 1e-7)
+
+    # 歪み率が大きい（相対的に伸びている / 縮んでいない）方向が稜線
+    return eps02 >= eps13
+
+
 def evaluate_quad_flatness(face_normals, threshold_deg=5.0):
     """
     Quadを構成する小三角形の法線群から、平坦（シワがない）かどうかを判定する。
@@ -371,9 +403,137 @@ def apply_post_process(obj, mode='OPTIMAL_TRI', flatness_threshold=5.0) -> bool:
 
 def restore_original_quads(obj) -> bool:
     """
-    十字分割されたメッシュの全中心頂点を Dissolve して元の四角面メッシュに完全復元する。
+    十字分割または動的対角線分割されたメッシュを元の四角面メッシュに完全復元する。
     """
-    res = apply_post_process(obj, mode='QUAD')
-    if res:
-        clear_pre_subdivision_backup(obj)
-    return res
+    if is_cross_subdivided(obj):
+        res = apply_post_process(obj, mode='QUAD')
+        if res:
+            clear_pre_subdivision_backup(obj)
+        return res
+    else:
+        # 動的対角線分割等のバックアップからの復元
+        return restore_pre_subdivision_mesh(obj)
+
+
+def apply_dynamic_diagonal_triangulation(obj, rest_positions=None, preserve_flat=False, flatness_threshold=5.0) -> bool:
+    """
+    シミュレーション後の四角面メッシュに対して、歪み（Strain）に基づく動的対角線分割を実行する。
+    
+    特徴:
+    - 頂点数は一切増加しない。
+    - 四角面ごとに、対角線の伸び縮み率（歪み）を計算し、シワの稜線にフィットする方向で2分割（face_split）する。
+    - 事前バックアップを取得するため、restore_pre_subdivision_mesh または restore_original_quads で復元可能。
+
+    引数:
+        obj: 対象メッシュオブジェクト
+        rest_positions: レスト頂点座標の配列 (N, 3)。None の場合は "_taremin_rest_positions" または初期バックアップを参照
+        preserve_flat: 平坦な四角面を分割せずそのまま保持するかどうか
+        flatness_threshold: 平坦判定の角度閾値（度）
+    戻り値:
+        bool: 分割が実行されたら True
+    """
+    if not obj or obj.type != 'MESH':
+        return False
+
+    mesh = obj.data
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+
+    # 四角面（4頂点面）のみを抽出
+    quad_faces = [f for f in bm.faces if len(f.verts) == 4]
+    if not quad_faces:
+        bm.free()
+        return False
+
+    # 復元用バックアップの作成
+    backup_pre_subdivision_mesh(obj)
+
+    # レスト座標の取得
+    n_verts = len(bm.verts)
+    rest_pos_arr = None
+    if rest_positions is not None and len(rest_positions) == n_verts:
+        rest_pos_arr = np.array(rest_positions, dtype=np.float32)
+    elif "_taremin_rest_positions" in obj:
+        raw_rest = obj["_taremin_rest_positions"]
+        if len(raw_rest) == n_verts * 3:
+            rest_pos_arr = np.array(raw_rest, dtype=np.float32).reshape((n_verts, 3))
+    
+    if rest_pos_arr is None:
+        # バックアップメッシュの座標を参照
+        if "_taremin_backup_mesh" in obj:
+            b_mesh = bpy.data.meshes.get(obj["_taremin_backup_mesh"])
+            if b_mesh and len(b_mesh.vertices) == n_verts:
+                c = np.empty(n_verts * 3, dtype=np.float32)
+                b_mesh.vertices.foreach_get("co", c)
+                rest_pos_arr = c.reshape((n_verts, 3))
+
+    if rest_pos_arr is None:
+        # フォールバック: 現在座標をそのまま使用（この場合は幾何判定のみ）
+        c = np.empty(n_verts * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("co", c)
+        rest_pos_arr = c.reshape((n_verts, 3))
+
+    # 各Quadの現在頂点座標とレスト座標から分割方向を判定
+    # entry: (quad_face, v_start, v_end)
+    splits_to_perform = []
+
+    for f in quad_faces:
+        v0, v1, v2, v3 = f.verts[0], f.verts[1], f.verts[2], f.verts[3]
+        i0, i1, i2, i3 = v0.index, v1.index, v2.index, v3.index
+
+        p0_curr = np.array(v0.co, dtype=np.float32)
+        p1_curr = np.array(v1.co, dtype=np.float32)
+        p2_curr = np.array(v2.co, dtype=np.float32)
+        p3_curr = np.array(v3.co, dtype=np.float32)
+
+        p0_rest = rest_pos_arr[i0]
+        p1_rest = rest_pos_arr[i1]
+        p2_rest = rest_pos_arr[i2]
+        p3_rest = rest_pos_arr[i3]
+
+        if preserve_flat:
+            # 2つの対角線分割それぞれの法線差を確認
+            # (v0, v1, v2) と (v0, v2, v3)
+            n1 = np.cross(p1_curr - p0_curr, p2_curr - p0_curr)
+            n2 = np.cross(p2_curr - p0_curr, p3_curr - p0_curr)
+            norm1 = np.linalg.norm(n1)
+            norm2 = np.linalg.norm(n2)
+            if norm1 > 1e-6 and norm2 > 1e-6:
+                cos_ang = np.clip(np.dot(n1 / norm1, n2 / norm2), -1.0, 1.0)
+                ang_deg = math.degrees(math.acos(cos_ang))
+                if ang_deg < flatness_threshold:
+                    # 平坦なので分割しない
+                    continue
+
+        use_02 = evaluate_quad_diagonal_by_strain(
+            p0_rest, p1_rest, p2_rest, p3_rest,
+            p0_curr, p1_curr, p2_curr, p3_curr
+        )
+
+        if use_02:
+            splits_to_perform.append((f, v0, v2))
+        else:
+            splits_to_perform.append((f, v1, v3))
+
+    split_count = 0
+    for f, va, vb in splits_to_perform:
+        try:
+            bmesh.utils.face_split(f, va, vb)
+            split_count += 1
+        except Exception:
+            pass
+
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bm.to_mesh(mesh)
+    mesh.update()
+    bm.free()
+
+    logger.info(
+        f"[Topology] Applied dynamic diagonal triangulation to '{obj.name}': "
+        f"split {split_count}/{len(quad_faces)} quads "
+        f"(mesh now has {len(mesh.vertices)} verts, {len(mesh.polygons)} polygons)"
+    )
+    return split_count > 0

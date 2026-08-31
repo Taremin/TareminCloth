@@ -44,6 +44,25 @@ def extract_mesh_data(obj):
         else:
             sewing_edges.append(e)
 
+    # 四角面（Quad）が存在する場合、両対角線のエッジ (v0, v2) と (v1, v3) を
+    # せん断拘束（Shear）の対称化のために抽出
+    diag_edges = []
+    for poly in mesh.polygons:
+        if len(poly.vertices) == 4:
+            v = poly.vertices
+            diag_edges.append([min(v[0], v[2]), max(v[0], v[2])])
+            diag_edges.append([min(v[1], v[3]), max(v[1], v[3])])
+
+    if diag_edges:
+        # 重複を排除しつつ normal_edges に追加、あるいは Rust core でせん断拘束として扱えるように
+        # 既存 edges と重複しない対角線エッジを特定
+        diag_set = set((e[0], e[1]) for e in diag_edges)
+        curr_edge_set = set((min(e[0], e[1]), max(e[0], e[1])) for e in normal_edges)
+        new_diags = [list(e) for e in diag_set if e not in curr_edge_set]
+        # 注意: normal_edgesに直接加えると伸び拘束（Tension）にもなってしまうため、
+        # 後述のShear拘束等で利用できるようにするか、Rust coreのShear生成ロジックに適合させる。
+        # 現在のRust coreはfaces (triangles) から隣接三角の対向頂点をShear拘束として自動生成している。
+
     edges_2d = np.array(normal_edges, dtype=np.uint32) if normal_edges else np.empty((0, 2), dtype=np.uint32)
     sew_2d = np.array(sewing_edges, dtype=np.uint32) if sewing_edges else None
 
