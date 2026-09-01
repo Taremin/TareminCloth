@@ -70,53 +70,58 @@ struct DispatchInfo {
 
 const EPSILON: f32 = 1e-7;
 
-// 点から三角形への最近傍点
-fn closest_point_on_triangle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> vec3<f32> {
+struct ClosestResult {
+    point: vec3<f32>,
+    is_face: bool,
+};
+
+// 点から三角形への最近傍点および面内部フラグ
+fn closest_point_on_triangle_ext(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> ClosestResult {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
     let d1 = dot(ab, ap);
     let d2 = dot(ac, ap);
     if (d1 <= 0.0 && d2 <= 0.0) {
-        return a;
+        return ClosestResult(a, false);
     }
 
     let bp = p - b;
     let d3 = dot(ab, bp);
     let d4 = dot(ac, bp);
     if (d3 >= 0.0 && d4 <= d3) {
-        return b;
+        return ClosestResult(b, false);
     }
 
     let vc = d1 * d4 - d3 * d2;
     if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
         let v = d1 / (d1 - d3);
-        return a + v * ab;
+        return ClosestResult(a + v * ab, false);
     }
 
     let cp = p - c;
     let d5 = dot(ab, cp);
     let d6 = dot(ac, cp);
     if (d6 >= 0.0 && d5 <= d6) {
-        return c;
+        return ClosestResult(c, false);
     }
 
     let vb = d5 * d2 - d1 * d6;
     if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
         let w = d2 / (d2 - d6);
-        return a + w * ac;
+        return ClosestResult(a + w * ac, false);
     }
 
     let va = d3 * d6 - d5 * d4;
     if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return b + w * (c - b);
+        return ClosestResult(b + w * (c - b), false);
     }
 
     let denom = 1.0 / (va + vb + vc);
     let v = vb * denom;
     let w = vc * denom;
-    return a + ab * v + ac * w;
+    return ClosestResult(a + ab * v + ac * w, true);
 }
 
 // 点 pt から線分 p0 -> p1 上の最近傍点パラメータ t in [0, 1]
@@ -212,8 +217,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    // 2. メッシュコライダー判定 (中点判定 + コライダー頂点最近傍点判定)
-    let mid_old = (vertices[c.v0].position + vertices[c.v1].position) * 0.5;
+    // 2. メッシュコライダー判定 (Triangle Mesh: 中点・両頂点による多段近傍押し戻し)
+    let old0 = vertices[c.v0].position;
+    let old1 = vertices[c.v1].position;
+    let mid_old = (old0 + old1) * 0.5;
     let mid_new = (prev0 + prev1) * 0.5;
     let mid_sweep = (mid_old + mid_new) * 0.5;
     let sweep_move_r = length(mid_new - mid_old) * 0.5;
@@ -239,7 +246,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let face_normal = cross_prod / cross_len;
 
         // (A) エッジ中点からコライダー面への最近傍押し戻し (弦の沈み込み防止)
-        let q_mid = closest_point_on_triangle(mid_new, tri.p0, tri.p1, tri.p2);
+        let res_mid = closest_point_on_triangle_ext(mid_new, tri.p0, tri.p1, tri.p2);
+        let q_mid = res_mid.point;
         let delta_mid = mid_new - q_mid;
         let dist_mid = length(delta_mid);
         let signed_dist_mid = dot(delta_mid, face_normal);
@@ -259,8 +267,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     prev1 += push * factor1;
                 }
             } else {
-                let max_recovery_depth = bound_r;
-                if (dist_mid < max_recovery_depth) {
+                let max_recovery_depth = target_dist * 3.0;
+                if (res_mid.is_face && dist_mid < max_recovery_depth && dist_mid <= abs(signed_dist_mid) * 1.1 + EPSILON) {
                     let normal = face_normal;
                     let push = normal * (target_dist - signed_dist_mid);
                     let factor0 = 2.0 * w0 * inv_w_sum;
