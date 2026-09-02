@@ -85,11 +85,6 @@ pub struct GpuClothSimulator {
     pub(crate) collider_buffer: wgpu::Buffer,
     pub(crate) mesh_triangles_buffer: wgpu::Buffer,
     pub(crate) mesh_bounds_buffer: wgpu::Buffer,
-    pub(crate) collider_group_bounds_buffer: wgpu::Buffer,
-    pub(crate) num_clusters: u32,
-    pub enable_collider_cluster_culling: bool,
-    pub enable_single_sided_recovery: bool,
-    pub collider_sweep_margin_offset: f32,
     pub(crate) collider_params_buffer: wgpu::Buffer,
     pub(crate) collider_bind_group: wgpu::BindGroup,
     pub(crate) collision_pipeline: wgpu::ComputePipeline,
@@ -221,11 +216,6 @@ impl GpuClothSimulator {
             collider_buffer: res.collider_buffer,
             mesh_triangles_buffer: res.mesh_triangles_buffer,
             mesh_bounds_buffer: res.mesh_bounds_buffer,
-            collider_group_bounds_buffer: res.collider_group_bounds_buffer,
-            num_clusters: 0,
-            enable_collider_cluster_culling: false,
-            enable_single_sided_recovery: true,
-            collider_sweep_margin_offset: 0.05,
             collider_params_buffer: res.collider_params_buffer,
             collider_bind_group: res.collider_bind_group,
             collision_pipeline: res.collision_pipeline,
@@ -558,7 +548,6 @@ impl GpuClothSimulator {
         }
 
         let num_mesh_triangles = self.mesh_triangles.len() as u32;
-        let mut num_clusters = 0u32;
         if num_mesh_triangles > 0 {
             self.context.queue.write_buffer(
                 &self.mesh_triangles_buffer,
@@ -566,7 +555,7 @@ impl GpuClothSimulator {
                 bytemuck::cast_slice(&self.mesh_triangles),
             );
 
-            // 1. 各三角形の軽量境界球（中心vec3 + 外接半径f32）
+            // 軽量境界球（中心vec3 + 外接半径f32）の事前計算とアップロード
             let mut bounds = Vec::with_capacity(self.mesh_triangles.len());
             for t in &self.mesh_triangles {
                 let cx = (t.p0[0] + t.p1[0] + t.p2[0]) / 3.0;
@@ -583,54 +572,17 @@ impl GpuClothSimulator {
                 0,
                 bytemuck::cast_slice(&bounds),
             );
-
-            // 2. 16面クラスタ境界球の計算 (Linear BVH)
-            let cluster_size = 16usize;
-            num_clusters = ((bounds.len() + cluster_size - 1) / cluster_size) as u32;
-            let mut group_bounds = Vec::with_capacity(num_clusters as usize);
-
-            for chunk in bounds.chunks(cluster_size) {
-                let mut min_pt = [f32::INFINITY; 3];
-                let mut max_pt = [f32::NEG_INFINITY; 3];
-                for b in chunk {
-                    let r = b[3];
-                    for k in 0..3 {
-                        min_pt[k] = min_pt[k].min(b[k] - r);
-                        max_pt[k] = max_pt[k].max(b[k] + r);
-                    }
-                }
-                let center = [
-                    (min_pt[0] + max_pt[0]) * 0.5,
-                    (min_pt[1] + max_pt[1]) * 0.5,
-                    (min_pt[2] + max_pt[2]) * 0.5,
-                ];
-                let radius = ((max_pt[0] - min_pt[0]).powi(2)
-                    + (max_pt[1] - min_pt[1]).powi(2)
-                    + (max_pt[2] - min_pt[2]).powi(2))
-                .sqrt()
-                    * 0.5;
-                group_bounds.push([center[0], center[1], center[2], radius]);
-            }
-            self.context.queue.write_buffer(
-                &self.collider_group_bounds_buffer,
-                0,
-                bytemuck::cast_slice(&group_bounds),
-            );
         }
 
         let params = CollisionParams {
             num_vertices: self.num_vertices,
             num_colliders,
             num_mesh_triangles,
-            num_clusters,
             dt: 0.016 / 20.0,
             edge_margin_scale: self.edge_margin_scale,
             edge_margin_offset: self.edge_margin_offset,
-            enable_cluster_culling: if self.enable_collider_cluster_culling { 1 } else { 0 },
-            enable_single_sided_recovery: if self.enable_single_sided_recovery { 1 } else { 0 },
-            sweep_margin_offset: self.collider_sweep_margin_offset,
-            _pad0: 0,
-            _pad1: 0,
+            _pad0: 0.0,
+            _pad1: 0.0,
         };
         self.context.queue.write_buffer(
             &self.collider_params_buffer,
@@ -713,18 +665,6 @@ impl GpuClothSimulator {
     /// コンパクトリードバックの有効/無効を設定する (true: 12B/頂点, false: 48B/頂点)
     pub fn set_enable_compact_readback(&mut self, enable: bool) {
         self.enable_compact_readback = enable;
-    }
-
-    /// コライダー最適化およびリカバリーのオプションを設定する
-    pub fn set_collider_options(
-        &mut self,
-        enable_cluster_culling: bool,
-        enable_single_sided_recovery: bool,
-        sweep_margin: f32,
-    ) {
-        self.enable_collider_cluster_culling = enable_cluster_culling;
-        self.enable_single_sided_recovery = enable_single_sided_recovery;
-        self.collider_sweep_margin_offset = sweep_margin;
     }
 
     /// ソルバーモードを設定する (0: Coloring, 1: Atomic Jacobi)

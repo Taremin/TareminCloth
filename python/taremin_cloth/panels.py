@@ -319,11 +319,6 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             box_col = layout.box()
             box_col.label(text="Collider Interaction", icon='PHYSICS')
             c_col = box_col.column(align=True)
-            c_col.prop(settings, "enable_collider_cluster_culling")
-            c_col.prop(settings, "enable_single_sided_recovery")
-            if settings.enable_collider_cluster_culling:
-                c_col.prop(settings, "collider_sweep_margin_offset")
-            c_col.separator()
             c_col.prop(settings, "enable_edge_collision")
             if settings.enable_edge_collision:
                 edge_sub = c_col.column(align=True)

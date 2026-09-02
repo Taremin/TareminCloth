@@ -34,26 +34,15 @@ impl GpuClothSimulator {
         let has_colliders = !self.colliders.is_empty() || !self.mesh_triangles.is_empty();
 
         if has_colliders {
-            let num_mesh_triangles = self.mesh_triangles.len() as u32;
-            let cluster_size = 16u32;
-            let num_clusters = if num_mesh_triangles > 0 {
-                (num_mesh_triangles + cluster_size - 1) / cluster_size
-            } else {
-                0
-            };
             let col_params = CollisionParams {
                 num_vertices: self.num_vertices,
                 num_colliders: self.colliders.len() as u32,
-                num_mesh_triangles,
-                num_clusters,
+                num_mesh_triangles: self.mesh_triangles.len() as u32,
                 dt: substep_dt,
                 edge_margin_scale: self.edge_margin_scale,
                 edge_margin_offset: self.edge_margin_offset,
-                enable_cluster_culling: if self.enable_collider_cluster_culling { 1 } else { 0 },
-                enable_single_sided_recovery: if self.enable_single_sided_recovery { 1 } else { 0 },
-                sweep_margin_offset: self.collider_sweep_margin_offset,
-                _pad0: 0,
-                _pad1: 0,
+                _pad0: 0.0,
+                _pad1: 0.0,
             };
             self.context.queue.write_buffer(
                 &self.collider_params_buffer,

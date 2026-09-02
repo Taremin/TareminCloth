@@ -35,15 +35,11 @@ struct CollisionParams {
     num_vertices: u32,
     num_colliders: u32,
     num_mesh_triangles: u32,
-    num_clusters: u32,
     dt: f32,
     edge_margin_scale: f32,
     edge_margin_offset: f32,
-    enable_cluster_culling: u32,
-    enable_single_sided_recovery: u32,
-    sweep_margin_offset: f32,
-    _pad0: u32,
-    _pad1: u32,
+    _pad0: f32,
+    _pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;
@@ -51,7 +47,6 @@ struct CollisionParams {
 @group(0) @binding(2) var<storage, read> mesh_triangles: array<GpuMeshTriangle>;
 @group(0) @binding(3) var<uniform> params: CollisionParams;
 @group(0) @binding(4) var<storage, read> mesh_bounds: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read> collider_group_bounds: array<vec4<f32>>;
 
 const EPSILON: f32 = 1e-7;
 
@@ -272,187 +267,89 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var best_recovery_rest = 0.0;
     var has_valid_recovery = false;
 
-    let num_groups = params.num_clusters;
-    let total_tris = params.num_mesh_triangles;
-    let use_cluster = params.enable_cluster_culling != 0u && num_groups > 0u;
+    for (var i = 0u; i < params.num_mesh_triangles; i = i + 1u) {
+        // 第1段階: 16バイトの軽量境界球 (vec4: xyz=中心, w=外接半径+厚み) のみをフェッチして判定
+        // Sweep 移動を考慮し、前位置 v.position と 現在位置 p の双方を境界球判定
+        let b = mesh_bounds[i];
+        let diff = p - b.xyz;
+        let diff_old = v.position - b.xyz;
+        let r = b.w * 1.5 + thickness;
+        if (dot(diff, diff) > r * r && dot(diff_old, diff_old) > r * r) {
+            continue; // 近傍外の三角形はここで即座にスキップ
+        }
 
-    if (!use_cluster) {
-        // [完全同一の直接走査パス - デフォルト] (3160075と1ビットも違わない完全同一処理)
-        for (var i = 0u; i < total_tris; i = i + 1u) {
-            let b = mesh_bounds[i];
-            let diff = p - b.xyz;
-            let diff_old = v.position - b.xyz;
-            let r = b.w * 1.5 + thickness;
-            if (dot(diff, diff) > r * r && dot(diff_old, diff_old) > r * r) {
-                continue;
+        // 第2段階: 境界球と交差した三角形のみ、48バイトの詳細頂点データをフェッチ
+        let tri = mesh_triangles[i];
+        let target_dist = thickness + tri.thickness;
+
+        let cross_prod = cross(tri.p1 - tri.p0, tri.p2 - tri.p0);
+        let cross_len = length(cross_prod);
+        if (cross_len < EPSILON) {
+            continue;
+        }
+        let face_normal = cross_prod / cross_len;
+        let is_single_sided = (tri.flags & 1u) != 0u;
+
+        // (A) 連続衝突判定 (CCD: Möller–Trumbore)
+        // サブステップ開始位置 v.position から現在予測位置 p への移動線分が三角形を通過したかを判定
+        let isect = intersect_segment_triangle(v.position, p, tri.p0, tri.p1, tri.p2);
+        if (isect.x > 0.5) {
+            let t_hit = isect.y;
+            let hit_pt = v.position + t_hit * (p - v.position);
+            var normal = face_normal;
+            let move_dir = p - v.position;
+            if (dot(move_dir, face_normal) > 0.0 && !is_single_sided) {
+                normal = -face_normal;
             }
+            let target_pos = hit_pt + normal * target_dist;
+            apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
+            has_front_contact = true;
+        }
 
-            let tri = mesh_triangles[i];
-            let target_dist = thickness + tri.thickness;
+        // (B) 近傍厚み接触 & 静的貫通リカバリー候補の収集
+        let res = closest_point_on_triangle_ext(p, tri.p0, tri.p1, tri.p2);
+        let q = res.point;
+        let delta = p - q;
+        let dist = length(delta);
+        let signed_dist = dot(delta, face_normal);
 
-            let cross_prod = cross(tri.p1 - tri.p0, tri.p2 - tri.p0);
-            let cross_len = length(cross_prod);
-            if (cross_len < EPSILON) {
-                continue;
-            }
-            let face_normal = cross_prod / cross_len;
-            let is_single_sided = (tri.flags & 1u) != 0u;
-
-            // (A) 連続衝突判定 (CCD)
-            let isect = intersect_segment_triangle(v.position, p, tri.p0, tri.p1, tri.p2);
-            if (isect.x > 0.5) {
-                let t_hit = isect.y;
-                let hit_pt = v.position + t_hit * (p - v.position);
-                var normal = face_normal;
-                let move_dir = p - v.position;
-                if (dot(move_dir, face_normal) > 0.0 && !is_single_sided) {
-                    normal = -face_normal;
-                }
-                let target_pos = hit_pt + normal * target_dist;
-                apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
-                has_front_contact = true;
-            }
-
-            // (B) 近傍厚み接触 & 静的貫通リカバリー候補の収集
-            let res = closest_point_on_triangle_ext(p, tri.p0, tri.p1, tri.p2);
-            let q = res.point;
-            let delta = p - q;
-            let dist = length(delta);
-            let signed_dist = dot(delta, face_normal);
-
-            if (is_single_sided) {
-                if (signed_dist >= 0.0) {
-                    if (dist < target_dist) {
-                        var normal = face_normal;
-                        if (dist > EPSILON) {
-                            normal = delta / dist;
-                        }
-                        let target_pos = p + normal * (target_dist - dist);
-                        apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
-                        has_front_contact = true;
-                    }
-                } else {
-                    if (params.enable_single_sided_recovery != 0u) {
-                        let max_recovery_depth = target_dist * 3.0;
-                        if (res.is_face && dist < max_recovery_depth && dist <= abs(signed_dist) * 1.1 + EPSILON) {
-                            if (dist < best_recovery_depth) {
-                                best_recovery_depth = dist;
-                                best_recovery_normal = face_normal;
-                                best_recovery_pos = p + face_normal * (target_dist - signed_dist);
-                                best_recovery_fric = tri.friction;
-                                best_recovery_rest = tri.restitution;
-                                has_valid_recovery = true;
-                            }
-                        }
-                    }
-                }
-            } else {
-                if (dist < target_dist && signed_dist >= -target_dist) {
+        if (is_single_sided) {
+            if (signed_dist >= 0.0) {
+                // 表側: 通常の厚み判定 (多面接触を完全維持)
+                if (dist < target_dist) {
                     var normal = face_normal;
-                    if (dist > EPSILON && signed_dist > 0.0) {
+                    if (dist > EPSILON) {
                         normal = delta / dist;
                     }
                     let target_pos = p + normal * (target_dist - dist);
                     apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
                     has_front_contact = true;
                 }
+            } else {
+                // 裏側 (メッシュ内部侵入):
+                // 表側接触が一切ない孤立頂点のみを対象とし、安全ガードを満たす最近傍1面を記録
+                let max_recovery_depth = target_dist * 3.0;
+                if (res.is_face && dist < max_recovery_depth && dist <= abs(signed_dist) * 1.1 + EPSILON) {
+                    if (dist < best_recovery_depth) {
+                        best_recovery_depth = dist;
+                        best_recovery_normal = face_normal;
+                        best_recovery_pos = p + face_normal * (target_dist - signed_dist);
+                        best_recovery_fric = tri.friction;
+                        best_recovery_rest = tri.restitution;
+                        has_valid_recovery = true;
+                    }
+                }
             }
-        }
-    } else {
-        // [16面クラスタ境界球カリングパス - オプション有効時]
-        let sweep_offset = max(params.sweep_margin_offset, 0.0);
-
-        for (var g = 0u; g < num_groups; g = g + 1u) {
-            let gb = collider_group_bounds[g];
-            let diff_g = p - gb.xyz;
-            let diff_old_g = v.position - gb.xyz;
-            let rg = gb.w * 1.5 + thickness + sweep_offset;
-            if (dot(diff_g, diff_g) > rg * rg && dot(diff_old_g, diff_old_g) > rg * rg) {
-                continue;
-            }
-
-            let start_i = g * 16u;
-            let end_i = min(start_i + 16u, total_tris);
-
-            for (var i = start_i; i < end_i; i = i + 1u) {
-                let b = mesh_bounds[i];
-                let diff = p - b.xyz;
-                let diff_old = v.position - b.xyz;
-                let r = b.w * 1.5 + thickness;
-                if (dot(diff, diff) > r * r && dot(diff_old, diff_old) > r * r) {
-                    continue;
+        } else {
+            // 両面コライダー: 厚み target_dist の両面薄皮判定
+            if (dist < target_dist && signed_dist >= -target_dist) {
+                var normal = face_normal;
+                if (dist > EPSILON && signed_dist > 0.0) {
+                    normal = delta / dist;
                 }
-
-                let tri = mesh_triangles[i];
-                let target_dist = thickness + tri.thickness;
-
-                let cross_prod = cross(tri.p1 - tri.p0, tri.p2 - tri.p0);
-                let cross_len = length(cross_prod);
-                if (cross_len < EPSILON) {
-                    continue;
-                }
-                let face_normal = cross_prod / cross_len;
-                let is_single_sided = (tri.flags & 1u) != 0u;
-
-                // (A) CCD
-                let isect = intersect_segment_triangle(v.position, p, tri.p0, tri.p1, tri.p2);
-                if (isect.x > 0.5) {
-                    let t_hit = isect.y;
-                    let hit_pt = v.position + t_hit * (p - v.position);
-                    var normal = face_normal;
-                    let move_dir = p - v.position;
-                    if (dot(move_dir, face_normal) > 0.0 && !is_single_sided) {
-                        normal = -face_normal;
-                    }
-                    let target_pos = hit_pt + normal * target_dist;
-                    apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
-                    has_front_contact = true;
-                }
-
-                // (B) 近傍厚み接触 & 静的貫通リカバリー
-                let res = closest_point_on_triangle_ext(p, tri.p0, tri.p1, tri.p2);
-                let q = res.point;
-                let delta = p - q;
-                let dist = length(delta);
-                let signed_dist = dot(delta, face_normal);
-
-                if (is_single_sided) {
-                    if (signed_dist >= 0.0) {
-                        if (dist < target_dist) {
-                            var normal = face_normal;
-                            if (dist > EPSILON) {
-                                normal = delta / dist;
-                            }
-                            let target_pos = p + normal * (target_dist - dist);
-                            apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
-                            has_front_contact = true;
-                        }
-                    } else {
-                        if (params.enable_single_sided_recovery != 0u) {
-                            let max_recovery_depth = target_dist * 3.0;
-                            if (res.is_face && dist < max_recovery_depth && dist <= abs(signed_dist) * 1.1 + EPSILON) {
-                                if (dist < best_recovery_depth) {
-                                    best_recovery_depth = dist;
-                                    best_recovery_normal = face_normal;
-                                    best_recovery_pos = p + face_normal * (target_dist - signed_dist);
-                                    best_recovery_fric = tri.friction;
-                                    best_recovery_rest = tri.restitution;
-                                    has_valid_recovery = true;
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if (dist < target_dist && signed_dist >= -target_dist) {
-                        var normal = face_normal;
-                        if (dist > EPSILON && signed_dist > 0.0) {
-                            normal = delta / dist;
-                        }
-                        let target_pos = p + normal * (target_dist - dist);
-                        apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
-                        has_front_contact = true;
-                    }
-                }
+                let target_pos = p + normal * (target_dist - dist);
+                apply_contact_response(target_pos, normal, tri.friction, tri.restitution, dt, p_initial, &x_n, &p);
+                has_front_contact = true;
             }
         }
     }
