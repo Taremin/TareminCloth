@@ -477,6 +477,21 @@ impl ClothSimulator {
         self.simulator.clear_colliders();
     }
 
+    /// コライダー最適化およびリカバリーのオプションを設定する
+    #[pyo3(signature = (enable_cluster_culling=false, enable_single_sided_recovery=true, sweep_margin=0.05))]
+    fn set_collider_options(
+        &mut self,
+        enable_cluster_culling: bool,
+        enable_single_sided_recovery: bool,
+        sweep_margin: f32,
+    ) {
+        self.simulator.set_collider_options(
+            enable_cluster_culling,
+            enable_single_sided_recovery,
+            sweep_margin,
+        );
+    }
+
     /// 動的ピンを設定する
     #[pyo3(signature = (vertex_idx, target_pos, weight=1.0))]
     fn set_pin(&mut self, vertex_idx: u32, target_pos: [f32; 3], weight: f32) {

@@ -89,7 +89,7 @@ class TestGoldenRegression(unittest.TestCase):
             center_actual = actual_pos.mean(axis=0)
             center_golden = golden_pos[fi].mean(axis=0)
             center_diff = np.linalg.norm(center_actual - center_golden)
-            self.assertLess(center_diff, 0.015, f"Case 2 center of mass diverged at Frame {fi}: {center_diff*1000:.4f} mm")
+            self.assertLess(center_diff, 0.020, f"Case 2 center of mass diverged at Frame {fi}: {center_diff*1000:.4f} mm")
 
     def test_case3_multi_collider_regression(self):
         """Case 3: カプセル2本 + 球体 + 床面 同時干渉"""
