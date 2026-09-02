@@ -417,8 +417,8 @@ impl ClothSimulator {
         self.simulator.add_plane_collider(point, normal, friction, restitution);
     }
 
-    /// メッシュ三角形コライダーを設定 (triangles: shape [N, 3, 3])
-    #[pyo3(signature = (triangles, friction=0.3, thickness=0.01, restitution=0.0, single_sided=true))]
+    /// メッシュ三角形コライダーを設定 (triangles: shape [N, 3, 3], attributes: shape [N, 4] optional)
+    #[pyo3(signature = (triangles, friction=0.3, thickness=0.01, restitution=0.0, single_sided=true, attributes=None))]
     fn set_mesh_collider_triangles(
         &mut self,
         triangles: PyReadonlyArray3<f32>,
@@ -426,13 +426,16 @@ impl ClothSimulator {
         thickness: f32,
         restitution: f32,
         single_sided: bool,
+        attributes: Option<PyReadonlyArray2<f32>>,
     ) -> PyResult<()> {
         let tri_view = triangles.as_array();
         let n_triangles = tri_view.shape()[0];
         let mut mesh_triangles = Vec::with_capacity(n_triangles);
-        let flags = if single_sided { 1u32 } else { 0u32 };
+        let default_flags = if single_sided { 1u32 } else { 0u32 };
 
-        for tri in tri_view.outer_iter() {
+        let attr_opt = attributes.as_ref().map(|a| a.as_array());
+
+        for (i, tri) in tri_view.outer_iter().enumerate() {
             if tri.shape() != [3, 3] {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "各三角形は 3 頂点 x 3 座標 (shape [3, 3]) である必要があります",
@@ -442,13 +445,24 @@ impl ClothSimulator {
             let p1 = [tri[[1, 0]], tri[[1, 1]], tri[[1, 2]]];
             let p2 = [tri[[2, 0]], tri[[2, 1]], tri[[2, 2]]];
 
+            let (fric, thick, rest, flags) = if let Some(ref attr_view) = attr_opt {
+                let row = attr_view.row(i);
+                let f = row[0];
+                let t = row[1];
+                let r = row[2];
+                let s = if row[3] > 0.5 { 1u32 } else { 0u32 };
+                (f, t, r, s)
+            } else {
+                (friction, thickness, restitution, default_flags)
+            };
+
             mesh_triangles.push(GpuMeshTriangle {
                 p0,
-                friction,
+                friction: fric,
                 p1,
-                thickness,
+                thickness: thick,
                 p2,
-                restitution,
+                restitution: rest,
                 flags,
                 _pad: [0.0; 3],
             });

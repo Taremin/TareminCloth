@@ -69,6 +69,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     _collider_cache[sim_id] = state_key
     sim.clear_colliders()
     all_mesh_triangles = []
+    all_mesh_attributes = []
     mesh_friction = 0.5
     mesh_thickness = 0.005
     mesh_restitution = 0.0
@@ -94,10 +95,10 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
             pt_b = [loc.x, loc.y, loc.z + col_settings.radius]
             sim.add_capsule_collider(pt_a, pt_b, col_settings.radius, col_settings.friction, restitution)
         elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
-            mesh_friction = col_settings.friction
-            mesh_thickness = col_settings.thickness
-            mesh_restitution = restitution
-            mesh_single_sided = getattr(col_settings, "single_sided", True)
+            cur_friction = float(col_settings.friction)
+            cur_thickness = float(col_settings.thickness)
+            cur_restitution = float(restitution)
+            cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
             eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
             mesh = eval_obj.to_mesh() if depsgraph else obj.data
             mesh.calc_loop_triangles()
@@ -123,15 +124,18 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
 
                 all_mesh_triangles.append(tri_coords)
 
+                # このメッシュコライダーの個別属性配列 (shape: [n_tris, 4])
+                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                attr_block = np.tile(attr_row, (n_tris, 1))
+                all_mesh_attributes.append(attr_block)
+
             if depsgraph:
                 eval_obj.to_mesh_clear()
 
     if all_mesh_triangles:
         tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]
+        attr_array = np.vstack(all_mesh_attributes) if len(all_mesh_attributes) > 1 else all_mesh_attributes[0]
         sim.set_mesh_collider_triangles(
             tri_array,
-            friction=mesh_friction,
-            thickness=mesh_thickness,
-            restitution=mesh_restitution,
-            single_sided=mesh_single_sided,
+            attributes=attr_array,
         )
