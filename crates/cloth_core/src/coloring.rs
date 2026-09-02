@@ -20,12 +20,12 @@ pub fn color_distance_constraints(
         vertex_to_constraints[c.v1 as usize].push(i);
     }
 
-    // Welsh-Powell法: 拘束の接続次数（隣接する拘束数）が大きい順に彩色順序をソート
+    // Welsh-Powell法: 拘束の接続次数（隣接する拘束数）が大きい順に彩色順序をソート (タイブレークとしてインデックスを使用し完全決定論化)
     let mut order: Vec<usize> = (0..num_constraints).collect();
-    order.sort_unstable_by_key(|&i| {
+    order.sort_by_key(|&i| {
         let c = &constraints[i];
         let deg = vertex_to_constraints[c.v0 as usize].len() + vertex_to_constraints[c.v1 as usize].len();
-        std::cmp::Reverse(deg)
+        (std::cmp::Reverse(deg), i)
     });
 
     let mut num_colors = 0;
@@ -96,12 +96,12 @@ pub fn color_bending_constraints(
         vertex_to_constraints[c.v3 as usize].push(i);
     }
 
-    // Welsh-Powell法: 拘束の接続次数が大きい順にソート
+    // Welsh-Powell法: 拘束の接続次数が大きい順にソート (タイブレークとしてインデックスを使用)
     let mut order: Vec<usize> = (0..num_constraints).collect();
-    order.sort_unstable_by_key(|&i| {
+    order.sort_by_key(|&i| {
         let c = &constraints[i];
         let deg = vertex_to_constraints[c.v2 as usize].len() + vertex_to_constraints[c.v3 as usize].len();
-        std::cmp::Reverse(deg)
+        (std::cmp::Reverse(deg), i)
     });
 
     let mut num_colors = 0;
@@ -166,12 +166,12 @@ pub fn color_sewing_constraints(
         vertex_to_constraints[c.v1 as usize].push(i);
     }
 
-    // Welsh-Powell法: 拘束の接続次数が大きい順にソート
+    // Welsh-Powell法: 拘束の接続次数が大きい順にソート (タイブレークとしてインデックスを使用)
     let mut order: Vec<usize> = (0..num_constraints).collect();
-    order.sort_unstable_by_key(|&i| {
+    order.sort_by_key(|&i| {
         let c = &constraints[i];
         let deg = vertex_to_constraints[c.v0 as usize].len() + vertex_to_constraints[c.v1 as usize].len();
-        std::cmp::Reverse(deg)
+        (std::cmp::Reverse(deg), i)
     });
 
     let mut num_colors = 0;
