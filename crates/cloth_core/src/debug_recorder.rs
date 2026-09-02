@@ -60,8 +60,15 @@ pub struct SimulationMetadata {
     pub faces: Vec<[u32; 3]>,
     pub inv_masses: Vec<f32>,
     pub initial_rest_lengths: Vec<f32>,
+    // 縫合スプリング (v0, v1)
+    #[serde(default)]
+    pub sewing_springs: Option<Vec<[u32; 2]>>,
     // 物理パラメータ
     pub stiffness: f32,
+    #[serde(default)]
+    pub compression_stiffness: Option<f32>,
+    #[serde(default)]
+    pub shear_stiffness: Option<f32>,
     pub bending_stiffness: f32,
     pub thickness: f32,
     pub gravity: [f32; 3],
@@ -360,7 +367,10 @@ mod tests {
             faces: vec![],
             inv_masses: vec![1.0, 1.0],
             initial_rest_lengths: vec![1.0],
+            sewing_springs: None,
             stiffness: 500.0,
+            compression_stiffness: None,
+            shear_stiffness: None,
             bending_stiffness: 5.0,
             thickness: 0.01,
             gravity: [0.0, 0.0, -9.81],

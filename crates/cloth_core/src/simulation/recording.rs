@@ -20,6 +20,21 @@ impl GpuClothSimulator {
             .map(|v| v.thickness)
             .unwrap_or(0.005);
 
+        let sewing_springs = if !self.sewing_constraints.is_empty() {
+            Some(self.sewing_constraints.iter().map(|sc| [sc.v0, sc.v1]).collect())
+        } else {
+            None
+        };
+        let compression_stiffness = self
+            .distance_constraints
+            .first()
+            .map(|dc| if dc.compression_compliance > 1e-9 { 1.0 / dc.compression_compliance } else { 0.0 });
+        let shear_stiffness = self
+            .distance_constraints
+            .iter()
+            .find(|dc| dc.constraint_type == 1)
+            .map(|dc| if dc.tension_compliance > 1e-9 { 1.0 / dc.tension_compliance } else { 0.0 });
+
         let metadata = SimulationMetadata {
             object_name: object_name.to_string(),
             num_vertices: self.num_vertices,
@@ -29,7 +44,10 @@ impl GpuClothSimulator {
             faces: self.mesh_faces.clone(),
             inv_masses: self.original_inv_masses.clone(),
             initial_rest_lengths: self.initial_distance_rest_lengths.clone(),
+            sewing_springs,
             stiffness,
+            compression_stiffness,
+            shear_stiffness,
             bending_stiffness,
             thickness,
             gravity: self.gravity,

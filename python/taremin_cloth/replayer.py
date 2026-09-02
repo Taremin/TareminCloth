@@ -72,14 +72,25 @@ class ClothReplayer:
         if len(inv_masses) != len(initial_positions):
             inv_masses = np.ones(len(initial_positions), dtype=np.float32)
 
+        comp_stiff = self.metadata.get("compression_stiffness")
+        shear_stiff = self.metadata.get("shear_stiffness")
+        raw_sew = self.metadata.get("sewing_springs")
+        if raw_sew is not None and len(raw_sew) > 0:
+            sew_arr = np.ascontiguousarray(np.array(raw_sew, dtype=np.uint32))
+        else:
+            sew_arr = None
+
         sim = taremin_cloth_core.ClothSimulator(
             positions=initial_positions.astype(np.float32),
             edges=self.edges,
             faces=self.faces,
             inv_masses=inv_masses,
+            sewing_springs=sew_arr,
             thickness=float(self.metadata.get("thickness", 0.005)),
             stiffness=float(self.metadata.get("stiffness", 500.0)),
             bending_stiffness=float(self.metadata.get("bending_stiffness", 5.0)),
+            compression_stiffness=float(comp_stiff) if comp_stiff is not None else None,
+            shear_stiffness=float(shear_stiff) if shear_stiff is not None else None,
         )
 
         # 物理パラメータの反映

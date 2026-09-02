@@ -12,7 +12,7 @@ use crate::context::GpuContext;
 use crate::debug_recorder::SimulationDebugRecorder;
 use crate::mesh::{
     ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle,
-    GpuPinConstraint, GpuVertex, SelfCollisionParams,
+    GpuPinConstraint, GpuSewingConstraint, GpuVertex, SelfCollisionParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
 use self::types::{CollisionParams, PinParams};
@@ -37,6 +37,7 @@ pub struct GpuClothSimulator {
     pub original_edge_to_constraint: Vec<usize>,
     pub initial_distance_rest_lengths: Vec<f32>,
     pub(crate) bending_constraints: Vec<GpuBendingConstraint>,
+    pub(crate) sewing_constraints: Vec<GpuSewingConstraint>,
 
     pub(crate) vertex_buffer: wgpu::Buffer,
     pub(crate) dist_buffer: wgpu::Buffer,
@@ -180,6 +181,7 @@ impl GpuClothSimulator {
             original_edge_to_constraint: mesh.original_edge_to_constraint,
             initial_distance_rest_lengths: mesh.initial_distance_rest_lengths,
             bending_constraints: mesh.bending_constraints,
+            sewing_constraints: mesh.sewing_constraints,
             vertex_buffer: res.vertex_buffer,
             dist_buffer: res.dist_buffer,
             bend_buffer: res.bend_buffer,

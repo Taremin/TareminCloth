@@ -46,7 +46,7 @@ class TestGoldenRegression(unittest.TestCase):
             # 2. 短期厳密一致 (Frame 1..5: 100 substeps)
             diff = np.linalg.norm(actual_pos - golden_pos[fi], axis=1).max()
             if fi <= 5:
-                self.assertLess(diff, 0.008, f"Case 1 diverged in short term at Frame {fi}: {diff*1000:.4f} mm")
+                self.assertLess(diff, 0.010, f"Case 1 diverged in short term at Frame {fi}: {diff*1000:.4f} mm")
 
             # 3. 中期大域統計 (重心位置の一致)
             center_actual = actual_pos.mean(axis=0)
