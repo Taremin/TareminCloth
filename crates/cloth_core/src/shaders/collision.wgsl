@@ -81,15 +81,6 @@ fn apply_contact_response(
     }
     let delta_x_n = dot(target_pos - *x_n, normal) - desired_v_out_n * effective_dt;
     *x_n = *x_n + normal * delta_x_n;
-
-    // 3. 接触押し出しに伴う異常初速（局所スパイク）の物理クランプ (Velocity Clamping)
-    // コライダー裏面リカバリー等の急激な位置補正が時速数百km/hの暴走速度に変換されるのを防ぐ
-    let max_safe_vel = 25.0; // 最大許容速度 25 m/s (時速 90km/h 相当)
-    let v_post = (*p - *x_n) / effective_dt;
-    let v_speed = length(v_post);
-    if (v_speed > max_safe_vel) {
-        *x_n = *p - (v_post / v_speed) * (max_safe_vel * effective_dt);
-    }
 }
 
 struct ClosestResult {
