@@ -46,11 +46,15 @@ struct CollisionParams {
     num_vertices: u32,
     num_colliders: u32,
     num_mesh_triangles: u32,
+    num_clusters: u32,
     dt: f32,
     edge_margin_scale: f32,
     edge_margin_offset: f32,
-    _pad0: f32,
-    _pad1: f32,
+    enable_cluster_culling: u32,
+    enable_single_sided_recovery: u32,
+    sweep_margin_offset: f32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 struct DispatchInfo {

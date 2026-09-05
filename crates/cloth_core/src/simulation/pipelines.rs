@@ -7,16 +7,7 @@ use crate::mesh::{
     GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
-use super::types::{CollisionParams, DispatchInfo, PinParams};
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct NormalParams {
-    num_vertices: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-}
+use super::types::{CollisionParams, DispatchInfo, NormalParams, PinParams};
 
 pub fn create_shader_with_wg_size(device: &wgpu::Device, label: &str, src: &str, wg_size: u32) -> wgpu::ShaderModule {
     let source = if wg_size != 64 {
@@ -55,6 +46,7 @@ pub struct SimulationResources {
     pub collider_buffer: wgpu::Buffer,
     pub mesh_triangles_buffer: wgpu::Buffer,
     pub mesh_bounds_buffer: wgpu::Buffer,
+    pub collider_group_bounds_buffer: wgpu::Buffer,
     pub collider_params_buffer: wgpu::Buffer,
     pub collider_bind_group: wgpu::BindGroup,
     pub collision_pipeline: wgpu::ComputePipeline,
@@ -264,17 +256,31 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
+    // 16面グループごとの階層境界球バッファ (vec4<f32>: xyz=中心, w=半径)
+    let max_groups = ((max_mesh_triangles + 15) / 16).max(1);
+    let collider_group_bounds_size = (max_groups * std::mem::size_of::<[f32; 4]>()) as u64;
+    let collider_group_bounds_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Collider Group Bounds Buffer"),
+        size: collider_group_bounds_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     let collider_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth Collider Params Buffer"),
         contents: bytemuck::bytes_of(&CollisionParams {
             num_vertices,
             num_colliders: 0,
             num_mesh_triangles: 0,
+            num_clusters: 0,
             dt: 0.016 / 20.0,
             edge_margin_scale: 1.0,
             edge_margin_offset: 0.0,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            enable_cluster_culling: 0,
+            enable_single_sided_recovery: 1,
+            sweep_margin_offset: 0.05,
+            _pad0: 0,
+            _pad1: 0,
         }),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
@@ -511,7 +517,7 @@ pub fn build_simulation_resources(
 
     let collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Collision Bind Group Layout"),
-        entries: &[storage_rw, storage_ro(1), storage_ro(2), uniform_entry(3), storage_ro(4)],
+        entries: &[storage_rw, storage_ro(1), storage_ro(2), uniform_entry(3), storage_ro(4), storage_ro(5)],
     });
 
     let edge_collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -749,6 +755,10 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: mesh_bounds_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: collider_group_bounds_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1256,6 +1266,7 @@ pub fn build_simulation_resources(
         collider_buffer,
         mesh_triangles_buffer,
         mesh_bounds_buffer,
+        collider_group_bounds_buffer,
         collider_params_buffer,
         collider_bind_group,
         collision_pipeline,

@@ -85,6 +85,7 @@ pub struct GpuClothSimulator {
     pub(crate) collider_buffer: wgpu::Buffer,
     pub(crate) mesh_triangles_buffer: wgpu::Buffer,
     pub(crate) mesh_bounds_buffer: wgpu::Buffer,
+    pub(crate) collider_group_bounds_buffer: wgpu::Buffer,
     pub(crate) collider_params_buffer: wgpu::Buffer,
     pub(crate) collider_bind_group: wgpu::BindGroup,
     pub(crate) collision_pipeline: wgpu::ComputePipeline,
@@ -130,6 +131,9 @@ pub struct GpuClothSimulator {
     pub enable_edge_collision: bool,
     pub edge_margin_scale: f32,
     pub edge_margin_offset: f32,
+    pub enable_collider_cluster_culling: bool,
+    pub enable_single_sided_recovery: bool,
+    pub collider_sweep_margin_offset: f32,
     pub self_collision_max_iterations: u32,
     pub(crate) edge_collision_pipeline: wgpu::ComputePipeline,
     pub(crate) edge_collision_bind_groups: Vec<wgpu::BindGroup>,
@@ -216,6 +220,7 @@ impl GpuClothSimulator {
             collider_buffer: res.collider_buffer,
             mesh_triangles_buffer: res.mesh_triangles_buffer,
             mesh_bounds_buffer: res.mesh_bounds_buffer,
+            collider_group_bounds_buffer: res.collider_group_bounds_buffer,
             collider_params_buffer: res.collider_params_buffer,
             collider_bind_group: res.collider_bind_group,
             collision_pipeline: res.collision_pipeline,
@@ -252,6 +257,9 @@ impl GpuClothSimulator {
             enable_edge_collision: false,
             edge_margin_scale: 1.0,
             edge_margin_offset: 0.0,
+            enable_collider_cluster_culling: false,
+            enable_single_sided_recovery: true,
+            collider_sweep_margin_offset: 0.05,
             edge_collision_pipeline: res.edge_collision_pipeline,
             edge_collision_bind_groups: res.edge_collision_bind_groups,
             mesh_edges,
@@ -536,6 +544,18 @@ impl GpuClothSimulator {
         self.mesh_triangles.clear();
         self.upload_colliders();
     }
+    /// コライダー最適化およびリカバリーのオプションを設定する
+    pub fn set_collider_options(
+        &mut self,
+        enable_cluster_culling: bool,
+        enable_single_sided_recovery: bool,
+        sweep_margin: f32,
+    ) {
+        self.enable_collider_cluster_culling = enable_cluster_culling;
+        self.enable_single_sided_recovery = enable_single_sided_recovery;
+        self.collider_sweep_margin_offset = sweep_margin;
+        self.upload_colliders();
+    }
 
     pub(crate) fn upload_colliders(&self) {
         let num_colliders = self.colliders.len() as u32;
@@ -572,17 +592,53 @@ impl GpuClothSimulator {
                 0,
                 bytemuck::cast_slice(&bounds),
             );
+
+            // 16面クラスタごとの階層境界球の事前計算とアップロード
+            let num_clusters = (num_mesh_triangles + 15) / 16;
+            let mut group_bounds = Vec::with_capacity(num_clusters as usize);
+            for g in 0..num_clusters {
+                let start = (g * 16) as usize;
+                let end = ((g * 16 + 16) as usize).min(bounds.len());
+                let chunk = &bounds[start..end];
+                let (mut min_x, mut min_y, mut min_z) = (f32::MAX, f32::MAX, f32::MAX);
+                let (mut max_x, mut max_y, mut max_z) = (f32::MIN, f32::MIN, f32::MIN);
+                for b in chunk {
+                    min_x = min_x.min(b[0] - b[3]);
+                    min_y = min_y.min(b[1] - b[3]);
+                    min_z = min_z.min(b[2] - b[3]);
+                    max_x = max_x.max(b[0] + b[3]);
+                    max_y = max_y.max(b[1] + b[3]);
+                    max_z = max_z.max(b[2] + b[3]);
+                }
+                let g_cx = (min_x + max_x) * 0.5;
+                let g_cy = (min_y + max_y) * 0.5;
+                let g_cz = (min_z + max_z) * 0.5;
+                let g_r = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)).sqrt() * 0.5;
+                group_bounds.push([g_cx, g_cy, g_cz, g_r]);
+            }
+            if !group_bounds.is_empty() {
+                self.context.queue.write_buffer(
+                    &self.collider_group_bounds_buffer,
+                    0,
+                    bytemuck::cast_slice(&group_bounds),
+                );
+            }
         }
 
+        let num_clusters = if num_mesh_triangles > 0 { (num_mesh_triangles + 15) / 16 } else { 0 };
         let params = CollisionParams {
             num_vertices: self.num_vertices,
             num_colliders,
             num_mesh_triangles,
+            num_clusters,
             dt: 0.016 / 20.0,
             edge_margin_scale: self.edge_margin_scale,
             edge_margin_offset: self.edge_margin_offset,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            enable_cluster_culling: if self.enable_collider_cluster_culling { 1 } else { 0 },
+            enable_single_sided_recovery: if self.enable_single_sided_recovery { 1 } else { 0 },
+            sweep_margin_offset: self.collider_sweep_margin_offset,
+            _pad0: 0,
+            _pad1: 0,
         };
         self.context.queue.write_buffer(
             &self.collider_params_buffer,
