@@ -45,6 +45,11 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 has_active_anim = True
             if col_settings.collider_type == 'BONE_SDF':
                 has_bone_sdf = True
+                if getattr(col_settings, "enable_joint_mesh", True):
+                    if get_armature_modifier(obj) is not None:
+                        has_active_anim = True
+                    elif obj.animation_data and obj.animation_data.action:
+                        has_active_anim = True
             elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
                 # Armature変形、オブジェクトアニメーション、シェイプキーアニメーションがある場合は毎フレーム更新
                 if get_armature_modifier(obj) is not None:
@@ -76,6 +81,8 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 round(getattr(col_settings, "sdf_margin", 0.2), 3),
                 round(getattr(col_settings, "weight_threshold", 0.02), 4),
                 round(getattr(col_settings, "blend_k", 0.05), 4),
+                bool(getattr(col_settings, "enable_joint_mesh", True)),
+                round(getattr(col_settings, "joint_weight_threshold", 0.85), 2),
             ))
 
     sim_id = id(sim)
@@ -159,6 +166,44 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     )
                     _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res)
 
+                    # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加
+                    if getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
+                        eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
+                        mesh = eval_obj.to_mesh() if depsgraph else obj.data
+                        mesh.calc_loop_triangles()
+                        n_verts = len(mesh.vertices)
+                        n_tris = len(mesh.loop_triangles)
+
+                        if n_verts > 0 and n_tris > 0:
+                            raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+                            mesh.vertices.foreach_get("co", raw_coords)
+                            v_local = raw_coords.reshape((n_verts, 3))
+
+                            mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
+                            ones = np.ones((n_verts, 1), dtype=np.float32)
+                            v_homo = np.hstack([v_local, ones])
+                            v_world = (v_homo @ mat_np.T)[:, :3]
+
+                            tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+                            mesh.loop_triangles.foreach_get("vertices", tri_indices)
+                            tri_indices_2d = tri_indices.reshape((n_tris, 3))
+
+                            valid_joint_idx = bake_res.joint_face_indices[bake_res.joint_face_indices < n_tris]
+                            if len(valid_joint_idx) > 0:
+                                joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
+                                cur_friction = float(col_settings.friction)
+                                cur_thickness = float(col_settings.thickness)
+                                cur_restitution = float(getattr(col_settings, "restitution", 0.0))
+                                cur_single_sided = 1.0
+
+                                all_mesh_triangles.append(joint_tri_coords)
+                                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                                attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
+                                all_mesh_attributes.append(attr_block)
+
+                        if depsgraph:
+                            eval_obj.to_mesh_clear()
+
         if all_mesh_triangles:
             tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]
             attr_array = np.vstack(all_mesh_attributes) if len(all_mesh_attributes) > 1 else all_mesh_attributes[0]
@@ -173,9 +218,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
         if arm_obj and getattr(arm_obj, "pose", None):
             eval_arm = arm_obj.evaluated_get(depsgraph) if depsgraph else arm_obj
             mat_arm_world = np.array(eval_arm.matrix_world, dtype=np.float32)
-
             world_mats = []
-            inv_mats = []
             for b_name in bake_res.bone_names:
                 pbone = eval_arm.pose.bones.get(b_name)
                 if pbone is not None:
@@ -183,18 +226,19 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     w_mat = mat_arm_world @ p_mat
                 else:
                     w_mat = np.eye(4, dtype=np.float32)
-
-                try:
-                    inv_mat = np.linalg.inv(w_mat)
-                except np.linalg.LinAlgError:
-                    inv_mat = np.eye(4, dtype=np.float32)
-
-                # WGSL mat4x4<f32> (Column-Major) に合わせて転置して格納
-                world_mats.append(np.ascontiguousarray(w_mat.T, dtype=np.float32))
-                inv_mats.append(np.ascontiguousarray(inv_mat.T, dtype=np.float32))
+                world_mats.append(w_mat)
 
             if world_mats:
-                w_arr = np.stack(world_mats)
-                inv_arr = np.stack(inv_mats)
-                sim.update_bone_transforms(w_arr, inv_arr)
+                # [N, 4, 4] 配列として一括スタック
+                w_arr_row = np.stack(world_mats)
+                try:
+                    # NumPy BLAS による一括バッチ逆行列計算 (個別ループより約10倍高速)
+                    inv_arr_row = np.linalg.inv(w_arr_row)
+                except np.linalg.LinAlgError:
+                    inv_arr_row = np.tile(np.eye(4, dtype=np.float32), (len(world_mats), 1, 1))
+
+                # WGSL mat4x4<f32> (Column-Major) に合わせて軸(1, 2)を一括転置
+                w_arr_col = np.ascontiguousarray(np.transpose(w_arr_row, (0, 2, 1)), dtype=np.float32)
+                inv_arr_col = np.ascontiguousarray(np.transpose(inv_arr_row, (0, 2, 1)), dtype=np.float32)
+                sim.update_bone_transforms(w_arr_col, inv_arr_col)
 

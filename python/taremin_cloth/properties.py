@@ -723,6 +723,19 @@ class TareminColliderSettings(PropertyGroup):
         description="SDFベイク結果をディスクキャッシュし、次回以降即時ロードする",
         default=True,
     )
+    enable_joint_mesh: BoolProperty(
+        name="Joint Mesh Hybrid",
+        description="関節部（腰・背骨・首など）の複数ボーンブレンド領域のみ部分メッシュコライダーを併用し、剛体SDFの角ばり突出を解消する（激しい屈曲アニメーション時に推奨）",
+        default=True,
+    )
+    joint_weight_threshold: FloatProperty(
+        name="Joint Blend Threshold",
+        description="関節部と判定する最大ボーンウェイトの閾値（これ未満のブレンド頂点を含む面を部分メッシュ化）",
+        default=0.85,
+        min=0.5,
+        max=0.99,
+        precision=2,
+    )
     radius: FloatProperty(
         name="Radius",
         description="コライダー半径 (m)",

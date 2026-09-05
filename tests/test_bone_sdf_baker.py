@@ -197,6 +197,63 @@ class TestBoneSdfBaker(unittest.TestCase):
         self.assertGreaterEqual(deleted, 1)
         self.assertIsNone(load_cached_sdf(sig))
 
+    def test_hybrid_joint_mesh_extraction(self):
+        """ハイブリッドモードでの関節面抽出とAlphaフェードアウト、キャッシュ復元を検証"""
+        verts, tris = create_cube_mesh(center=(0.0, 0.0, 0.0), size=1.0)
+        n_verts = len(verts)
+
+        # 頂点 0〜3 は Bone_A (1.0), 頂点 4〜7 は Bone_A (0.5) と Bone_B (0.5) のブレンド領域
+        w_a = np.array([1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+        w_b = np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        bone_weights = {"Bone_A": w_a, "Bone_B": w_b}
+        bone_bind_matrices = {
+            "Bone_A": np.eye(4, dtype=np.float32),
+            "Bone_B": np.eye(4, dtype=np.float32),
+        }
+
+        # 1. ハイブリッド無効時
+        res_standard = bake_bone_sdf_from_data(
+            mesh_verts=verts,
+            mesh_tris=tris,
+            bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices,
+            resolution=16,
+            enable_joint_mesh=False,
+        )
+        self.assertEqual(len(res_standard.joint_face_indices), 0)
+
+        # 2. ハイブリッド有効時 (threshold=0.85)
+        res_hybrid = bake_bone_sdf_from_data(
+            mesh_verts=verts,
+            mesh_tris=tris,
+            bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices,
+            resolution=16,
+            enable_joint_mesh=True,
+            joint_weight_threshold=0.85,
+        )
+        # 頂点4〜7を含む三角形（Top面、Front面の一部、Back面の一部等）が抽出されること
+        self.assertGreater(len(res_hybrid.joint_face_indices), 0)
+        self.assertLessEqual(len(res_hybrid.joint_face_indices), len(tris))
+
+        # 3. Alpha値がブレンド領域で減衰していることの確認
+        arr_std = np.frombuffer(res_standard.texture_bytes, dtype=np.float16).reshape((16, 16, 32, 2))
+        arr_hyb = np.frombuffer(res_hybrid.texture_bytes, dtype=np.float16).reshape((16, 16, 32, 2))
+        alpha_std = arr_std[:, :, :, 1].astype(np.float32)
+        alpha_hyb = arr_hyb[:, :, :, 1].astype(np.float32)
+
+        # ハイブリッド時、ブレンド領域では Alpha がフェードアウトするため、全体のAlpha平均が下がる
+        self.assertLess(np.mean(alpha_hyb), np.mean(alpha_std))
+
+        # 4. キャッシュの保存と復元
+        sig = compute_mesh_signature(verts, tris, ["Bone_A", "Bone_B"], 16, enable_joint_mesh=True, joint_weight_threshold=0.85)
+        save_cached_sdf(sig, res_hybrid)
+        loaded = load_cached_sdf(sig)
+        self.assertIsNotNone(loaded)
+        np.testing.assert_array_equal(loaded.joint_face_indices, res_hybrid.joint_face_indices)
+
 
 if __name__ == "__main__":
     unittest.main()
+

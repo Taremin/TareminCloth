@@ -534,6 +534,16 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 b_col.prop(col_settings, "weight_threshold")
                 b_col.prop(col_settings, "blend_k")
                 b_col.prop(col_settings, "thickness")
+
+                # ハイブリッドコライダー（関節部メッシュ補完）
+                box_hybrid = b_col.box()
+                box_hybrid.prop(col_settings, "enable_joint_mesh", text="Joint Mesh Hybrid", icon='MOD_MESHDEFORM')
+                if col_settings.enable_joint_mesh:
+                    col_h = box_hybrid.column(align=True)
+                    col_h.prop(col_settings, "joint_weight_threshold")
+                    col_h.label(text="腰曲げ等の激しい屈曲時の角ばり突出を解消", icon='INFO')
+                    col_h.label(text="※静止画や軽微なポーズではOFFで十分高速です")
+
                 b_col.prop(col_settings, "sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)

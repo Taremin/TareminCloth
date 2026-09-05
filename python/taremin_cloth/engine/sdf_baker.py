@@ -35,6 +35,7 @@ class BoneSdfBakeResult:
         bone_infos: np.ndarray,   # shape: [N, 20]
         bone_names: List[str],
         bind_matrices: np.ndarray,  # shape: [N, 4, 4]
+        joint_face_indices: Optional[np.ndarray] = None,  # shape: [M] (ハイブリッド関節面インデックス)
     ):
         self.texture_bytes = texture_bytes
         self.width = width
@@ -43,6 +44,34 @@ class BoneSdfBakeResult:
         self.bone_infos = bone_infos
         self.bone_names = bone_names
         self.bind_matrices = bind_matrices
+        self.joint_face_indices = joint_face_indices if joint_face_indices is not None else np.empty(0, dtype=np.int32)
+
+
+def extract_joint_mesh_indices(
+    mesh_verts: np.ndarray,
+    mesh_tris: np.ndarray,
+    bone_weights: Dict[str, np.ndarray],
+    threshold: float = 0.85,
+) -> np.ndarray:
+    """
+    複数ボーンブレンド領域（関節部）に含まれる三角形のインデックス配列を抽出する。
+    戻り値: shape [M] (元の mesh_tris の行インデックス配列)
+    """
+    if not bone_weights or len(mesh_tris) == 0:
+        return np.empty(0, dtype=np.int32)
+
+    n_verts = len(mesh_verts)
+    max_weights = np.zeros(n_verts, dtype=np.float32)
+    for w_arr in bone_weights.values():
+        max_weights = np.maximum(max_weights, w_arr)
+
+    # 関節頂点: 最大ウェイトが閾値未満（複数ボーンで分散）かつ微小ウェイト以上の頂点
+    is_joint_vert = (max_weights < threshold) & (max_weights > 0.01)
+
+    # 三角形のいずれかの頂点が関節頂点であれば関節三角形として抽出
+    tri_has_joint = is_joint_vert[mesh_tris[:, 0]] | is_joint_vert[mesh_tris[:, 1]] | is_joint_vert[mesh_tris[:, 2]]
+    joint_indices = np.where(tri_has_joint)[0].astype(np.int32)
+    return joint_indices
 
 
 def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) -> Tuple[int, int, int, int, int, int, int]:
@@ -76,10 +105,18 @@ def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) 
     return n_cols, n_rows, n_layers, safe_res, total_width, total_height, total_depth
 
 
-def compute_mesh_signature(verts: np.ndarray, tris: np.ndarray, bone_names: List[str], res: int) -> str:
+def compute_mesh_signature(
+    verts: np.ndarray,
+    tris: np.ndarray,
+    bone_names: List[str],
+    res: int,
+    enable_joint_mesh: bool = False,
+    joint_weight_threshold: float = 0.85,
+) -> str:
     """メッシュと設定からユニークなキャッシュハッシュキーを生成する"""
     hasher = hashlib.sha256()
-    hasher.update(f"v2_brick_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
+    prefix = f"v3_hybrid_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}"
+    hasher.update(f"{prefix}_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
     # 先頭と末尾の数頂点をサンプリングしてハッシュ化
     sample_verts = verts[::max(1, len(verts) // 20)]
     hasher.update(sample_verts.tobytes())
@@ -113,6 +150,8 @@ def bake_bone_sdf_from_data(
     friction: float = 0.5,
     thickness: float = 0.005,
     restitution: float = 0.0,
+    enable_joint_mesh: bool = False,
+    joint_weight_threshold: float = 0.85,
 ) -> BoneSdfBakeResult:
     """
     素体メッシュとボーン情報からローカルSDFテクスチャアトラスを生成する
@@ -128,6 +167,16 @@ def bake_bone_sdf_from_data(
     if n_bones == 0:
         logger.warning("[SDF Baker] 有効なボーンが見つかりませんでした")
         return BoneSdfBakeResult(b"", 0, 0, 0, np.zeros((0, 20), dtype=np.float32), [], np.zeros((0, 4, 4), dtype=np.float32))
+
+    # ハイブリッド用に関節部三角形インデックスを抽出
+    joint_face_indices = np.empty(0, dtype=np.int32)
+    if enable_joint_mesh:
+        joint_face_indices = extract_joint_mesh_indices(
+            mesh_verts, mesh_tris, bone_weights, threshold=joint_weight_threshold
+        )
+        logger.info(
+            f"[SDF Baker] ハイブリッドモード有効: {len(joint_face_indices)} / {len(mesh_tris)} 面の関節三角形を抽出 (閾値: {joint_weight_threshold})"
+        )
 
     logger.info(f"[SDF Baker] ボーンSDFベイク開始: {n_bones} 本のボーン (解像度: {resolution}^3)")
 
@@ -291,6 +340,12 @@ def bake_bone_sdf_from_data(
                 dists[c_start:c_end] = min_d * signs
                 alphas[c_start:c_end] = sub_weights[nearest_v_idx]
 
+        # ハイブリッドモード時、関節部メッシュ補完領域における剛体角突出を抑制するため、
+        # 閾値未満のブレンドウェイト領域のAlphaを滑らかにフェードアウト
+        if enable_joint_mesh and joint_weight_threshold > 0.0:
+            fade = np.clip(alphas / joint_weight_threshold, 0.0, 1.0) ** 2
+            alphas = alphas * fade
+
         # ボクセルアレイに格納 (ローカル [X, Y, Z, C] -> テクスチャ順 [Z, Y, X, C])
         dists_3d = dists.reshape((res, res, res))
         alphas_3d = alphas.reshape((res, res, res))
@@ -321,6 +376,7 @@ def bake_bone_sdf_from_data(
         bone_infos=bone_infos_arr,
         bone_names=active_bones,
         bind_matrices=bind_matrices_arr,
+        joint_face_indices=joint_face_indices,
     )
 
 
@@ -339,6 +395,7 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
         return None
     try:
         data = np.load(cache_path, allow_pickle=True)
+        joint_face_indices = data["joint_face_indices"] if "joint_face_indices" in data else np.empty(0, dtype=np.int32)
         return BoneSdfBakeResult(
             texture_bytes=data["texture_bytes"].tobytes(),
             width=int(data["width"]),
@@ -347,6 +404,7 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
             bone_infos=data["bone_infos"],
             bone_names=list(data["bone_names"]),
             bind_matrices=data["bind_matrices"],
+            joint_face_indices=joint_face_indices,
         )
     except Exception as e:
         logger.warning(f"[SDF Baker] キャッシュ読込失敗: {e}")
@@ -366,6 +424,7 @@ def save_cached_sdf(cache_key: str, result: BoneSdfBakeResult):
             bone_infos=result.bone_infos,
             bone_names=np.array(result.bone_names),
             bind_matrices=result.bind_matrices,
+            joint_face_indices=result.joint_face_indices,
         )
         logger.info(f"[SDF Baker] キャッシュ保存完了: {cache_path}")
     except Exception as e:
@@ -532,8 +591,18 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         logger.warning(f"[SDF Baker] 有効なボーンウェイトが見つかりませんでした")
         return None
 
+    enable_joint_mesh = getattr(col_settings, "enable_joint_mesh", True)
+    joint_weight_threshold = getattr(col_settings, "joint_weight_threshold", 0.85)
+
     # キャッシュチェック
-    cache_key = compute_mesh_signature(mesh_verts, mesh_tris, list(bone_weights.keys()), resolution)
+    cache_key = compute_mesh_signature(
+        mesh_verts,
+        mesh_tris,
+        list(bone_weights.keys()),
+        resolution,
+        enable_joint_mesh=enable_joint_mesh,
+        joint_weight_threshold=joint_weight_threshold,
+    )
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
         if cached is not None:
@@ -553,6 +622,8 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         friction=float(col_settings.friction),
         thickness=float(col_settings.thickness),
         restitution=float(getattr(col_settings, "restitution", 0.0)),
+        enable_joint_mesh=enable_joint_mesh,
+        joint_weight_threshold=joint_weight_threshold,
     )
 
     if cache_enabled and result.depth > 0:
