@@ -34,11 +34,14 @@ cargo build --release -p taremin_cloth_core
 Copy-Item "target/release/taremin_cloth_core.dll" "taremin_cloth_core.pyd" -Force
 Copy-Item "target/release/taremin_cloth_core.dll" "python/taremin_cloth/taremin_cloth_core.pyd" -Force
 
-# 3. Python側の主要単体・統合テストの実行
+# 3. Python側の主要単体・統合テストの実行（高速スタンドアロン・Blender不要）
 python -m unittest tests/test_mesh_analysis.py
 python -m unittest tests/test_mesh_renderer.py
 python -m unittest tests/test_replayer_standalone.py
 python -m unittest tests/test_debug_recorder.py
+
+# 4. Blenderアドオン結合・E2Eテストの実行（tools/blender_manager による自動解決）
+python run_tests.py --test test_simulation_e2e.py
 ```
 
 ---
@@ -87,3 +90,33 @@ python -m unittest tests/test_issue_f71.py
 | `render` | 指定フレームの貫通可視化画像をレンダリング（0.1秒） | `python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 -o f71.png` |
 | `check-intersections` | 指定フレームの自己交差三角形ペアを検出 | `python -m taremin_cloth.log_tools check-intersections input.jsonl.gz -f 71` |
 | `export-obj` | 指定フレームをOBJ形式でエクスポート | `python -m taremin_cloth.log_tools export-obj input.jsonl.gz -f 71 -o f71.obj` |
+
+---
+
+## 6. Blender結合・E2Eテスト運用ガイド (`tools/blender_manager.py`)
+
+Blender API (`bpy`) に依存する統合テスト（オペレーター登録、頂点グループピン設定、縫合E2E、タイムライン再生など）の実行や、特定のBlenderバージョンでの検証には、`run_tests.py` および `tools/blender_manager.py` を使用します。
+
+### Blenderバージョンの自動解決とテスト実行
+
+```bash
+# 利用可能なBlender一覧とキャッシュ容量を確認
+python run_tests.py --list-blenders
+
+# Blender依存のE2Eテストを実行（未インストールの場合は公式最新LTSを自動DL）
+python run_tests.py --test test_simulation_e2e.py
+
+# 特定のBlenderバージョン（例: 5.2 / 4.2 / 3.6）を指定して実行
+python run_tests.py --blender 5.2 --test test_simulation_e2e.py
+```
+
+### Pythonスクリプトから Blender パスを動的解決する場合
+
+```python
+from tools.blender_manager import resolve_blender
+
+# 最新LTS（または指定バージョン）の blender.exe パスを取得（必要に応じて自動DL）
+blender_exe = resolve_blender("5.2")  # または resolve_blender("latest-lts")
+```
+> [!TIP]
+> テストスクリプトや検証ツール内で `C:\Blender\...` などのパスをハードコードせず、必ず `tools.blender_manager.resolve_blender()` を利用して実行環境に依存しないパス解決を行ってください。
