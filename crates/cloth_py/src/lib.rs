@@ -1,7 +1,10 @@
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use cloth_core::{ClothMesh, GpuBoneInfo, GpuBoneTransform, GpuClothSimulator, GpuContext, GpuMeshTriangle};
+use pyo3::types::{PyBytes, PyDict};
+use cloth_core::{
+    bake_bone_sdf_gpu as core_bake_bone_sdf_gpu, BoneInput, ClothMesh, GpuBoneInfo,
+    GpuBoneTransform, GpuClothSimulator, GpuContext, GpuMeshTriangle,
+};
 
 /// GPUが利用可能かどうかを判定する
 #[pyfunction]
@@ -240,6 +243,130 @@ fn render_mesh_to_png<'py>(
         true, 1.0, None, None,
         None, None,
     )
+}
+
+/// GPUコンピュートシェーダーを用いたボーンSDFアトラスの並列ベイク
+#[pyfunction]
+#[pyo3(signature = (
+    mesh_verts,
+    mesh_tris,
+    bone_names,
+    bone_weights,
+    bone_bind_matrices,
+    resolution=64,
+    margin=0.2,
+    weight_threshold=0.02,
+    blend_k=0.05,
+    friction=0.5,
+    thickness=0.005,
+    restitution=0.0
+))]
+fn bake_bone_sdf_gpu<'py>(
+    py: Python<'py>,
+    mesh_verts: PyReadonlyArray2<f32>,
+    mesh_tris: PyReadonlyArray2<i32>,
+    bone_names: Vec<String>,
+    bone_weights: Vec<PyReadonlyArray1<f32>>,
+    bone_bind_matrices: PyReadonlyArray3<f32>,
+    resolution: usize,
+    margin: f32,
+    weight_threshold: f32,
+    blend_k: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let verts_view = mesh_verts.as_array();
+    let n_verts = verts_view.shape()[0];
+    let mut verts_vec = Vec::with_capacity(n_verts);
+    for row in verts_view.outer_iter() {
+        if row.len() >= 3 {
+            verts_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let tris_view = mesh_tris.as_array();
+    let n_tris = tris_view.shape()[0];
+    let mut tris_vec = Vec::with_capacity(n_tris);
+    for row in tris_view.outer_iter() {
+        if row.len() >= 3 {
+            tris_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let bind_mats_view = bone_bind_matrices.as_array();
+    let n_bones = bone_names.len();
+    let mut bones_input = Vec::with_capacity(n_bones);
+
+    for (b_idx, name) in bone_names.into_iter().enumerate() {
+        let w_view = bone_weights[b_idx].as_array();
+        let weights = w_view.to_vec();
+
+        let mut bind_mat = [0.0f32; 16];
+        if b_idx < bind_mats_view.shape()[0] {
+            let mut k = 0;
+            for r in 0..4 {
+                for c in 0..4 {
+                    if k < 16 {
+                        bind_mat[k] = bind_mats_view[[b_idx, r, c]];
+                        k += 1;
+                    }
+                }
+            }
+        }
+
+        bones_input.push(BoneInput {
+            name,
+            weights,
+            bind_matrix: bind_mat,
+        });
+    }
+
+    let res = core_bake_bone_sdf_gpu(
+        &verts_vec,
+        &tris_vec,
+        &bones_input,
+        resolution,
+        margin,
+        weight_threshold,
+        blend_k,
+        friction,
+        thickness,
+        restitution,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU SDFベイク失敗: {e}")))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("texture_bytes", PyBytes::new(py, &res.texture_bytes))?;
+    dict.set_item("width", res.width)?;
+    dict.set_item("height", res.height)?;
+    dict.set_item("depth", res.depth)?;
+
+    // bone_infos: [N, 20]
+    let py_infos = PyArray2::from_vec2(
+        py,
+        &res.bone_infos.iter().map(|arr| arr.to_vec()).collect::<Vec<_>>(),
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("bone_infos変換失敗: {e}")))?;
+    dict.set_item("bone_infos", py_infos)?;
+    dict.set_item("active_bones", res.active_bones)?;
+
+    // bind_matrices: [N, 4, 4]
+    let mut mats_3d: Vec<Vec<Vec<f32>>> = Vec::with_capacity(res.bind_matrices.len());
+    for mat in &res.bind_matrices {
+        let mut mat_2d = Vec::with_capacity(4);
+        for r in 0..4 {
+            let mut row = Vec::with_capacity(4);
+            for c in 0..4 {
+                row.push(mat[r * 4 + c]);
+            }
+            mat_2d.push(row);
+        }
+        mats_3d.push(mat_2d);
+    }
+    let py_mats = PyArray3::from_vec3(py, &mats_3d)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("bind_matrices変換失敗: {e}")))?;
+    dict.set_item("bind_matrices", py_mats)?;
+
+    Ok(dict)
 }
 
 /// GPU Cloth シミュレータ PyClass
@@ -881,6 +1008,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_current_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(render_mesh_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(render_scene_to_png, m)?)?;
+    m.add_function(wrap_pyfunction!(bake_bone_sdf_gpu, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

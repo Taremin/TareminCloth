@@ -39,6 +39,7 @@ python -m unittest tests/test_mesh_analysis.py
 python -m unittest tests/test_mesh_renderer.py
 python -m unittest tests/test_replayer_standalone.py
 python -m unittest tests/test_debug_recorder.py
+python -m unittest tests/test_sdf_baker_gpu.py
 
 # 4. Blenderアドオン結合・E2Eテストの実行（tools/blender_manager による自動解決）
 python run_tests.py --test test_simulation_e2e.py

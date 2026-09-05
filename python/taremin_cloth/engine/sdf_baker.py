@@ -6,6 +6,7 @@ taremin_cloth ボーン局所SDFベーカー (SDF Baker)
 """
 
 import os
+import time
 import hashlib
 import numpy as np
 from typing import Dict, List, Tuple, Optional
@@ -435,182 +436,208 @@ def bake_bone_sdf_from_data(
 
     logger.info(f"[SDF Baker] ボーンSDFベイク開始: {n_bones} 本のボーン (解像度: {resolution}^3)")
 
-    # 2. BVHTree の構築 (BlenderのC実装BVH、またはNumPyフォールバック)
-    bvh = None
-    if HAS_MATHUTILS_BVH:
-        verts_math = [mathutils.Vector(v) for v in mesh_verts]
-        polys = [tuple(t) for t in mesh_tris]
-        bvh = BVHTree.FromPolygons(verts_math, polys, all_triangles=True)
-
     n_cols, n_rows, n_layers, res, total_width, total_height, total_depth = compute_3d_atlas_layout(n_bones, resolution)
 
-    vram_bytes = total_width * total_height * total_depth * 4  # Rg16Float (4 bytes/voxel)
-    vram_mb = vram_bytes / (1024 * 1024)
-    if vram_mb > 1500.0:
-        logger.warning(
-            f"[SDF Baker] 警告: SDFテクスチャの推定VRAM使用量が大きいです: {vram_mb:.1f} MB ({total_width}x{total_height}x{total_depth})"
-        )
+    gpu_baked = False
+    texture_bytes = b""
+    bone_infos_arr = np.zeros((0, 20), dtype=np.float32)
+    bind_matrices_arr = np.zeros((0, 4, 4), dtype=np.float32)
 
-    # 全体アトラス配列 (Z, Y, X, C)
-    atlas_3d = np.zeros((total_depth, total_height, total_width, 2), dtype=np.float16)
-    bone_infos_list = []
-    bind_matrices_list = []
+    # 2. GPUコンピュートシェーダーによる並列ベイクの優先試行
+    try:
+        import taremin_cloth_core
+        if hasattr(taremin_cloth_core, "bake_bone_sdf_gpu") and taremin_cloth_core.is_gpu_available():
+            logger.info(f"[SDF Baker] GPUコンピュートシェーダーによる高速並列ベイクを実行中...")
+            t_start = time.time()
+            b_weights_list = [np.ascontiguousarray(bone_weights[b], dtype=np.float32) for b in active_bones]
+            b_mats_list = np.ascontiguousarray([bone_bind_matrices[b] for b in active_bones], dtype=np.float32)
 
-    # 3. 各ボーンのAABB計算とSDFサンプリング
-    for b_idx, b_name in enumerate(active_bones):
-        w_arr = bone_weights[b_name]
-        valid_indices = np.where(w_arr > weight_threshold)[0]
-        if len(valid_indices) == 0:
-            continue
+            gpu_dict = taremin_cloth_core.bake_bone_sdf_gpu(
+                mesh_verts=np.ascontiguousarray(mesh_verts, dtype=np.float32),
+                mesh_tris=np.ascontiguousarray(mesh_tris, dtype=np.int32),
+                bone_names=active_bones,
+                bone_weights=b_weights_list,
+                bone_bind_matrices=b_mats_list,
+                resolution=int(resolution),
+                margin=float(margin),
+                weight_threshold=float(weight_threshold),
+                blend_k=float(blend_k),
+                friction=float(friction),
+                thickness=float(thickness),
+                restitution=float(restitution),
+            )
+            texture_bytes = gpu_dict["texture_bytes"]
+            total_width = int(gpu_dict["width"])
+            total_height = int(gpu_dict["height"])
+            total_depth = int(gpu_dict["depth"])
+            bone_infos_arr = np.ascontiguousarray(gpu_dict["bone_infos"], dtype=np.float32)
+            bind_matrices_arr = np.ascontiguousarray(gpu_dict["bind_matrices"], dtype=np.float32)
+            active_bones = list(gpu_dict["active_bones"])
+            gpu_baked = True
+            logger.info(f"[SDF Baker] GPUベイク完了 ({time.time() - t_start:.3f}秒, {len(active_bones)} 本)")
+    except Exception as e:
+        logger.warning(f"[SDF Baker] GPUベイク失敗、CPUフォールバックを実行します: {e}")
+        gpu_baked = False
 
-        mat_inv = bone_bind_matrices[b_name]  # メッシュ空間 -> ボーン空間
-        try:
-            mat_fwd = np.linalg.inv(mat_inv)  # ボーン空間 -> メッシュ空間
-        except np.linalg.LinAlgError:
-            mat_fwd = np.eye(4, dtype=np.float32)
+    # 3. CPUフォールバック (BVHTree または NumPy)
+    if not gpu_baked:
+        logger.info(f"[SDF Baker] CPUフォールバックベイクを開始します...")
+        bvh = None
+        if HAS_MATHUTILS_BVH:
+            verts_math = [mathutils.Vector(v) for v in mesh_verts]
+            polys = [tuple(t) for t in mesh_tris]
+            bvh = BVHTree.FromPolygons(verts_math, polys, all_triangles=True)
 
-        # 該当ボーンの影響を受ける頂点のローカル座標を算出
-        verts_target = mesh_verts[valid_indices]
-        ones = np.ones((len(verts_target), 1), dtype=np.float32)
-        v_homo = np.hstack([verts_target, ones])
-        v_local = (v_homo @ mat_inv.T)[:, :3]
+        vram_bytes = total_width * total_height * total_depth * 4  # Rg16Float (4 bytes/voxel)
+        vram_mb = vram_bytes / (1024 * 1024)
+        if vram_mb > 1500.0:
+            logger.warning(
+                f"[SDF Baker] 警告: SDFテクスチャの推定VRAM使用量が大きいです: {vram_mb:.1f} MB ({total_width}x{total_height}x{total_depth})"
+            )
 
-        # ローカルAABBとマージン
-        local_min = np.min(v_local, axis=0)
-        local_max = np.max(v_local, axis=0)
-        size = local_max - local_min
-        size = np.maximum(size, 0.05)  # 最小サイズ 5cm 保証
-        local_min -= size * margin
-        local_max += size * margin
-        size = local_max - local_min
+        atlas_3d = np.zeros((total_depth, total_height, total_width, 2), dtype=np.float16)
+        bone_infos_list = []
+        bind_matrices_list = []
 
-        # タイル座標 (c: col, r: row, l: layer)
-        b_per_layer = n_cols * n_rows
-        l = b_idx // b_per_layer
-        rem = b_idx % b_per_layer
-        r = rem // n_cols
-        c = rem % n_cols
+        for b_idx, b_name in enumerate(active_bones):
+            w_arr = bone_weights[b_name]
+            valid_indices = np.where(w_arr > weight_threshold)[0]
+            if len(valid_indices) == 0:
+                continue
 
-        # UVWスケールとオフセット (3Dタイルスロットへの射影用)
-        # ローカル [local_min, local_max] -> タイル範囲 [c/n_cols, (c+1)/n_cols], etc.
-        uvw_scale_local = 1.0 / size
-        uvw_offset_local = -local_min / size
+            mat_inv = bone_bind_matrices[b_name]  # メッシュ空間 -> ボーン空間
+            try:
+                mat_fwd = np.linalg.inv(mat_inv)  # ボーン空間 -> メッシュ空間
+            except np.linalg.LinAlgError:
+                mat_fwd = np.eye(4, dtype=np.float32)
 
-        atlas_uvw_scale = np.array([
-            uvw_scale_local[0] / float(n_cols),
-            uvw_scale_local[1] / float(n_rows),
-            uvw_scale_local[2] / float(n_layers),
-            blend_k,  # w成分に blend_k
-        ], dtype=np.float32)
+            verts_target = mesh_verts[valid_indices]
+            ones = np.ones((len(verts_target), 1), dtype=np.float32)
+            v_homo = np.hstack([verts_target, ones])
+            v_local = (v_homo @ mat_inv.T)[:, :3]
 
-        atlas_uvw_offset = np.array([
-            (uvw_offset_local[0] + float(c)) / float(n_cols),
-            (uvw_offset_local[1] + float(r)) / float(n_rows),
-            (uvw_offset_local[2] + float(l)) / float(n_layers),
-            0.0,  # 将来の atlas_id 用スロット
-        ], dtype=np.float32)
+            local_min = np.min(v_local, axis=0)
+            local_max = np.max(v_local, axis=0)
+            size = local_max - local_min
+            size = np.maximum(size, 0.05)
+            local_min -= size * margin
+            local_max += size * margin
+            size = local_max - local_min
 
-        bone_params = np.array([friction, thickness, restitution, weight_threshold], dtype=np.float32)
+            b_per_layer = n_cols * n_rows
+            l = b_idx // b_per_layer
+            rem = b_idx % b_per_layer
+            r = rem // n_cols
+            c = rem % n_cols
 
-        info_row = np.concatenate([
-            np.append(local_min, float(b_idx)),
-            np.append(local_max, float(res)),
-            atlas_uvw_scale,
-            atlas_uvw_offset,
-            bone_params,
-        ]).astype(np.float32)  # 20 elements
-        bone_infos_list.append(info_row)
-        bind_matrices_list.append(mat_inv)
+            uvw_scale_local = 1.0 / size
+            uvw_offset_local = -local_min / size
 
-        # 4. ボクセル座標からメッシュへの距離サンプリング
-        # linspace でボクセル中心をサンプリング
-        grid_x = np.linspace(local_min[0], local_max[0], res, dtype=np.float32)
-        grid_y = np.linspace(local_min[1], local_max[1], res, dtype=np.float32)
-        grid_z = np.linspace(local_min[2], local_max[2], res, dtype=np.float32)
-        gx, gy, gz = np.meshgrid(grid_x, grid_y, grid_z, indexing='ij')
+            atlas_uvw_scale = np.array([
+                uvw_scale_local[0] / float(n_cols),
+                uvw_scale_local[1] / float(n_rows),
+                uvw_scale_local[2] / float(n_layers),
+                blend_k,
+            ], dtype=np.float32)
 
-        pts_local = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=-1)
-        ones_pts = np.ones((len(pts_local), 1), dtype=np.float32)
-        pts_mesh = (np.hstack([pts_local, ones_pts]) @ mat_fwd.T)[:, :3]
+            atlas_uvw_offset = np.array([
+                (uvw_offset_local[0] + float(c)) / float(n_cols),
+                (uvw_offset_local[1] + float(r)) / float(n_rows),
+                (uvw_offset_local[2] + float(l)) / float(n_layers),
+                0.0,
+            ], dtype=np.float32)
 
-        dists = np.zeros(len(pts_mesh), dtype=np.float32)
-        alphas = np.zeros(len(pts_mesh), dtype=np.float32)
+            bone_params = np.array([friction, thickness, restitution, weight_threshold], dtype=np.float32)
 
-        if bvh is not None:
-            # Blender C-BVH 高速クエリ
-            for p_idx, pt in enumerate(pts_mesh):
-                v_pt = mathutils.Vector((pt[0], pt[1], pt[2]))
-                loc, norm, poly_idx, d = bvh.find_nearest(v_pt)
-                if loc is not None:
-                    # 面法線との内積で内外符号を判定 (外側: 正, 内側: 負)
-                    diff = v_pt - loc
-                    sign = 1.0 if diff.dot(norm) >= 0.0 else -1.0
-                    dists[p_idx] = d * sign
+            info_row = np.concatenate([
+                np.append(local_min, float(b_idx)),
+                np.append(local_max, float(res)),
+                atlas_uvw_scale,
+                atlas_uvw_offset,
+                bone_params,
+            ]).astype(np.float32)
+            bone_infos_list.append(info_row)
+            bind_matrices_list.append(mat_inv)
 
-                    # 最近傍ポリゴンの頂点ウェイトを取得
-                    tri = mesh_tris[poly_idx]
-                    tri_weights = w_arr[tri]
-                    alphas[p_idx] = np.mean(tri_weights)
-                else:
-                    dists[p_idx] = 10.0
-                    alphas[p_idx] = 0.0
-        else:
-            # フォールバック: 頂点法線と三角形中心を用いた符号付き距離算出 (Blender外・テスト用)
-            vert_normals = compute_vertex_normals(mesh_verts, mesh_tris)
-            sub_verts = mesh_verts[valid_indices]
-            sub_weights = w_arr[valid_indices]
-            sub_normals = vert_normals[valid_indices]
+            grid_x = np.linspace(local_min[0], local_max[0], res, dtype=np.float32)
+            grid_y = np.linspace(local_min[1], local_max[1], res, dtype=np.float32)
+            grid_z = np.linspace(local_min[2], local_max[2], res, dtype=np.float32)
+            gx, gy, gz = np.meshgrid(grid_x, grid_y, grid_z, indexing='ij')
 
-            tri_v0 = mesh_verts[mesh_tris[:, 0]]
-            tri_v1 = mesh_verts[mesh_tris[:, 1]]
-            tri_v2 = mesh_verts[mesh_tris[:, 2]]
-            tri_centers = (tri_v0 + tri_v1 + tri_v2) / 3.0
-            tri_normals = np.cross(tri_v1 - tri_v0, tri_v2 - tri_v0)
-            tri_lens = np.linalg.norm(tri_normals, axis=-1, keepdims=True)
-            tri_normals = tri_normals / np.maximum(tri_lens, 1e-8)
+            pts_local = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=-1)
+            ones_pts = np.ones((len(pts_local), 1), dtype=np.float32)
+            pts_mesh = (np.hstack([pts_local, ones_pts]) @ mat_fwd.T)[:, :3]
 
-            chunk_size = 2048
-            for c_start in range(0, len(pts_mesh), chunk_size):
-                c_end = min(c_start + chunk_size, len(pts_mesh))
-                p_chunk = pts_mesh[c_start:c_end]
+            dists = np.zeros(len(pts_mesh), dtype=np.float32)
+            alphas = np.zeros(len(pts_mesh), dtype=np.float32)
 
-                diffs_v = p_chunk[:, np.newaxis, :] - sub_verts[np.newaxis, :, :]
-                sq_dists_v = np.sum(diffs_v * diffs_v, axis=-1)
-                nearest_v_idx = np.argmin(sq_dists_v, axis=-1)
-                min_dv = np.sqrt(sq_dists_v[np.arange(len(p_chunk)), nearest_v_idx])
+            if bvh is not None:
+                for p_idx, pt in enumerate(pts_mesh):
+                    v_pt = mathutils.Vector((pt[0], pt[1], pt[2]))
+                    loc, norm, poly_idx, d = bvh.find_nearest(v_pt)
+                    if loc is not None:
+                        diff = v_pt - loc
+                        sign = 1.0 if diff.dot(norm) >= 0.0 else -1.0
+                        dists[p_idx] = d * sign
+                        tri = mesh_tris[poly_idx]
+                        tri_weights = w_arr[tri]
+                        alphas[p_idx] = np.mean(tri_weights)
+                    else:
+                        dists[p_idx] = 10.0
+                        alphas[p_idx] = 0.0
+            else:
+                vert_normals = compute_vertex_normals(mesh_verts, mesh_tris)
+                sub_verts = mesh_verts[valid_indices]
+                sub_weights = w_arr[valid_indices]
+                sub_normals = vert_normals[valid_indices]
 
-                diffs_t = p_chunk[:, np.newaxis, :] - tri_centers[np.newaxis, :, :]
-                sq_dists_t = np.sum(diffs_t * diffs_t, axis=-1)
-                nearest_t_idx = np.argmin(sq_dists_t, axis=-1)
+                tri_v0 = mesh_verts[mesh_tris[:, 0]]
+                tri_v1 = mesh_verts[mesh_tris[:, 1]]
+                tri_v2 = mesh_verts[mesh_tris[:, 2]]
+                tri_centers = (tri_v0 + tri_v1 + tri_v2) / 3.0
+                tri_normals = np.cross(tri_v1 - tri_v0, tri_v2 - tri_v0)
+                tri_lens = np.linalg.norm(tri_normals, axis=-1, keepdims=True)
+                tri_normals = tri_normals / np.maximum(tri_lens, 1e-8)
 
-                best_t = nearest_t_idx
-                t_norm = tri_normals[best_t]
-                t_center = tri_centers[best_t]
-                dot_t = np.sum((p_chunk - t_center) * t_norm, axis=-1)
+                chunk_size = 2048
+                for c_start in range(0, len(pts_mesh), chunk_size):
+                    c_end = min(c_start + chunk_size, len(pts_mesh))
+                    p_chunk = pts_mesh[c_start:c_end]
 
-                plane_dist = np.abs(dot_t)
-                min_d = np.minimum(min_dv, plane_dist)
+                    diffs_v = p_chunk[:, np.newaxis, :] - sub_verts[np.newaxis, :, :]
+                    sq_dists_v = np.sum(diffs_v * diffs_v, axis=-1)
+                    nearest_v_idx = np.argmin(sq_dists_v, axis=-1)
+                    min_dv = np.sqrt(sq_dists_v[np.arange(len(p_chunk)), nearest_v_idx])
 
-                signs = np.where(dot_t >= 0.0, 1.0, -1.0)
-                dists[c_start:c_end] = min_d * signs
-                alphas[c_start:c_end] = sub_weights[nearest_v_idx]
+                    diffs_t = p_chunk[:, np.newaxis, :] - tri_centers[np.newaxis, :, :]
+                    sq_dists_t = np.sum(diffs_t * diffs_t, axis=-1)
+                    nearest_t_idx = np.argmin(sq_dists_t, axis=-1)
 
-        # ボクセルアレイに格納 (ローカル [X, Y, Z, C] -> テクスチャ順 [Z, Y, X, C])
-        dists_3d = dists.reshape((res, res, res))
-        alphas_3d = alphas.reshape((res, res, res))
-        bone_voxels_xyz = np.stack([dists_3d, alphas_3d], axis=-1)
-        bone_voxels_zyx = np.transpose(bone_voxels_xyz, (2, 1, 0, 3)).astype(np.float16)
+                    best_t = nearest_t_idx
+                    t_norm = tri_normals[best_t]
+                    t_center = tri_centers[best_t]
+                    dot_t = np.sum((p_chunk - t_center) * t_norm, axis=-1)
 
-        z0, z1 = l * res, (l + 1) * res
-        y0, y1 = r * res, (r + 1) * res
-        x0, x1 = c * res, (c + 1) * res
-        atlas_3d[z0:z1, y0:y1, x0:x1, :] = bone_voxels_zyx
+                    plane_dist = np.abs(dot_t)
+                    min_d = np.minimum(min_dv, plane_dist)
 
-    # 3Dテクスチャ用連続バイト列に変換
-    texture_bytes = np.ascontiguousarray(atlas_3d).tobytes()
+                    signs = np.where(dot_t >= 0.0, 1.0, -1.0)
+                    dists[c_start:c_end] = min_d * signs
+                    alphas[c_start:c_end] = sub_weights[nearest_v_idx]
 
-    bone_infos_arr = np.array(bone_infos_list, dtype=np.float32)
-    bind_matrices_arr = np.array(bind_matrices_list, dtype=np.float32)
+            dists_3d = dists.reshape((res, res, res))
+            alphas_3d = alphas.reshape((res, res, res))
+            bone_voxels_xyz = np.stack([dists_3d, alphas_3d], axis=-1)
+            bone_voxels_zyx = np.transpose(bone_voxels_xyz, (2, 1, 0, 3)).astype(np.float16)
+
+            z0, z1 = l * res, (l + 1) * res
+            y0, y1 = r * res, (r + 1) * res
+            x0, x1 = c * res, (c + 1) * res
+            atlas_3d[z0:z1, y0:y1, x0:x1, :] = bone_voxels_zyx
+
+        texture_bytes = np.ascontiguousarray(atlas_3d).tobytes()
+        bone_infos_arr = np.array(bone_infos_list, dtype=np.float32)
+        bind_matrices_arr = np.array(bind_matrices_list, dtype=np.float32)
 
     # ハイブリッド用に関節部三角形インデックスを抽出 (親子階層自動抽出方式、または主要関節フォールバック)
     joint_face_indices = np.empty(0, dtype=np.int32)
