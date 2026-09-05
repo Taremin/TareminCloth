@@ -19,3 +19,4 @@ png = "0.17"
 
 [dev-dependencies]
 pollster = "0.4"
+naga = { version = "24.0", features = ["wgsl-in"] }

@@ -26,8 +26,8 @@
 ## 3. 基本ビルド＆テストコマンド
 
 ```powershell
-# 1. Rustコアの単体テスト
-cargo test --lib
+# 1. Rustコアの単体テスト & WGSL構造体アライメント自動検証テスト
+cargo test
 
 # 2. PyO3 モジュールのビルドと配置
 cargo build --release -p taremin_cloth_core

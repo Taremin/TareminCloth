@@ -19,13 +19,15 @@ struct GpuSewingConstraint {
 };
 
 struct SimParams {
-    gravity: vec4<f32>, // xyz: gravity, w: dt
+    gravity: vec4<f32>, // xyz: gravity vector, w: dt
     damping: f32,
     substeps: u32,
     num_vertices: u32,
     num_distance_constraints: u32,
     num_bending_constraints: u32,
     num_sewing_constraints: u32,
+    _pad0: f32,
+    _pad1: f32,
 };
 
 struct DispatchInfo {
