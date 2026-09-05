@@ -1,7 +1,7 @@
 use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use cloth_core::{ClothMesh, GpuClothSimulator, GpuContext, GpuMeshTriangle};
+use cloth_core::{ClothMesh, GpuBoneInfo, GpuBoneTransform, GpuClothSimulator, GpuContext, GpuMeshTriangle};
 
 /// GPUが利用可能かどうかを判定する
 #[pyfunction]
@@ -475,6 +475,93 @@ impl ClothSimulator {
     /// すべてのコライダーをクリア
     fn clear_colliders(&mut self) {
         self.simulator.clear_colliders();
+    }
+
+    /// ボーンSDFコライダーを設定
+    /// - width, height, depth: 3Dテクスチャ解像度
+    /// - texture_bytes: 生バイト列 (Rg16Float)
+    /// - bone_infos: shape [N, 20] (各ボーンの aabb_min:4, aabb_max:4, uvw_scale:4, uvw_offset:4, params:4)
+    #[pyo3(signature = (width, height, depth, texture_bytes, bone_infos))]
+    fn set_bone_sdf_colliders(
+        &mut self,
+        width: u32,
+        height: u32,
+        depth: u32,
+        texture_bytes: &[u8],
+        bone_infos: PyReadonlyArray2<f32>,
+    ) -> PyResult<()> {
+        let info_view = bone_infos.as_array();
+        let n_bones = info_view.shape()[0];
+        let mut gpu_bone_infos = Vec::with_capacity(n_bones);
+
+        for row in info_view.outer_iter() {
+            if row.len() < 20 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "bone_infos の各行は少なくとも 20 要素必要です",
+                ));
+            }
+            gpu_bone_infos.push(GpuBoneInfo {
+                aabb_min: [row[0], row[1], row[2], row[3]],
+                aabb_max: [row[4], row[5], row[6], row[7]],
+                uvw_scale: [row[8], row[9], row[10], row[11]],
+                uvw_offset: [row[12], row[13], row[14], row[15]],
+                params: [row[16], row[17], row[18], row[19]],
+            });
+        }
+
+        self.simulator.set_bone_sdf_colliders(
+            width,
+            height,
+            depth,
+            texture_bytes,
+            &gpu_bone_infos,
+        );
+        Ok(())
+    }
+
+    /// 各ボーンのワールド変換行列を更新（毎フレーム実行）
+    /// - world_matrices: shape [N, 4, 4]
+    /// - inv_world_matrices: shape [N, 4, 4]
+    #[pyo3(signature = (world_matrices, inv_world_matrices))]
+    fn update_bone_transforms(
+        &mut self,
+        world_matrices: PyReadonlyArray3<f32>,
+        inv_world_matrices: PyReadonlyArray3<f32>,
+    ) -> PyResult<()> {
+        let w_view = world_matrices.as_array();
+        let inv_view = inv_world_matrices.as_array();
+        let n_bones = w_view.shape()[0];
+        if inv_view.shape()[0] != n_bones {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "world_matrices と inv_world_matrices のボーン数が一致しません",
+            ));
+        }
+
+        let mut transforms = Vec::with_capacity(n_bones);
+        for i in 0..n_bones {
+            let mut w_mat = [[0.0f32; 4]; 4];
+            let mut inv_mat = [[0.0f32; 4]; 4];
+
+            for r in 0..4 {
+                for c in 0..4 {
+                    w_mat[r][c] = w_view[[i, r, c]];
+                    inv_mat[r][c] = inv_view[[i, r, c]];
+                }
+            }
+
+            transforms.push(GpuBoneTransform {
+                world_matrix: w_mat,
+                inv_world_matrix: inv_mat,
+            });
+        }
+
+        self.simulator.update_bone_transforms(&transforms);
+        Ok(())
+    }
+
+    /// ボーンSDFコライダーをクリア
+    fn clear_bone_sdf_colliders(&mut self) {
+        self.simulator.clear_bone_sdf_colliders();
     }
 
     /// コライダー最適化およびリカバリーのオプションを設定する

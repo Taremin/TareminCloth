@@ -270,11 +270,15 @@ def cloth_frame_handler(scene):
     any_collider_deformed = False
     for col_o in scene.objects:
         c_set = getattr(col_o, "taremin_collider", None)
-        if c_set and c_set.is_collider and getattr(c_set, "enabled", True) and getattr(c_set, "anim", None) and c_set.anim.enabled:
-            anim_frame = current_frame - scene.frame_start
-            _, deformed = anim_driver.step_collider_animation(col_o, anim_frame)
-            if deformed:
-                any_collider_deformed = True
+        if c_set and c_set.is_collider and getattr(c_set, "enabled", True):
+            if getattr(c_set, "anim", None) and c_set.anim.enabled:
+                anim_frame = current_frame - scene.frame_start
+                _, deformed = anim_driver.step_collider_animation(col_o, anim_frame)
+                if deformed:
+                    any_collider_deformed = True
+            elif c_set.collider_type == 'MESH' and col_o.type == 'MESH':
+                if col_o.find_armature() or (col_o.animation_data and col_o.animation_data.action):
+                    any_collider_deformed = True
 
     try:
         if any_collider_deformed:

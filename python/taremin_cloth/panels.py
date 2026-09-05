@@ -494,6 +494,51 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             elif col_settings.collider_type == 'MESH':
                 b_col.prop(col_settings, "thickness")
                 b_col.prop(col_settings, "single_sided")
+            elif col_settings.collider_type == 'BONE_SDF':
+                arm_mod = None
+                if obj and getattr(obj, "type", None) == 'MESH':
+                    for mod in getattr(obj, "modifiers", []):
+                        if getattr(mod, "type", None) == 'ARMATURE' and getattr(mod, "object", None):
+                            arm_mod = mod
+                            break
+                if not arm_mod:
+                    box_warn = b_col.box()
+                    box_warn.alert = True
+                    box_warn.label(text="Armatureモディファイアが必要です", icon='ERROR')
+                    box_warn.label(text="スキニングされた素体メッシュに設定してください")
+                else:
+                    b_col.label(text=f"Armature: {arm_mod.object.name}", icon='ARMATURE_DATA')
+
+                b_col.prop(col_settings, "sdf_resolution")
+                if col_settings.sdf_resolution == 'CUSTOM':
+                    b_col.prop(col_settings, "sdf_resolution_custom")
+
+                # 事前サイズ超過警告とテクスチャ情報表示
+                if arm_mod and arm_mod.object and getattr(arm_mod.object, "data", None):
+                    arm_obj = arm_mod.object
+                    n_bones_est = len(arm_obj.data.bones)
+                    req_res = int(col_settings.sdf_resolution) if col_settings.sdf_resolution != 'CUSTOM' else col_settings.sdf_resolution_custom
+                    from .engine.sdf_baker import compute_3d_atlas_layout
+                    n_cols, n_rows, n_layers, safe_res, total_w, total_h, total_d = compute_3d_atlas_layout(n_bones_est, req_res)
+                    vram_mb = (total_w * total_h * total_d * 4) / (1024 * 1024)
+
+                    if safe_res < req_res:
+                        box_ovf = b_col.box()
+                        box_ovf.alert = True
+                        box_ovf.label(text=f"警告: 解像度がGPU上限(2048px)を超過します", icon='ERROR')
+                        box_ovf.label(text=f"ボーン数({n_bones_est})に対する安全解像度: {safe_res}以下")
+                    else:
+                        b_col.label(text=f"SDFテクスチャ: {total_w}x{total_h}x{total_d} (約{vram_mb:.0f}MB)", icon='INFO')
+
+                b_col.prop(col_settings, "sdf_margin")
+                b_col.prop(col_settings, "weight_threshold")
+                b_col.prop(col_settings, "blend_k")
+                b_col.prop(col_settings, "thickness")
+                b_col.prop(col_settings, "sdf_cache_enabled")
+
+                row_cache = b_col.row(align=True)
+                row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text="Clear Cache", icon='TRASH')
+                row_cache.operator("taremin_cloth.rebake_bone_sdf", text="Rebake SDF", icon='FILE_REFRESH')
             b_col.prop(col_settings, "friction")
             b_col.prop(col_settings, "restitution")
 

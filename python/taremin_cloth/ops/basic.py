@@ -251,3 +251,42 @@ class TAREMIN_CLOTH_OT_select_object(bpy.types.Operator):
         context.view_layer.objects.active = target_obj
 
         return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_clear_bone_sdf_cache(bpy.types.Operator):
+    """保存されているすべてのボーンSDFキャッシュを消去します"""
+    bl_idname = "taremin_cloth.clear_bone_sdf_cache"
+    bl_label = "Clear Bone SDF Cache"
+    bl_description = "ディスクに保存されているすべてのボーンSDFキャッシュファイルを削除します"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        from ..engine.sdf_baker import clear_all_cached_sdf
+        count = clear_all_cached_sdf()
+        self.report({'INFO'}, f"ボーンSDFキャッシュを削除しました ({count}件)")
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
+    """アクティブな素体オブジェクトのボーンSDFを強制的に再ベイクします"""
+    bl_idname = "taremin_cloth.rebake_bone_sdf"
+    bl_label = "Rebake Bone SDF"
+    bl_description = "キャッシュを使用せず、現在のメッシュとボーン構造からボーン局所SDFを再計算します"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and getattr(obj, "taremin_collider", None) and obj.taremin_collider.is_collider and obj.taremin_collider.collider_type == 'BONE_SDF'
+
+    def execute(self, context):
+        obj = context.active_object
+        col_settings = obj.taremin_collider
+        from ..engine.sdf_baker import get_or_bake_bone_sdf_for_object
+        result = get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake=True)
+        if result is not None:
+            self.report({'INFO'}, f"'{obj.name}' のボーンSDFを再ベイクしました: {len(result.bone_names)} ボーン ({result.width}x{result.height}x{result.depth})")
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, f"'{obj.name}' のボーンSDFベイクに失敗しました。Armatureモディファイアとウェイトを確認してください")
+            return {'CANCELLED'}

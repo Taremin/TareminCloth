@@ -12,6 +12,8 @@ from .basic import (
     TAREMIN_CLOTH_OT_clear_cache,
     TAREMIN_CLOTH_OT_apply_gpu_settings,
     TAREMIN_CLOTH_OT_select_object,
+    TAREMIN_CLOTH_OT_clear_bone_sdf_cache,
+    TAREMIN_CLOTH_OT_rebake_bone_sdf,
 )
 from .interactive import (
     FPSCounter,
@@ -59,6 +61,8 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_apply_pose_preview,
     TAREMIN_CLOTH_OT_select_object,
     TAREMIN_CLOTH_OT_auto_fit_thickness,
+    TAREMIN_CLOTH_OT_clear_bone_sdf_cache,
+    TAREMIN_CLOTH_OT_rebake_bone_sdf,
 )
 
 __all__ = [
@@ -84,6 +88,8 @@ __all__ = [
     "TAREMIN_CLOTH_OT_apply_pose_preview",
     "TAREMIN_CLOTH_OT_select_object",
     "TAREMIN_CLOTH_OT_auto_fit_thickness",
+    "TAREMIN_CLOTH_OT_clear_bone_sdf_cache",
+    "TAREMIN_CLOTH_OT_rebake_bone_sdf",
     "FPSCounter",
     "is_interactive_running",
     "stop_interactive_if_running",

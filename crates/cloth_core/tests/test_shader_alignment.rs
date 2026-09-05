@@ -5,7 +5,9 @@ use cloth_core::mesh::{
     GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint,
     GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
 };
-use cloth_core::simulation::types::{CollisionParams, DispatchInfo, NormalParams, PinParams};
+use cloth_core::simulation::types::{
+    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, NormalParams, PinParams,
+};
 use cloth_core::spatial_hash::SpatialHashParams;
 
 use naga::front::wgsl;
@@ -181,6 +183,23 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, CollisionParams, enable_cluster_culling);
             check_member!(filename, s, CollisionParams, enable_single_sided_recovery);
             check_member!(filename, s, CollisionParams, sweep_margin_offset);
+            check_member!(filename, s, CollisionParams, num_bones);
+            check_member!(filename, s, CollisionParams, enable_bone_sdf);
+        }
+
+        if let Some(s) = structs.get("GpuBoneInfo") {
+            check_struct_size!(filename, s, GpuBoneInfo);
+            check_member!(filename, s, GpuBoneInfo, aabb_min);
+            check_member!(filename, s, GpuBoneInfo, aabb_max);
+            check_member!(filename, s, GpuBoneInfo, uvw_scale);
+            check_member!(filename, s, GpuBoneInfo, uvw_offset);
+            check_member!(filename, s, GpuBoneInfo, params);
+        }
+
+        if let Some(s) = structs.get("GpuBoneTransform") {
+            check_struct_size!(filename, s, GpuBoneTransform);
+            check_member!(filename, s, GpuBoneTransform, world_matrix);
+            check_member!(filename, s, GpuBoneTransform, inv_world_matrix);
         }
 
         if let Some(s) = structs.get("SelfCollisionParams") {

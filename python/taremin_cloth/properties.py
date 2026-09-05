@@ -674,8 +674,54 @@ class TareminColliderSettings(PropertyGroup):
             ('CAPSULE', "Capsule", "カプセルコライダー"),
             ('PLANE', "Plane", "平面コライダー"),
             ('MESH', "Mesh", "メッシュコライダー (カスタムポリゴンメッシュ)"),
+            ('BONE_SDF', "Bone SDF", "ボーン局所SDFコライダー (素体・キャラクタ向け)"),
         ],
         default='MESH',
+    )
+    sdf_resolution: EnumProperty(
+        name="SDF Resolution",
+        description="各ボーンローカルSDFのテクスチャ解像度",
+        items=[
+            ('32', "32 (Low)", "軽量・高速 (32x32x32, 約131KB/ボーン)"),
+            ('64', "64 (Standard)", "標準・推奨 (64x64x64, 約1MB/ボーン)"),
+            ('128', "128 (High)", "高精細 (128x128x128, 約8MB/ボーン)"),
+            ('CUSTOM', "Custom", "カスタム解像度指定"),
+        ],
+        default='64',
+    )
+    sdf_resolution_custom: IntProperty(
+        name="Custom Resolution",
+        description="カスタムSDF解像度 (16〜512)",
+        default=128,
+        min=16,
+        max=512,
+    )
+    sdf_margin: FloatProperty(
+        name="SDF Margin",
+        description="ボーンローカルAABBのマージン比率",
+        default=0.2,
+        min=0.05,
+        max=1.0,
+    )
+    weight_threshold: FloatProperty(
+        name="Weight Threshold",
+        description="ボーン影響度として認識する最小ウェイト閾値（ゴミウェイトの除外）",
+        default=0.02,
+        min=0.001,
+        max=0.5,
+    )
+    blend_k: FloatProperty(
+        name="Blend Smoothness",
+        description="関節部での複数ボーンSDF合成の滑らかさ・ブレンド半径 (m)",
+        default=0.05,
+        min=0.001,
+        max=0.5,
+        unit='LENGTH',
+    )
+    sdf_cache_enabled: BoolProperty(
+        name="Cache SDF",
+        description="SDFベイク結果をディスクキャッシュし、次回以降即時ロードする",
+        default=True,
     )
     radius: FloatProperty(
         name="Radius",

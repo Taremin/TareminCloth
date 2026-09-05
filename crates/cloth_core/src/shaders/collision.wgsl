@@ -42,8 +42,21 @@ struct CollisionParams {
     enable_cluster_culling: u32,
     enable_single_sided_recovery: u32,
     sweep_margin_offset: f32,
-    _pad0: u32,
-    _pad1: u32,
+    num_bones: u32,
+    enable_bone_sdf: u32,
+};
+
+struct GpuBoneInfo {
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    uvw_scale: vec4<f32>,
+    uvw_offset: vec4<f32>,
+    params: vec4<f32>, // x: friction, y: thickness, z: restitution, w: blend_k
+};
+
+struct GpuBoneTransform {
+    world_matrix: mat4x4<f32>,
+    inv_world_matrix: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;
@@ -52,6 +65,11 @@ struct CollisionParams {
 @group(0) @binding(3) var<uniform> params: CollisionParams;
 @group(0) @binding(4) var<storage, read> mesh_bounds: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> collider_group_bounds: array<vec4<f32>>;
+@group(0) @binding(6) var bone_sdf_texture: texture_3d<f32>;
+@group(0) @binding(7) var bone_sdf_sampler: sampler;
+@group(0) @binding(8) var<storage, read> bone_infos: array<GpuBoneInfo>;
+@group(0) @binding(9) var<storage, read> bone_transforms: array<GpuBoneTransform>;
+
 
 const EPSILON: f32 = 1e-7;
 
@@ -86,6 +104,125 @@ fn apply_contact_response(
     }
     let delta_x_n = dot(target_pos - *x_n, normal) - desired_v_out_n * effective_dt;
     *x_n = *x_n + normal * delta_x_n;
+}
+
+fn smin_poly(a: f32, b: f32, k: f32) -> f32 {
+    let h = max(k - abs(a - b), 0.0) / max(k, 1e-6);
+    return min(a, b) - h * h * k * 0.25;
+}
+
+// ボーンSDFコライダーの衝突判定および押し戻し
+fn solve_bone_sdf_collision(
+    p: ptr<function, vec3<f32>>,
+    x_n: ptr<function, vec3<f32>>,
+    dt: f32,
+    p_initial: vec3<f32>,
+    vertex_thickness: f32
+) {
+    if (params.enable_bone_sdf == 0u || params.num_bones == 0u) {
+        return;
+    }
+
+    var best_dist = 1e6;
+    var best_normal = vec3<f32>(0.0, 0.0, 0.0);
+    var best_friction = 0.0;
+    var best_restitution = 0.0;
+    var best_target_dist = 0.0;
+    var hit_count = 0u;
+
+    for (var b = 0u; b < params.num_bones; b = b + 1u) {
+        let info = bone_infos[b];
+        let transform = bone_transforms[b];
+
+        // 1. 布の現在位置 p をボーンローカル座標に射影
+        let p_local = (transform.inv_world_matrix * vec4<f32>(*p, 1.0)).xyz;
+
+        // 2. ローカルAABBによる早期カリング (マージン込み)
+        let target_dist = vertex_thickness + info.params.y;
+        let margin = target_dist + 0.05;
+        if (p_local.x < info.aabb_min.x - margin || p_local.x > info.aabb_max.x + margin ||
+            p_local.y < info.aabb_min.y - margin || p_local.y > info.aabb_max.y + margin ||
+            p_local.z < info.aabb_min.z - margin || p_local.z > info.aabb_max.z + margin) {
+            continue;
+        }
+
+        // 3. テクスチャアトラスのUVW座標へ変換
+        let uvw = p_local * info.uvw_scale.xyz + info.uvw_offset.xyz;
+
+        // 各ボーンに割り当てられた3Dタイルスロット範囲 [uvw_min, uvw_max]
+        let uvw_min = info.aabb_min.xyz * info.uvw_scale.xyz + info.uvw_offset.xyz;
+        let uvw_max = info.aabb_max.xyz * info.uvw_scale.xyz + info.uvw_offset.xyz;
+
+        // 隣接ボーンのスライスへの侵入を完全に防止
+        if (uvw.x < uvw_min.x || uvw.x > uvw_max.x ||
+            uvw.y < uvw_min.y || uvw.y > uvw_max.y ||
+            uvw.z < uvw_min.z || uvw.z > uvw_max.z) {
+            continue;
+        }
+
+        // トリリニア補間での隣接スライスにじみを防ぐ安全クランプ (スロット境界の 0.5ボクセル内側へ)
+        let eps_slice = (uvw_max - uvw_min) * 0.015;
+        let uvw_safe = clamp(uvw, uvw_min + eps_slice, uvw_max - eps_slice);
+
+        // 4. トリリニアサンプリング (Distance, Alpha/Weight)
+        let sample_val = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, uvw_safe, 0.0);
+        let raw_dist = sample_val.r;
+        let alpha = sample_val.g;
+
+        // Alphaマスク: weight_threshold以下の領域はカリングして安全圏(+10.0)へ逃がす
+        let threshold = max(info.params.w, 0.01);
+        let mask = smoothstep(0.0, threshold, alpha);
+        let effective_dist = mix(10.0, raw_dist, mask);
+
+        if (effective_dist < target_dist) {
+            // 衝突・厚み内侵入を検知した場合のみ法線中心差分を計算
+            let eps = 0.005; // 5mm
+            let eps_uv = eps * info.uvw_scale.xyz;
+
+            let u_min_safe = uvw_min.x + eps_slice.x;
+            let u_max_safe = uvw_max.x - eps_slice.x;
+            let v_min_safe = uvw_min.y + eps_slice.y;
+            let v_max_safe = uvw_max.y - eps_slice.y;
+            let w_min_safe = uvw_min.z + eps_slice.z;
+            let w_max_safe = uvw_max.z - eps_slice.z;
+
+            let d_x_pos = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(clamp(uvw.x + eps_uv.x, u_min_safe, u_max_safe), uvw_safe.y, uvw_safe.z), 0.0).r;
+            let d_x_neg = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(clamp(uvw.x - eps_uv.x, u_min_safe, u_max_safe), uvw_safe.y, uvw_safe.z), 0.0).r;
+            let d_y_pos = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(uvw_safe.x, clamp(uvw.y + eps_uv.y, v_min_safe, v_max_safe), uvw_safe.z), 0.0).r;
+            let d_y_neg = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(uvw_safe.x, clamp(uvw.y - eps_uv.y, v_min_safe, v_max_safe), uvw_safe.z), 0.0).r;
+            let d_z_pos = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(uvw_safe.x, uvw_safe.y, clamp(uvw.z + eps_uv.z, w_min_safe, w_max_safe)), 0.0).r;
+            let d_z_neg = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(uvw_safe.x, uvw_safe.y, clamp(uvw.z - eps_uv.z, w_min_safe, w_max_safe)), 0.0).r;
+
+            var grad_local = vec3<f32>(
+                d_x_pos - d_x_neg,
+                d_y_pos - d_y_neg,
+                d_z_pos - d_z_neg
+            );
+            let grad_len = length(grad_local);
+            var normal_local = vec3<f32>(0.0, 1.0, 0.0);
+            if (grad_len > 1e-6) {
+                normal_local = grad_local / grad_len;
+            }
+
+            // ワールド法線へ変換
+            let normal_world = normalize((transform.world_matrix * vec4<f32>(normal_local, 0.0)).xyz);
+
+            if (hit_count == 0u || effective_dist < best_dist) {
+                best_dist = effective_dist;
+                best_normal = normal_world;
+                best_friction = info.params.x;
+                best_restitution = info.params.z;
+                best_target_dist = target_dist;
+            }
+            hit_count = hit_count + 1u;
+        }
+    }
+
+    if (hit_count > 0u && best_dist < best_target_dist) {
+        let penetration = best_target_dist - best_dist;
+        let target_pos = *p + best_normal * penetration;
+        apply_contact_response(target_pos, best_normal, best_friction, best_restitution, dt, p_initial, x_n, p);
+    }
 }
 
 struct ClosestResult {
@@ -452,6 +589,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (!has_front_contact && has_valid_recovery) {
         apply_contact_response(best_recovery_pos, best_recovery_normal, best_recovery_fric, best_recovery_rest, dt, p_initial, &x_n, &p);
     }
+
+    // フェーズ3: ボーン局所SDFコライダーの判定・押し戻し
+    solve_bone_sdf_collision(&p, &x_n, dt, p_initial, thickness);
 
     v.prev_pos = p;
     v.position = x_n; // 法線突入速度を吸収した基準位置

@@ -7,7 +7,9 @@ use crate::mesh::{
     GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
-use super::types::{CollisionParams, DispatchInfo, NormalParams, PinParams};
+use super::types::{
+    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, NormalParams, PinParams,
+};
 
 pub fn create_shader_with_wg_size(device: &wgpu::Device, label: &str, src: &str, wg_size: u32) -> wgpu::ShaderModule {
     let source = if wg_size != 64 {
@@ -50,6 +52,12 @@ pub struct SimulationResources {
     pub collider_params_buffer: wgpu::Buffer,
     pub collider_bind_group: wgpu::BindGroup,
     pub collision_pipeline: wgpu::ComputePipeline,
+    pub collision_bgl: wgpu::BindGroupLayout,
+    pub bone_sdf_texture: wgpu::Texture,
+    pub bone_sdf_texture_view: wgpu::TextureView,
+    pub bone_sdf_sampler: wgpu::Sampler,
+    pub bone_info_buffer: wgpu::Buffer,
+    pub bone_transform_buffer: wgpu::Buffer,
     pub spatial_hash: GpuSpatialHash,
     pub self_collision_pipeline: wgpu::ComputePipeline,
     pub self_collision_bind_group: wgpu::BindGroup,
@@ -279,10 +287,55 @@ pub fn build_simulation_resources(
             enable_cluster_culling: 0,
             enable_single_sided_recovery: 1,
             sweep_margin_offset: 0.05,
-            _pad0: 0,
-            _pad1: 0,
+            num_bones: 0,
+            enable_bone_sdf: 0,
         }),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    // ボーンSDF用バッファ & 初期ダミー3Dテクスチャ
+    let max_bones = 128;
+    let bone_info_buffer_size = (max_bones * std::mem::size_of::<GpuBoneInfo>()) as u64;
+    let bone_info_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Bone Info Buffer"),
+        size: bone_info_buffer_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bone_transform_buffer_size = (max_bones * std::mem::size_of::<GpuBoneTransform>()) as u64;
+    let bone_transform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Bone Transform Buffer"),
+        size: bone_transform_buffer_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bone_sdf_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("TareminCloth Dummy Bone SDF Texture"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rg16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bone_sdf_texture_view = bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let bone_sdf_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("TareminCloth Bone SDF Sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
     });
 
     let default_params = SimParams {
@@ -517,7 +570,32 @@ pub fn build_simulation_resources(
 
     let collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Collision Bind Group Layout"),
-        entries: &[storage_rw, storage_ro(1), storage_ro(2), uniform_entry(3), storage_ro(4), storage_ro(5)],
+        entries: &[
+            storage_rw,
+            storage_ro(1),
+            storage_ro(2),
+            uniform_entry(3),
+            storage_ro(4),
+            storage_ro(5),
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            storage_ro(8),
+            storage_ro(9),
+        ],
     });
 
     let edge_collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -759,6 +837,22 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: collider_group_bounds_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&bone_sdf_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(&bone_sdf_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: bone_info_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: bone_transform_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1270,6 +1364,12 @@ pub fn build_simulation_resources(
         collider_params_buffer,
         collider_bind_group,
         collision_pipeline,
+        collision_bgl,
+        bone_sdf_texture,
+        bone_sdf_texture_view,
+        bone_sdf_sampler,
+        bone_info_buffer,
+        bone_transform_buffer,
         spatial_hash,
         self_collision_pipeline,
         self_collision_bind_group,

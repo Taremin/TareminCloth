@@ -227,4 +227,112 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_bone_sdf_collision() {
+        use half::f16;
+        use crate::simulation::types::{GpuBoneInfo, GpuBoneTransform};
+
+        let ctx = Arc::new(GpuContext::new().expect("GPU Context creation"));
+
+        // z=0.4 から自由落下する頂点
+        let positions = vec![[0.0, 0.0, 0.4]];
+        let edges = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.02, // 厚み 0.02
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+
+        // 3D テクスチャ作成: 16x16x16
+        // AABB: [-0.5, -0.5, -0.5] ~ [0.5, 0.5, 0.5]
+        // z = 0 平面からの距離: d = z
+        let size = 16usize;
+        let mut tex_data = Vec::with_capacity(size * size * size * 4);
+        for k in 0..size {
+            let z = -0.5 + (k as f32 + 0.5) / size as f32 * 1.0;
+            for _j in 0..size {
+                for _i in 0..size {
+                    let d = f16::from_f32(z);
+                    let alpha = f16::from_f32(1.0);
+                    tex_data.extend_from_slice(&d.to_le_bytes());
+                    tex_data.extend_from_slice(&alpha.to_le_bytes());
+                }
+            }
+        }
+
+        let bone_info = GpuBoneInfo {
+            aabb_min: [-0.5, -0.5, -0.5, 0.0],
+            aabb_max: [0.5, 0.5, 0.5, 0.0],
+            uvw_scale: [1.0, 1.0, 1.0, 0.05], // blend_k = 0.05
+            uvw_offset: [0.5, 0.5, 0.5, 0.0],
+            params: [0.3, 0.02, 0.0, 0.0], // friction: 0.3, thickness: 0.02, restitution: 0.0
+        };
+
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let bone_transform = GpuBoneTransform {
+            world_matrix: identity,
+            inv_world_matrix: identity,
+        };
+
+        sim.set_bone_sdf_colliders(size as u32, size as u32, size as u32, &tex_data, &[bone_info]);
+        sim.update_bone_transforms(&[bone_transform]);
+
+        // シミュレーション実行 (自由落下)
+        for _ in 0..60 {
+            sim.step(1.0 / 60.0, 20);
+        }
+
+        let verts = sim.read_vertices();
+        let z = verts[0].position[2];
+        println!("[Test Bone SDF Collision] Final Vertex Z: {}", z);
+
+        // コライダー厚み (0.02) + 布厚み (0.02) = 0.04 で止まること
+        assert!(z >= 0.04 - 2e-3, "頂点がボーンSDF表面 (z=0.04) で止まらなければならない (実測 z={})", z);
+        assert!(z <= 0.06, "頂点が浮き上がりすぎてはならない (実測 z={})", z);
+
+        // 動的テスト: ボーンを z=+0.1 移動させた場合、頂点も押し上げられること
+        let moved_world = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.1, 1.0],
+        ];
+        let moved_inv = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, -0.1, 1.0],
+        ];
+        sim.update_bone_transforms(&[GpuBoneTransform {
+            world_matrix: moved_world,
+            inv_world_matrix: moved_inv,
+        }]);
+
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0, 20);
+        }
+
+        let verts_moved = sim.read_vertices();
+        let z_moved = verts_moved[0].position[2];
+        println!("[Test Bone SDF Collision] Moved Vertex Z: {}", z_moved);
+        assert!(z_moved >= 0.14 - 2e-3, "ボーン移動に伴い頂点が z=0.14 以上に押し上げられること (実測 z={})", z_moved);
+    }
 }

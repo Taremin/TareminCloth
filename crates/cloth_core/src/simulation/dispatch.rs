@@ -31,7 +31,7 @@ impl GpuClothSimulator {
         let vert_workgroups = (self.num_vertices + wg_size - 1) / wg_size;
         let num_pins = self.dynamic_pins.len() as u32;
         let pin_workgroups = (num_pins + wg_size - 1) / wg_size;
-        let has_colliders = !self.colliders.is_empty() || !self.mesh_triangles.is_empty();
+        let has_colliders = !self.colliders.is_empty() || !self.mesh_triangles.is_empty() || self.enable_bone_sdf;
 
         if has_colliders {
             let num_mesh_triangles = self.mesh_triangles.len() as u32;
@@ -47,8 +47,8 @@ impl GpuClothSimulator {
                 enable_cluster_culling: if self.enable_collider_cluster_culling { 1 } else { 0 },
                 enable_single_sided_recovery: if self.enable_single_sided_recovery { 1 } else { 0 },
                 sweep_margin_offset: self.collider_sweep_margin_offset,
-                _pad0: 0,
-                _pad1: 0,
+                num_bones: self.bone_infos.len() as u32,
+                enable_bone_sdf: if self.enable_bone_sdf { 1 } else { 0 },
             };
             self.context.queue.write_buffer(
                 &self.collider_params_buffer,

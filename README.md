@@ -19,6 +19,9 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
 - **🛡️ 剛体 & メッシュコライダー (SDF & Triangle Mesh Collision)**:
   - 球（Sphere）、カプセル（Capsule）、無限平面（Plane）の SDF プリミティブ衝突判定。
   - 人体モデルや Suzanne などの **任意のポリゴンメッシュ（Mesh Collider）** との完全 GPU 並列衝突判定および摩擦力（Friction）シミュレーション。
+- **🦴 ボーン局所SDFコライダー (Bone SDF Collision)**:
+  - スキニング素体メッシュから各ボーンのローカル符号付き距離場（SDF）とウェイト（Alpha）を 3D Brick Atlas テクスチャへ事前ベイク。
+  - アニメーション再生時、ボーン変換行列（4x4）のみを GPU 転送することで、高密度素体でも毎フレームのメッシュ転送負荷ゼロで超高速・安定した衝突判定を実現。
 - **🏃 コライダー変形アニメーション (Collider Animation Driver)**:
   - インタラクティブモードやシミュレーション中に、コライダーの **ボーン（ポーズ）やシェイプキー** を自動アニメーション駆動。
   - 関節を曲げたときの引っ張り・たわみシワを自然に生成し、掴んで整えるスカルプト的ワークフローを実現。

@@ -15,7 +15,7 @@ use crate::mesh::{
     GpuPinConstraint, GpuSewingConstraint, GpuVertex, SelfCollisionParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
-use self::types::{CollisionParams, PinParams};
+use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, PinParams};
 use self::pipelines::build_simulation_resources;
 
 pub struct GpuClothSimulator {
@@ -89,6 +89,17 @@ pub struct GpuClothSimulator {
     pub(crate) collider_params_buffer: wgpu::Buffer,
     pub(crate) collider_bind_group: wgpu::BindGroup,
     pub(crate) collision_pipeline: wgpu::ComputePipeline,
+    pub(crate) collision_bgl: wgpu::BindGroupLayout,
+
+    // ボーンSDFコライダー用
+    pub(crate) bone_infos: Vec<GpuBoneInfo>,
+    pub(crate) bone_transforms: Vec<GpuBoneTransform>,
+    pub(crate) enable_bone_sdf: bool,
+    pub(crate) bone_sdf_texture: wgpu::Texture,
+    pub(crate) bone_sdf_texture_view: wgpu::TextureView,
+    pub(crate) bone_sdf_sampler: wgpu::Sampler,
+    pub(crate) bone_info_buffer: wgpu::Buffer,
+    pub(crate) bone_transform_buffer: wgpu::Buffer,
 
     // 自己・レイヤー衝突 & 貫通解消 (Untangling) 用
     pub(crate) spatial_hash: GpuSpatialHash,
@@ -224,6 +235,15 @@ impl GpuClothSimulator {
             collider_params_buffer: res.collider_params_buffer,
             collider_bind_group: res.collider_bind_group,
             collision_pipeline: res.collision_pipeline,
+            collision_bgl: res.collision_bgl,
+            bone_infos: Vec::new(),
+            bone_transforms: Vec::new(),
+            enable_bone_sdf: false,
+            bone_sdf_texture: res.bone_sdf_texture,
+            bone_sdf_texture_view: res.bone_sdf_texture_view,
+            bone_sdf_sampler: res.bone_sdf_sampler,
+            bone_info_buffer: res.bone_info_buffer,
+            bone_transform_buffer: res.bone_transform_buffer,
             spatial_hash: res.spatial_hash,
             self_collision_pipeline: res.self_collision_pipeline,
             self_collision_bind_group: res.self_collision_bind_group,
@@ -542,7 +562,147 @@ impl GpuClothSimulator {
     pub fn clear_colliders(&mut self) {
         self.colliders.clear();
         self.mesh_triangles.clear();
+        self.clear_bone_sdf_colliders();
         self.upload_colliders();
+    }
+
+    /// ボーンSDFコライダーの3Dテクスチャアトラスおよび静的情報を設定
+    pub fn set_bone_sdf_colliders(
+        &mut self,
+        width: u32,
+        height: u32,
+        depth: u32,
+        texture_data: &[u8],
+        bone_infos: &[GpuBoneInfo],
+    ) {
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+
+        // 1. 新しい 3D テクスチャ (Rg16Float) を作成
+        self.bone_sdf_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TareminCloth Bone SDF 3D Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: depth,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.bone_sdf_texture_view = self.bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 2. テクスチャデータを書き込み (Rg16Float は 1 ピクセル 4 バイト)
+        let bytes_per_pixel = 4u32;
+        let bytes_per_row = width * bytes_per_pixel;
+        let rows_per_image = height;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.bone_sdf_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            texture_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(rows_per_image),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: depth,
+            },
+        );
+
+        // 3. ボーン静的情報をアップロード
+        self.bone_infos = bone_infos.to_vec();
+        if !self.bone_infos.is_empty() {
+            queue.write_buffer(
+                &self.bone_info_buffer,
+                0,
+                bytemuck::cast_slice(&self.bone_infos),
+            );
+        }
+
+        self.enable_bone_sdf = !self.bone_infos.is_empty();
+
+        // 4. BindGroup を再作成
+        self.recreate_collider_bind_group();
+        self.upload_colliders();
+    }
+
+    /// 各ボーンのワールド変換行列を更新（毎フレーム実行）
+    pub fn update_bone_transforms(&mut self, transforms: &[GpuBoneTransform]) {
+        self.bone_transforms = transforms.to_vec();
+        if !self.bone_transforms.is_empty() {
+            self.context.queue.write_buffer(
+                &self.bone_transform_buffer,
+                0,
+                bytemuck::cast_slice(&self.bone_transforms),
+            );
+        }
+    }
+
+    /// ボーンSDFコライダーをクリア・無効化
+    pub fn clear_bone_sdf_colliders(&mut self) {
+        self.bone_infos.clear();
+        self.bone_transforms.clear();
+        self.enable_bone_sdf = false;
+        self.upload_colliders();
+    }
+
+    fn recreate_collider_bind_group(&mut self) {
+        self.collider_bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Collider Bind Group (Recreated with Bone SDF)"),
+            layout: &self.collision_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.collider_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.mesh_triangles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.collider_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.mesh_bounds_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.collider_group_bounds_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.bone_sdf_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&self.bone_sdf_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.bone_info_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: self.bone_transform_buffer.as_entire_binding(),
+                },
+            ],
+        });
     }
     /// コライダー最適化およびリカバリーのオプションを設定する
     pub fn set_collider_options(
@@ -637,8 +797,8 @@ impl GpuClothSimulator {
             enable_cluster_culling: if self.enable_collider_cluster_culling { 1 } else { 0 },
             enable_single_sided_recovery: if self.enable_single_sided_recovery { 1 } else { 0 },
             sweep_margin_offset: self.collider_sweep_margin_offset,
-            _pad0: 0,
-            _pad1: 0,
+            num_bones: self.bone_infos.len() as u32,
+            enable_bone_sdf: if self.enable_bone_sdf { 1 } else { 0 },
         };
         self.context.queue.write_buffer(
             &self.collider_params_buffer,

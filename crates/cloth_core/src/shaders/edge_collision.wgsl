@@ -53,8 +53,8 @@ struct CollisionParams {
     enable_cluster_culling: u32,
     enable_single_sided_recovery: u32,
     sweep_margin_offset: f32,
-    _pad0: u32,
-    _pad1: u32,
+    num_bones: u32,
+    enable_bone_sdf: u32,
 };
 
 struct DispatchInfo {
