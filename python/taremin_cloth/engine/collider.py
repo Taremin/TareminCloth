@@ -4,6 +4,7 @@ Blenderシーン内のコライダーオブジェクト（Sphere, Plane, Capsule
 ワールド座標変換を行ってGPUシミュレータに差分同期する。
 """
 
+import math
 import bpy
 import numpy as np
 from ..utils.logger import logger
@@ -172,43 +173,79 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 else:
                     _, bake_res = _bone_sdf_cache[sim_id]
 
-                # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（初回フレーム含む）
+                # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（動的アクティブ化対応）
                 if bake_res and getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
-                    eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
-                    mesh = eval_obj.to_mesh() if depsgraph else obj.data
-                    mesh.calc_loop_triangles()
-                    n_verts = len(mesh.vertices)
-                    n_tris = len(mesh.loop_triangles)
+                    rot_threshold_deg = float(getattr(col_settings, "joint_rotation_threshold", 2.0))
+                    rot_threshold_rad = math.radians(rot_threshold_deg)
 
-                    if n_verts > 0 and n_tris > 0:
-                        raw_coords = np.empty(n_verts * 3, dtype=np.float32)
-                        mesh.vertices.foreach_get("co", raw_coords)
-                        v_local = raw_coords.reshape((n_verts, 3))
+                    # 動的アクティブ化判定
+                    active_indices = None
+                    if rot_threshold_deg <= 0.0 or not bake_res.joint_faces_by_pair:
+                        # 0度以下設定またはペア情報がない場合は全関節面をアクティブ
+                        active_indices = bake_res.joint_face_indices
+                    else:
+                        arm_obj = arm_mod.object
+                        active_pair_faces = []
+                        if arm_obj and arm_obj.pose:
+                            for (p_name, c_name), p_faces in bake_res.joint_faces_by_pair.items():
+                                pb_c = arm_obj.pose.bones.get(c_name)
+                                if not pb_c:
+                                    continue
+                                delta_angle = 0.0
+                                rot_mode = pb_c.rotation_mode
+                                if rot_mode == 'QUATERNION':
+                                    q = pb_c.rotation_quaternion
+                                    delta_angle = 2.0 * math.acos(min(abs(float(q[0])), 1.0))
+                                elif rot_mode == 'AXIS_ANGLE':
+                                    delta_angle = abs(float(pb_c.rotation_axis_angle[0]))
+                                else:
+                                    e = pb_c.rotation_euler
+                                    delta_angle = math.sqrt(float(e.x)**2 + float(e.y)**2 + float(e.z)**2)
 
-                        mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
-                        ones = np.ones((n_verts, 1), dtype=np.float32)
-                        v_homo = np.hstack([v_local, ones])
-                        v_world = (v_homo @ mat_np.T)[:, :3]
+                                if delta_angle >= rot_threshold_rad:
+                                    active_pair_faces.append(p_faces)
 
-                        tri_indices = np.empty(n_tris * 3, dtype=np.int32)
-                        mesh.loop_triangles.foreach_get("vertices", tri_indices)
-                        tri_indices_2d = tri_indices.reshape((n_tris, 3))
+                        if active_pair_faces:
+                            active_indices = np.unique(np.concatenate(active_pair_faces))
+                        else:
+                            active_indices = np.empty(0, dtype=np.int32)
 
-                        valid_joint_idx = bake_res.joint_face_indices[bake_res.joint_face_indices < n_tris]
-                        if len(valid_joint_idx) > 0:
-                            joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
-                            cur_friction = float(col_settings.friction)
-                            cur_thickness = float(col_settings.thickness)
-                            cur_restitution = float(getattr(col_settings, "restitution", 0.0))
-                            cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
+                    if active_indices is not None and len(active_indices) > 0:
+                        eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
+                        mesh = eval_obj.to_mesh() if depsgraph else obj.data
+                        mesh.calc_loop_triangles()
+                        n_verts = len(mesh.vertices)
+                        n_tris = len(mesh.loop_triangles)
 
-                            all_mesh_triangles.append(joint_tri_coords)
-                            attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
-                            attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
-                            all_mesh_attributes.append(attr_block)
+                        if n_verts > 0 and n_tris > 0:
+                            raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+                            mesh.vertices.foreach_get("co", raw_coords)
+                            v_local = raw_coords.reshape((n_verts, 3))
 
-                    if depsgraph:
-                        eval_obj.to_mesh_clear()
+                            mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
+                            ones = np.ones((n_verts, 1), dtype=np.float32)
+                            v_homo = np.hstack([v_local, ones])
+                            v_world = (v_homo @ mat_np.T)[:, :3]
+
+                            tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+                            mesh.loop_triangles.foreach_get("vertices", tri_indices)
+                            tri_indices_2d = tri_indices.reshape((n_tris, 3))
+
+                            valid_joint_idx = active_indices[active_indices < n_tris]
+                            if len(valid_joint_idx) > 0:
+                                joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
+                                cur_friction = float(col_settings.friction)
+                                cur_thickness = float(col_settings.thickness)
+                                cur_restitution = float(getattr(col_settings, "restitution", 0.0))
+                                cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
+
+                                all_mesh_triangles.append(joint_tri_coords)
+                                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                                attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
+                                all_mesh_attributes.append(attr_block)
+
+                        if depsgraph:
+                            eval_obj.to_mesh_clear()
 
         if all_mesh_triangles:
             tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]

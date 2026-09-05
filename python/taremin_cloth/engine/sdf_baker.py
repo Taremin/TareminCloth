@@ -36,6 +36,7 @@ class BoneSdfBakeResult:
         bone_names: List[str],
         bind_matrices: np.ndarray,  # shape: [N, 4, 4]
         joint_face_indices: Optional[np.ndarray] = None,  # shape: [M] (ハイブリッド関節面インデックス)
+        joint_faces_by_pair: Optional[Dict[Tuple[str, str], np.ndarray]] = None,  # {(parent, child): indices}
     ):
         self.texture_bytes = texture_bytes
         self.width = width
@@ -45,6 +46,7 @@ class BoneSdfBakeResult:
         self.bone_names = bone_names
         self.bind_matrices = bind_matrices
         self.joint_face_indices = joint_face_indices if joint_face_indices is not None else np.empty(0, dtype=np.int32)
+        self.joint_faces_by_pair = joint_faces_by_pair if joint_faces_by_pair is not None else {}
 
 
 def extract_joint_mesh_from_sdf(
@@ -281,6 +283,60 @@ def extract_major_joint_mesh_indices(
 extract_limb_joint_mesh_indices = extract_major_joint_mesh_indices
 
 
+def extract_hierarchy_joint_mesh_indices(
+    mesh_verts: np.ndarray,
+    mesh_tris: np.ndarray,
+    bone_weights: Dict[str, np.ndarray],
+    bone_parent_map: Dict[str, Optional[str]],
+    min_blend_weight: float = 0.05,
+    min_verts_per_joint: int = 4,
+) -> Tuple[np.ndarray, Dict[Tuple[str, str], np.ndarray]]:
+    """
+    アーマチュアの親子階層（Parent-Child）に基づいて、関節部の三角形インデックスを自動抽出する。
+    ボーン名（文字列）に一切依存せず、親子関係にあるボーンペア間でスキンウェイトがブレンドされている面を特定する。
+    
+    戻り値:
+        (all_joint_face_indices, joint_faces_by_pair)
+        - all_joint_face_indices: 全関節面のユニオン配列 (shape: [M], dtype: int32)
+        - joint_faces_by_pair: 各ペア (parent, child) をキーとする面インデックス辞書
+    """
+    if not bone_weights or len(mesh_tris) == 0 or not bone_parent_map:
+        return np.empty(0, dtype=np.int32), {}
+
+    n_verts = len(mesh_verts)
+    joint_faces_by_pair: Dict[Tuple[str, str], np.ndarray] = {}
+
+    for child, parent in bone_parent_map.items():
+        if not parent:
+            continue
+        if child not in bone_weights or parent not in bone_weights:
+            continue
+
+        w_child = bone_weights[child]
+        w_parent = bone_weights[parent]
+
+        # 両方のボーンから min_blend_weight 以上のウェイトを受けている頂点
+        blend_mask = (w_child > min_blend_weight) & (w_parent > min_blend_weight)
+        n_blend = int(np.count_nonzero(blend_mask))
+
+        # 指先などの極小ブレンド領域はノイズとしてスキップ
+        if n_blend < min_verts_per_joint:
+            continue
+
+        # any1: ブレンド頂点を1つでも含む三角形を抽出
+        tri_mask = blend_mask[mesh_tris[:, 0]] | blend_mask[mesh_tris[:, 1]] | blend_mask[mesh_tris[:, 2]]
+        pair_faces = np.where(tri_mask)[0].astype(np.int32)
+
+        if len(pair_faces) > 0:
+            joint_faces_by_pair[(parent, child)] = pair_faces
+
+    if not joint_faces_by_pair:
+        return np.empty(0, dtype=np.int32), {}
+
+    all_faces = np.unique(np.concatenate(list(joint_faces_by_pair.values())))
+    return all_faces, joint_faces_by_pair
+
+
 def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) -> Tuple[int, int, int, int, int, int, int]:
     """
     ボーン数と解像度から、3D Brick Atlas のタイル分割数とテクスチャ寸法を計算する。
@@ -322,7 +378,7 @@ def compute_mesh_signature(
 ) -> str:
     """メッシュと設定からユニークなキャッシュハッシュキーを生成する"""
     hasher = hashlib.sha256()
-    prefix = f"v7_leg_hybrid_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}"
+    prefix = f"v8_hierarchy_hybrid_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}"
     hasher.update(f"{prefix}_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
     # 先頭と末尾の数頂点をサンプリングしてハッシュ化
     sample_verts = verts[::max(1, len(verts) // 20)]
@@ -360,6 +416,7 @@ def bake_bone_sdf_from_data(
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
     overlap_rings: int = 1,
+    bone_parent_map: Optional[Dict[str, Optional[str]]] = None,
 ) -> BoneSdfBakeResult:
     """
     素体メッシュとボーン情報からローカルSDFテクスチャアトラスを生成する
@@ -555,18 +612,32 @@ def bake_bone_sdf_from_data(
     bone_infos_arr = np.array(bone_infos_list, dtype=np.float32)
     bind_matrices_arr = np.array(bind_matrices_list, dtype=np.float32)
 
-    # ハイブリッド用に関節部三角形インデックスを抽出 (主要関節抽出方式: 四肢+体幹背骨)
+    # ハイブリッド用に関節部三角形インデックスを抽出 (親子階層自動抽出方式、または主要関節フォールバック)
     joint_face_indices = np.empty(0, dtype=np.int32)
+    joint_faces_by_pair: Dict[Tuple[str, str], np.ndarray] = {}
     if enable_joint_mesh:
-        joint_face_indices = extract_major_joint_mesh_indices(
-            mesh_verts=mesh_verts,
-            mesh_tris=mesh_tris,
-            bone_weights=bone_weights,
-            min_blend_weight=0.06,
-        )
-        logger.info(
-            f"[SDF Baker] ハイブリッドモード有効 (主要関節方式: 四肢+体幹背骨): {len(joint_face_indices)} / {len(mesh_tris)} 面の関節三角形を抽出 (のりしろ: any1)"
-        )
+        if bone_parent_map:
+            joint_face_indices, joint_faces_by_pair = extract_hierarchy_joint_mesh_indices(
+                mesh_verts=mesh_verts,
+                mesh_tris=mesh_tris,
+                bone_weights=bone_weights,
+                bone_parent_map=bone_parent_map,
+                min_blend_weight=0.05,
+            )
+            logger.info(
+                f"[SDF Baker] ハイブリッドモード有効 (親子階層方式): {len(joint_face_indices)} / {len(mesh_tris)} 面 "
+                f"({len(joint_faces_by_pair)} 個の関節ペア) を抽出"
+            )
+        else:
+            joint_face_indices = extract_major_joint_mesh_indices(
+                mesh_verts=mesh_verts,
+                mesh_tris=mesh_tris,
+                bone_weights=bone_weights,
+                min_blend_weight=0.06,
+            )
+            logger.info(
+                f"[SDF Baker] ハイブリッドモード有効 (主要関節フォールバック): {len(joint_face_indices)} / {len(mesh_tris)} 面の関節三角形を抽出 (のりしろ: any1)"
+            )
 
     logger.info(
         f"[SDF Baker] ベイク完了: テクスチャサイズ {total_width}x{total_height}x{total_depth} "
@@ -582,6 +653,7 @@ def bake_bone_sdf_from_data(
         bone_names=active_bones,
         bind_matrices=bind_matrices_arr,
         joint_face_indices=joint_face_indices,
+        joint_faces_by_pair=joint_faces_by_pair,
     )
 
 
@@ -601,6 +673,18 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
     try:
         data = np.load(cache_path, allow_pickle=True)
         joint_face_indices = data["joint_face_indices"] if "joint_face_indices" in data else np.empty(0, dtype=np.int32)
+        joint_faces_by_pair: Dict[Tuple[str, str], np.ndarray] = {}
+        if "pair_keys" in data and "pair_lens" in data and "pair_data" in data:
+            p_keys = data["pair_keys"]
+            p_lens = data["pair_lens"]
+            p_data = data["pair_data"]
+            offset = 0
+            for k_str, l in zip(p_keys, p_lens):
+                parts = str(k_str).split(":::")
+                if len(parts) == 2:
+                    joint_faces_by_pair[(parts[0], parts[1])] = p_data[offset : offset + l]
+                offset += l
+
         return BoneSdfBakeResult(
             texture_bytes=data["texture_bytes"].tobytes(),
             width=int(data["width"]),
@@ -610,6 +694,7 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
             bone_names=list(data["bone_names"]),
             bind_matrices=data["bind_matrices"],
             joint_face_indices=joint_face_indices,
+            joint_faces_by_pair=joint_faces_by_pair,
         )
     except Exception as e:
         logger.warning(f"[SDF Baker] キャッシュ読込失敗: {e}")
@@ -620,6 +705,15 @@ def save_cached_sdf(cache_key: str, result: BoneSdfBakeResult):
     """SDFベイク結果をディスクキャッシュに保存する"""
     cache_path = os.path.join(get_cache_dir(), f"{cache_key}.npz")
     try:
+        pairs = list(result.joint_faces_by_pair.keys())
+        pair_keys = np.array([f"{p}:::{c}" for p, c in pairs])
+        pair_lens = np.array([len(result.joint_faces_by_pair[k]) for k in pairs], dtype=np.int32)
+        pair_data = (
+            np.concatenate([result.joint_faces_by_pair[k] for k in pairs])
+            if pairs
+            else np.empty(0, dtype=np.int32)
+        )
+
         np.savez_compressed(
             cache_path,
             texture_bytes=np.frombuffer(result.texture_bytes, dtype=np.uint8),
@@ -630,6 +724,9 @@ def save_cached_sdf(cache_key: str, result: BoneSdfBakeResult):
             bone_names=np.array(result.bone_names),
             bind_matrices=result.bind_matrices,
             joint_face_indices=result.joint_face_indices,
+            pair_keys=pair_keys,
+            pair_lens=pair_lens,
+            pair_data=pair_data,
         )
         logger.info(f"[SDF Baker] キャッシュ保存完了: {cache_path}")
     except Exception as e:
@@ -796,6 +893,8 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         logger.warning(f"[SDF Baker] 有効なボーンウェイトが見つかりませんでした")
         return None
 
+    bone_parent_map = {b.name: (b.parent.name if b.parent else None) for b in arm_data.bones}
+
     enable_joint_mesh = getattr(col_settings, "enable_joint_mesh", True)
     joint_weight_threshold = getattr(col_settings, "joint_weight_threshold", 0.85)
 
@@ -811,15 +910,19 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
         if cached is not None:
-            # 3Dテクスチャはキャッシュを即座に復元しつつ、関節面は最新ロジックを適用
+            # 3Dテクスチャはキャッシュを即座に復元しつつ、関節面は最新の親子階層ロジックを適用
             if enable_joint_mesh:
-                cached.joint_face_indices = extract_major_joint_mesh_indices(
+                cached.joint_face_indices, cached.joint_faces_by_pair = extract_hierarchy_joint_mesh_indices(
                     mesh_verts=mesh_verts,
                     mesh_tris=mesh_tris,
                     bone_weights=bone_weights,
-                    min_blend_weight=0.06,
+                    bone_parent_map=bone_parent_map,
+                    min_blend_weight=0.05,
                 )
-            logger.info(f"[SDF Baker] キャッシュからSDFを即座に復元しました: {cache_key} (関節面数: {len(cached.joint_face_indices)})")
+            logger.info(
+                f"[SDF Baker] キャッシュからSDFを即座に復元しました: {cache_key} "
+                f"(関節面数: {len(cached.joint_face_indices)}, ペア数: {len(cached.joint_faces_by_pair)})"
+            )
             return cached
 
     # ベイク実行
@@ -837,6 +940,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         restitution=float(getattr(col_settings, "restitution", 0.0)),
         enable_joint_mesh=enable_joint_mesh,
         joint_weight_threshold=joint_weight_threshold,
+        bone_parent_map=bone_parent_map,
     )
 
     if cache_enabled and result.depth > 0:

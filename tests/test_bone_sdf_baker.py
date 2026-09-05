@@ -19,6 +19,7 @@ from taremin_cloth.engine.sdf_baker import (
     compute_mesh_signature,
     extract_joint_mesh_indices,
     extract_limb_joint_mesh_indices,
+    extract_hierarchy_joint_mesh_indices,
     extract_joint_mesh_from_sdf,
     save_cached_sdf,
     load_cached_sdf,
@@ -355,7 +356,56 @@ class TestBoneSdfBaker(unittest.TestCase):
         self.assertGreater(len(joint_faces), 0)
         np.testing.assert_array_equal(bake_res.joint_face_indices, joint_faces)
 
+    def test_extract_hierarchy_joint_mesh(self):
+        """ボーン名不問の親子階層（Parent-Child）に基づく関節抽出およびペア辞書保持の検証"""
+        verts, tris = create_cube_mesh(center=(0.0, 0.0, 0.0), size=1.0)
+        # 英語名・日本語名に関係なく親子関係から自動抽出できることを検証
+        bone_parent_map = {
+            "CustomBone_Child": "CustomBone_Parent",
+            "CustomBone_Parent": None,
+        }
+        bw_parent = np.array([1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+        bw_child = np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+        bone_weights = {
+            "CustomBone_Parent": bw_parent,
+            "CustomBone_Child": bw_child,
+        }
+        bone_bind_matrices = {
+            "CustomBone_Parent": np.eye(4, dtype=np.float32),
+            "CustomBone_Child": np.eye(4, dtype=np.float32),
+        }
 
+        # 1. extract_hierarchy_joint_mesh_indices 単体テスト
+        all_faces, pair_dict = extract_hierarchy_joint_mesh_indices(
+            verts, tris, bone_weights, bone_parent_map, min_blend_weight=0.05, min_verts_per_joint=2
+        )
+        self.assertGreater(len(all_faces), 0)
+        self.assertIn(("CustomBone_Parent", "CustomBone_Child"), pair_dict)
+        np.testing.assert_array_equal(all_faces, pair_dict[("CustomBone_Parent", "CustomBone_Child")])
+
+        # 2. bake_bone_sdf_from_data による統合ベイクテスト
+        bake_res = bake_bone_sdf_from_data(
+            mesh_verts=verts,
+            mesh_tris=tris,
+            bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices,
+            resolution=16,
+            enable_joint_mesh=True,
+            bone_parent_map=bone_parent_map,
+        )
+        self.assertEqual(len(bake_res.joint_face_indices), len(all_faces))
+        self.assertIn(("CustomBone_Parent", "CustomBone_Child"), bake_res.joint_faces_by_pair)
+
+        # 3. キャッシュ保存と復元によるペア辞書整合性の検証
+        sig = compute_mesh_signature(verts, tris, list(bone_weights.keys()), 16, enable_joint_mesh=True)
+        save_cached_sdf(sig, bake_res)
+        loaded = load_cached_sdf(sig)
+        self.assertIsNotNone(loaded)
+        self.assertIn(("CustomBone_Parent", "CustomBone_Child"), loaded.joint_faces_by_pair)
+        np.testing.assert_array_equal(
+            loaded.joint_faces_by_pair[("CustomBone_Parent", "CustomBone_Child")],
+            bake_res.joint_faces_by_pair[("CustomBone_Parent", "CustomBone_Child")]
+        )
 
 
 if __name__ == "__main__":

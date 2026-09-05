@@ -541,8 +541,8 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 if col_settings.enable_joint_mesh:
                     col_h = box_hybrid.column(align=True)
                     col_h.prop(col_settings, "joint_weight_threshold")
-                    col_h.label(text="腰曲げ等の激しい屈曲時の角ばり突出を解消", icon='INFO')
-                    col_h.label(text="※静止画や軽微なポーズではOFFで十分高速です")
+                    col_h.prop(col_settings, "joint_rotation_threshold", text="Activation Angle (°)")
+                    col_h.label(text="屈曲した関節のみ動的にメッシュ化し高速化", icon='INFO')
 
                 b_col.prop(col_settings, "sdf_cache_enabled")
 

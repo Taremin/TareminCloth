@@ -736,6 +736,14 @@ class TareminColliderSettings(PropertyGroup):
         max=0.99,
         precision=2,
     )
+    joint_rotation_threshold: FloatProperty(
+        name="Activation Angle",
+        description="関節メッシュを動的同期する最小屈曲角（度）。0で常時全同期、2度程度で曲がった関節のみ同期し高速化",
+        default=2.0,
+        min=0.0,
+        max=45.0,
+        precision=1,
+    )
     radius: FloatProperty(
         name="Radius",
         description="コライダー半径 (m)",
