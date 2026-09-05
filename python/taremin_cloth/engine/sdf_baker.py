@@ -44,6 +44,7 @@ class BoneSdfBakeResult:
         self.height = height
         self.depth = depth
         self.bone_infos = bone_infos
+        self.res = int(bone_infos[0, 7]) if len(bone_infos) > 0 else 64
         self.bone_names = bone_names
         self.bind_matrices = bind_matrices
         self.joint_face_indices = joint_face_indices if joint_face_indices is not None else np.empty(0, dtype=np.int32)
@@ -783,7 +784,51 @@ def get_armature_modifier(obj):
     for mod in getattr(obj, "modifiers", []):
         if getattr(mod, "type", None) == 'ARMATURE' and getattr(mod, "object", None):
             return mod
-    return None
+def get_pre_armature_eval_mesh(obj):
+    """
+    Armatureモディファイアより前の先行モディファイア（Mirror, Lattice等）を反映した静止評価メッシュを取得する。
+    戻り値: (mesh, eval_obj, disabled_mods)
+    ※使い終わったら必ず cleanup_pre_armature_eval_mesh(eval_obj, disabled_mods) を呼ぶこと。
+    """
+    arm_mod = get_armature_modifier(obj)
+    disabled_mods = []
+    found_arm = False
+    for mod in getattr(obj, "modifiers", []):
+        if mod == arm_mod:
+            found_arm = True
+        if found_arm or getattr(mod, "type", None) == 'COLLISION':
+            if getattr(mod, "show_viewport", False):
+                mod.show_viewport = False
+                disabled_mods.append(mod)
+
+    eval_obj = None
+    try:
+        try:
+            bpy.context.view_layer.update()
+        except Exception:
+            pass
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+        mesh = eval_obj.to_mesh()
+        return mesh, eval_obj, disabled_mods
+    except Exception as e:
+        logger.warning(f"[SDF Baker] 評価メッシュ取得失敗、obj.dataにフォールバックします: {e}")
+        return obj.data, None, disabled_mods
+
+
+def cleanup_pre_armature_eval_mesh(eval_obj, disabled_mods):
+    """get_pre_armature_eval_mesh で取得した評価メッシュとモディファイア状態を解放・復元する"""
+    if eval_obj is not None:
+        try:
+            eval_obj.to_mesh_clear()
+        except Exception:
+            pass
+    for mod in disabled_mods:
+        mod.show_viewport = True
+    try:
+        bpy.context.view_layer.update()
+    except Exception:
+        pass
 
 
 def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = False) -> Optional[BoneSdfBakeResult]:
@@ -811,32 +856,8 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     blend_k = getattr(col_settings, "blend_k", 0.05)
     cache_enabled = getattr(col_settings, "sdf_cache_enabled", True)
 
-    # Armatureモディファイアより前の先行モディファイア（Mirror, Lattice等）を反映した静止メッシュを取得
-    disabled_mods = []
-    found_arm = False
-    for mod in getattr(obj, "modifiers", []):
-        if mod == arm_mod:
-            found_arm = True
-        if found_arm or getattr(mod, "type", None) == 'COLLISION':
-            if getattr(mod, "show_viewport", False):
-                mod.show_viewport = False
-                disabled_mods.append(mod)
+    mesh, eval_obj, disabled_mods = get_pre_armature_eval_mesh(obj)
 
-    mesh_is_eval = False
-    eval_obj = None
-    try:
-        try:
-            bpy.context.view_layer.update()
-        except Exception:
-            pass
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-        eval_obj = obj.evaluated_get(depsgraph)
-        mesh = eval_obj.to_mesh()
-        mesh_is_eval = True
-    except Exception as e:
-        logger.warning(f"[SDF Baker] 評価メッシュ取得失敗、obj.dataにフォールバックします: {e}")
-        mesh = obj.data
-        mesh_is_eval = False
     # メッシュ頂点と三角形の抽出
     n_verts = len(mesh.vertices)
     raw_coords = np.empty(n_verts * 3, dtype=np.float32)
@@ -863,17 +884,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
             vg_weights_map[g_idx].append((v_idx, g.weight))
 
     # データ抽出完了後に評価メッシュの解放とモディファイア復元
-    if mesh_is_eval and eval_obj is not None:
-        try:
-            eval_obj.to_mesh_clear()
-        except Exception:
-            pass
-    for mod in disabled_mods:
-        mod.show_viewport = True
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
+    cleanup_pre_armature_eval_mesh(eval_obj, disabled_mods)
 
     # 頂点グループからボーンウェイトを抽出
     bone_weights = {}
@@ -974,3 +985,117 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         save_cached_sdf(cache_key, result)
 
     return result
+
+
+def extract_dynamic_sdf_setup_data(obj, arm_obj, bake_res: BoneSdfBakeResult) -> Dict[str, np.ndarray]:
+    """
+    GPU LBSスキニングと動的SDFベイクに必要な静止ポーズ頂点・ウェイト・三角形ソースデータを抽出する。
+    """
+    mesh, eval_obj, disabled_mods = get_pre_armature_eval_mesh(obj)
+    n_verts = len(mesh.vertices)
+    raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", raw_coords)
+    v_pos = raw_coords.reshape((n_verts, 3))
+
+    raw_normals = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("normal", raw_normals)
+    v_normal = raw_normals.reshape((n_verts, 3))
+
+    rest_verts = np.hstack([v_pos, v_normal]).astype(np.float32)
+
+    bone_name_to_idx = {name: i for i, name in enumerate(bake_res.bone_names)}
+    n_bones = len(bake_res.bone_names)
+
+    vg_idx_to_bone_idx = {}
+    for vg in obj.vertex_groups:
+        if vg.name in bone_name_to_idx:
+            vg_idx_to_bone_idx[vg.index] = bone_name_to_idx[vg.name]
+
+    bone_indices = np.zeros((n_verts, 4), dtype=np.uint32)
+    bone_weights = np.zeros((n_verts, 4), dtype=np.float32)
+
+    for v in mesh.vertices:
+        v_idx = v.index
+        weights_list = []
+        for g in v.groups:
+            if g.group in vg_idx_to_bone_idx:
+                b_idx = vg_idx_to_bone_idx[g.group]
+                w = float(g.weight)
+                if w > 0.001:
+                    weights_list.append((w, b_idx))
+
+        if weights_list:
+            weights_list.sort(key=lambda x: x[0], reverse=True)
+            top4 = weights_list[:4]
+            total_w = sum(w for w, _ in top4)
+            if total_w > 1e-6:
+                for slot, (w, b_idx) in enumerate(top4):
+                    bone_indices[v_idx, slot] = b_idx
+                    bone_weights[v_idx, slot] = w / total_w
+            else:
+                bone_weights[v_idx, 0] = 1.0
+        else:
+            bone_weights[v_idx, 0] = 1.0
+
+    mesh.calc_loop_triangles()
+    n_tris = len(mesh.loop_triangles)
+    tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("vertices", tri_indices)
+    mesh_tris = tri_indices.reshape((n_tris, 3))
+
+    # 評価メッシュの解放とモディファイア復元
+    cleanup_pre_armature_eval_mesh(eval_obj, disabled_mods)
+
+    bone_vert_weights = [np.zeros(n_verts, dtype=np.float32) for _ in range(n_bones)]
+    for v_idx in range(n_verts):
+        for slot in range(4):
+            w = bone_weights[v_idx, slot]
+            if w > 0.0:
+                b_idx = bone_indices[v_idx, slot]
+                if b_idx < n_bones:
+                    bone_vert_weights[b_idx][v_idx] = w
+
+    tri_sources_list = []
+    tri_weights_list = []
+
+    for b_idx in range(n_bones):
+        w_arr = bone_vert_weights[b_idx]
+        b_min = bake_res.bone_infos[b_idx, 0:3]
+        b_max = bake_res.bone_infos[b_idx, 4:7]
+        b_mat = bake_res.bind_matrices[b_idx]
+
+        for tri in mesh_tris:
+            i0, i1, i2 = int(tri[0]), int(tri[1]), int(tri[2])
+            w0, w1, w2 = float(w_arr[i0]), float(w_arr[i1]), float(w_arr[i2])
+            if w0 <= 0.0 and w1 <= 0.0 and w2 <= 0.0:
+                continue
+
+            p0 = b_mat[:3, :3] @ v_pos[i0] + b_mat[:3, 3]
+            p1 = b_mat[:3, :3] @ v_pos[i1] + b_mat[:3, 3]
+            p2 = b_mat[:3, :3] @ v_pos[i2] + b_mat[:3, 3]
+
+            t_min = np.minimum(np.minimum(p0, p1), p2)
+            t_max = np.maximum(np.maximum(p0, p1), p2)
+
+            if np.all(t_min <= b_max) and np.all(t_max >= b_min):
+                tri_sources_list.append([i0, i1, i2, b_idx])
+                tri_weights_list.append([w0, w1, w2])
+
+    if not tri_sources_list:
+        tri_sources = np.zeros((1, 4), dtype=np.uint32)
+        tri_weights = np.zeros((1, 3), dtype=np.float32)
+    else:
+        tri_sources = np.array(tri_sources_list, dtype=np.uint32)
+        tri_weights = np.array(tri_weights_list, dtype=np.float32)
+
+    # bake_res.bind_matrices はすでに「メッシュ空間 -> 各ボーンローカル空間」の変換行列 (B_bind)
+    bone_bind_inv_matrices = np.stack(bake_res.bind_matrices).astype(np.float32)
+
+    return {
+        "rest_verts": rest_verts,
+        "bone_indices": bone_indices,
+        "bone_weights": bone_weights,
+        "tri_sources": tri_sources,
+        "tri_weights": tri_weights,
+        "bone_bind_inv_matrices": bone_bind_inv_matrices,
+    }

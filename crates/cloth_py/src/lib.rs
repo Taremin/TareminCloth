@@ -2,8 +2,9 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
-    bake_bone_sdf_gpu as core_bake_bone_sdf_gpu, BoneInput, ClothMesh, GpuBoneInfo,
-    GpuBoneTransform, GpuClothSimulator, GpuContext, GpuMeshTriangle,
+    bake_bone_sdf_gpu as core_bake_bone_sdf_gpu, BoneInput, ClothMesh, DynamicBoneSdfSetup,
+    GpuBakeParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuClothSimulator,
+    GpuContext, GpuMeshTriangle, GpuSkinningVertex,
 };
 
 /// GPUが利用可能かどうかを判定する
@@ -812,6 +813,203 @@ impl ClothSimulator {
     /// ボーンSDFコライダーをクリア
     fn clear_bone_sdf_colliders(&mut self) {
         self.simulator.clear_bone_sdf_colliders();
+    }
+
+    /// フルGPU動的SDFコライダーを初期化・設定する
+    #[pyo3(signature = (
+        width,
+        height,
+        depth,
+        res,
+        bone_infos,
+        rest_verts,
+        bone_indices,
+        bone_weights,
+        tri_sources,
+        tri_weights,
+        bone_bind_inv_matrices,
+        update_interval=1
+    ))]
+    fn setup_dynamic_bone_sdf(
+        &mut self,
+        width: u32,
+        height: u32,
+        depth: u32,
+        res: u32,
+        bone_infos: PyReadonlyArray2<f32>,
+        rest_verts: PyReadonlyArray2<f32>,
+        bone_indices: PyReadonlyArray2<u32>,
+        bone_weights: PyReadonlyArray2<f32>,
+        tri_sources: PyReadonlyArray2<u32>,
+        tri_weights: PyReadonlyArray2<f32>,
+        bone_bind_inv_matrices: PyReadonlyArray3<f32>,
+        update_interval: u32,
+    ) -> PyResult<()> {
+        let info_view = bone_infos.as_array();
+        let n_bones = info_view.shape()[0];
+        let mut gpu_bone_infos = Vec::with_capacity(n_bones);
+        for row in info_view.outer_iter() {
+            if row.len() < 20 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "bone_infos の各行は少なくとも 20 要素必要です",
+                ));
+            }
+            gpu_bone_infos.push(GpuBoneInfo {
+                aabb_min: [row[0], row[1], row[2], row[3]],
+                aabb_max: [row[4], row[5], row[6], row[7]],
+                uvw_scale: [row[8], row[9], row[10], row[11]],
+                uvw_offset: [row[12], row[13], row[14], row[15]],
+                params: [row[16], row[17], row[18], row[19]],
+            });
+        }
+
+        let rv_view = rest_verts.as_array();
+        let bi_view = bone_indices.as_array();
+        let bw_view = bone_weights.as_array();
+        let n_verts = rv_view.shape()[0];
+
+        if bi_view.shape()[0] != n_verts || bw_view.shape()[0] != n_verts {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "rest_verts, bone_indices, bone_weights の頂点数が一致しません",
+            ));
+        }
+
+        let mut gpu_rest_verts = Vec::with_capacity(n_verts);
+        for i in 0..n_verts {
+            let r_row = rv_view.row(i);
+            let b_idx = bi_view.row(i);
+            let b_w = bw_view.row(i);
+
+            let pos = [r_row[0], r_row[1], r_row[2]];
+            let normal = if r_row.len() >= 6 {
+                [r_row[3], r_row[4], r_row[5]]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+
+            gpu_rest_verts.push(GpuSkinningVertex {
+                pos,
+                _pad0: 0.0,
+                normal,
+                _pad1: 0.0,
+                bone_indices: [b_idx[0], b_idx[1], b_idx[2], b_idx[3]],
+                bone_weights: [b_w[0], b_w[1], b_w[2], b_w[3]],
+            });
+        }
+
+        let ts_view = tri_sources.as_array();
+        let tw_view = tri_weights.as_array();
+        let n_tris = ts_view.shape()[0];
+        if tw_view.shape()[0] != n_tris {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tri_sources と tri_weights の三角形数が一致しません",
+            ));
+        }
+
+        let mut gpu_tri_sources = Vec::with_capacity(n_tris);
+        for i in 0..n_tris {
+            let ts_row = ts_view.row(i);
+            let tw_row = tw_view.row(i);
+            if ts_row.len() < 4 || tw_row.len() < 3 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "tri_sources は 4要素 (i0, i1, i2, bone_idx)、tri_weights は 3要素 (w0, w1, w2) 必要です",
+                ));
+            }
+            gpu_tri_sources.push(GpuBoneTriangleSource {
+                i0: ts_row[0],
+                i1: ts_row[1],
+                i2: ts_row[2],
+                bone_idx: ts_row[3],
+                w0: tw_row[0],
+                w1: tw_row[1],
+                w2: tw_row[2],
+                _pad: 0.0,
+            });
+        }
+
+        let inv_view = bone_bind_inv_matrices.as_array();
+        if inv_view.shape()[0] != n_bones {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bone_bind_inv_matrices のボーン数が bone_infos と一致しません",
+            ));
+        }
+        let mut bind_inv_mats = Vec::with_capacity(n_bones);
+        for i in 0..n_bones {
+            let mut mat = [[0.0f32; 4]; 4];
+            for r in 0..4 {
+                for c in 0..4 {
+                    mat[r][c] = inv_view[[i, r, c]];
+                }
+            }
+            bind_inv_mats.push(mat);
+        }
+
+        // 各ボーンの三角形範囲 (tri_start, tri_count) を算出
+        let mut bone_tri_counts = vec![0u32; n_bones];
+        let mut bone_tri_starts = vec![0u32; n_bones];
+        for (idx, ts) in gpu_tri_sources.iter().enumerate() {
+            let b = ts.bone_idx as usize;
+            if b < n_bones {
+                if bone_tri_counts[b] == 0 {
+                    bone_tri_starts[b] = idx as u32;
+                }
+                bone_tri_counts[b] += 1;
+            }
+        }
+
+        let n_cols = (width / res).max(1);
+        let n_rows = (height / res).max(1);
+        let b_per_layer = n_cols * n_rows;
+
+        let mut bake_params = Vec::with_capacity(n_bones);
+        for b in 0..n_bones {
+            let l = b as u32 / b_per_layer;
+            let rem = b as u32 % b_per_layer;
+            let r = rem / n_cols;
+            let c = rem % n_cols;
+
+            let info = &gpu_bone_infos[b];
+            bake_params.push(GpuBakeParams {
+                local_min: [info.aabb_min[0], info.aabb_min[1], info.aabb_min[2]],
+                tri_start: bone_tri_starts[b],
+                local_max: [info.aabb_max[0], info.aabb_max[1], info.aabb_max[2]],
+                tri_count: bone_tri_counts[b],
+                tile_col: c,
+                tile_row: r,
+                tile_layer: l,
+                res,
+                total_width: width,
+                total_height: height,
+                total_depth: depth,
+                row_pitch: 0,
+            });
+        }
+
+        let setup = DynamicBoneSdfSetup {
+            width,
+            height,
+            depth,
+            res,
+            bone_infos: gpu_bone_infos,
+            rest_verts: gpu_rest_verts,
+            tri_sources: gpu_tri_sources,
+            bone_bind_inv_matrices: bind_inv_mats,
+            bake_params,
+        };
+
+        self.simulator.setup_dynamic_bone_sdf(setup);
+        self.simulator.set_dynamic_bone_sdf_update_interval(update_interval);
+        Ok(())
+    }
+
+    /// 動的ボーンSDFの有効/無効を切り替え
+    fn set_dynamic_bone_sdf_enabled(&mut self, enabled: bool) {
+        self.simulator.set_dynamic_bone_sdf_enabled(enabled);
+    }
+
+    /// 動的ボーンSDFの更新間隔（フレーム数）を設定
+    fn set_dynamic_bone_sdf_update_interval(&mut self, interval: u32) {
+        self.simulator.set_dynamic_bone_sdf_update_interval(interval);
     }
 
     /// コライダー最適化およびリカバリーのオプションを設定する

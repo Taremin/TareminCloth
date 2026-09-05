@@ -9,8 +9,8 @@ pub mod sdf_baker;
 
 pub use context::{GpuContext, GpuContextError, GpuDeviceInfo};
 pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams};
-pub use simulation::GpuClothSimulator;
-pub use simulation::types::{GpuBoneInfo, GpuBoneTransform};
+pub use simulation::{DynamicBoneSdfSetup, GpuClothSimulator};
+pub use simulation::types::{GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex};
 pub use debug_recorder::{ColliderRecord, FrameRecord, FrameStats, JsonlRecord, PinRecord, SimulationDebugRecorder, SimulationMetadata};
 pub use renderer::{
     render_mesh_to_buffer, render_mesh_to_png_file, render_scene_to_buffer,

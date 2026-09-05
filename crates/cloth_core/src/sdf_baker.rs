@@ -21,7 +21,7 @@ pub struct GpuBakeParams {
     pub total_width: u32,
     pub total_height: u32,
     pub total_depth: u32,
-    pub _pad: u32,
+    pub row_pitch: u32,
 }
 
 /// シェーダー転送用三角形データ（アライメント: 16バイト境界、サイズ: 64バイト）
@@ -320,7 +320,7 @@ pub fn bake_bone_sdf_gpu(
             total_width: total_width as u32,
             total_height: total_height as u32,
             total_depth: total_depth as u32,
-            _pad: 0,
+            row_pitch: 0,
         });
     }
 

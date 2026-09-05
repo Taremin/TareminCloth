@@ -8,7 +8,12 @@ import math
 import bpy
 import numpy as np
 from ..utils.logger import logger
-from .sdf_baker import get_or_bake_bone_sdf_for_object, get_armature_modifier, BoneSdfBakeResult
+from .sdf_baker import (
+    get_or_bake_bone_sdf_for_object,
+    get_armature_modifier,
+    BoneSdfBakeResult,
+    extract_dynamic_sdf_setup_data,
+)
 
 _collider_cache = {}
 _bone_sdf_cache = {}
@@ -157,21 +162,48 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     logger.warning(f"[Collider Sync] '{obj.name}' にArmatureモディファイアがありません。BONE_SDFをスキップします。")
                     continue
 
+                update_mode = getattr(col_settings, "sdf_update_mode", "STATIC")
+
                 if sim_id not in _bone_sdf_cache:
                     bake_res = get_or_bake_bone_sdf_for_object(obj, col_settings)
                     if bake_res and bake_res.depth > 0:
-                        sim.set_bone_sdf_colliders(
-                            bake_res.width,
-                            bake_res.height,
-                            bake_res.depth,
-                            bake_res.texture_bytes,
-                            bake_res.bone_infos,
-                        )
-                        _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res)
+                        if update_mode == 'DYNAMIC_GPU':
+                            dyn_data = extract_dynamic_sdf_setup_data(obj, arm_mod.object, bake_res)
+                            update_interval = int(getattr(col_settings, "sdf_dynamic_update_interval", 1))
+                            sim.setup_dynamic_bone_sdf(
+                                bake_res.width,
+                                bake_res.height,
+                                bake_res.depth,
+                                bake_res.res,
+                                bake_res.bone_infos,
+                                dyn_data["rest_verts"],
+                                dyn_data["bone_indices"],
+                                dyn_data["bone_weights"],
+                                dyn_data["tri_sources"],
+                                dyn_data["tri_weights"],
+                                dyn_data["bone_bind_inv_matrices"],
+                                update_interval,
+                            )
+                            _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res, 'DYNAMIC_GPU')
+                            logger.info(f"[Collider Sync] フルGPU動的SDFコライダーを初期化しました (interval={update_interval})")
+                        else:
+                            sim.set_bone_sdf_colliders(
+                                bake_res.width,
+                                bake_res.height,
+                                bake_res.depth,
+                                bake_res.texture_bytes,
+                                bake_res.bone_infos,
+                            )
+                            _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res, 'STATIC')
                     else:
                         bake_res = None
                 else:
-                    _, bake_res = _bone_sdf_cache[sim_id]
+                    cache_entry = _bone_sdf_cache[sim_id]
+                    bake_res = cache_entry[1]
+
+                # DYNAMIC_GPU の場合はGPU側でメッシュ変形に追従するため、関節メッシュハイブリッドの重いCPU to_mesh()評価はスキップ
+                if update_mode == 'DYNAMIC_GPU':
+                    continue
 
                 # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（動的アクティブ化対応）
                 if bake_res and getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
@@ -260,7 +292,9 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
 
     # 毎フレームのボーン変換行列更新 (BONE_SDF)
     if sim_id in _bone_sdf_cache:
-        arm_obj, bake_res = _bone_sdf_cache[sim_id]
+        cache_entry = _bone_sdf_cache[sim_id]
+        arm_obj = cache_entry[0]
+        bake_res = cache_entry[1]
         if arm_obj and getattr(arm_obj, "pose", None):
             eval_arm = arm_obj.evaluated_get(depsgraph) if depsgraph else arm_obj
             mat_arm_world = np.array(eval_arm.matrix_world, dtype=np.float32)

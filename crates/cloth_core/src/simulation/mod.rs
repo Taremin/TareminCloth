@@ -15,8 +15,23 @@ use crate::mesh::{
     GpuPinConstraint, GpuSewingConstraint, GpuVertex, SelfCollisionParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
-use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, PinParams};
+use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
+use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
+
+/// 動的ボーンSDF（GPU LBS + インメモリSDF更新）の初期設定データ
+#[derive(Clone, Debug)]
+pub struct DynamicBoneSdfSetup {
+    pub rest_verts: Vec<GpuSkinningVertex>,
+    pub tri_sources: Vec<GpuBoneTriangleSource>,
+    pub bone_bind_inv_matrices: Vec<[[f32; 4]; 4]>,
+    pub bake_params: Vec<GpuBakeParams>,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub res: u32,
+    pub bone_infos: Vec<GpuBoneInfo>,
+}
 
 pub struct GpuClothSimulator {
     pub context: Arc<GpuContext>,
@@ -100,6 +115,28 @@ pub struct GpuClothSimulator {
     pub(crate) bone_sdf_sampler: wgpu::Sampler,
     pub(crate) bone_info_buffer: wgpu::Buffer,
     pub(crate) bone_transform_buffer: wgpu::Buffer,
+
+    // 動的ボーンSDF (GPU LBS + インメモリSDF更新) 用
+    pub enable_dynamic_bone_sdf: bool,
+    pub dynamic_sdf_update_interval: u32,
+    pub(crate) dynamic_sdf_frame_counter: u32,
+    pub(crate) dynamic_sdf_setup: Option<DynamicBoneSdfSetup>,
+
+    pub(crate) rest_vertices_buffer: Option<wgpu::Buffer>,
+    pub(crate) bone_skin_matrices_buffer: Option<wgpu::Buffer>,
+    pub(crate) skinned_positions_buffer: Option<wgpu::Buffer>,
+    pub(crate) tri_sources_buffer: Option<wgpu::Buffer>,
+    pub(crate) dynamic_bake_triangles_buffer: Option<wgpu::Buffer>,
+    pub(crate) dynamic_bake_params_buffer: Option<wgpu::Buffer>,
+    pub(crate) dynamic_sdf_output_buffer: Option<wgpu::Buffer>,
+    pub(crate) bone_inv_matrices_buffer: Option<wgpu::Buffer>,
+
+    pub(crate) skinning_pipeline: Option<wgpu::ComputePipeline>,
+    pub(crate) skinning_bind_group: Option<wgpu::BindGroup>,
+    pub(crate) prep_triangles_pipeline: Option<wgpu::ComputePipeline>,
+    pub(crate) prep_triangles_bind_group: Option<wgpu::BindGroup>,
+    pub(crate) dynamic_bake_pipeline: Option<wgpu::ComputePipeline>,
+    pub(crate) dynamic_bake_bind_group: Option<wgpu::BindGroup>,
 
     // 自己・レイヤー衝突 & 貫通解消 (Untangling) 用
     pub(crate) spatial_hash: GpuSpatialHash,
@@ -244,6 +281,24 @@ impl GpuClothSimulator {
             bone_sdf_sampler: res.bone_sdf_sampler,
             bone_info_buffer: res.bone_info_buffer,
             bone_transform_buffer: res.bone_transform_buffer,
+            enable_dynamic_bone_sdf: false,
+            dynamic_sdf_update_interval: 1,
+            dynamic_sdf_frame_counter: 0,
+            dynamic_sdf_setup: None,
+            rest_vertices_buffer: None,
+            bone_skin_matrices_buffer: None,
+            skinned_positions_buffer: None,
+            tri_sources_buffer: None,
+            dynamic_bake_triangles_buffer: None,
+            dynamic_bake_params_buffer: None,
+            dynamic_sdf_output_buffer: None,
+            bone_inv_matrices_buffer: None,
+            skinning_pipeline: None,
+            skinning_bind_group: None,
+            prep_triangles_pipeline: None,
+            prep_triangles_bind_group: None,
+            dynamic_bake_pipeline: None,
+            dynamic_bake_bind_group: None,
             spatial_hash: res.spatial_hash,
             self_collision_pipeline: res.self_collision_pipeline,
             self_collision_bind_group: res.self_collision_bind_group,
@@ -653,7 +708,386 @@ impl GpuClothSimulator {
         self.bone_infos.clear();
         self.bone_transforms.clear();
         self.enable_bone_sdf = false;
+        self.enable_dynamic_bone_sdf = false;
+        self.dynamic_sdf_setup = None;
         self.upload_colliders();
+    }
+
+    /// 動的ボーンSDFの有効/無効を切り替え
+    pub fn set_dynamic_bone_sdf_enabled(&mut self, enabled: bool) {
+        self.enable_dynamic_bone_sdf = enabled && self.dynamic_sdf_setup.is_some();
+    }
+
+    /// 動的ボーンSDFの更新間隔（フレーム数）を設定
+    pub fn set_dynamic_bone_sdf_update_interval(&mut self, interval: u32) {
+        self.dynamic_sdf_update_interval = interval.max(1);
+    }
+
+    /// 動的ボーンSDF（GPU LBS + インメモリSDF更新）パイプラインのセットアップ
+    pub fn setup_dynamic_bone_sdf(&mut self, setup: DynamicBoneSdfSetup) {
+        let num_verts = setup.rest_verts.len();
+        let num_tris = setup.tri_sources.len();
+        let num_bones = setup.bone_bind_inv_matrices.len();
+
+        if num_verts == 0 || num_tris == 0 || num_bones == 0 {
+            return;
+        }
+
+        // 1. 3Dテクスチャを setup.width, setup.height, setup.depth で作成
+        self.bone_sdf_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TareminCloth Dynamic Bone SDF 3D Texture"),
+            size: wgpu::Extent3d {
+                width: setup.width,
+                height: setup.height,
+                depth_or_array_layers: setup.depth,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.bone_sdf_texture_view = self.bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 2. ボーン静的情報をセット
+        self.bone_infos = setup.bone_infos.clone();
+        if !self.bone_infos.is_empty() {
+            self.context.queue.write_buffer(&self.bone_info_buffer, 0, bytemuck::cast_slice(&self.bone_infos));
+        }
+        self.enable_bone_sdf = !self.bone_infos.is_empty();
+        self.recreate_collider_bind_group();
+        self.upload_colliders();
+
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+
+        // 3. スキニング用バッファ
+        let rest_verts_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Rest Vertices"),
+            size: (std::mem::size_of::<GpuSkinningVertex>() * num_verts) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&rest_verts_buf, 0, bytemuck::cast_slice(&setup.rest_verts));
+
+        let bone_skin_mats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Bone Skin Matrices"),
+            size: (std::mem::size_of::<[[f32; 4]; 4]>() * num_bones) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let skinned_pos_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Skinned Positions"),
+            size: (std::mem::size_of::<[f32; 4]>() * num_verts) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        // 4. 三角形準備用バッファ
+        let bone_inv_mats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Bone Inv Matrices"),
+            size: (std::mem::size_of::<[[f32; 4]; 4]>() * num_bones) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let tri_sources_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Triangle Sources"),
+            size: (std::mem::size_of::<GpuBoneTriangleSource>() * num_tris) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&tri_sources_buf, 0, bytemuck::cast_slice(&setup.tri_sources));
+
+        let dynamic_bake_tris_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Bake Triangles"),
+            size: (std::mem::size_of::<GpuBakeTriangle>() * num_tris) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        // 5. ベイク用バッファ
+        let bytes_per_pixel = 4u32;
+        let bytes_per_row = setup.width * bytes_per_pixel;
+        let aligned_bytes_per_row = (bytes_per_row + 255) & !255;
+        let row_pitch = aligned_bytes_per_row / bytes_per_pixel;
+
+        let mut aligned_params = setup.bake_params.clone();
+        for p in &mut aligned_params {
+            p.row_pitch = row_pitch;
+        }
+
+        let bake_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Bake Params"),
+            size: (std::mem::size_of::<GpuBakeParams>() * aligned_params.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&bake_params_buf, 0, bytemuck::cast_slice(&aligned_params));
+
+        let total_output_bytes = (aligned_bytes_per_row * setup.height * setup.depth) as u64;
+        let sdf_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dynamic SDF Output Voxels Buffer"),
+            size: total_output_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        // 6. シェーダーモジュール作成
+        let skinning_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Dynamic Skinning Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/skinning.wgsl").into()),
+        });
+        let prep_triangles_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Dynamic Prep Triangles Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/prep_bone_triangles.wgsl").into()),
+        });
+        let dynamic_bake_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Dynamic SDF Bake Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/bake_sdf.wgsl").into()),
+        });
+
+        // 7. パイプライン作成
+        let storage_bgl_entry = |binding: u32, read_only: bool| -> wgpu::BindGroupLayoutEntry {
+            wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        };
+
+        // (A) スキニング
+        let skinning_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Dynamic Skinning BGL"),
+            entries: &[
+                storage_bgl_entry(0, true),
+                storage_bgl_entry(1, true),
+                storage_bgl_entry(2, false),
+            ],
+        });
+        let skinning_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Dynamic Skinning Pipeline Layout"),
+            bind_group_layouts: &[&skinning_bgl],
+            push_constant_ranges: &[],
+        });
+        let skinning_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Dynamic Skinning Pipeline"),
+            layout: Some(&skinning_pl),
+            module: &skinning_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let skinning_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Dynamic Skinning BindGroup"),
+            layout: &skinning_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: rest_verts_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: bone_skin_mats_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: skinned_pos_buf.as_entire_binding() },
+            ],
+        });
+
+        // (B) 三角形準備
+        let prep_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Dynamic Prep Triangles BGL"),
+            entries: &[
+                storage_bgl_entry(0, true),
+                storage_bgl_entry(1, true),
+                storage_bgl_entry(2, true),
+                storage_bgl_entry(3, false),
+            ],
+        });
+        let prep_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Dynamic Prep Triangles Pipeline Layout"),
+            bind_group_layouts: &[&prep_bgl],
+            push_constant_ranges: &[],
+        });
+        let prep_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Dynamic Prep Triangles Pipeline"),
+            layout: Some(&prep_pl),
+            module: &prep_triangles_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let prep_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Dynamic Prep Triangles BindGroup"),
+            layout: &prep_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: skinned_pos_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: bone_inv_mats_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tri_sources_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: dynamic_bake_tris_buf.as_entire_binding() },
+            ],
+        });
+
+        // (C) ベイク
+        let bake_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Dynamic SDF Bake BGL"),
+            entries: &[
+                storage_bgl_entry(0, true),
+                storage_bgl_entry(1, true),
+                storage_bgl_entry(2, false),
+            ],
+        });
+        let bake_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Dynamic SDF Bake Pipeline Layout"),
+            bind_group_layouts: &[&bake_bgl],
+            push_constant_ranges: &[],
+        });
+        let bake_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Dynamic SDF Bake Pipeline"),
+            layout: Some(&bake_pl),
+            module: &dynamic_bake_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bake_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Dynamic SDF Bake BindGroup"),
+            layout: &bake_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: bake_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: dynamic_bake_tris_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: sdf_output_buf.as_entire_binding() },
+            ],
+        });
+
+        // 8. 内部状態の保存
+        self.rest_vertices_buffer = Some(rest_verts_buf);
+        self.bone_skin_matrices_buffer = Some(bone_skin_mats_buf);
+        self.skinned_positions_buffer = Some(skinned_pos_buf);
+        self.tri_sources_buffer = Some(tri_sources_buf);
+        self.dynamic_bake_triangles_buffer = Some(dynamic_bake_tris_buf);
+        self.dynamic_bake_params_buffer = Some(bake_params_buf);
+        self.dynamic_sdf_output_buffer = Some(sdf_output_buf);
+        self.bone_inv_matrices_buffer = Some(bone_inv_mats_buf);
+
+        self.skinning_pipeline = Some(skinning_pipeline);
+        self.skinning_bind_group = Some(skinning_bg);
+        self.prep_triangles_pipeline = Some(prep_pipeline);
+        self.prep_triangles_bind_group = Some(prep_bg);
+        self.dynamic_bake_pipeline = Some(bake_pipeline);
+        self.dynamic_bake_bind_group = Some(bake_bg);
+
+        self.dynamic_sdf_setup = Some(setup);
+        self.enable_dynamic_bone_sdf = true;
+    }
+
+    /// 毎フレームの動的SDF更新ディスパッチ（GPUインメモリ完結）
+    pub fn dispatch_dynamic_bone_sdf_update(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.enable_dynamic_bone_sdf {
+            return;
+        }
+
+        let setup = match self.dynamic_sdf_setup.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+
+        self.dynamic_sdf_frame_counter = self.dynamic_sdf_frame_counter.wrapping_add(1);
+        if (self.dynamic_sdf_frame_counter - 1) % self.dynamic_sdf_update_interval != 0 {
+            return;
+        }
+
+        let num_bones = setup.bone_bind_inv_matrices.len();
+        if self.bone_transforms.len() < num_bones {
+            return;
+        }
+
+        // 1. 各ボーンの変形行列 S = M_curr * B_bind を計算してアップロード
+        // self.bone_transforms[b].world_matrix は WGSL 用に Column-Major で格納されているため、
+        // Row-Major に転置してから B_bind (Row-Major) と積を取り、再度 Column-Major に転置して GPU へ渡す
+        let mut skin_mats = Vec::with_capacity(num_bones);
+        let mut inv_mats = Vec::with_capacity(num_bones);
+        for b in 0..num_bones {
+            let w_row = mat4_transpose(&self.bone_transforms[b].world_matrix);
+            let b_bind = &setup.bone_bind_inv_matrices[b];
+            let s_row = mat4_mul(&w_row, b_bind);
+            skin_mats.push(mat4_transpose(&s_row));
+            inv_mats.push(self.bone_transforms[b].inv_world_matrix);
+        }
+
+        if let Some(ref buf) = self.bone_skin_matrices_buffer {
+            self.context.queue.write_buffer(buf, 0, bytemuck::cast_slice(&skin_mats));
+        }
+        if let Some(ref buf) = self.bone_inv_matrices_buffer {
+            self.context.queue.write_buffer(buf, 0, bytemuck::cast_slice(&inv_mats));
+        }
+
+        // 2. Pass 1: LBSスキニング
+        let num_verts = setup.rest_verts.len() as u32;
+        if let (Some(ref pipeline), Some(ref bg)) = (&self.skinning_pipeline, &self.skinning_bind_group) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Dynamic SDF Skinning Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups((num_verts + 63) / 64, 1, 1);
+        }
+
+        // 3. Pass 2: ボーン局所三角形準備
+        let num_tris = setup.tri_sources.len() as u32;
+        if let (Some(ref pipeline), Some(ref bg)) = (&self.prep_triangles_pipeline, &self.prep_triangles_bind_group) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Dynamic SDF Prep Triangles Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups((num_tris + 63) / 64, 1, 1);
+        }
+
+        // 4. Pass 3: SDFベイク
+        if let (Some(ref pipeline), Some(ref bg)) = (&self.dynamic_bake_pipeline, &self.dynamic_bake_bind_group) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Dynamic SDF Bake Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            let wg_x = (setup.res + 3) / 4;
+            let wg_y = (setup.res + 3) / 4;
+            let wg_z = (setup.res * num_bones as u32 + 3) / 4;
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+        }
+
+        // 5. Pass 4: 3D テクスチャへの直接GPU内コピー
+        let bytes_per_pixel = 4u32;
+        let bytes_per_row = setup.width * bytes_per_pixel;
+        let aligned_bytes_per_row = (bytes_per_row + 255) & !255;
+        if let Some(ref out_buf) = self.dynamic_sdf_output_buffer {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: out_buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(aligned_bytes_per_row),
+                        rows_per_image: Some(setup.height),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.bone_sdf_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: setup.width,
+                    height: setup.height,
+                    depth_or_array_layers: setup.depth,
+                },
+            );
+        }
     }
 
     fn recreate_collider_bind_group(&mut self) {
@@ -892,4 +1326,29 @@ impl GpuClothSimulator {
     pub fn set_workgroup_size(&mut self, wg_size: u32) {
         self.workgroup_size = wg_size;
     }
+}
+
+#[inline]
+fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            out[i][j] = a[i][0] * b[0][j]
+                + a[i][1] * b[1][j]
+                + a[i][2] * b[2][j]
+                + a[i][3] * b[3][j];
+        }
+    }
+    out
+}
+
+#[inline]
+fn mat4_transpose(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            out[i][j] = m[j][i];
+        }
+    }
+    out
 }

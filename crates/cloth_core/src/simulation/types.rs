@@ -61,3 +61,29 @@ pub struct GpuBoneTransform {
     pub inv_world_matrix: [[f32; 4]; 4],
 }
 
+/// GPU LBS スキニング用の静止頂点データ（サイズ: 64バイト）
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuSkinningVertex {
+    pub pos: [f32; 3],
+    pub _pad0: f32,
+    pub normal: [f32; 3],
+    pub _pad1: f32,
+    pub bone_indices: [u32; 4],
+    pub bone_weights: [f32; 4],
+}
+
+/// 動的SDFベイク用のボーン三角形ソース（サイズ: 32バイト）
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuBoneTriangleSource {
+    pub i0: u32,
+    pub i1: u32,
+    pub i2: u32,
+    pub bone_idx: u32,
+    pub w0: f32,
+    pub w1: f32,
+    pub w2: f32,
+    pub _pad: f32,
+}
+

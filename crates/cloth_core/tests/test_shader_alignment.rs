@@ -6,8 +6,10 @@ use cloth_core::mesh::{
     GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
 };
 use cloth_core::simulation::types::{
-    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, NormalParams, PinParams,
+    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
+    GpuSkinningVertex, NormalParams, PinParams,
 };
+use cloth_core::sdf_baker::GpuBakeParams;
 use cloth_core::spatial_hash::SpatialHashParams;
 
 use naga::front::wgsl;
@@ -77,6 +79,9 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("spatial_hash_build.wgsl", include_str!("../src/shaders/spatial_hash_build.wgsl")),
     ("compute_normals.wgsl", include_str!("../src/shaders/compute_normals.wgsl")),
     ("extract_positions.wgsl", include_str!("../src/shaders/extract_positions.wgsl")),
+    ("bake_sdf.wgsl", include_str!("../src/shaders/bake_sdf.wgsl")),
+    ("skinning.wgsl", include_str!("../src/shaders/skinning.wgsl")),
+    ("prep_bone_triangles.wgsl", include_str!("../src/shaders/prep_bone_triangles.wgsl")),
 ];
 
 macro_rules! check_member {
@@ -300,6 +305,38 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_struct_size!(filename, s, GpuStarPair);
             check_member!(filename, s, GpuStarPair, v0);
             check_member!(filename, s, GpuStarPair, v1);
+        }
+
+        if let Some(s) = structs.get("GpuSkinningVertex") {
+            check_struct_size!(filename, s, GpuSkinningVertex);
+            check_member!(filename, s, GpuSkinningVertex, pos);
+            check_member!(filename, s, GpuSkinningVertex, normal);
+            check_member!(filename, s, GpuSkinningVertex, bone_indices);
+            check_member!(filename, s, GpuSkinningVertex, bone_weights);
+        }
+
+        if let Some(s) = structs.get("GpuBoneTriangleSource") {
+            check_struct_size!(filename, s, GpuBoneTriangleSource);
+            check_member!(filename, s, GpuBoneTriangleSource, i0);
+            check_member!(filename, s, GpuBoneTriangleSource, i1);
+            check_member!(filename, s, GpuBoneTriangleSource, i2);
+            check_member!(filename, s, GpuBoneTriangleSource, bone_idx);
+        }
+
+        if let Some(s) = structs.get("GpuBakeParams") {
+            check_struct_size!(filename, s, GpuBakeParams);
+            check_member!(filename, s, GpuBakeParams, local_min);
+            check_member!(filename, s, GpuBakeParams, tri_start);
+            check_member!(filename, s, GpuBakeParams, local_max);
+            check_member!(filename, s, GpuBakeParams, tri_count);
+            check_member!(filename, s, GpuBakeParams, tile_col);
+            check_member!(filename, s, GpuBakeParams, tile_row);
+            check_member!(filename, s, GpuBakeParams, tile_layer);
+            check_member!(filename, s, GpuBakeParams, res);
+            check_member!(filename, s, GpuBakeParams, total_width);
+            check_member!(filename, s, GpuBakeParams, total_height);
+            check_member!(filename, s, GpuBakeParams, total_depth);
+            check_member!(filename, s, GpuBakeParams, row_pitch);
         }
     }
 }

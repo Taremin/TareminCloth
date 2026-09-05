@@ -234,6 +234,7 @@ impl GpuClothSimulator {
             },
         );
 
+        self.dispatch_dynamic_bone_sdf_update(&mut encoder);
         self.encode_simulation_steps(&mut encoder, dt, substeps);
         self.context.queue.submit(Some(encoder.finish()));
 

@@ -718,6 +718,22 @@ class TareminColliderSettings(PropertyGroup):
         max=0.5,
         unit='LENGTH',
     )
+    sdf_update_mode: EnumProperty(
+        name="SDF Update Mode",
+        description="ボーンSDFの更新方式",
+        items=[
+            ('STATIC', "Static (Fastest)", "静止ポーズで事前ベイクした剛体SDFを使用（最高速・通常推奨）"),
+            ('DYNAMIC_GPU', "Dynamic Full GPU", "GPUスキニング(LBS)とGPU内SDF更新によりアニメーション変形に毎フレーム追従"),
+        ],
+        default='STATIC',
+    )
+    sdf_dynamic_update_interval: IntProperty(
+        name="Update Interval",
+        description="動的SDFの再計算間隔（フレーム数）。1で毎フレーム、2で2フレームごと（負荷軽減）",
+        default=1,
+        min=1,
+        max=10,
+    )
     sdf_cache_enabled: BoolProperty(
         name="Cache SDF",
         description="SDFベイク結果をディスクキャッシュし、次回以降即時ロードする",

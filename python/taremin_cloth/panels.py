@@ -533,6 +533,9 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 b_col.prop(col_settings, "sdf_margin")
                 b_col.prop(col_settings, "weight_threshold")
                 b_col.prop(col_settings, "blend_k")
+                b_col.prop(col_settings, "sdf_update_mode")
+                if col_settings.sdf_update_mode == 'DYNAMIC_GPU':
+                    b_col.prop(col_settings, "sdf_dynamic_update_interval")
                 b_col.prop(col_settings, "thickness")
 
                 # ハイブリッドコライダー（関節部メッシュ補完）

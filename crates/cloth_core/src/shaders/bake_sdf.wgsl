@@ -12,7 +12,7 @@ struct BakeParams {
     total_width: u32,
     total_height: u32,
     total_depth: u32,
-    _pad: u32,
+    row_pitch: u32,
 }
 
 struct BakeTriangle {
@@ -26,7 +26,7 @@ struct BakeTriangle {
     _pad: f32,
 }
 
-struct ClosestResult {
+struct BakeClosestResult {
     closest_pt: vec3<f32>,
     barycentric: vec3<f32>,
 }
@@ -36,7 +36,7 @@ struct ClosestResult {
 @group(0) @binding(2) var<storage, read_write> output_voxels: array<u32>;
 
 // Christer Ericson「Real-Time Collision Detection」に基づく点-三角形最短距離および重心座標計算
-fn closest_point_on_triangle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> ClosestResult {
+fn closest_point_on_triangle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> BakeClosestResult {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
@@ -44,39 +44,39 @@ fn closest_point_on_triangle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f
     let d1 = dot(ab, ap);
     let d2 = dot(ac, ap);
     if (d1 <= 0.0 && d2 <= 0.0) {
-        return ClosestResult(a, vec3<f32>(1.0, 0.0, 0.0)); // A頂点領域
+        return BakeClosestResult(a, vec3<f32>(1.0, 0.0, 0.0)); // A頂点領域
     }
 
     let bp = p - b;
     let d3 = dot(ab, bp);
     let d4 = dot(ac, bp);
     if (d3 >= 0.0 && d4 <= d3) {
-        return ClosestResult(b, vec3<f32>(0.0, 1.0, 0.0)); // B頂点領域
+        return BakeClosestResult(b, vec3<f32>(0.0, 1.0, 0.0)); // B頂点領域
     }
 
     let vc = d1 * d4 - d3 * d2;
     if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
         let v = d1 / (d1 - d3);
-        return ClosestResult(a + v * ab, vec3<f32>(1.0 - v, v, 0.0)); // AB辺領域
+        return BakeClosestResult(a + v * ab, vec3<f32>(1.0 - v, v, 0.0)); // AB辺領域
     }
 
     let cp = p - c;
     let d5 = dot(ab, cp);
     let d6 = dot(ac, cp);
     if (d6 >= 0.0 && d5 <= d6) {
-        return ClosestResult(c, vec3<f32>(0.0, 0.0, 1.0)); // C頂点領域
+        return BakeClosestResult(c, vec3<f32>(0.0, 0.0, 1.0)); // C頂点領域
     }
 
     let vb = d5 * d2 - d1 * d6;
     if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
         let w = d2 / (d2 - d6);
-        return ClosestResult(a + w * ac, vec3<f32>(1.0 - w, 0.0, w)); // AC辺領域
+        return BakeClosestResult(a + w * ac, vec3<f32>(1.0 - w, 0.0, w)); // AC辺領域
     }
 
     let va = d3 * d6 - d5 * d4;
     if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return ClosestResult(b + w * (c - b), vec3<f32>(0.0, 1.0 - w, w)); // BC辺領域
+        return BakeClosestResult(b + w * (c - b), vec3<f32>(0.0, 1.0 - w, w)); // BC辺領域
     }
 
     // 三角形面領域（内部）
@@ -84,7 +84,7 @@ fn closest_point_on_triangle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f
     let v = vb * denom;
     let w = vc * denom;
     let u = 1.0 - v - w;
-    return ClosestResult(a + ab * v + ac * w, vec3<f32>(u, v, w));
+    return BakeClosestResult(a + ab * v + ac * w, vec3<f32>(u, v, w));
 }
 
 @compute @workgroup_size(4, 4, 4)
@@ -140,7 +140,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let gz = params.tile_layer * res + vz;
 
     // Z -> Y -> X 順（C-contiguous: [depth, height, width]）
-    let flat_idx = (gz * params.total_height + gy) * params.total_width + gx;
+    let pitch = select(params.total_width, params.row_pitch, params.row_pitch > 0u);
+    let flat_idx = (gz * params.total_height + gy) * pitch + gx;
 
     // Rg16Float (vec2<f32> -> 2 x f16) を 32bit u32 にパックして格納
     output_voxels[flat_idx] = pack2x16float(vec2<f32>(best_signed_dist, best_alpha));
