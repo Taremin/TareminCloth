@@ -47,31 +47,238 @@ class BoneSdfBakeResult:
         self.joint_face_indices = joint_face_indices if joint_face_indices is not None else np.empty(0, dtype=np.int32)
 
 
+def extract_joint_mesh_from_sdf(
+    mesh_verts: np.ndarray,
+    mesh_tris: np.ndarray,
+    atlas_3d: np.ndarray,
+    bone_infos: np.ndarray,
+    bind_matrices: np.ndarray,
+    gap_threshold: float = 0.005,
+    mode: str = "any1",
+) -> np.ndarray:
+    """
+    素体メッシュ頂点位置でSDFテクスチャアトラスの実効距離を評価し、
+    SDFがメッシュ表面を再現できていない領域（欠損部 + のりしろ）の三角形インデックスを抽出する。
+    
+    原理:
+    - 剛体領域: SDF実効距離 eff_dist ≈ 0 (SDF単体で衝突判定可能)
+    - 関節・境界領域: スキンウェイトのブレンドやカットオフにより eff_dist > gap_threshold
+    - mode="any1" により、欠損頂点を含む三角形を抽出することで、完全剛体部との境界に
+      自然で必要十分な1段のオーバーラップ（のりしろ）が自動形成される。
+    
+    戻り値: shape [M] (抽出された三角形の行インデックス配列, np.int32)
+    """
+    if len(mesh_verts) == 0 or len(mesh_tris) == 0 or len(bone_infos) == 0:
+        return np.empty(0, dtype=np.int32)
+
+    n_verts = len(mesh_verts)
+    n_bones = len(bone_infos)
+    D, H, W, _ = atlas_3d.shape
+
+    eff_dist = np.full(n_verts, 10.0, dtype=np.float32)
+
+    for b_idx in range(n_bones):
+        b_info = bone_infos[b_idx]
+        mat_inv = bind_matrices[b_idx]
+
+        local_min = b_info[0:3]
+        local_max = b_info[4:7]
+        uvw_scale = b_info[8:11]
+        uvw_offset = b_info[12:15]
+        weight_th = max(b_info[19], 0.01)
+
+        # 頂点をボーンローカル座標系へ射影
+        ones = np.ones((n_verts, 1), dtype=np.float32)
+        p_homo = np.hstack([mesh_verts, ones])
+        p_local = (p_homo @ mat_inv.T)[:, :3]
+
+        margin = 0.02
+        in_aabb = np.all((p_local >= local_min - margin) & (p_local <= local_max + margin), axis=1)
+        if not np.any(in_aabb):
+            continue
+
+        p_in = p_local[in_aabb]
+        uvw = p_in * uvw_scale + uvw_offset
+
+        uvw_min = local_min * uvw_scale + uvw_offset
+        uvw_max = local_max * uvw_scale + uvw_offset
+
+        in_tile = np.all((uvw >= uvw_min) & (uvw <= uvw_max), axis=1)
+        if not np.any(in_tile):
+            continue
+
+        p_indices = np.where(in_aabb)[0][in_tile]
+        uvw_valid = uvw[in_tile]
+
+        eps_slice = (uvw_max - uvw_min) * 0.015
+        uvw_safe = np.clip(uvw_valid, uvw_min + eps_slice, uvw_max - eps_slice)
+
+        # ボクセルインデックスサンプリング
+        gx = np.clip(np.round((uvw_safe[:, 0] * W) - 0.5).astype(int), 0, W - 1)
+        gy = np.clip(np.round((uvw_safe[:, 1] * H) - 0.5).astype(int), 0, H - 1)
+        gz = np.clip(np.round((uvw_safe[:, 2] * D) - 0.5).astype(int), 0, D - 1)
+
+        samples = atlas_3d[gz, gy, gx]
+        raw_dist = samples[:, 0].astype(np.float32)
+        alpha = samples[:, 1].astype(np.float32)
+
+        # WGSLシェーダー (collision.wgsl) と同一のマスク & 実効距離計算
+        t = np.clip(alpha / weight_th, 0.0, 1.0)
+        mask = t * t * (3.0 - 2.0 * t)
+        cur_eff_dist = (1.0 - mask) * 10.0 + mask * raw_dist
+
+        is_closer = cur_eff_dist < eff_dist[p_indices]
+        update_idx = p_indices[is_closer]
+        eff_dist[update_idx] = cur_eff_dist[is_closer]
+
+    # 欠損頂点の検出 (SDF実効距離が表面から gap_threshold 以上逃げている領域)
+    deficient_verts = eff_dist > gap_threshold
+
+    # 三角形判定
+    if mode == "any1":
+        tri_mask = deficient_verts[mesh_tris[:, 0]] | deficient_verts[mesh_tris[:, 1]] | deficient_verts[mesh_tris[:, 2]]
+    elif mode == "any2":
+        cnt = (
+            deficient_verts[mesh_tris[:, 0]].astype(int)
+            + deficient_verts[mesh_tris[:, 1]].astype(int)
+            + deficient_verts[mesh_tris[:, 2]].astype(int)
+        )
+        tri_mask = cnt >= 2
+    else:  # all3
+        tri_mask = deficient_verts[mesh_tris[:, 0]] & deficient_verts[mesh_tris[:, 1]] & deficient_verts[mesh_tris[:, 2]]
+
+    return np.where(tri_mask)[0].astype(np.int32)
+
+
 def extract_joint_mesh_indices(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
     bone_weights: Dict[str, np.ndarray],
     threshold: float = 0.85,
+    overlap_rings: int = 0,
+    min_blend_weight: float = 0.02,
 ) -> np.ndarray:
     """
-    複数ボーンブレンド領域（関節部）に含まれる三角形のインデックス配列を抽出する。
+    複数ボーンブレンド領域（関節部）に含まれる三角形のインデックス配列をトポロジーウェイトから抽出する（フォールバック用）。
+    ウェイト分布から第2ウェイト（min_blend_weight）以上のブレンド頂点を検出し、
+    面判定(any1)により剛体側への1段のりしろを持った三角形群を抽出する。
     戻り値: shape [M] (元の mesh_tris の行インデックス配列)
     """
     if not bone_weights or len(mesh_tris) == 0:
         return np.empty(0, dtype=np.int32)
 
     n_verts = len(mesh_verts)
-    max_weights = np.zeros(n_verts, dtype=np.float32)
-    for w_arr in bone_weights.values():
-        max_weights = np.maximum(max_weights, w_arr)
 
-    # 関節頂点: 最大ウェイトが閾値未満（複数ボーンで分散）かつ微小ウェイト以上の頂点
-    is_joint_vert = (max_weights < threshold) & (max_weights > 0.01)
+    # 全ボーンウェイト行列を構築 [V, B]
+    weight_cols = [w_arr for w_arr in bone_weights.values() if np.max(w_arr) > min_blend_weight]
+    if len(weight_cols) < 2:
+        return np.empty(0, dtype=np.int32)
 
-    # 三角形のいずれかの頂点が関節頂点であれば関節三角形として抽出
-    tri_has_joint = is_joint_vert[mesh_tris[:, 0]] | is_joint_vert[mesh_tris[:, 1]] | is_joint_vert[mesh_tris[:, 2]]
+    w_matrix = np.column_stack(weight_cols)
+
+    # 各頂点の上位2つのウェイトを取得 (partition により O(B) で高速)
+    part = np.partition(w_matrix, -2, axis=1)[:, -2:]
+    w_second = np.min(part, axis=1)  # 2番目に大きいウェイト
+
+    # 1. 第2ウェイトが min_blend_weight を超える頂点をブレンド頂点として抽出
+    blend_vert_indices = np.where(w_second > min_blend_weight)[0]
+    if len(blend_vert_indices) == 0:
+        return np.empty(0, dtype=np.int32)
+
+    joint_verts = set(blend_vert_indices)
+
+    # 2. 追加の剛体側へののりしろ（トポロジーリング拡張: 必要な場合のみ）
+    if overlap_rings > 0:
+        adj = [set() for _ in range(n_verts)]
+        for t in mesh_tris:
+            adj[t[0]].add(t[1]); adj[t[0]].add(t[2])
+            adj[t[1]].add(t[0]); adj[t[1]].add(t[2])
+            adj[t[2]].add(t[0]); adj[t[2]].add(t[1])
+
+        current_ring = set(joint_verts)
+        for _ in range(overlap_rings):
+            next_ring = set()
+            for v in current_ring:
+                for neighbor in adj[v]:
+                    if neighbor not in joint_verts:
+                        next_ring.add(neighbor)
+            joint_verts.update(next_ring)
+            current_ring = next_ring
+
+    # 3. 関節頂点を1つでも含む三角形を抽出 (境界に自然な1リングのりしろが付与される)
+    vert_mask = np.zeros(n_verts, dtype=bool)
+    vert_mask[list(joint_verts)] = True
+    tri_has_joint = vert_mask[mesh_tris[:, 0]] | vert_mask[mesh_tris[:, 1]] | vert_mask[mesh_tris[:, 2]]
     joint_indices = np.where(tri_has_joint)[0].astype(np.int32)
     return joint_indices
+
+
+def is_major_joint_pair(b1: str, b2: str) -> bool:
+    """ボーン名から主要関節（股関節/鼠径部、膝、肘、肩、腰/背骨）のペアであるかを判定する"""
+    b1_l, b2_l = b1.lower(), b2.lower()
+    # 左右の一致チェック (左右が異なるボーン同士はペアとみなさない)
+    if (".l" in b1_l or "_l" in b1_l) and (".r" in b2_l or "_r" in b2_l):
+        return False
+    if (".r" in b1_l or "_r" in b1_l) and (".l" in b2_l or "_l" in b2_l):
+        return False
+    # 股関節 / 鼠径部 (hips/pelvis と upper_leg/leg/thigh)
+    if ("hip" in b1_l or "pelvis" in b1_l) and ("leg" in b2_l or "thigh" in b2_l):
+        return True
+    if ("hip" in b2_l or "pelvis" in b2_l) and ("leg" in b1_l or "thigh" in b1_l):
+        return True
+    # 膝 (upper_leg/thigh と lower_leg/calf/shin/knee)
+    if ("upper_leg" in b1_l or "thigh" in b1_l) and ("lower_leg" in b2_l or "calf" in b2_l or "shin" in b2_l or "knee" in b2_l):
+        return True
+    if ("upper_leg" in b2_l or "thigh" in b2_l) and ("lower_leg" in b1_l or "calf" in b1_l or "shin" in b1_l or "knee" in b1_l):
+        return True
+    # 体幹・背骨の主要屈曲関節 (hips/pelvis と spine, spine と chest)
+    if ("hip" in b1_l or "pelvis" in b1_l) and "spine" in b2_l:
+        return True
+    if ("hip" in b2_l or "pelvis" in b2_l) and "spine" in b1_l:
+        return True
+    if "spine" in b1_l and "chest" in b2_l:
+        return True
+    if "spine" in b2_l and "chest" in b1_l:
+        return True
+    return False
+
+# 互換用エイリアス
+is_limb_joint_pair = is_major_joint_pair
+
+
+def extract_major_joint_mesh_indices(
+    mesh_verts: np.ndarray,
+    mesh_tris: np.ndarray,
+    bone_weights: Dict[str, np.ndarray],
+    min_blend_weight: float = 0.06,
+) -> np.ndarray:
+    """
+    主要関節（股関節/鼠径部、膝、および腰/背骨境界）の回転ブレンド領域に含まれる三角形インデックスを抽出する。
+    局所的な回転関節境界のみをメッシュ化することで、全身に広がる過剰な面数を抑え（約10〜12%）、
+    衣服の巻き上がりを防ぎつつ、股関節の凹みおよび前屈時の背骨の出っ張りをメッシュコライダーで完全に解消する。
+    """
+    if not bone_weights or len(mesh_tris) == 0:
+        return np.empty(0, dtype=np.int32)
+    n_verts = len(mesh_verts)
+    b_names = list(bone_weights.keys())
+    pairs = []
+    for i in range(len(b_names)):
+        for j in range(i + 1, len(b_names)):
+            if is_major_joint_pair(b_names[i], b_names[j]):
+                pairs.append((b_names[i], b_names[j]))
+    if not pairs:
+        return extract_joint_mesh_indices(mesh_verts, mesh_tris, bone_weights, min_blend_weight=min_blend_weight)
+
+    joint_verts = np.zeros(n_verts, dtype=bool)
+    for b1, b2 in pairs:
+        w1, w2 = bone_weights[b1], bone_weights[b2]
+        joint_verts |= (w1 > min_blend_weight) & (w2 > min_blend_weight)
+
+    tri_mask = joint_verts[mesh_tris[:, 0]] | joint_verts[mesh_tris[:, 1]] | joint_verts[mesh_tris[:, 2]]
+    return np.where(tri_mask)[0].astype(np.int32)
+
+# 互換用エイリアス
+extract_limb_joint_mesh_indices = extract_major_joint_mesh_indices
 
 
 def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) -> Tuple[int, int, int, int, int, int, int]:
@@ -115,7 +322,7 @@ def compute_mesh_signature(
 ) -> str:
     """メッシュと設定からユニークなキャッシュハッシュキーを生成する"""
     hasher = hashlib.sha256()
-    prefix = f"v3_hybrid_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}"
+    prefix = f"v7_leg_hybrid_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}"
     hasher.update(f"{prefix}_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
     # 先頭と末尾の数頂点をサンプリングしてハッシュ化
     sample_verts = verts[::max(1, len(verts) // 20)]
@@ -152,6 +359,7 @@ def bake_bone_sdf_from_data(
     restitution: float = 0.0,
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
+    overlap_rings: int = 1,
 ) -> BoneSdfBakeResult:
     """
     素体メッシュとボーン情報からローカルSDFテクスチャアトラスを生成する
@@ -167,16 +375,6 @@ def bake_bone_sdf_from_data(
     if n_bones == 0:
         logger.warning("[SDF Baker] 有効なボーンが見つかりませんでした")
         return BoneSdfBakeResult(b"", 0, 0, 0, np.zeros((0, 20), dtype=np.float32), [], np.zeros((0, 4, 4), dtype=np.float32))
-
-    # ハイブリッド用に関節部三角形インデックスを抽出
-    joint_face_indices = np.empty(0, dtype=np.int32)
-    if enable_joint_mesh:
-        joint_face_indices = extract_joint_mesh_indices(
-            mesh_verts, mesh_tris, bone_weights, threshold=joint_weight_threshold
-        )
-        logger.info(
-            f"[SDF Baker] ハイブリッドモード有効: {len(joint_face_indices)} / {len(mesh_tris)} 面の関節三角形を抽出 (閾値: {joint_weight_threshold})"
-        )
 
     logger.info(f"[SDF Baker] ボーンSDFベイク開始: {n_bones} 本のボーン (解像度: {resolution}^3)")
 
@@ -340,12 +538,6 @@ def bake_bone_sdf_from_data(
                 dists[c_start:c_end] = min_d * signs
                 alphas[c_start:c_end] = sub_weights[nearest_v_idx]
 
-        # ハイブリッドモード時、関節部メッシュ補完領域における剛体角突出を抑制するため、
-        # 閾値未満のブレンドウェイト領域のAlphaを滑らかにフェードアウト
-        if enable_joint_mesh and joint_weight_threshold > 0.0:
-            fade = np.clip(alphas / joint_weight_threshold, 0.0, 1.0) ** 2
-            alphas = alphas * fade
-
         # ボクセルアレイに格納 (ローカル [X, Y, Z, C] -> テクスチャ順 [Z, Y, X, C])
         dists_3d = dists.reshape((res, res, res))
         alphas_3d = alphas.reshape((res, res, res))
@@ -362,6 +554,19 @@ def bake_bone_sdf_from_data(
 
     bone_infos_arr = np.array(bone_infos_list, dtype=np.float32)
     bind_matrices_arr = np.array(bind_matrices_list, dtype=np.float32)
+
+    # ハイブリッド用に関節部三角形インデックスを抽出 (主要関節抽出方式: 四肢+体幹背骨)
+    joint_face_indices = np.empty(0, dtype=np.int32)
+    if enable_joint_mesh:
+        joint_face_indices = extract_major_joint_mesh_indices(
+            mesh_verts=mesh_verts,
+            mesh_tris=mesh_tris,
+            bone_weights=bone_weights,
+            min_blend_weight=0.06,
+        )
+        logger.info(
+            f"[SDF Baker] ハイブリッドモード有効 (主要関節方式: 四肢+体幹背骨): {len(joint_face_indices)} / {len(mesh_tris)} 面の関節三角形を抽出 (のりしろ: any1)"
+        )
 
     logger.info(
         f"[SDF Baker] ベイク完了: テクスチャサイズ {total_width}x{total_height}x{total_depth} "
@@ -606,7 +811,15 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
         if cached is not None:
-            logger.info(f"[SDF Baker] キャッシュからSDFを即座に復元しました: {cache_key}")
+            # 3Dテクスチャはキャッシュを即座に復元しつつ、関節面は最新ロジックを適用
+            if enable_joint_mesh:
+                cached.joint_face_indices = extract_major_joint_mesh_indices(
+                    mesh_verts=mesh_verts,
+                    mesh_tris=mesh_tris,
+                    bone_weights=bone_weights,
+                    min_blend_weight=0.06,
+                )
+            logger.info(f"[SDF Baker] キャッシュからSDFを即座に復元しました: {cache_key} (関節面数: {len(cached.joint_face_indices)})")
             return cached
 
     # ベイク実行

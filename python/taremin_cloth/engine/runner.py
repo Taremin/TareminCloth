@@ -276,7 +276,7 @@ def cloth_frame_handler(scene):
                 _, deformed = anim_driver.step_collider_animation(col_o, anim_frame)
                 if deformed:
                     any_collider_deformed = True
-            elif c_set.collider_type == 'MESH' and col_o.type == 'MESH':
+            elif col_o.type == 'MESH' and (c_set.collider_type == 'MESH' or (c_set.collider_type == 'BONE_SDF' and getattr(c_set, "enable_joint_mesh", True))):
                 if col_o.find_armature() or (col_o.animation_data and col_o.animation_data.action):
                     any_collider_deformed = True
 

@@ -89,6 +89,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     state_key = tuple(col_state)
     state_changed = force or has_active_anim or (_collider_cache.get(sim_id) != state_key)
 
+    logger.debug(f"[Collider Sync] Frame {getattr(scene, 'frame_current', -1)}: state_changed={state_changed} (force={force}, has_active_anim={has_active_anim})")
     if state_changed:
         _collider_cache[sim_id] = state_key
         sim.clear_colliders()
@@ -155,54 +156,59 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     logger.warning(f"[Collider Sync] '{obj.name}' にArmatureモディファイアがありません。BONE_SDFをスキップします。")
                     continue
 
-                bake_res = get_or_bake_bone_sdf_for_object(obj, col_settings)
-                if bake_res and bake_res.depth > 0:
-                    sim.set_bone_sdf_colliders(
-                        bake_res.width,
-                        bake_res.height,
-                        bake_res.depth,
-                        bake_res.texture_bytes,
-                        bake_res.bone_infos,
-                    )
-                    _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res)
+                if sim_id not in _bone_sdf_cache:
+                    bake_res = get_or_bake_bone_sdf_for_object(obj, col_settings)
+                    if bake_res and bake_res.depth > 0:
+                        sim.set_bone_sdf_colliders(
+                            bake_res.width,
+                            bake_res.height,
+                            bake_res.depth,
+                            bake_res.texture_bytes,
+                            bake_res.bone_infos,
+                        )
+                        _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res)
+                    else:
+                        bake_res = None
+                else:
+                    _, bake_res = _bone_sdf_cache[sim_id]
 
-                    # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加
-                    if getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
-                        eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
-                        mesh = eval_obj.to_mesh() if depsgraph else obj.data
-                        mesh.calc_loop_triangles()
-                        n_verts = len(mesh.vertices)
-                        n_tris = len(mesh.loop_triangles)
+                # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（初回フレーム含む）
+                if bake_res and getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
+                    eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
+                    mesh = eval_obj.to_mesh() if depsgraph else obj.data
+                    mesh.calc_loop_triangles()
+                    n_verts = len(mesh.vertices)
+                    n_tris = len(mesh.loop_triangles)
 
-                        if n_verts > 0 and n_tris > 0:
-                            raw_coords = np.empty(n_verts * 3, dtype=np.float32)
-                            mesh.vertices.foreach_get("co", raw_coords)
-                            v_local = raw_coords.reshape((n_verts, 3))
+                    if n_verts > 0 and n_tris > 0:
+                        raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+                        mesh.vertices.foreach_get("co", raw_coords)
+                        v_local = raw_coords.reshape((n_verts, 3))
 
-                            mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
-                            ones = np.ones((n_verts, 1), dtype=np.float32)
-                            v_homo = np.hstack([v_local, ones])
-                            v_world = (v_homo @ mat_np.T)[:, :3]
+                        mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
+                        ones = np.ones((n_verts, 1), dtype=np.float32)
+                        v_homo = np.hstack([v_local, ones])
+                        v_world = (v_homo @ mat_np.T)[:, :3]
 
-                            tri_indices = np.empty(n_tris * 3, dtype=np.int32)
-                            mesh.loop_triangles.foreach_get("vertices", tri_indices)
-                            tri_indices_2d = tri_indices.reshape((n_tris, 3))
+                        tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+                        mesh.loop_triangles.foreach_get("vertices", tri_indices)
+                        tri_indices_2d = tri_indices.reshape((n_tris, 3))
 
-                            valid_joint_idx = bake_res.joint_face_indices[bake_res.joint_face_indices < n_tris]
-                            if len(valid_joint_idx) > 0:
-                                joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
-                                cur_friction = float(col_settings.friction)
-                                cur_thickness = float(col_settings.thickness)
-                                cur_restitution = float(getattr(col_settings, "restitution", 0.0))
-                                cur_single_sided = 1.0
+                        valid_joint_idx = bake_res.joint_face_indices[bake_res.joint_face_indices < n_tris]
+                        if len(valid_joint_idx) > 0:
+                            joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
+                            cur_friction = float(col_settings.friction)
+                            cur_thickness = float(col_settings.thickness)
+                            cur_restitution = float(getattr(col_settings, "restitution", 0.0))
+                            cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
 
-                                all_mesh_triangles.append(joint_tri_coords)
-                                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
-                                attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
-                                all_mesh_attributes.append(attr_block)
+                            all_mesh_triangles.append(joint_tri_coords)
+                            attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                            attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
+                            all_mesh_attributes.append(attr_block)
 
-                        if depsgraph:
-                            eval_obj.to_mesh_clear()
+                    if depsgraph:
+                        eval_obj.to_mesh_clear()
 
         if all_mesh_triangles:
             tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]
@@ -211,6 +217,9 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 tri_array,
                 attributes=attr_array,
             )
+            logger.debug(f"[Collider Sync] sim.set_mesh_collider_triangles 実行: {len(tri_array)} 面")
+        else:
+            logger.debug("[Collider Sync] all_mesh_triangles は空です (0面)")
 
     # 毎フレームのボーン変換行列更新 (BONE_SDF)
     if sim_id in _bone_sdf_cache:

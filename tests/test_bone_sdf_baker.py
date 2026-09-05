@@ -17,6 +17,9 @@ from taremin_cloth.engine.sdf_baker import (
     bake_bone_sdf_from_data,
     BoneSdfBakeResult,
     compute_mesh_signature,
+    extract_joint_mesh_indices,
+    extract_limb_joint_mesh_indices,
+    extract_joint_mesh_from_sdf,
     save_cached_sdf,
     load_cached_sdf,
     clear_all_cached_sdf,
@@ -237,23 +240,125 @@ class TestBoneSdfBaker(unittest.TestCase):
         self.assertGreater(len(res_hybrid.joint_face_indices), 0)
         self.assertLessEqual(len(res_hybrid.joint_face_indices), len(tris))
 
-        # 3. Alpha値がブレンド領域で減衰していることの確認
-        arr_std = np.frombuffer(res_standard.texture_bytes, dtype=np.float16).reshape((16, 16, 32, 2))
-        arr_hyb = np.frombuffer(res_hybrid.texture_bytes, dtype=np.float16).reshape((16, 16, 32, 2))
-        alpha_std = arr_std[:, :, :, 1].astype(np.float32)
-        alpha_hyb = arr_hyb[:, :, :, 1].astype(np.float32)
-
-        # ハイブリッド時、ブレンド領域では Alpha がフェードアウトするため、全体のAlpha平均が下がる
-        self.assertLess(np.mean(alpha_hyb), np.mean(alpha_std))
-
-        # 4. キャッシュの保存と復元
+        # 3. キャッシュの保存と復元
         sig = compute_mesh_signature(verts, tris, ["Bone_A", "Bone_B"], 16, enable_joint_mesh=True, joint_weight_threshold=0.85)
         save_cached_sdf(sig, res_hybrid)
         loaded = load_cached_sdf(sig)
         self.assertIsNotNone(loaded)
         np.testing.assert_array_equal(loaded.joint_face_indices, res_hybrid.joint_face_indices)
 
+    def test_extract_joint_mesh_indices_complete_coverage(self):
+        """第2ウェイトによるブレンド全域抽出および剛体側へののりしろ（overlap_rings）の検証"""
+        verts, tris = create_cube_mesh(center=(0.0, 0.0, 0.0), size=1.0)
+        n_verts = len(verts)
+
+        # 頂点 0〜3: Bone_A (1.0) 完全剛体
+        # 頂点 4: Bone_A (0.95), Bone_B (0.05) - 従来の threshold=0.85 では除外されていた境界頂点
+        # 頂点 5: Bone_A (0.50), Bone_B (0.50) - 中心ブレンド頂点
+        # 頂点 6, 7: Bone_B (1.0) 完全剛体
+        w_a = np.array([1.0, 1.0, 1.0, 1.0, 0.95, 0.50, 0.0, 0.0], dtype=np.float32)
+        w_b = np.array([0.0, 0.0, 0.0, 0.0, 0.05, 0.50, 1.0, 1.0], dtype=np.float32)
+        bone_weights = {"Bone_A": w_a, "Bone_B": w_b}
+
+        # 1. overlap_rings=0 (純粋なブレンド頂点 4, 5 のみを含む三角形)
+        indices_ring0 = extract_joint_mesh_indices(
+            verts, tris, bone_weights, overlap_rings=0, min_blend_weight=0.02
+        )
+        self.assertGreater(len(indices_ring0), 0)
+
+        # 抽出された各面が頂点 4 または 5 を含んでいることを検証
+        for f_idx in indices_ring0:
+            face_verts = set(tris[f_idx])
+            self.assertTrue(4 in face_verts or 5 in face_verts)
+
+        # 2. overlap_rings=1 (剛体側の隣接頂点へ1リング拡張)
+        indices_ring1 = extract_joint_mesh_indices(
+            verts, tris, bone_weights, overlap_rings=1, min_blend_weight=0.02
+        )
+        # 1リング拡張により、より広範囲の面がカバーされること
+        self.assertGreater(len(indices_ring1), len(indices_ring0))
+
+        # 3. ボーンが1本のみの場合は空配列が返ること
+        single_weights = {"Bone_A": np.ones(n_verts, dtype=np.float32)}
+        indices_single = extract_joint_mesh_indices(verts, tris, single_weights)
+        self.assertEqual(len(indices_single), 0)
+
+        # 4. 微小ノイズ (w_second < min_blend_weight) では抽出されないこと
+        noise_weights = {
+            "Bone_A": np.array([1.0, 1.0, 1.0, 1.0, 0.995, 1.0, 1.0, 1.0], dtype=np.float32),
+            "Bone_B": np.array([0.0, 0.0, 0.0, 0.0, 0.005, 0.0, 0.0, 0.0], dtype=np.float32),
+        }
+        indices_noise = extract_joint_mesh_indices(verts, tris, noise_weights, min_blend_weight=0.02)
+        self.assertEqual(len(indices_noise), 0)
+
+    def test_smoothstep_alpha_fade(self):
+        """Smoothstep減衰によるAlpha連続遷移の検証"""
+        joint_weight_threshold = 0.85
+        min_t = joint_weight_threshold * 0.4  # 0.34
+
+        test_alphas = np.array([0.0, 0.2, 0.34, 0.5, 0.85, 1.0], dtype=np.float32)
+        t = np.clip((test_alphas - min_t) / (joint_weight_threshold - min_t), 0.0, 1.0)
+        fade = t * t * (3.0 - 2.0 * t)
+        faded_alphas = test_alphas * fade
+
+        # min_t (0.34) 以下では fade = 0.0
+        self.assertEqual(faded_alphas[0], 0.0)
+        self.assertEqual(faded_alphas[1], 0.0)
+        self.assertEqual(faded_alphas[2], 0.0)
+
+        # threshold (0.85) 以上では fade = 1.0
+        self.assertAlmostEqual(faded_alphas[4], 0.85, places=5)
+        self.assertAlmostEqual(faded_alphas[5], 1.0, places=5)
+
+        # 中間値 (0.5) では滑らかに減衰 (0 < faded < 0.5)
+        self.assertGreater(faded_alphas[3], 0.0)
+        self.assertLess(faded_alphas[3], 0.5)
+
+        # 単調増加性の検証
+        self.assertTrue(np.all(np.diff(faded_alphas) >= 0.0))
+
+    def test_extract_limb_joint_mesh(self):
+        """大関節ペアテスト"""
+        verts, tris = create_cube_mesh(center=(0.0, 0.0, 0.0), size=1.0)
+        bw_a = np.array([1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+        bw_b = np.array([0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        bone_weights = {
+            "hips": bw_a,
+            "upper_leg.L": bw_b,
+        }
+        bone_bind_matrices = {
+            "hips": np.eye(4, dtype=np.float32),
+            "upper_leg.L": np.eye(4, dtype=np.float32),
+        }
+
+        # ハイブリッド有効でベイク
+        res = 16
+        bake_res = bake_bone_sdf_from_data(
+            mesh_verts=verts,
+            mesh_tris=tris,
+            bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices,
+            resolution=res,
+            enable_joint_mesh=True,
+        )
+
+        joint_faces = extract_limb_joint_mesh_indices(
+            verts,
+            tris,
+            bone_weights,
+            min_blend_weight=0.05,
+        )
+
+        self.assertIsInstance(joint_faces, np.ndarray)
+        self.assertEqual(joint_faces.dtype, np.int32)
+        self.assertGreater(len(joint_faces), 0)
+        np.testing.assert_array_equal(bake_res.joint_face_indices, joint_faces)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

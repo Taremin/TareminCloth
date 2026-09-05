@@ -171,8 +171,14 @@ fn solve_bone_sdf_collision(
 
         // Alphaマスク: weight_threshold以下の領域はカリングして安全圏(+10.0)へ逃がす
         let threshold = max(info.params.w, 0.01);
-        let mask = smoothstep(0.0, threshold, alpha);
-        let effective_dist = mix(10.0, raw_dist, mask);
+        var retract_offset = 0.0;
+        // ハイブリッドモード（関節メッシュコライダーが存在する場合）のみ、関節境界で剛体角をリトラクト
+        // メッシュコライダーが存在しないSDF単体時は、コライダー壁としての貫通防止機能を優先して角を維持
+        if (params.num_mesh_triangles > 0u) {
+            let blend_mask = smoothstep(threshold, 0.7, alpha);
+            retract_offset = (1.0 - blend_mask) * 0.06; // 最大6cm内側へリトラクト
+        }
+        let effective_dist = select(10.0, raw_dist + retract_offset, alpha > threshold);
 
         if (effective_dist < target_dist) {
             // 衝突・厚み内侵入を検知した場合のみ法線中心差分を計算
@@ -591,7 +597,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     // フェーズ3: ボーン局所SDFコライダーの判定・押し戻し
-    solve_bone_sdf_collision(&p, &x_n, dt, p_initial, thickness);
+    // メッシュコライダーで既に接触・押し戻しが行われた頂点は、二重適用による干渉・摩擦引き攣れを防ぐためスキップ
+    if (!has_front_contact && !has_valid_recovery) {
+        solve_bone_sdf_collision(&p, &x_n, dt, p_initial, thickness);
+    }
 
     v.prev_pos = p;
     v.position = x_n; // 法線突入速度を吸収した基準位置

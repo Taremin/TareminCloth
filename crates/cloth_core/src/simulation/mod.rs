@@ -558,11 +558,11 @@ impl GpuClothSimulator {
         self.upload_colliders();
     }
 
-    /// すべてのコライダーをクリア
+    /// すべてのコライダー（球、カプセル、平面、動的メッシュ三角形）をクリア
+    /// 注: ボーンSDFコライダーは静的アセットのためクリアしません（clear_bone_sdf_collidersを使用）
     pub fn clear_colliders(&mut self) {
         self.colliders.clear();
         self.mesh_triangles.clear();
-        self.clear_bone_sdf_colliders();
         self.upload_colliders();
     }
 
