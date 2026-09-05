@@ -71,20 +71,45 @@ fn get_current_gpu_device<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> 
     Ok(dict)
 }
 
-/// メッシュをUnlit（表面:白、裏面:赤）で描画してPNG画像として保存する（Blender非依存・高速ソフトウェアラスタライザ）
+/// シーン（布メッシュ、縫合スプリング、コライダー）をUnlit/シェーディングで描画してPNG保存する
 /// 戻り値: 赤色（裏面露出）ピクセル数
 #[pyfunction]
-#[pyo3(signature = (filepath, positions, faces, width=800, height=600, camera_pos=None, camera_target=None, fov=45.0))]
-fn render_mesh_to_png<'py>(
+#[pyo3(signature = (
+    filepath,
+    positions,
+    faces,
+    sewing_springs=None,
+    mesh_colliders=None,
+    width=800,
+    height=600,
+    camera_pos=None,
+    camera_target=None,
+    fov=45.0,
+    draw_wireframe=true,
+    wire_width=1.0,
+    collider_color=None,
+    sewing_color=None,
+    vertex_colors=None,
+    extra_lines=None
+))]
+fn render_scene_to_png<'py>(
     _py: Python<'py>,
     filepath: &str,
     positions: PyReadonlyArray2<f32>,
     faces: PyReadonlyArray2<u32>,
+    sewing_springs: Option<PyReadonlyArray2<u32>>,
+    mesh_colliders: Option<PyReadonlyArray2<f32>>,
     width: u32,
     height: u32,
     camera_pos: Option<[f32; 3]>,
     camera_target: Option<[f32; 3]>,
     fov: f32,
+    draw_wireframe: bool,
+    wire_width: f32,
+    collider_color: Option<[u8; 3]>,
+    sewing_color: Option<[u8; 3]>,
+    vertex_colors: Option<PyReadonlyArray2<u8>>,
+    extra_lines: Option<PyReadonlyArray2<f32>>,
 ) -> PyResult<usize> {
     let pos_view = positions.as_array();
     let mut pos_vec = Vec::with_capacity(pos_view.shape()[0]);
@@ -102,7 +127,62 @@ fn render_mesh_to_png<'py>(
         }
     }
 
-    let options = cloth_core::RenderOptions {
+    let mut sew_vec = Vec::new();
+    if let Some(sew_arr) = sewing_springs {
+        let view = sew_arr.as_array();
+        sew_vec.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 2 {
+                sew_vec.push([row[0], row[1]]);
+            }
+        }
+    }
+
+    let mut col_tris = Vec::new();
+    if let Some(col_arr) = mesh_colliders {
+        let view = col_arr.as_array();
+        col_tris.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 9 {
+                col_tris.push([
+                    row[0], row[1], row[2],
+                    row[3], row[4], row[5],
+                    row[6], row[7], row[8],
+                ]);
+            }
+        }
+    }
+
+    let mut v_colors_vec = Vec::new();
+    let has_vc = if let Some(vc_arr) = vertex_colors {
+        let view = vc_arr.as_array();
+        v_colors_vec.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 3 {
+                v_colors_vec.push([row[0], row[1], row[2]]);
+            }
+        }
+        true
+    } else {
+        false
+    };
+
+    let mut lines_vec = Vec::new();
+    if let Some(l_arr) = extra_lines {
+        let view = l_arr.as_array();
+        lines_vec.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 9 {
+                lines_vec.push([
+                    row[0], row[1], row[2],
+                    row[3], row[4], row[5],
+                    row[6], row[7], row[8],
+                ]);
+            }
+        }
+    }
+
+    let mut options = cloth_core::RenderOptions {
         width,
         height,
         camera_pos,
@@ -111,12 +191,55 @@ fn render_mesh_to_png<'py>(
         bg_color: [35, 35, 35],
         front_color: [255, 255, 255],
         back_color: [255, 0, 0],
+        collider_color: [140, 160, 180],
+        sewing_color: [0, 204, 255],
+        draw_wireframe,
+        wire_width_px: wire_width,
     };
 
-    let result = cloth_core::render_mesh_to_png_file(filepath, &pos_vec, &face_vec, &options)
+    if let Some(c) = collider_color {
+        options.collider_color = c;
+    }
+    if let Some(c) = sewing_color {
+        options.sewing_color = c;
+    }
+
+    let scene = cloth_core::SceneData {
+        positions: &pos_vec,
+        faces: &face_vec,
+        sewing_springs: &sew_vec,
+        mesh_triangles: &col_tris,
+        vertex_colors: if has_vc { Some(&v_colors_vec) } else { None },
+        extra_lines: &lines_vec,
+    };
+
+    let result = cloth_core::render_scene_to_png_file(filepath, &scene, &options)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("PNG描画保存に失敗しました: {e}")))?;
 
     Ok(result.red_pixels)
+}
+
+/// 既存互換用のラッパー
+#[pyfunction]
+#[pyo3(signature = (filepath, positions, faces, width=800, height=600, camera_pos=None, camera_target=None, fov=45.0))]
+fn render_mesh_to_png<'py>(
+    py: Python<'py>,
+    filepath: &str,
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    width: u32,
+    height: u32,
+    camera_pos: Option<[f32; 3]>,
+    camera_target: Option<[f32; 3]>,
+    fov: f32,
+) -> PyResult<usize> {
+    render_scene_to_png(
+        py, filepath, positions, faces,
+        None, None,
+        width, height, camera_pos, camera_target, fov,
+        true, 1.0, None, None,
+        None, None,
+    )
 }
 
 /// GPU Cloth シミュレータ PyClass
@@ -757,6 +880,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(get_current_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(render_mesh_to_png, m)?)?;
+    m.add_function(wrap_pyfunction!(render_scene_to_png, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

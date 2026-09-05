@@ -84,6 +84,182 @@ class TestMeshRenderer(unittest.TestCase):
             self.assertTrue(os.path.getsize(out_file) > 0)
             self.assertEqual(red_count, 0)
 
+    def test_render_scene_with_sewing_and_colliders(self):
+        """縫合線（水色）およびコライダー（スレートグレー）の同時描画検証"""
+        from taremin_cloth.mesh_renderer import render_scene_to_file
+        from PIL import Image
+
+        positions = np.array([
+            [-0.5, -0.5, 0.0],
+            [0.5, -0.5, 0.0],
+            [0.0, 0.5, 0.0],
+            [0.0, 1.5, 0.0],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.uint32)
+        sewing_springs = np.array([[2, 3]], dtype=np.uint32)
+        colliders = np.array([
+            [-1.5, -1.5, -0.5, -0.5, -1.5, -0.5, -1.0, -0.5, -0.5]
+        ], dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            png_path = os.path.join(tmpdir, "scene_test.png")
+            render_scene_to_file(
+                png_path, positions, faces,
+                sewing_springs=sewing_springs,
+                mesh_colliders=colliders,
+                width=100, height=100,
+                camera_pos=(0.0, 0.0, 4.0),
+                camera_target=(0.0, 0.0, 0.0),
+            )
+            self.assertTrue(os.path.exists(png_path))
+            img = Image.open(png_path)
+            arr = np.array(img)
+
+            # 縫合エッジ (水色 [0, 204, 255])
+            sew_mask = (arr[:, :, 0] == 0) & (arr[:, :, 1] == 204) & (arr[:, :, 2] == 255)
+            self.assertTrue(np.sum(sew_mask) > 0, "縫合エッジ（水色）が検出されませんでした")
+
+            # コライダー (スレートグレー [140, 160, 180] 前後)
+            col_mask = (arr[:, :, 2] > arr[:, :, 0]) & (arr[:, :, 2] > 70) & (arr[:, :, 0] > 40)
+            self.assertTrue(np.sum(col_mask) > 10, "コライダーが検出されませんでした")
+
+    def test_create_animation_file(self):
+        """連番フレーム画像からの APNG / GIF 生成検証"""
+        from taremin_cloth.mesh_renderer import create_animation_file
+        from PIL import Image
+
+        # 差分のある2フレーム (表面と裏面)
+        positions1 = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        positions2 = np.array([[-1.0, -1.0, 0.0], [0.0, 1.0, 0.0], [1.0, -1.0, 0.0]], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.uint32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = os.path.join(tmpdir, "f1.png")
+            f2 = os.path.join(tmpdir, "f2.png")
+            render_mesh_to_file(f1, positions1, faces, width=80, height=80)
+            render_mesh_to_file(f2, positions2, faces, width=80, height=80)
+
+            # 1. APNG
+            apng_path = os.path.join(tmpdir, "anim.png")
+            create_animation_file([f1, f2], apng_path, fps=10)
+            self.assertTrue(os.path.exists(apng_path))
+            self.assertTrue(os.path.getsize(apng_path) > 0)
+
+            with Image.open(apng_path) as anim_img:
+                self.assertTrue(getattr(anim_img, "is_animated", False))
+                self.assertEqual(getattr(anim_img, "n_frames", 1), 2)
+
+            # 2. GIF
+            gif_path = os.path.join(tmpdir, "anim.gif")
+            create_animation_file([f1, f2], gif_path, fps=10)
+            self.assertTrue(os.path.exists(gif_path))
+            with Image.open(gif_path) as gif_img:
+                self.assertTrue(getattr(gif_img, "is_animated", False))
+                self.assertEqual(getattr(gif_img, "n_frames", 1), 2)
+
+    def test_primitive_collider_mesh_generation(self):
+        """球・カプセル・平面のプリミティブコライダーメッシュ自動生成の検証"""
+        from taremin_cloth.mesh_renderer import (
+            generate_sphere_mesh,
+            generate_capsule_mesh,
+            generate_plane_mesh,
+            convert_colliders_to_mesh,
+        )
+
+        # 1. 球
+        s_mesh = generate_sphere_mesh([0, 0, 0], radius=1.0)
+        self.assertGreater(len(s_mesh), 0)
+        self.assertEqual(s_mesh.shape[1], 9)
+
+        # 2. カプセル
+        c_mesh = generate_capsule_mesh([0, 0, 0], [0, 0, 1.0], radius=0.2)
+        self.assertGreater(len(c_mesh), 0)
+        self.assertEqual(c_mesh.shape[1], 9)
+
+        # 3. 平面
+        p_mesh = generate_plane_mesh([0, 0, 0], [0, 0, 1.0], size=2.0)
+        self.assertEqual(len(p_mesh), 2) # 2枚の三角形
+
+        # 4. 一括変換
+        cols_record = [
+            {"type": "sphere", "center": [0, 1, 0], "radius": 0.5},
+            {"type": "capsule", "point_a": [1, 0, 0], "point_b": [1, 1, 0], "radius": 0.2},
+            {"type": "plane", "point": [0, 0, -1], "normal": [0, 0, 1]},
+        ]
+        all_tris = convert_colliders_to_mesh(cols_record)
+        self.assertIsNotNone(all_tris)
+        self.assertGreater(len(all_tris), 10)
+
+    def test_heatmap_computations(self):
+        """速度・歪み・法線ヒートマップ計算の検証"""
+        from taremin_cloth.mesh_renderer import (
+            colormap_jet,
+            compute_velocity_colors,
+            compute_strain_colors,
+            compute_normal_colors,
+        )
+
+        positions = np.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.uint32)
+        edges = np.array([[0, 1], [1, 2], [2, 0]], dtype=np.uint32)
+        rest_lens = np.array([0.8, 1.4, 0.8], dtype=np.float32) # 引き伸ばされている
+
+        # 1. 速度ヒートマップ
+        vels = np.array([[0, 0, 0], [1.0, 0, 0], [2.0, 0, 0]], dtype=np.float32)
+        v_colors = compute_velocity_colors(vels)
+        self.assertEqual(v_colors.shape, (3, 3))
+        self.assertEqual(v_colors.dtype, np.uint8)
+
+        # 2. 歪みヒートマップ
+        s_colors = compute_strain_colors(positions, edges, rest_lens)
+        self.assertEqual(s_colors.shape, (3, 3))
+        self.assertEqual(s_colors.dtype, np.uint8)
+
+        # 3. 法線カラーマップ
+        n_colors = compute_normal_colors(positions, faces)
+        self.assertEqual(n_colors.shape, (3, 3))
+        self.assertEqual(n_colors.dtype, np.uint8)
+
+    def test_render_with_vertex_colors_and_extra_lines(self):
+        """頂点カラー（ヒートマップ）および追加3Dライン（SDF BBOX）描画の検証"""
+        from taremin_cloth.mesh_renderer import render_scene_to_file
+        from PIL import Image
+
+        positions = np.array([
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.uint32)
+        v_colors = np.array([
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ], dtype=np.uint8)
+        extra_lines = np.array([
+            [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 255.0, 170.0, 0.0], # ゴールドの線
+        ], dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_p = os.path.join(tmpdir, "test_vc.png")
+            render_scene_to_file(
+                out_p, positions, faces,
+                vertex_colors=v_colors,
+                extra_lines=extra_lines,
+                width=100, height=100,
+                camera_pos=(0, 0, 3), camera_target=(0, 0, 0)
+            )
+            self.assertTrue(os.path.exists(out_p))
+            img = Image.open(out_p)
+            arr = np.array(img)
+            # ゴールド (255, 170, 0) の線が存在すること
+            gold_mask = (arr[:, :, 0] == 255) & (arr[:, :, 1] == 170) & (arr[:, :, 2] == 0)
+            self.assertTrue(np.any(gold_mask), "追加3Dライン（ゴールド）が描画されていません")
+
 
 if __name__ == "__main__":
     unittest.main()

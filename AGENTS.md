@@ -87,7 +87,8 @@ python -m unittest tests/test_issue_f71.py
 | `inspect` | ログ全体の異常値を走査してサマリー表示 | `python -m taremin_cloth.log_tools inspect input.jsonl.gz` |
 | `slice` | 指定フレーム区間を切り出して新しい極小ログを作成 | `python -m taremin_cloth.log_tools slice input.jsonl.gz --start 68 --end 74 -o sliced.jsonl.gz` |
 | `make-test` | 自己完結型 unittest テストスクリプトを自動生成 | `python -m taremin_cloth.log_tools make-test input.jsonl.gz -f 71 -o tests/test_f71.py` |
-| `render` | 指定フレームの貫通可視化画像をレンダリング（0.1秒） | `python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 -o f71.png` |
+| `render` | 指定フレームまたは連番・APNG動画をレンダリング（縫合線・コライダー自動表示、速度・歪み・法線ヒートマップ対応、Blender不要） | `python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 -o f71.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz --frames all --format apng -o anim.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 20 --color-by velocity -o vel.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 40 --color-by strain -o strain.png` |
+| `render-coloring` | 制約グラフ彩色（Welsh-Powell法）を可視化レンダリング | `python -m taremin_cloth.log_tools render-coloring input.jsonl.gz --type distance -o coloring.png` |
 | `check-intersections` | 指定フレームの自己交差三角形ペアを検出 | `python -m taremin_cloth.log_tools check-intersections input.jsonl.gz -f 71` |
 | `export-obj` | 指定フレームをOBJ形式でエクスポート | `python -m taremin_cloth.log_tools export-obj input.jsonl.gz -f 71 -o f71.obj` |
 
