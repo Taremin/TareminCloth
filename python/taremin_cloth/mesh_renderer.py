@@ -755,3 +755,94 @@ def transform_sdf_voxels_to_world(
         return np.vstack(all_voxels)
     return None
 
+
+def extract_joint_mesh_wireframe_lines(
+    mesh_verts: np.ndarray,
+    mesh_tris: np.ndarray,
+    face_indices: np.ndarray,
+    color: Tuple[float, float, float] = (255.0, 255.0, 255.0),
+) -> Optional[np.ndarray]:
+    """
+    指定された三角形面群から重複エッジを排除し、
+    3Dワイヤーフレーム線分配列 [E, 9] (x0, y0, z0, x1, y1, z1, r, g, b) を生成します。
+
+    Args:
+        mesh_verts: [V, 3] 頂点座標配列
+        mesh_tris: [F, 3] 三角形インデックス配列
+        face_indices: [M] ワイヤーフレーム化する面の行インデックス配列
+        color: 線のRGB色 (デフォルト: 白色 [255, 255, 255])
+
+    Returns:
+        [E, 9] の 3D 線分配列 (線分が存在しない場合は None)
+    """
+    if len(mesh_verts) == 0 or len(mesh_tris) == 0 or len(face_indices) == 0:
+        return None
+
+    n_tris = len(mesh_tris)
+    valid_idx = face_indices[face_indices < n_tris]
+    if len(valid_idx) == 0:
+        return None
+
+    sub_tris = mesh_tris[valid_idx]
+
+    # 重複エッジの排除
+    edges = set()
+    for t in sub_tris:
+        edges.add((min(t[0], t[1]), max(t[0], t[1])))
+        edges.add((min(t[1], t[2]), max(t[1], t[2])))
+        edges.add((min(t[2], t[0]), max(t[2], t[0])))
+
+    if not edges:
+        return None
+
+    lines = []
+    c0, c1, c2 = float(color[0]), float(color[1]), float(color[2])
+    for e0, e1 in edges:
+        p0 = mesh_verts[e0]
+        p1 = mesh_verts[e1]
+        lines.append([p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], c0, c1, c2])
+
+    return np.array(lines, dtype=np.float32)
+
+
+def filter_active_joint_faces(
+    joint_faces_by_pair: dict,
+    bone_rotations: dict,
+    rotation_threshold_deg: float = 2.0,
+) -> np.ndarray:
+    """
+    各ボーンのローカル回転角（クォータニオン [w, x, y, z]）から屈曲角を算出し、
+    閾値(rotation_threshold_deg)以上屈曲しているボーンペアの関節面インデックスを動的に抽出します。
+
+    Args:
+        joint_faces_by_pair: {(parent, child): face_indices} の辞書
+        bone_rotations: {bone_name: [w, x, y, z]} のクォータニオン回転辞書
+        rotation_threshold_deg: アクティブ化する最小屈曲角（度）。0.0 以下の場合は全関節面を返却。
+
+    Returns:
+        アクティブな面インデックスのユニオン配列 (shape [M], dtype int32)
+    """
+    if not joint_faces_by_pair:
+        return np.empty(0, dtype=np.int32)
+
+    if rotation_threshold_deg <= 0.0:
+        return np.unique(np.concatenate(list(joint_faces_by_pair.values()))).astype(np.int32)
+
+    import math
+    rot_th_rad = math.radians(rotation_threshold_deg)
+    active_faces = []
+
+    for (p_name, c_name), faces in joint_faces_by_pair.items():
+        q = bone_rotations.get(c_name)
+        if q is None or len(q) < 4:
+            continue
+
+        w = float(q[0])
+        delta_angle = 2.0 * math.acos(min(abs(w), 1.0))
+        if delta_angle >= rot_th_rad:
+            active_faces.append(faces)
+
+    if active_faces:
+        return np.unique(np.concatenate(active_faces)).astype(np.int32)
+    return np.empty(0, dtype=np.int32)
+

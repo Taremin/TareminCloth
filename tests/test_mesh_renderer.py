@@ -362,6 +362,71 @@ class TestMeshRenderer(unittest.TestCase):
         for d in vox_sz_tgt:
             self.assertTrue(0.015 <= d <= 0.025, f"target_spacing に一致していません: {d}")
 
+    def test_extract_joint_mesh_wireframe_lines(self):
+        """ジョイントメッシュ三角形の重複排除エッジ抽出の検証"""
+        from taremin_cloth.mesh_renderer import extract_joint_mesh_wireframe_lines
+
+        # 四角形を2分割した2つの三角形 (0, 1, 2) と (0, 2, 3)
+        # 共有エッジは (0, 2)
+        verts = np.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float32)
+        tris = np.array([
+            [0, 1, 2],
+            [0, 2, 3],
+        ], dtype=np.int32)
+
+        # 2面とも対象にする場合: 三角形2つで計6エッジ中、共有エッジ1本が重複排除され 5本のエッジになる
+        face_indices = np.array([0, 1], dtype=np.int32)
+        lines = extract_joint_mesh_wireframe_lines(verts, tris, face_indices, color=(255, 255, 255))
+        self.assertIsNotNone(lines)
+        self.assertEqual(len(lines), 5, f"重複排除後のエッジ数が5ではありません: {len(lines)}")
+        self.assertEqual(lines.shape[1], 9)
+        # 色が [255, 255, 255] であること
+        self.assertTrue(np.all(lines[:, 6:9] == 255.0))
+
+        # 空の面インデックスの場合は None
+        empty_lines = extract_joint_mesh_wireframe_lines(verts, tris, np.empty(0, dtype=np.int32))
+        self.assertIsNone(empty_lines)
+
+    def test_filter_active_joint_faces(self):
+        """動的アクティブ化（屈曲角閾値判定）による関節面フィルタリングの検証"""
+        from taremin_cloth.mesh_renderer import filter_active_joint_faces
+        import math
+
+        joint_faces = {
+            ("hips", "spine"): np.array([10, 11, 12], dtype=np.int32),
+            ("spine", "chest"): np.array([20, 21], dtype=np.int32),
+            ("shoulder.L", "upper_arm.L"): np.array([30, 31, 32], dtype=np.int32),
+        }
+
+        # 1. spine のみ 10度 屈曲、他は直立 (0度)
+        # q = [cos(theta/2), sin(theta/2), 0, 0]
+        theta_spine = math.radians(10.0)
+        q_spine = [math.cos(theta_spine / 2.0), math.sin(theta_spine / 2.0), 0.0, 0.0]
+        q_identity = [1.0, 0.0, 0.0, 0.0]
+
+        rotations = {
+            "spine": q_spine,
+            "chest": q_identity,
+            "upper_arm.L": q_identity,
+        }
+
+        # 閾値 2.0度: spine (10度) のみアクティブ化され [10, 11, 12] が返却される
+        act_faces = filter_active_joint_faces(joint_faces, rotations, rotation_threshold_deg=2.0)
+        np.testing.assert_array_equal(act_faces, np.array([10, 11, 12], dtype=np.int32))
+
+        # 閾値 15.0度: 全ボーンが閾値未満のため空配列が返却される
+        act_empty = filter_active_joint_faces(joint_faces, rotations, rotation_threshold_deg=15.0)
+        self.assertEqual(len(act_empty), 0)
+
+        # 閾値 0.0度: 全関節面が返却される (10, 11, 12, 20, 21, 30, 31, 32)
+        act_all = filter_active_joint_faces(joint_faces, rotations, rotation_threshold_deg=0.0)
+        self.assertEqual(len(act_all), 8)
+
 
 if __name__ == "__main__":
     unittest.main()
