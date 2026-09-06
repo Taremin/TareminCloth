@@ -1091,6 +1091,24 @@ def extract_dynamic_sdf_setup_data(obj, arm_obj, bake_res: BoneSdfBakeResult) ->
     # bake_res.bind_matrices はすでに「メッシュ空間 -> 各ボーンローカル空間」の変換行列 (B_bind)
     bone_bind_inv_matrices = np.stack(bake_res.bind_matrices).astype(np.float32)
 
+    # ボーン依存関係グラフの構築:
+    # 各ボーン b_idx の三角形に含まれる頂点 (i0, i1, i2) に影響を与えるすべてのボーンの集合
+    bone_dependencies = [set() for _ in range(n_bones)]
+    for ts in tri_sources_list:
+        i0, i1, i2, b_idx = int(ts[0]), int(ts[1]), int(ts[2]), int(ts[3])
+        for v_i in (i0, i1, i2):
+            for slot in range(4):
+                if bone_weights[v_i, slot] > 0.01:
+                    dep_b = int(bone_indices[v_i, slot])
+                    if dep_b < n_bones:
+                        bone_dependencies[b_idx].add(dep_b)
+
+    # 自身 (b_idx) は常に自身の依存先頭に含める
+    for b_idx in range(n_bones):
+        bone_dependencies[b_idx].add(b_idx)
+
+    bone_dependency_map = [sorted(list(deps)) for deps in bone_dependencies]
+
     return {
         "rest_verts": rest_verts,
         "bone_indices": bone_indices,
@@ -1098,4 +1116,5 @@ def extract_dynamic_sdf_setup_data(obj, arm_obj, bake_res: BoneSdfBakeResult) ->
         "tri_sources": tri_sources,
         "tri_weights": tri_weights,
         "bone_bind_inv_matrices": bone_bind_inv_matrices,
+        "bone_dependency_map": bone_dependency_map,
     }

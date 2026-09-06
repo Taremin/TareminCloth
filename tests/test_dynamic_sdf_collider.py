@@ -263,9 +263,112 @@ class TestDynamicSdfCollider(unittest.TestCase):
         for _ in range(5):
             sim.step(0.0166667, 10)
 
+    def test_dynamic_sdf_dirty_bones_differential_update(self):
+        """Dirtyボーン指定による動的SDFの差分更新およびスキップ（空配列）の動作テスト"""
+        verts = np.array([
+            [-0.1, 0.0, -0.1], [ 0.1, 0.0, -0.1], [ 0.1, 0.5, -0.1], [-0.1, 0.5, -0.1],
+            [-0.1, 0.0,  0.1], [ 0.1, 0.0,  0.1], [ 0.1, 0.5,  0.1], [-0.1, 0.5,  0.1],
+            [-0.1, 1.0, -0.1], [ 0.1, 1.0, -0.1], [ 0.1, 1.0,  0.1], [-0.1, 1.0,  0.1],
+        ], dtype=np.float32)
+        normals = np.zeros_like(verts)
+        normals[:, 1] = 1.0
+        tris = np.array([
+            [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
+            [0, 1, 5], [0, 5, 4], [2, 9, 8], [2, 3, 8],
+            [6, 10, 9], [6, 9, 2], [7, 11, 10], [7, 10, 6],
+            [8, 9, 10], [8, 10, 11]
+        ], dtype=np.int32)
+
+        w0 = np.array([1.0, 1.0, 0.5, 0.5, 1.0, 1.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        w1 = np.array([0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+        bone_weights = {"Bone0": w0, "Bone1": w1}
+
+        b0_mat = np.eye(4, dtype=np.float32)
+        b1_mat = np.eye(4, dtype=np.float32)
+        b1_mat[1, 3] = -0.5
+        bone_bind_matrices = {"Bone0": b0_mat, "Bone1": b1_mat}
+
+        bake_res = bake_bone_sdf_from_data(
+            mesh_verts=verts,
+            mesh_tris=tris,
+            bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices,
+            resolution=32,
+            margin=0.2,
+        )
+
+        cloth_verts = np.array([[0.0, 0.8, -0.2], [0.1, 0.8, -0.2]], dtype=np.float32)
+        edges = np.array([[0, 1]], dtype=np.uint32)
+        sim = taremin_cloth_core.ClothSimulator(positions=cloth_verts, edges=edges)
+
+        rest_verts = np.hstack([verts, normals]).astype(np.float32)
+        n_verts = len(verts)
+        bone_indices = np.zeros((n_verts, 4), dtype=np.uint32)
+        bone_weights_arr = np.zeros((n_verts, 4), dtype=np.float32)
+        for i in range(n_verts):
+            bone_indices[i, 0] = 0
+            bone_weights_arr[i, 0] = w0[i]
+            bone_indices[i, 1] = 1
+            bone_weights_arr[i, 1] = w1[i]
+
+        tri_sources_list = []
+        tri_weights_list = []
+        for tri in tris:
+            tw0 = w0[tri[0]]; tw1 = w0[tri[1]]; tw2 = w0[tri[2]]
+            if tw0 > 0 or tw1 > 0 or tw2 > 0:
+                tri_sources_list.append([tri[0], tri[1], tri[2], 0])
+                tri_weights_list.append([tw0, tw1, tw2])
+        for tri in tris:
+            tw0 = w1[tri[0]]; tw1 = w1[tri[1]]; tw2 = w1[tri[2]]
+            if tw0 > 0 or tw1 > 0 or tw2 > 0:
+                tri_sources_list.append([tri[0], tri[1], tri[2], 1])
+                tri_weights_list.append([tw0, tw1, tw2])
+
+        tri_sources = np.array(tri_sources_list, dtype=np.uint32)
+        tri_weights = np.array(tri_weights_list, dtype=np.float32)
+        bind_inv_mats = np.stack([np.linalg.inv(b0_mat), np.linalg.inv(b1_mat)]).astype(np.float32)
+
+        sim.setup_dynamic_bone_sdf(
+            bake_res.width, bake_res.height, bake_res.depth, bake_res.res,
+            bake_res.bone_infos, rest_verts, bone_indices, bone_weights_arr,
+            tri_sources, tri_weights, bind_inv_mats, 1,
+        )
+
+        w_mats = np.stack([np.eye(4, dtype=np.float32), np.eye(4, dtype=np.float32)])
+        w_mats[1, 1, 3] = 0.5
+        inv_mats = np.linalg.inv(w_mats)
+        w_mats_col = np.ascontiguousarray(np.transpose(w_mats, (0, 2, 1)), dtype=np.float32)
+        inv_mats_col = np.ascontiguousarray(np.transpose(inv_mats, (0, 2, 1)), dtype=np.float32)
+
+        # 1. 初期フレーム: 全ボーン Dirty (dirty_bone_indices=None)
+        sim.update_bone_transforms(w_mats_col, inv_mats_col, None)
+        sim.step(0.0166667, 5)
+
+        # 2. 静止フレーム: ポーズ変化なし (dirty_bone_indices=空配列 -> GPUディスパッチ完全スキップ)
+        empty_dirty = np.empty(0, dtype=np.uint32)
+        sim.update_bone_transforms(w_mats_col, inv_mats_col, empty_dirty)
+        sim.step(0.0166667, 5)
+
+        # 3. 差分変形フレーム: Bone1 のみ回転 (dirty_bone_indices=[1])
+        theta = np.pi / 4.0
+        r_mat = np.eye(4, dtype=np.float32)
+        r_mat[0, 0] = np.cos(theta); r_mat[0, 1] = -np.sin(theta)
+        r_mat[1, 0] = np.sin(theta); r_mat[1, 1] = np.cos(theta)
+        w_mats[1] = np.eye(4, dtype=np.float32)
+        w_mats[1, 1, 3] = 0.5
+        w_mats[1] = w_mats[1] @ r_mat
+        inv_mats = np.linalg.inv(w_mats)
+        w_mats_col = np.ascontiguousarray(np.transpose(w_mats, (0, 2, 1)), dtype=np.float32)
+        inv_mats_col = np.ascontiguousarray(np.transpose(inv_mats, (0, 2, 1)), dtype=np.float32)
+
+        dirty_bone1 = np.array([1], dtype=np.uint32)
+        sim.update_bone_transforms(w_mats_col, inv_mats_col, dirty_bone1)
+        sim.step(0.0166667, 5)
+
         out_pos = np.zeros(len(cloth_verts) * 3, dtype=np.float32)
         sim.get_positions(out_pos)
         self.assertFalse(np.isnan(out_pos).any())
+        self.assertFalse(np.isinf(out_pos).any())
 
 
 if __name__ == "__main__":

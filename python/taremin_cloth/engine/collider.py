@@ -184,7 +184,13 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                                 dyn_data["bone_bind_inv_matrices"],
                                 update_interval,
                             )
-                            _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res, 'DYNAMIC_GPU')
+                            _bone_sdf_cache[sim_id] = (
+                                arm_mod.object,
+                                bake_res,
+                                'DYNAMIC_GPU',
+                                dyn_data.get("bone_dependency_map", []),
+                                None,
+                            )
                             logger.info(f"[Collider Sync] フルGPU動的SDFコライダーを初期化しました (interval={update_interval})")
                         else:
                             sim.set_bone_sdf_colliders(
@@ -320,5 +326,51 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 # WGSL mat4x4<f32> (Column-Major) に合わせて軸(1, 2)を一括転置
                 w_arr_col = np.ascontiguousarray(np.transpose(w_arr_row, (0, 2, 1)), dtype=np.float32)
                 inv_arr_col = np.ascontiguousarray(np.transpose(inv_arr_row, (0, 2, 1)), dtype=np.float32)
-                sim.update_bone_transforms(w_arr_col, inv_arr_col)
+
+                dirty_bone_indices = None
+                if len(cache_entry) >= 4 and cache_entry[2] == 'DYNAMIC_GPU':
+                    dep_map = cache_entry[3]
+                    prev_pose_mats = cache_entry[4] if len(cache_entry) >= 5 else None
+
+                    # 各ボーンのポーズ行列（アーマチュアローカル空間）をスタック
+                    # ※ワールド全体の平行移動・回転のみではローカルSDFは変化しないため、p_matの変化を検出
+                    pose_mats_list = []
+                    for b_name in bake_res.bone_names:
+                        pbone = eval_arm.pose.bones.get(b_name)
+                        if pbone is not None:
+                            pose_mats_list.append(np.array(pbone.matrix, dtype=np.float32))
+                        else:
+                            pose_mats_list.append(np.eye(4, dtype=np.float32))
+                    pose_mats_row = np.stack(pose_mats_list)
+
+                    if prev_pose_mats is not None and prev_pose_mats.shape == pose_mats_row.shape:
+                        diff = np.abs(pose_mats_row - prev_pose_mats)
+                        bone_diff_max = np.max(diff, axis=(1, 2))
+                        moved_mask = bone_diff_max > 1e-4
+                        if not np.any(moved_mask):
+                            # ポーズ変化なし -> Dirtyボーン 0本（SDFベイク・コピー完全スキップ: 0ms）
+                            dirty_bone_indices = np.empty(0, dtype=np.uint32)
+                        else:
+                            moved_set = set(np.where(moved_mask)[0])
+                            dirty_set = set()
+                            for b_idx, deps in enumerate(dep_map):
+                                for dep in deps:
+                                    if dep in moved_set:
+                                        dirty_set.add(b_idx)
+                                        break
+                            dirty_bone_indices = np.array(sorted(list(dirty_set)), dtype=np.uint32)
+                    else:
+                        # 初回フレーム: 全ボーン Dirty (None = 全ベイク)
+                        dirty_bone_indices = None
+
+                    # キャッシュを最新の pose_mats で更新
+                    _bone_sdf_cache[sim_id] = (
+                        cache_entry[0],
+                        cache_entry[1],
+                        cache_entry[2],
+                        dep_map,
+                        pose_mats_row,
+                    )
+
+                sim.update_bone_transforms(w_arr_col, inv_arr_col, dirty_bone_indices)
 

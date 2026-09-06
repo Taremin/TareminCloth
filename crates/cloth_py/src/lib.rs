@@ -773,11 +773,13 @@ impl ClothSimulator {
     /// 各ボーンのワールド変換行列を更新（毎フレーム実行）
     /// - world_matrices: shape [N, 4, 4]
     /// - inv_world_matrices: shape [N, 4, 4]
-    #[pyo3(signature = (world_matrices, inv_world_matrices))]
+    /// - dirty_bone_indices: オプション。更新対象のボーンID配列（None: 全ボーン、空配列: 更新スキップ）
+    #[pyo3(signature = (world_matrices, inv_world_matrices, dirty_bone_indices=None))]
     fn update_bone_transforms(
         &mut self,
         world_matrices: PyReadonlyArray3<f32>,
         inv_world_matrices: PyReadonlyArray3<f32>,
+        dirty_bone_indices: Option<PyReadonlyArray1<u32>>,
     ) -> PyResult<()> {
         let w_view = world_matrices.as_array();
         let inv_view = inv_world_matrices.as_array();
@@ -807,7 +809,20 @@ impl ClothSimulator {
         }
 
         self.simulator.update_bone_transforms(&transforms);
+
+        let dirty_vec = dirty_bone_indices.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
+        self.simulator.set_dynamic_bone_sdf_dirty_bones(dirty_vec);
         Ok(())
+    }
+
+    /// 動的ボーンSDFのDirtyボーンインデックス（再ベイク対象）を設定
+    #[pyo3(signature = (dirty_bone_indices=None))]
+    fn set_dynamic_bone_sdf_dirty_bones(
+        &mut self,
+        dirty_bone_indices: Option<PyReadonlyArray1<u32>>,
+    ) {
+        let dirty_vec = dirty_bone_indices.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
+        self.simulator.set_dynamic_bone_sdf_dirty_bones(dirty_vec);
     }
 
     /// ボーンSDFコライダーをクリア

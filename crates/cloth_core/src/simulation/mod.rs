@@ -121,6 +121,8 @@ pub struct GpuClothSimulator {
     pub dynamic_sdf_update_interval: u32,
     pub(crate) dynamic_sdf_frame_counter: u32,
     pub(crate) dynamic_sdf_setup: Option<DynamicBoneSdfSetup>,
+    pub active_dirty_bone_indices: Option<Vec<u32>>,
+    pub dynamic_sdf_initial_baked: bool,
 
     pub(crate) rest_vertices_buffer: Option<wgpu::Buffer>,
     pub(crate) bone_skin_matrices_buffer: Option<wgpu::Buffer>,
@@ -299,6 +301,8 @@ impl GpuClothSimulator {
             prep_triangles_bind_group: None,
             dynamic_bake_pipeline: None,
             dynamic_bake_bind_group: None,
+            active_dirty_bone_indices: None,
+            dynamic_sdf_initial_baked: false,
             spatial_hash: res.spatial_hash,
             self_collision_pipeline: res.self_collision_pipeline,
             self_collision_bind_group: res.self_collision_bind_group,
@@ -814,18 +818,18 @@ impl GpuClothSimulator {
         let aligned_bytes_per_row = (bytes_per_row + 255) & !255;
         let row_pitch = aligned_bytes_per_row / bytes_per_pixel;
 
-        let mut aligned_params = setup.bake_params.clone();
-        for p in &mut aligned_params {
+        let mut setup = setup;
+        for p in &mut setup.bake_params {
             p.row_pitch = row_pitch;
         }
 
         let bake_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Dynamic SDF Bake Params"),
-            size: (std::mem::size_of::<GpuBakeParams>() * aligned_params.len()) as u64,
+            size: (std::mem::size_of::<GpuBakeParams>() * setup.bake_params.len()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&bake_params_buf, 0, bytemuck::cast_slice(&aligned_params));
+        queue.write_buffer(&bake_params_buf, 0, bytemuck::cast_slice(&setup.bake_params));
 
         let total_output_bytes = (aligned_bytes_per_row * setup.height * setup.depth) as u64;
         let sdf_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -979,7 +983,14 @@ impl GpuClothSimulator {
         self.dynamic_bake_bind_group = Some(bake_bg);
 
         self.dynamic_sdf_setup = Some(setup);
+        self.active_dirty_bone_indices = None;
+        self.dynamic_sdf_initial_baked = false;
         self.enable_dynamic_bone_sdf = true;
+    }
+
+    /// 動的ボーンSDFのDirtyボーンインデックス（再ベイク対象）を設定
+    pub fn set_dynamic_bone_sdf_dirty_bones(&mut self, dirty_bones: Option<Vec<u32>>) {
+        self.active_dirty_bone_indices = dirty_bones;
     }
 
     /// 毎フレームの動的SDF更新ディスパッチ（GPUインメモリ完結）
@@ -1047,6 +1058,41 @@ impl GpuClothSimulator {
             pass.dispatch_workgroups((num_tris + 63) / 64, 1, 1);
         }
 
+        // Dirty ボーン判定
+        // 初期ベイクが未実行の場合は、Python側の指定にかかわらず強制的に全ボーンベイクを実行
+        let (dirty_count, is_dirty_mode) = if !self.dynamic_sdf_initial_baked {
+            (num_bones as u32, false)
+        } else {
+            match self.active_dirty_bone_indices {
+                Some(ref list) => {
+                    if list.is_empty() {
+                        // ポーズ変化なし -> GPUディスパッチ・テクスチャコピーを完全スキップ (0ms)
+                        return;
+                    }
+                    (list.len() as u32, true)
+                }
+                None => (num_bones as u32, false),
+            }
+        };
+
+        // 4. Pass 3: SDFベイク用パラメータの準備
+        if is_dirty_mode {
+            let list = self.active_dirty_bone_indices.as_ref().unwrap();
+            let mut dirty_params = Vec::with_capacity(list.len());
+            for &b in list {
+                if (b as usize) < setup.bake_params.len() {
+                    dirty_params.push(setup.bake_params[b as usize]);
+                }
+            }
+            if let Some(ref buf) = self.dynamic_bake_params_buffer {
+                self.context.queue.write_buffer(buf, 0, bytemuck::cast_slice(&dirty_params));
+            }
+        } else {
+            if let Some(ref buf) = self.dynamic_bake_params_buffer {
+                self.context.queue.write_buffer(buf, 0, bytemuck::cast_slice(&setup.bake_params));
+            }
+        }
+
         // 4. Pass 3: SDFベイク
         if let (Some(ref pipeline), Some(ref bg)) = (&self.dynamic_bake_pipeline, &self.dynamic_bake_bind_group) {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1057,7 +1103,7 @@ impl GpuClothSimulator {
             pass.set_bind_group(0, bg, &[]);
             let wg_x = (setup.res + 3) / 4;
             let wg_y = (setup.res + 3) / 4;
-            let wg_z = (setup.res * num_bones as u32 + 3) / 4;
+            let wg_z = (setup.res * dirty_count + 3) / 4;
             pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
 
@@ -1088,6 +1134,8 @@ impl GpuClothSimulator {
                 },
             );
         }
+
+        self.dynamic_sdf_initial_baked = true;
     }
 
     fn recreate_collider_bind_group(&mut self) {
