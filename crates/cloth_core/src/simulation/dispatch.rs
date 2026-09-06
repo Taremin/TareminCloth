@@ -125,6 +125,14 @@ impl GpuClothSimulator {
                         }
                     }
                 }
+
+                // 5. コライダー衝突拘束 (Coupled XPBD: 押し出しと距離拘束の協調収束)
+                //    反復ループ内で距離拘束等と同調して解くことで、押し出しによるエッジの過剰伸長を防止
+                if has_colliders {
+                    cpass.set_pipeline(&self.collision_pipeline);
+                    cpass.set_bind_group(0, &self.collider_bind_group, &[]);
+                    cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                }
             }
 
             // 5. 反復終了後にピン位置を適用 (Grab等)
@@ -139,21 +147,9 @@ impl GpuClothSimulator {
             }
 
             // =========================================================================
-            // 6. コライダー衝突 & 自己衝突パス (パイプライン順序適正化)
-            //    拘束解決（Distance/Sewing/Pin）によって動かされた頂点の貫通を最終調停
+            // 6. エッジコライダー詳細衝突 & 自己衝突パス
             // =========================================================================
-            // 6.1 Collision Constraints Pass (コライダー衝突)
-            if has_colliders {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Collision Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.collision_pipeline);
-                cpass.set_bind_group(0, &self.collider_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-
-            // 6.2 Edge Collision Constraints Pass (エッジコライダー衝突)
+            // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突)
             if has_colliders && self.enable_edge_collision {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Edge Collision Pass"),
