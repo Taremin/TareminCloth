@@ -22,50 +22,15 @@ except ImportError:
     _HAS_PIL = False
 
 
-def render_scene_to_file(
-    filepath: str,
+def _prepare_scene_arrays(
     positions: np.ndarray,
     faces: np.ndarray,
     sewing_springs: Optional[np.ndarray] = None,
     mesh_colliders: Optional[np.ndarray] = None,
     vertex_colors: Optional[np.ndarray] = None,
     extra_lines: Optional[np.ndarray] = None,
-    width: int = 800,
-    height: int = 600,
-    camera_pos: Optional[Tuple[float, float, float]] = None,
-    camera_target: Optional[Tuple[float, float, float]] = None,
-    fov: float = 45.0,
-    draw_wireframe: bool = True,
-    wire_width: float = 1.0,
-    collider_color: Optional[Tuple[int, int, int]] = None,
-    sewing_color: Optional[Tuple[int, int, int]] = None,
-    **kwargs
-) -> Tuple[str, int]:
-    """
-    シーン（布メッシュ、縫合エッジ、コライダー、頂点カラー、追加3D線分）を
-    Rust内蔵のソフトウェアラスタライザで描画し、PNG画像として保存します。
-
-    Args:
-        filepath: 保存先PNGファイルパス
-        positions: [N, 3] 布頂点座標配列
-        faces: [M, 3] 布三角形インデックス配列
-        sewing_springs: [K, 2] 縫合エッジ頂点インデックスペア
-        mesh_colliders: [L, 9] コライダー三角形配列 (p0x..z, p1x..z, p2x..z)
-        vertex_colors: [N, 3] 頂点ごとのRGBカラー (0-255 uint8, ヒートマップ等)
-        extra_lines: [E, 9] 追加3Dライン配列 (p0x..z, p1x..z, r, g, b)
-        width: 画像幅
-        height: 画像高さ
-        camera_pos: カメラ位置 (未指定時はAABBから自動算出)
-        camera_target: 注視点位置 (未指定時はAABB中心)
-        fov: 視野角(度)
-        draw_wireframe: ワイヤーフレームを描画するか
-        wire_width: ワイヤーフレーム太さ(px)
-        collider_color: コライダー色 (RGB 0-255)
-        sewing_color: 縫合エッジ色 (RGB 0-255)
-
-    Returns:
-        (filepath, red_pixels): 保存先パスと裏面露出（赤）ピクセル数のタプル
-    """
+    voxels: Optional[np.ndarray] = None,
+):
     pos = np.ascontiguousarray(positions, dtype=np.float32)
     fcs = np.ascontiguousarray(faces, dtype=np.uint32)
 
@@ -88,6 +53,44 @@ def render_scene_to_file(
     if extra_lines is not None and len(extra_lines) > 0:
         lines = np.ascontiguousarray(extra_lines, dtype=np.float32)
 
+    vox = None
+    if voxels is not None and len(voxels) > 0:
+        vox = np.ascontiguousarray(voxels, dtype=np.float32)
+
+    return pos, fcs, sew, cols, vc, lines, vox
+
+
+def render_scene_to_file(
+    filepath: str,
+    positions: np.ndarray,
+    faces: np.ndarray,
+    sewing_springs: Optional[np.ndarray] = None,
+    mesh_colliders: Optional[np.ndarray] = None,
+    vertex_colors: Optional[np.ndarray] = None,
+    extra_lines: Optional[np.ndarray] = None,
+    voxels: Optional[np.ndarray] = None,
+    width: int = 800,
+    height: int = 600,
+    camera_pos: Optional[Tuple[float, float, float]] = None,
+    camera_target: Optional[Tuple[float, float, float]] = None,
+    fov: float = 45.0,
+    draw_wireframe: bool = True,
+    wire_width: float = 1.0,
+    wireframe_only: bool = False,
+    wire_color: Optional[Tuple[int, int, int]] = None,
+    collider_color: Optional[Tuple[int, int, int]] = None,
+    sewing_color: Optional[Tuple[int, int, int]] = None,
+    voxel_screen_size: Optional[float] = None,
+    **kwargs
+) -> Tuple[str, int]:
+    """
+    シーン（布メッシュ、縫合エッジ、コライダー、頂点カラー、追加3D線分、ボクセル）を
+    Rust内蔵のソフトウェアラスタライザで描画し、PNG画像として保存します。
+    """
+    pos, fcs, sew, cols, vc, lines, vox = _prepare_scene_arrays(
+        positions, faces, sewing_springs, mesh_colliders, vertex_colors, extra_lines, voxels
+    )
+
     os.makedirs(os.path.dirname(os.path.abspath(filepath)) or ".", exist_ok=True)
 
     if _HAS_RUST_CORE and hasattr(taremin_cloth_core, "render_scene_to_png"):
@@ -104,10 +107,14 @@ def render_scene_to_file(
             fov=float(fov),
             draw_wireframe=bool(draw_wireframe),
             wire_width=float(wire_width),
+            wireframe_only=bool(wireframe_only),
+            wire_color=list(wire_color) if wire_color is not None else None,
             collider_color=list(collider_color) if collider_color is not None else None,
             sewing_color=list(sewing_color) if sewing_color is not None else None,
             vertex_colors=vc,
             extra_lines=lines,
+            voxels=vox,
+            voxel_screen_size=float(voxel_screen_size) if voxel_screen_size is not None else None,
         )
         return filepath, red_pixels
     elif _HAS_RUST_CORE and hasattr(taremin_cloth_core, "render_mesh_to_png"):
@@ -124,6 +131,91 @@ def render_scene_to_file(
         return filepath, red_pixels
     else:
         raise RuntimeError("taremin_cloth_core のレンダリング機能が利用できません。")
+
+
+def render_scene_to_image(
+    positions: np.ndarray,
+    faces: np.ndarray,
+    sewing_springs: Optional[np.ndarray] = None,
+    mesh_colliders: Optional[np.ndarray] = None,
+    vertex_colors: Optional[np.ndarray] = None,
+    extra_lines: Optional[np.ndarray] = None,
+    voxels: Optional[np.ndarray] = None,
+    width: int = 800,
+    height: int = 600,
+    camera_pos: Optional[Tuple[float, float, float]] = None,
+    camera_target: Optional[Tuple[float, float, float]] = None,
+    fov: float = 45.0,
+    draw_wireframe: bool = True,
+    wire_width: float = 1.0,
+    wireframe_only: bool = False,
+    wire_color: Optional[Tuple[int, int, int]] = None,
+    collider_color: Optional[Tuple[int, int, int]] = None,
+    sewing_color: Optional[Tuple[int, int, int]] = None,
+    voxel_screen_size: Optional[float] = None,
+    **kwargs
+):
+    """
+    シーンをメモリ上でラスタライズし、ディスクI/Oなしで直接 PIL.Image を生成して返却します。
+    """
+    if not _HAS_PIL:
+        raise RuntimeError("アニメーション生成や画像直接取得には PIL (Pillow) が必要です。")
+
+    pos, fcs, sew, cols, vc, lines, vox = _prepare_scene_arrays(
+        positions, faces, sewing_springs, mesh_colliders, vertex_colors, extra_lines, voxels
+    )
+
+    if _HAS_RUST_CORE and hasattr(taremin_cloth_core, "render_scene_to_rgb"):
+        raw_bytes, _red_pixels = taremin_cloth_core.render_scene_to_rgb(
+            pos,
+            fcs,
+            sewing_springs=sew,
+            mesh_colliders=cols,
+            width=width,
+            height=height,
+            camera_pos=list(camera_pos) if camera_pos is not None else None,
+            camera_target=list(camera_target) if camera_target is not None else None,
+            fov=float(fov),
+            draw_wireframe=bool(draw_wireframe),
+            wire_width=float(wire_width),
+            wireframe_only=bool(wireframe_only),
+            wire_color=list(wire_color) if wire_color is not None else None,
+            collider_color=list(collider_color) if collider_color is not None else None,
+            sewing_color=list(sewing_color) if sewing_color is not None else None,
+            vertex_colors=vc,
+            extra_lines=lines,
+            voxels=vox,
+            voxel_screen_size=float(voxel_screen_size) if voxel_screen_size is not None else None,
+        )
+        # raw RGB バッファから PIL.Image をコピー生成
+        img = Image.frombytes("RGB", (width, height), bytes(raw_bytes))
+        return img
+    else:
+        # フォールバック: 一時ファイル経由
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            render_scene_to_file(
+                tmp_path, positions, faces,
+                sewing_springs=sewing_springs, mesh_colliders=mesh_colliders,
+                vertex_colors=vertex_colors, extra_lines=extra_lines, voxels=voxels,
+                width=width, height=height,
+                camera_pos=camera_pos, camera_target=camera_target, fov=fov,
+                draw_wireframe=draw_wireframe, wire_width=wire_width,
+                wireframe_only=wireframe_only, wire_color=wire_color,
+                collider_color=collider_color, sewing_color=sewing_color,
+                **kwargs
+            )
+            img = Image.open(tmp_path)
+            img.load()
+            return img
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 def render_mesh_to_file(
@@ -146,33 +238,13 @@ def render_mesh_to_image(
     fov: float = 45.0,
     **kwargs
 ):
-    """
-    PIL.Imageオブジェクトを返却する互換用ヘルパー。
-    内部で一時PNGを生成してロードします。
-    """
-    if not _HAS_PIL:
-        raise RuntimeError("PIL (Pillow) がインストールされていません")
-
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    try:
-        render_scene_to_file(
-            tmp_path, positions, faces,
-            width=width, height=height,
-            camera_pos=camera_pos, camera_target=camera_target, fov=fov,
-            **kwargs
-        )
-        img = Image.open(tmp_path)
-        img.load()
-        return img
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+    """PIL.Imageオブジェクトを返却する互換用ヘルパー。render_scene_to_image を直接呼び出します"""
+    return render_scene_to_image(
+        positions, faces,
+        width=width, height=height,
+        camera_pos=camera_pos, camera_target=camera_target, fov=fov,
+        **kwargs
+    )
 
 
 def count_red_pixels(
@@ -534,3 +606,152 @@ def generate_sdf_bbox_lines(
     if lines:
         return np.array(lines, dtype=np.float32)
     return None
+
+
+def extract_sdf_surface_voxels(
+    bake_res,
+    alpha_threshold: float = 0.03,
+    dist_factor: float = 0.75,
+    stride: int = 1,
+    adaptive: bool = True,
+    target_spacing: Optional[float] = None,
+) -> List[Tuple[str, np.ndarray, np.ndarray, Tuple[int, int, int]]]:
+    """
+    SDFベイク結果（BakeResult）の3Dテクスチャから、各ボーンの表面付近ボクセルを抽出します。
+
+    Args:
+        bake_res: BakeResult オブジェクト
+        alpha_threshold: ボーン影響度ウェイト閾値
+        dist_factor: 表面近傍判定ファクター (|eff_d| <= dist_factor * avg_spacing)
+        stride: ボクセルサンプリング間隔 (adaptive=False 時の一律間隔、または adaptive=True 時の基準倍率)
+        adaptive: True の場合、各軸のアスペクト比に応じて stride を個別に適応化（等方サンプリング）
+        target_spacing: ワールド/ローカル空間での目標間隔 (m単位)。指定時は全軸・全ボーンでこの間隔を基準に適応サンプリング。
+
+    Returns:
+        List of (bone_name, local_pts [V, 3], voxel_size [3], rgb_color [3])
+    """
+    raw_tex = np.frombuffer(bake_res.texture_bytes, dtype=np.float16).reshape(
+        (bake_res.depth, bake_res.height, bake_res.width, 2)
+    )
+    bone_names = bake_res.bone_names
+    bone_infos = bake_res.bone_infos
+
+    bone_voxels = []
+    b_per_layer = 16
+
+    for b_idx, bname in enumerate(bone_names):
+        info = bone_infos[b_idx]
+        local_min = np.array(info[0:3], dtype=np.float32)
+        local_max = np.array(info[4:7], dtype=np.float32)
+        res = int(info[7])
+        if res <= 0:
+            bone_voxels.append((bname, np.empty((0, 3), dtype=np.float32), np.zeros(3, dtype=np.float32), (100, 140, 180)))
+            continue
+
+        weight_th = max(float(info[19]), 0.01)
+
+        box_size = local_max - local_min
+        base_d = box_size / float(res)
+
+        if adaptive:
+            if target_spacing is not None and target_spacing > 0.0:
+                st_x = max(1, int(round(target_spacing / base_d[0])))
+                st_y = max(1, int(round(target_spacing / base_d[1])))
+                st_z = max(1, int(round(target_spacing / base_d[2])))
+            else:
+                target_pitch = float(np.max(base_d)) * float(max(1, int(stride)))
+                st_x = max(1, int(round(target_pitch / base_d[0])))
+                st_y = max(1, int(round(target_pitch / base_d[1])))
+                st_z = max(1, int(round(target_pitch / base_d[2])))
+        else:
+            st = max(1, int(stride))
+            st_x = st_y = st_z = st
+
+        l_idx = b_idx // b_per_layer
+        rem = b_idx % b_per_layer
+        r_idx = rem // 4
+        c_idx = rem % 4
+
+        z0, z1 = l_idx * res, (l_idx + 1) * res
+        y0, y1 = r_idx * res, (r_idx + 1) * res
+        x0, x1 = c_idx * res, (c_idx + 1) * res
+
+        slot_tex = raw_tex[z0:z1:st_z, y0:y1:st_y, x0:x1:st_x, :]
+        raw_d = slot_tex[:, :, :, 0].astype(np.float32)
+        alpha = slot_tex[:, :, :, 1].astype(np.float32)
+
+        t = np.clip(alpha / weight_th, 0.0, 1.0)
+        mask = t * t * (3.0 - 2.0 * t)
+        eff_d = (1.0 - mask) * 10.0 + mask * raw_d
+
+        eff_vox_size = base_d * np.array([st_x, st_y, st_z], dtype=np.float32)
+        avg_spacing = float(np.mean(eff_vox_size))
+
+        surf_mask = (np.abs(eff_d) <= avg_spacing * dist_factor) & (alpha > alpha_threshold)
+
+        bname_l = bname.lower()
+        if "hip" in bname_l:
+            b_color = (255, 210, 40) # イエローゴールド
+        elif "leg" in bname_l or "thigh" in bname_l or "foot" in bname_l:
+            b_color = (60, 220, 120) # エメラルドグリーン
+        elif "spine" in bname_l or "chest" in bname_l or "neck" in bname_l or "head" in bname_l:
+            b_color = (0, 200, 255) # シアン
+        elif "arm" in bname_l or "hand" in bname_l or "shoulder" in bname_l:
+            b_color = (255, 100, 200) # マゼンタピンク
+        else:
+            b_color = (100, 140, 180) # スレートブルー
+
+        if np.any(surf_mask):
+            iz, iy, ix = np.where(surf_mask)
+            fx = (ix.astype(np.float32) * st_x + 0.5) / float(res)
+            fy = (iy.astype(np.float32) * st_y + 0.5) / float(res)
+            fz = (iz.astype(np.float32) * st_z + 0.5) / float(res)
+
+            px = local_min[0] + fx * box_size[0]
+            py = local_min[1] + fy * box_size[1]
+            pz = local_min[2] + fz * box_size[2]
+            pts_loc = np.stack([px, py, pz], axis=-1)
+            bone_voxels.append((bname, pts_loc, eff_vox_size, b_color))
+        else:
+            bone_voxels.append((bname, np.empty((0, 3), dtype=np.float32), eff_vox_size, b_color))
+
+    return bone_voxels
+
+
+def transform_sdf_voxels_to_world(
+    bone_surface_voxels: List[Tuple[str, np.ndarray, np.ndarray, Tuple[int, int, int]]],
+    bone_world_matrices: dict,
+    scale_factor: float = 0.5
+) -> Optional[np.ndarray]:
+    """
+    各ボーンのローカル表面ボクセルをボーンワールド行列で変換し、
+    [N, 7] (x, y, z, size, r, g, b) のボクセル配列を生成します。
+    """
+    all_voxels = []
+    for bname, pts_loc, vox_sz, b_color in bone_surface_voxels:
+        if len(pts_loc) == 0:
+            continue
+        mat = bone_world_matrices.get(bname)
+        if mat is None:
+            continue
+
+        mat4 = np.asarray(mat, dtype=np.float32).reshape((4, 4))
+        pts_homo = np.hstack([pts_loc, np.ones((len(pts_loc), 1), dtype=np.float32)])
+        pts_w = (pts_homo @ mat4.T)[:, :3]
+
+        # ボクセルの実効サイズ（立方体の一辺）
+        v_size = float(np.mean(vox_sz)) * scale_factor
+        n = len(pts_w)
+
+        vox_arr = np.empty((n, 7), dtype=np.float32)
+        vox_arr[:, 0:3] = pts_w
+        vox_arr[:, 3] = v_size
+        vox_arr[:, 4] = b_color[0]
+        vox_arr[:, 5] = b_color[1]
+        vox_arr[:, 6] = b_color[2]
+        all_voxels.append(vox_arr)
+
+    if all_voxels:
+        return np.vstack(all_voxels)
+    return None
+

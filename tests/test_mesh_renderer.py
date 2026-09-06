@@ -260,6 +260,108 @@ class TestMeshRenderer(unittest.TestCase):
             gold_mask = (arr[:, :, 0] == 255) & (arr[:, :, 1] == 170) & (arr[:, :, 2] == 0)
             self.assertTrue(np.any(gold_mask), "追加3Dライン（ゴールド）が描画されていません")
 
+    def test_wireframe_only_and_voxels_render(self):
+        """wireframe_only モードとボクセル描画、および render_scene_to_image の動作検証"""
+        from taremin_cloth.mesh_renderer import render_scene_to_image
+        from PIL import Image
+
+        positions = np.array([
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.uint32)
+
+        # 鮮やかなシアンのボクセル [0, 240, 255]
+        voxels = np.array([
+            [0.0, 0.0, 0.0, 0.4, 0.0, 240.0, 255.0],
+        ], dtype=np.float32)
+
+        # 1. render_scene_to_image で直接 PIL.Image を生成
+        img = render_scene_to_image(
+            positions, faces,
+            voxels=voxels,
+            wireframe_only=True,
+            width=100, height=100,
+            camera_pos=(0, 0, 3), camera_target=(0, 0, 0)
+        )
+        self.assertIsInstance(img, Image.Image)
+        arr = np.array(img)
+
+        # ワイヤーフレームのオレンジ [255, 140, 20] が検出されること
+        orange_mask = (arr[:, :, 0] == 255) & (arr[:, :, 1] == 140) & (arr[:, :, 2] == 20)
+        self.assertTrue(np.any(orange_mask), "布のオレンジワイヤーフレームが描画されていません")
+
+        # ボクセルのシアン [0, >100, >100] が検出されること
+        cyan_mask = (arr[:, :, 0] == 0) & (arr[:, :, 1] > 100) & (arr[:, :, 2] > 100)
+        self.assertTrue(np.any(cyan_mask), "ボクセルのシアンが描画されていません")
+
+        # 2. voxel_screen_size=2.0 でスクリーンスペース固定サイズ描画
+        img_ss = render_scene_to_image(
+            positions, faces,
+            voxels=voxels,
+            voxel_screen_size=2.0,
+            wireframe_only=True,
+            width=100, height=100,
+            camera_pos=(0, 0, 3), camera_target=(0, 0, 0)
+        )
+        arr_ss = np.array(img_ss)
+        cyan_mask_ss = (arr_ss[:, :, 0] == 0) & (arr_ss[:, :, 1] == 240) & (arr_ss[:, :, 2] == 255)
+        # 2x2 正方形なのでちょうど 4 ピクセル描画されること
+        self.assertEqual(np.count_nonzero(cyan_mask_ss), 4, "スクリーンスペース 2x2 ボクセルのピクセル数が4ではありません")
+
+    def test_extract_sdf_surface_voxels_adaptive(self):
+        """非等方AABBに対する適応的サンプリング（adaptive stride）の検証"""
+        from taremin_cloth.mesh_renderer import extract_sdf_surface_voxels
+        from types import SimpleNamespace
+
+        # モックの BakeResult: すねを模した極端な縦長直方体 (10cm x 60cm x 15cm, res=64)
+        # base_d = [1.56mm, 9.38mm, 2.34mm]
+        res = 64
+        tex = np.zeros((res, res, res, 2), dtype=np.float16)
+        # 表面付近のボクセルを設定 (dist=0.001, alpha=0.5)
+        tex[:, :, :, 0] = 0.001
+        tex[:, :, :, 1] = 0.5
+
+        info_row = [0.0] * 20
+        info_row[0:3] = [-0.05, 0.0, -0.075] # min
+        info_row[4:7] = [0.05, 0.6, 0.075]   # max (box: 0.1 x 0.6 x 0.15)
+        info_row[7] = float(res)
+        info_row[19] = 0.01 # weight_threshold
+
+        mock_bake = SimpleNamespace(
+            texture_bytes=tex.tobytes(),
+            bone_names=["lower_leg"],
+            bone_infos=[info_row],
+            width=res,
+            height=res,
+            depth=res,
+        )
+
+        # 1. adaptive=False の場合: stride は全軸一律
+        res_non_adaptive = extract_sdf_surface_voxels(mock_bake, stride=2, adaptive=False)
+        self.assertEqual(len(res_non_adaptive), 1)
+        _, pts_non_ad, vox_sz_non_ad, _ = res_non_adaptive[0]
+        self.assertGreater(len(pts_non_ad), 0)
+        # vox_sz のアスペクト比は元のAABBのまま (約 1:6:1.5)
+        self.assertAlmostEqual(vox_sz_non_ad[1] / vox_sz_non_ad[0], 6.0, delta=0.1)
+
+        # 2. adaptive=True の場合: 粗い長軸(Y)に合わせ、他軸が間引かれて等方化される
+        res_adaptive = extract_sdf_surface_voxels(mock_bake, stride=1, adaptive=True)
+        _, pts_ad, vox_sz_ad, _ = res_adaptive[0]
+        self.assertGreater(len(pts_ad), 0)
+        # vox_sz は等方化されているため、アスペクト比がほぼ 1:1 に近い
+        ratio_yx = vox_sz_ad[1] / vox_sz_ad[0]
+        self.assertTrue(0.8 <= ratio_yx <= 1.25, f"等方化されたアスペクト比が期待外: {ratio_yx}")
+
+        # 3. target_spacing を指定した場合
+        target_sp = 0.02 # 20mm
+        res_target = extract_sdf_surface_voxels(mock_bake, target_spacing=target_sp, adaptive=True)
+        _, pts_tgt, vox_sz_tgt, _ = res_target[0]
+        self.assertGreater(len(pts_tgt), 0)
+        for d in vox_sz_tgt:
+            self.assertTrue(0.015 <= d <= 0.025, f"target_spacing に一致していません: {d}")
+
 
 if __name__ == "__main__":
     unittest.main()

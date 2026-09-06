@@ -26,6 +26,12 @@ pub struct RenderOptions {
     pub draw_wireframe: bool,
     /// ワイヤーフレームの太さ (ピクセル単位, デフォルト 1.0px)
     pub wire_width_px: f32,
+    /// 面を描画せずワイヤーフレームのみを描画するか (透過ワイヤーフレーム)
+    pub wireframe_only: bool,
+    /// ワイヤーフレーム描画色 (None時はデフォルト色: wireframe_only時はBlenderオレンジ [255, 140, 20], 通常時は陰影トーン)
+    pub wire_color: Option<[u8; 3]>,
+    /// ボクセルのスクリーンスペース固定描画サイズ (ピクセル単位, None時は従来の3Dワールド空間キューブ描画)
+    pub voxel_screen_size: Option<f32>,
 }
 
 impl Default for RenderOptions {
@@ -43,6 +49,9 @@ impl Default for RenderOptions {
             sewing_color: [0, 204, 255],
             draw_wireframe: true,
             wire_width_px: 1.0,
+            wireframe_only: false,
+            wire_color: None,
+            voxel_screen_size: None,
         }
     }
 }
@@ -56,6 +65,7 @@ pub struct SceneData<'a> {
     pub mesh_triangles: &'a [[f32; 9]], // コライダー三角形 [p0x..z, p1x..z, p2x..z]
     pub vertex_colors: Option<&'a [[u8; 3]]>, // 頂点ごとのRGBカラー (ヒートマップ用)
     pub extra_lines: &'a [[f32; 9]],    // 追加3Dライン [p0x..z, p1x..z, r, g, b] (SDF BBOX等)
+    pub voxels: &'a [[f32; 7]],         // ボクセルデータ [center_x..z, size, r, g, b]
 }
 
 pub struct RenderResult {
@@ -288,11 +298,17 @@ fn rasterize_triangle(
         (base_color[2] as f32 * ndotl).min(255.0) as u8,
     ];
 
-    let default_wire_color = [
-        (default_shaded_color[0] as f32 * 0.45) as u8,
-        (default_shaded_color[1] as f32 * 0.45) as u8,
-        (default_shaded_color[2] as f32 * 0.45) as u8,
-    ];
+    let default_wire_color = if let Some(wc) = options.wire_color {
+        wc
+    } else if options.wireframe_only {
+        [255, 140, 20] // Blenderのアクティブオブジェクト選択色（鮮やかなオレンジ）
+    } else {
+        [
+            (default_shaded_color[0] as f32 * 0.45) as u8,
+            (default_shaded_color[1] as f32 * 0.45) as u8,
+            (default_shaded_color[2] as f32 * 0.45) as u8,
+        ]
+    };
 
     let half_w = options.wire_width_px * 0.5;
     let wire_thresh_sq = half_w * half_w;
@@ -308,6 +324,22 @@ fn rasterize_triangle(
             let w2 = 1.0 - w0 - w1;
 
             if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                // ピクセル空間距離による均一エッジ判定（1px）
+                let is_wire = if options.draw_wireframe {
+                    let p = [px, py];
+                    let d01_sq = dist_sq_point_to_segment(p, p0, p1);
+                    let d12_sq = dist_sq_point_to_segment(p, p1, p2);
+                    let d20_sq = dist_sq_point_to_segment(p, p2, p0);
+                    d01_sq <= wire_thresh_sq || d12_sq <= wire_thresh_sq || d20_sq <= wire_thresh_sq
+                } else {
+                    false
+                };
+
+                // wireframe_only が有効な場合、エッジ以外の面内部ピクセルはスキップ（Zバッファも更新しない）
+                if options.wireframe_only && !is_wire {
+                    continue;
+                }
+
                 let pz = w0 * z0 + w1 * z1 + w2 * z2;
                 let pixel_idx = row_offset + x as usize;
                 if pz < z_buffer[pixel_idx] {
@@ -320,25 +352,20 @@ fn rasterize_triangle(
                         let g = (w0 * c0[1] as f32 + w1 * c1[1] as f32 + w2 * c2[1] as f32) * ndotl;
                         let b = (w0 * c0[2] as f32 + w1 * c1[2] as f32 + w2 * c2[2] as f32) * ndotl;
                         let sc = [r.min(255.0) as u8, g.min(255.0) as u8, b.min(255.0) as u8];
-                        let wc = [
-                            (sc[0] as f32 * 0.45) as u8,
-                            (sc[1] as f32 * 0.45) as u8,
-                            (sc[2] as f32 * 0.45) as u8,
-                        ];
+                        let wc = if let Some(custom_wc) = options.wire_color {
+                            custom_wc
+                        } else if options.wireframe_only {
+                            [255, 140, 20]
+                        } else {
+                            [
+                                (sc[0] as f32 * 0.45) as u8,
+                                (sc[1] as f32 * 0.45) as u8,
+                                (sc[2] as f32 * 0.45) as u8,
+                            ]
+                        };
                         (sc, wc)
                     } else {
                         (default_shaded_color, default_wire_color)
-                    };
-
-                    // ピクセル空間距離による均一エッジ判定（1px）
-                    let is_wire = if options.draw_wireframe {
-                        let p = [px, py];
-                        let d01_sq = dist_sq_point_to_segment(p, p0, p1);
-                        let d12_sq = dist_sq_point_to_segment(p, p1, p2);
-                        let d20_sq = dist_sq_point_to_segment(p, p2, p0);
-                        d01_sq <= wire_thresh_sq || d12_sq <= wire_thresh_sq || d20_sq <= wire_thresh_sq
-                    } else {
-                        false
                     };
 
                     let final_pix = if is_wire { wire_color } else { shaded_color };
@@ -351,7 +378,249 @@ fn rasterize_triangle(
     }
 }
 
-/// シーン全体（布、縫合エッジ、コライダー）をメモリ上のフレームバッファへラスタライズ描画する
+/// 単色・高速フラット三角形ラスタライザ（ボクセル面等用）
+fn rasterize_flat_triangle(
+    p0: [f32; 2], z0: f32,
+    p1: [f32; 2], z1: f32,
+    p2: [f32; 2], z2: f32,
+    color: [u8; 3],
+    width: u32,
+    height: u32,
+    fb: &mut [u8],
+    z_buffer: &mut [f32],
+) {
+    let min_x = (p0[0].min(p1[0]).min(p2[0]).floor() as i32).max(0).min((width - 1) as i32) as u32;
+    let max_x = (p0[0].max(p1[0]).max(p2[0]).ceil() as i32).max(0).min((width - 1) as i32) as u32;
+    let min_y = (p0[1].min(p1[1]).min(p2[1]).floor() as i32).max(0).min((height - 1) as i32) as u32;
+    let max_y = (p0[1].max(p1[1]).max(p2[1]).ceil() as i32).max(0).min((height - 1) as i32) as u32;
+
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let denom = (p1[1] - p2[1]) * (p0[0] - p2[0]) + (p2[0] - p1[0]) * (p0[1] - p2[1]);
+    if denom.abs() < 1e-7 {
+        return;
+    }
+    let inv_denom = 1.0 / denom;
+
+    for y in min_y..=max_y {
+        let py = y as f32 + 0.5;
+        let row_offset = (y * width) as usize;
+        for x in min_x..=max_x {
+            let px = x as f32 + 0.5;
+            let w0 = ((p1[1] - p2[1]) * (px - p2[0]) + (p2[0] - p1[0]) * (py - p2[1])) * inv_denom;
+            let w1 = ((p2[1] - p0[1]) * (px - p2[0]) + (p0[0] - p2[0]) * (py - p2[1])) * inv_denom;
+            let w2 = 1.0 - w0 - w1;
+
+            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                let pz = w0 * z0 + w1 * z1 + w2 * z2;
+                let pixel_idx = row_offset + x as usize;
+                if pz < z_buffer[pixel_idx] {
+                    z_buffer[pixel_idx] = pz;
+                    let rgb_idx = pixel_idx * 3;
+                    fb[rgb_idx] = color[0];
+                    fb[rgb_idx + 1] = color[1];
+                    fb[rgb_idx + 2] = color[2];
+                }
+            }
+        }
+    }
+}
+
+/// ボクセル群 [x, y, z, size, r, g, b] をZバッファテスト付きでラスタライズ描画する
+fn rasterize_voxels(
+    voxels: &[[f32; 7]],
+    vp: &Mat4,
+    eye: [f32; 3],
+    light_dir: [f32; 3],
+    width: u32,
+    height: u32,
+    options: &RenderOptions,
+    fb: &mut [u8],
+    z_buffer: &mut [f32],
+) {
+    let w_f = width as f32;
+    let h_f = height as f32;
+
+    // スクリーンスペース固定サイズ描画モード
+    if let Some(screen_sz) = options.voxel_screen_size {
+        let is_1px = screen_sz <= 1.0;
+        let is_2x2 = screen_sz <= 2.0;
+
+        for v in voxels {
+            let cx = v[0];
+            let cy = v[1];
+            let cz = v[2];
+            let base_clr = [v[4] as u8, v[5] as u8, v[6] as u8];
+
+            let (c_s, c_z, valid) = project_point([cx, cy, cz], vp, w_f, h_f);
+            if !valid || c_z <= 0.0 {
+                continue;
+            }
+
+            let ix = c_s[0].round() as i32;
+            let iy = c_s[1].round() as i32;
+
+            if is_1px {
+                if ix >= 0 && ix < width as i32 && iy >= 0 && iy < height as i32 {
+                    let idx = (iy as u32 * width + ix as u32) as usize;
+                    if c_z < z_buffer[idx] {
+                        z_buffer[idx] = c_z;
+                        fb[idx * 3] = base_clr[0];
+                        fb[idx * 3 + 1] = base_clr[1];
+                        fb[idx * 3 + 2] = base_clr[2];
+                    }
+                }
+            } else if is_2x2 {
+                // 2x2 正方形 (中心ピクセルとその右・下)
+                for oy in 0..2 {
+                    for ox in 0..2 {
+                        let px = ix + ox;
+                        let py = iy + oy;
+                        if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
+                            let idx = (py as u32 * width + px as u32) as usize;
+                            if c_z < z_buffer[idx] {
+                                z_buffer[idx] = c_z;
+                                fb[idx * 3] = base_clr[0];
+                                fb[idx * 3 + 1] = base_clr[1];
+                                fb[idx * 3 + 2] = base_clr[2];
+                            }
+                        }
+                    }
+                }
+            } else {
+                // 3x3 以上の正方形
+                let h = (screen_sz * 0.5).round() as i32;
+                for oy in -h..=h {
+                    for ox in -h..=h {
+                        let px = ix + ox;
+                        let py = iy + oy;
+                        if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
+                            let idx = (py as u32 * width + px as u32) as usize;
+                            if c_z < z_buffer[idx] {
+                                z_buffer[idx] = c_z;
+                                fb[idx * 3] = base_clr[0];
+                                fb[idx * 3 + 1] = base_clr[1];
+                                fb[idx * 3 + 2] = base_clr[2];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    for v in voxels {
+        let cx = v[0];
+        let cy = v[1];
+        let cz = v[2];
+        let size = v[3];
+        let base_clr = [v[4] as f32, v[5] as f32, v[6] as f32];
+
+        let (c_s, c_z, valid) = project_point([cx, cy, cz], vp, w_f, h_f);
+        if !valid || c_z <= 0.0 {
+            continue;
+        }
+
+        let hs = (size * 0.5).max(0.0001);
+        let (p_off, _, off_valid) = project_point([cx + hs, cy, cz], vp, w_f, h_f);
+        let r_px = if off_valid {
+            ((p_off[0] - c_s[0]).powi(2) + (p_off[1] - c_s[1]).powi(2)).sqrt()
+        } else {
+            1.0
+        };
+
+        // 投影サイズが微小（1.2px未満）なら高速ドット描画
+        if r_px < 1.2 {
+            let px = c_s[0].round() as i32;
+            let py = c_s[1].round() as i32;
+            if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
+                let idx = (py as u32 * width + px as u32) as usize;
+                if c_z < z_buffer[idx] {
+                    z_buffer[idx] = c_z;
+                    fb[idx * 3] = base_clr[0] as u8;
+                    fb[idx * 3 + 1] = base_clr[1] as u8;
+                    fb[idx * 3 + 2] = base_clr[2] as u8;
+                }
+            }
+            continue;
+        }
+
+        let corners = [
+            [cx - hs, cy - hs, cz - hs], // 0
+            [cx + hs, cy - hs, cz - hs], // 1
+            [cx + hs, cy + hs, cz - hs], // 2
+            [cx - hs, cy + hs, cz - hs], // 3
+            [cx - hs, cy - hs, cz + hs], // 4
+            [cx + hs, cy - hs, cz + hs], // 5
+            [cx + hs, cy + hs, cz + hs], // 6
+            [cx - hs, cy + hs, cz + hs], // 7
+        ];
+
+        let mut screen_corners = [[0.0f32; 2]; 8];
+        let mut z_corners = [0.0f32; 8];
+        let mut all_valid = true;
+        for i in 0..8 {
+            let (s, z, val) = project_point(corners[i], vp, w_f, h_f);
+            if !val {
+                all_valid = false;
+                break;
+            }
+            screen_corners[i] = s;
+            z_corners[i] = z;
+        }
+        if !all_valid {
+            continue;
+        }
+
+        let view_dir = [eye[0] - cx, eye[1] - cy, eye[2] - cz];
+
+        // カメラ向きの3面を選択（外向き法線と視線方向の内積が正の面）
+        let faces_to_draw = [
+            if view_dir[0] < 0.0 {
+                ([-1.0f32, 0.0, 0.0], [0, 4, 7], [0, 7, 3])
+            } else {
+                ([1.0f32, 0.0, 0.0], [1, 2, 6], [1, 6, 5])
+            },
+            if view_dir[1] < 0.0 {
+                ([0.0f32, -1.0, 0.0], [0, 1, 5], [0, 5, 4])
+            } else {
+                ([0.0f32, 1.0, 0.0], [3, 7, 6], [3, 6, 2])
+            },
+            if view_dir[2] < 0.0 {
+                ([0.0f32, 0.0, -1.0], [0, 3, 2], [0, 2, 1])
+            } else {
+                ([0.0f32, 0.0, 1.0], [4, 5, 6], [4, 6, 7])
+            },
+        ];
+
+        for (norm, t0, t1) in faces_to_draw {
+            let ndotl = vec3_dot(norm, light_dir).abs() * 0.4 + 0.6;
+            let clr = [
+                (base_clr[0] * ndotl).min(255.0) as u8,
+                (base_clr[1] * ndotl).min(255.0) as u8,
+                (base_clr[2] * ndotl).min(255.0) as u8,
+            ];
+
+            rasterize_flat_triangle(
+                screen_corners[t0[0]], z_corners[t0[0]],
+                screen_corners[t0[1]], z_corners[t0[1]],
+                screen_corners[t0[2]], z_corners[t0[2]],
+                clr, width, height, fb, z_buffer,
+            );
+            rasterize_flat_triangle(
+                screen_corners[t1[0]], z_corners[t1[0]],
+                screen_corners[t1[1]], z_corners[t1[1]],
+                screen_corners[t1[2]], z_corners[t1[2]],
+                clr, width, height, fb, z_buffer,
+            );
+        }
+    }
+}
+
+/// シーン全体（布、縫合エッジ、コライダー、ボクセル、追加ライン）をメモリ上のフレームバッファへラスタライズ描画する
 pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> RenderResult {
     let width = options.width;
     let height = options.height;
@@ -359,8 +628,10 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
 
     let has_cloth = !scene.positions.is_empty() && !scene.faces.is_empty();
     let has_colliders = !scene.mesh_triangles.is_empty();
+    let has_voxels = !scene.voxels.is_empty();
+    let has_lines = !scene.extra_lines.is_empty();
 
-    if !has_cloth && !has_colliders {
+    if !has_cloth && !has_colliders && !has_voxels && !has_lines {
         let mut fb = Vec::with_capacity(total_pixels * 3);
         for _ in 0..total_pixels {
             fb.extend_from_slice(&options.bg_color);
@@ -373,7 +644,7 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
         };
     }
 
-    // AABB と注視点・カメラの自動計算（布とコライダーの両方を含む）
+    // AABB と注視点・カメラの自動計算（布、コライダー、ボクセルを含む）
     let mut min_pt = [f32::INFINITY; 3];
     let mut max_pt = [f32::NEG_INFINITY; 3];
 
@@ -396,6 +667,15 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
             max_pt[1] = max_pt[1].max(tri[idx + 1]);
             max_pt[2] = max_pt[2].max(tri[idx + 2]);
         }
+    }
+
+    for v in scene.voxels {
+        min_pt[0] = min_pt[0].min(v[0]);
+        min_pt[1] = min_pt[1].min(v[1]);
+        min_pt[2] = min_pt[2].min(v[2]);
+        max_pt[0] = max_pt[0].max(v[0]);
+        max_pt[1] = max_pt[1].max(v[1]);
+        max_pt[2] = max_pt[2].max(v[2]);
     }
 
     if min_pt[0].is_infinite() {
@@ -483,7 +763,22 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
         );
     }
 
-    // 2. 布メッシュの描画（表面:白、裏面:赤、または頂点カラー）
+    // 2. ボクセル群（SDFボクセルキューブ／スクリーンスペース固定点）の描画
+    if !scene.voxels.is_empty() {
+        rasterize_voxels(
+            scene.voxels,
+            &vp,
+            eye,
+            light_dir,
+            width,
+            height,
+            options,
+            &mut fb,
+            &mut z_buffer,
+        );
+    }
+
+    // 3. 布メッシュの描画（表面:白、裏面:赤、または頂点カラー／ワイヤーフレーム）
     for tri in scene.faces {
         let i0 = tri[0] as usize;
         let i1 = tri[1] as usize;
@@ -600,6 +895,7 @@ pub fn render_mesh_to_buffer(
         mesh_triangles: &[],
         vertex_colors: None,
         extra_lines: &[],
+        voxels: &[],
     };
     render_scene_to_buffer(&scene, options)
 }
@@ -646,6 +942,7 @@ pub fn render_mesh_to_png_file(
         mesh_triangles: &[],
         vertex_colors: None,
         extra_lines: &[],
+        voxels: &[],
     };
     render_scene_to_png_file(filepath, &scene, options)
 }
@@ -724,6 +1021,7 @@ mod tests {
             mesh_triangles: &mesh_triangles,
             vertex_colors: None,
             extra_lines: &extra_lines,
+            voxels: &[],
         };
 
         let res = render_scene_to_buffer(&scene, &options);
@@ -787,6 +1085,7 @@ mod tests {
             mesh_triangles: &[],
             vertex_colors: Some(&v_colors),
             extra_lines: &[],
+            voxels: &[],
         };
 
         let res = render_scene_to_buffer(&scene, &options);
@@ -840,5 +1139,144 @@ mod tests {
             }
         }
         assert!(non_bg_count > 10 && non_bg_count < 200, "細長い三角形の描画面積が異常です: {}", non_bg_count);
+    }
+
+    #[test]
+    fn test_rasterizer_wireframe_only() {
+        let pos = vec![
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+
+        // 1. 通常描画（面あり＋ワイヤーフレーム）
+        let opt_solid = RenderOptions {
+            width: 100,
+            height: 100,
+            camera_pos: Some([0.0, 0.0, 3.0]),
+            camera_target: Some([0.0, 0.0, 0.0]),
+            wireframe_only: false,
+            ..Default::default()
+        };
+        let res_solid = render_mesh_to_buffer(&pos, &faces, &opt_solid);
+
+        let mut solid_non_bg = 0;
+        for i in 0..(100 * 100) {
+            let pix = [res_solid.framebuffer_rgb[i * 3], res_solid.framebuffer_rgb[i * 3 + 1], res_solid.framebuffer_rgb[i * 3 + 2]];
+            if pix != opt_solid.bg_color {
+                solid_non_bg += 1;
+            }
+        }
+
+        // 2. wireframe_only 描画（面なし、エッジのみ）
+        let opt_wire = RenderOptions {
+            width: 100,
+            height: 100,
+            camera_pos: Some([0.0, 0.0, 3.0]),
+            camera_target: Some([0.0, 0.0, 0.0]),
+            wireframe_only: true,
+            ..Default::default()
+        };
+        let res_wire = render_mesh_to_buffer(&pos, &faces, &opt_wire);
+
+        let mut wire_non_bg = 0;
+        let mut orange_count = 0;
+        for i in 0..(100 * 100) {
+            let r = res_wire.framebuffer_rgb[i * 3];
+            let g = res_wire.framebuffer_rgb[i * 3 + 1];
+            let b = res_wire.framebuffer_rgb[i * 3 + 2];
+            if [r, g, b] != opt_wire.bg_color {
+                wire_non_bg += 1;
+                // デフォルトのオレンジ [255, 140, 20] を検出
+                if r == 255 && g == 140 && b == 20 {
+                    orange_count += 1;
+                }
+            }
+        }
+
+        assert!(solid_non_bg > 500, "面塗り描画のピクセル数が少なすぎます: {}", solid_non_bg);
+        assert!(wire_non_bg > 0 && wire_non_bg < solid_non_bg / 3, "wireframe_only の描画面積が異常です: solid={}, wire={}", solid_non_bg, wire_non_bg);
+        assert!(orange_count > 0, "Blenderアクティブオレンジのワイヤーピクセルが描画されていません");
+    }
+
+    #[test]
+    fn test_rasterizer_voxels() {
+        let options = RenderOptions {
+            width: 100,
+            height: 100,
+            camera_pos: Some([0.0, 0.0, 3.0]),
+            camera_target: Some([0.0, 0.0, 0.0]),
+            ..Default::default()
+        };
+
+        // 鮮やかなシアンのボクセル [0, 240, 255]
+        let voxels = vec![
+            [0.0, 0.0, 0.0, 0.4, 0.0, 240.0, 255.0],
+        ];
+
+        let scene = SceneData {
+            positions: &[],
+            faces: &[],
+            sewing_springs: &[],
+            mesh_triangles: &[],
+            vertex_colors: None,
+            extra_lines: &[],
+            voxels: &voxels,
+        };
+
+        let res = render_scene_to_buffer(&scene, &options);
+        let mut cyan_pixels = 0;
+        for i in 0..(100 * 100) {
+            let r = res.framebuffer_rgb[i * 3];
+            let g = res.framebuffer_rgb[i * 3 + 1];
+            let b = res.framebuffer_rgb[i * 3 + 2];
+            if r == 0 && g > 100 && b > 100 {
+                cyan_pixels += 1;
+            }
+        }
+
+        assert!(cyan_pixels > 20, "ボクセルのシアンピクセルが描画されていません: count={}", cyan_pixels);
+    }
+
+    #[test]
+    fn test_rasterizer_voxels_screenspace() {
+        let options = RenderOptions {
+            width: 100,
+            height: 100,
+            camera_pos: Some([0.0, 0.0, 3.0]),
+            camera_target: Some([0.0, 0.0, 0.0]),
+            voxel_screen_size: Some(2.0), // スクリーンスペース 2x2 px
+            ..Default::default()
+        };
+
+        // 鮮やかなシアンのボクセル [0, 240, 255]
+        let voxels = vec![
+            [0.0, 0.0, 0.0, 0.1, 0.0, 240.0, 255.0],
+        ];
+
+        let scene = SceneData {
+            positions: &[],
+            faces: &[],
+            sewing_springs: &[],
+            mesh_triangles: &[],
+            vertex_colors: None,
+            extra_lines: &[],
+            voxels: &voxels,
+        };
+
+        let res = render_scene_to_buffer(&scene, &options);
+        let mut cyan_pixels = 0;
+        for i in 0..(100 * 100) {
+            let r = res.framebuffer_rgb[i * 3];
+            let g = res.framebuffer_rgb[i * 3 + 1];
+            let b = res.framebuffer_rgb[i * 3 + 2];
+            if r == 0 && g == 240 && b == 255 {
+                cyan_pixels += 1;
+            }
+        }
+
+        // 2x2 なのでちょうど 4 ピクセル描画されること
+        assert_eq!(cyan_pixels, 4, "スクリーンスペース 2x2 ボクセル描画のピクセル数が4ではありません: count={}", cyan_pixels);
     }
 }
