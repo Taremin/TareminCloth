@@ -367,10 +367,13 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             col_inter.prop(settings, "interactive_realtime_sync", text="Real-time Sync")
             if settings.interactive_realtime_sync:
                 col_inter.prop(settings, "interactive_max_steps", text="Max Steps / Frame")
+            col_inter.prop(settings, "isolate_viewport_view", text="Isolate View (Local)")
             row_fps = col_inter.row(align=True)
             row_fps.prop(settings, "show_fps_overlay", text="Show FPS")
             if settings.show_fps_overlay:
                 row_fps.prop(settings, "fps_overlay_position", text="")
+            col_inter.separator()
+            col_inter.operator("taremin_cloth.benchmark_fps", text="Benchmark FPS (2 sec)", icon='TIME')
 
             # 伸縮グループ (Elastic Bands / Edge Scaling)
             box_elastic = layout.box()

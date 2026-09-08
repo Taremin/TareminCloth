@@ -13,12 +13,21 @@ _draw_handler_2d = None
 _interactive_active = False
 _active_grabbed_info = None  # {"obj_name": str, "vert_idx": int, "target_world_pos": Vector or None}
 _interactive_fps_info = None  # {"fps": float, "frame_ms": float, "show_overlay": bool}
+_pin_indices_cache = {}  # {(obj_name, vg_name): (indices_list, vert_count)}
+
+
+def clear_pin_cache():
+    """ピン留め頂点インデックスのキャッシュをクリアする"""
+    global _pin_indices_cache
+    _pin_indices_cache.clear()
 
 
 def set_interactive_active(active: bool):
     """インタラクティブモードの実行状態を設定する"""
     global _interactive_active
     _interactive_active = active
+    if not active:
+        clear_pin_cache()
 
 
 def is_interactive_active() -> bool:
@@ -194,16 +203,23 @@ def draw_callback_3d():
             vg_name = settings.pin_vertex_group or "Pin"
             vg = obj.vertex_groups.get(vg_name)
             if show_pin and vg and point_shader:
-                pin_coords = []
-                vg_idx = vg.index
-                for v in mesh.vertices:
-                    for g in v.groups:
-                        if g.group == vg_idx and g.weight > 0.0:
-                            w_pos = world_mat @ v.co
-                            pin_coords.append([w_pos.x, w_pos.y, w_pos.z])
-                            break
+                cache_key = (obj.name, vg_name)
+                vert_count = len(mesh.vertices)
+                cached = _pin_indices_cache.get(cache_key)
+                if cached is not None and cached[1] == vert_count:
+                    pin_indices = cached[0]
+                else:
+                    vg_idx = vg.index
+                    pin_indices = [
+                        v.index
+                        for v in mesh.vertices
+                        for g in v.groups
+                        if g.group == vg_idx and g.weight > 0.0
+                    ]
+                    _pin_indices_cache[cache_key] = (pin_indices, vert_count)
 
-                if pin_coords:
+                if pin_indices:
+                    pin_coords = [[*(world_mat @ mesh.vertices[i].co)] for i in pin_indices]
                     draw_pin_coords = apply_view_depth_bias(pin_coords, region_3d) if use_depth_test else pin_coords
                     gpu.state.point_size_set(8.0)
                     gpu.state.blend_set('ALPHA')

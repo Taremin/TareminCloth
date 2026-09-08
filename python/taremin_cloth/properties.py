@@ -403,6 +403,11 @@ class TareminClothObjectSettings(PropertyGroup):
         min=1,
         max=8,
     )
+    isolate_viewport_view: BoolProperty(
+        name="Isolate View (Local)",
+        description="インタラクティブシミュレーション実行中、布とコライダーのみのローカルビューに一時隔離してビューポート描画を最大速度にします",
+        default=True,
+    )
     show_fps_overlay: BoolProperty(
         name="Show FPS Overlay",
         description="インタラクティブシミュレーション実行中に3DビューポートにFPSとフレーム時間を表示します",

@@ -19,6 +19,8 @@ from ..engine.cache import (
 from ..engine.runner import (
     get_or_create_simulator,
     get_effective_substeps,
+    apply_fast_playback,
+    restore_fast_playback,
 )
 from ..engine.collider import sync_colliders
 from ..engine.params import sync_cloth_parameters
@@ -28,12 +30,19 @@ from ..utils.logger import logger
 
 _interactive_running = False
 _interactive_operator_instance = None
+_last_benchmark_summary = {}
 
 
 def is_interactive_running():
     """インタラクティブモードが実行中かどうかを判定する"""
     global _interactive_running
     return _interactive_running
+
+
+def get_last_benchmark_summary():
+    """直近のインタラクティブモードのFPSサンプリング計測結果を取得する"""
+    global _last_benchmark_summary
+    return _last_benchmark_summary
 
 
 def stop_interactive_if_running():
@@ -143,6 +152,97 @@ class FPSCounter:
         self.frame_ms = 0.0
 
 
+def enter_isolated_view(context, cloth_obj):
+    """シミュレーション関連オブジェクト（布、コライダー、アーマチュア）のみを対象にローカルビューに入る"""
+    saved_selection = [o.name for o in context.selected_objects if o]
+    saved_active = context.active_object.name if context.active_object else None
+    isolated_areas = []
+
+    try:
+        # 1. 関連オブジェクトの収集（布 + コライダー + 関連アーマチュア/親）
+        target_objs = {cloth_obj}
+        for o in context.scene.objects:
+            c_set = getattr(o, "taremin_cloth_collider", None)
+            if c_set and c_set.is_collider and getattr(c_set, "enabled", True):
+                target_objs.add(o)
+                p = o.parent
+                while p:
+                    target_objs.add(p)
+                    p = p.parent
+                for mod in o.modifiers:
+                    if mod.type == 'ARMATURE' and getattr(mod, "object", None):
+                        target_objs.add(mod.object)
+
+        # 布オブジェクトの親およびアーマチュアも含める
+        p = cloth_obj.parent
+        while p:
+            target_objs.add(p)
+            p = p.parent
+        for mod in cloth_obj.modifiers:
+            if mod.type == 'ARMATURE' and getattr(mod, "object", None):
+                target_objs.add(mod.object)
+
+        # 2. 選択状態の切り替え
+        bpy.ops.object.select_all(action='DESELECT')
+        for o in target_objs:
+            try:
+                o.select_set(True)
+            except Exception:
+                pass
+
+        # 3. VIEW_3D エリアで localview をトグル
+        if context.screen:
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    space = area.spaces.active
+                    if space and getattr(space, "local_view", None) is None:
+                        try:
+                            with context.temp_override(area=area):
+                                bpy.ops.view3d.localview(frame_selected=False)
+                            isolated_areas.append(area)
+                        except Exception as e:
+                            logger.debug(f"[Interactive] Failed to enter localview for area: {e}")
+
+        # 4. 選択状態を布オブジェクト単独に復元（アクティブに設定）
+        bpy.ops.object.select_all(action='DESELECT')
+        cloth_obj.select_set(True)
+        context.view_layer.objects.active = cloth_obj
+    except Exception as e:
+        logger.warning(f"[Interactive] Failed to isolate viewport view: {e}")
+
+    return isolated_areas, saved_selection, saved_active
+
+
+def exit_isolated_view(context, isolated_areas, saved_selection, saved_active):
+    """ローカルビューから通常表示に復帰し、選択状態を復元する"""
+    try:
+        # 1. 記録されたエリアのローカルビューを解除
+        for area in list(isolated_areas):
+            space = area.spaces.active if area else None
+            if space and getattr(space, "local_view", None) is not None:
+                try:
+                    with context.temp_override(area=area):
+                        bpy.ops.view3d.localview(frame_selected=False)
+                except Exception as e:
+                    logger.debug(f"[Interactive] Failed to exit localview for area: {e}")
+
+        # 2. 元の選択状態の復元
+        bpy.ops.object.select_all(action='DESELECT')
+        for name in saved_selection:
+            o = context.scene.objects.get(name)
+            if o:
+                try:
+                    o.select_set(True)
+                except Exception:
+                    pass
+        if saved_active:
+            act = context.scene.objects.get(saved_active)
+            if act:
+                context.view_layer.objects.active = act
+    except Exception as e:
+        logger.warning(f"[Interactive] Failed to restore viewport view: {e}")
+
+
 class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     """3Dビューポート上でリアルタイムに布を掴んで動かすモーダルオペレーター"""
     bl_idname = "taremin_cloth.interactive"
@@ -161,7 +261,10 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     _pinned_verts = set()
     _anim_frame_counter = 0
     _accumulator = 0.0
-    _last_step_time = 0.0
+    _isolated_areas = []
+    _saved_selection = []
+    _saved_active = None
+    _perf_samples = []
 
     @classmethod
     def poll(cls, context):
@@ -194,13 +297,14 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         realtime_sync = getattr(settings, "interactive_realtime_sync", True) if settings else True
         max_steps = getattr(settings, "interactive_max_steps", 4) if settings else 4
 
+        # インタラクティブモードでは描画レスポンスと実時間同期の両立を図る。
+        # 最大2ステップ/フレームに制限し、最大蓄積を3ステップ分 (約50ms) に抑えて遅延スパイラルを防止。
+        step_limit = min(max_steps, 2) if realtime_sync else 1
         if realtime_sync:
-            # スパイラル・オブ・デス（処理落ち累積の無限ループ）を防ぐため最大0.1秒蓄積
-            self._accumulator += min(delta_time, 0.1)
-            step_limit = max_steps
+            self._accumulator += delta_time
+            self._accumulator = min(self._accumulator, FIXED_DT * 3.0)
         else:
             self._accumulator = FIXED_DT
-            step_limit = 1
 
         step_count = 0
         t_anim_total = 0.0
@@ -208,8 +312,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         t_param_total = 0.0
         t_step_total = 0.0
 
-        # アキュムレータが 1/60 秒以上蓄積されている間、必要な分だけ物理ステップを進める
-        while self._accumulator >= FIXED_DT and step_count < step_limit:
+        # アキュムレータが 1/60 秒以上蓄積されている場合、同期処理とステップを実行
+        if self._accumulator >= FIXED_DT:
             # コライダーのアニメーション駆動ステップ
             t0 = time.perf_counter()
             any_collider_deformed = False
@@ -225,38 +329,49 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             if any_collider_deformed:
                 context.view_layer.update()
                 depsgraph = context.evaluated_depsgraph_get()
-            t_anim_total += (time.perf_counter() - t0) * 1000.0
+            t_anim_total = (time.perf_counter() - t0) * 1000.0
 
+            # コライダー同期とパラメータ同期はフレームあたり1回のみ実施
             t0 = time.perf_counter()
             sync_colliders(sim, context.scene, depsgraph=depsgraph, force=any_collider_deformed, cloth_obj=obj)
-            t_col_total += (time.perf_counter() - t0) * 1000.0
+            t_col_total = (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
             sync_cloth_parameters(sim, obj, context.scene)
             actual_substeps = get_effective_substeps(obj, coords, FIXED_DT, scene=context.scene)
-            t_param_total += (time.perf_counter() - t0) * 1000.0
+            t_param_total = (time.perf_counter() - t0) * 1000.0
+
+            while self._accumulator >= FIXED_DT and step_count < step_limit:
+                t0 = time.perf_counter()
+                sim.step(dt=FIXED_DT, substeps=actual_substeps, solver_iterations=settings.solver_iterations if settings else 1)
+                t_step_total += (time.perf_counter() - t0) * 1000.0
+
+                self._accumulator -= FIXED_DT
+                step_count += 1
+
+        # 物理ステップが実際に進んだ場合のみ、GPUリードバック、メッシュ頂点更新、再描画を実行
+        t_get = 0.0
+        t_mesh = 0.0
+        if step_count > 0:
+            t0 = time.perf_counter()
+            sim.get_positions(coords)
+            t_get = (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
-            sim.step(dt=FIXED_DT, substeps=actual_substeps, solver_iterations=settings.solver_iterations if settings else 1)
-            t_step_total += (time.perf_counter() - t0) * 1000.0
+            obj.data.vertices.foreach_set("co", coords)
+            obj.data.update()
+            obj["_taremin_cloth_is_deformed"] = True
+            t_mesh = (time.perf_counter() - t0) * 1000.0
 
-            self._accumulator -= FIXED_DT
-            step_count += 1
-
-        # 実時間同期が上限に達した場合、残余アキュムレータをリセットして遅延蓄積を防止
-        if step_count >= step_limit:
-            self._accumulator = min(self._accumulator, FIXED_DT * 0.5)
-
-        # 全ステップ完了後、1回だけGPUリードバックとメッシュ頂点更新を実行
-        t0 = time.perf_counter()
-        sim.get_positions(coords)
-        t_get = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        obj.data.vertices.foreach_set("co", coords)
-        obj.data.update()
-        obj["_taremin_cloth_is_deformed"] = True
-        t_mesh = (time.perf_counter() - t0) * 1000.0
+            # 3Dビューポートの再描画要求
+            has_redrawn = False
+            if context.screen:
+                for a in context.screen.areas:
+                    if a.type == 'VIEW_3D':
+                        a.tag_redraw()
+                        has_redrawn = True
+            if not has_redrawn and context.area:
+                context.area.tag_redraw()
 
         # FPS計測とオーバーレイ更新
         if self._fps_counter is not None:
@@ -265,22 +380,21 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
             drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position)
 
-            # 5フレームごとにコンソールへ詳細内訳ログを出力
-            if self._anim_frame_counter % 5 == 0:
-                t_work = (time.perf_counter() - t_start) * 1000.0
-                logger.info(
-                    f"[Interactive Details] Render FPS: {fps:4.1f} ({frame_ms:5.1f}ms) | Sim Steps: {step_count}x | Work: {t_work:4.1f}ms (step:{t_step_total:3.1f}, get:{t_get:3.1f}, mesh:{t_mesh:3.1f})"
-                )
-
-        # 3Dビューポートの再描画要求
-        has_redrawn = False
-        if context.screen:
-            for a in context.screen.areas:
-                if a.type == 'VIEW_3D':
-                    a.tag_redraw()
-                    has_redrawn = True
-        if not has_redrawn and context.area:
-            context.area.tag_redraw()
+        # パフォーマンスサンプリング記録
+        if delta_time > 0:
+            instant_fps = 1.0 / delta_time
+            t_work = (time.perf_counter() - t_start) * 1000.0
+            render_ms = max(0.0, delta_time * 1000.0 - t_work)
+            self._perf_samples.append({
+                "fps": instant_fps,
+                "dt_ms": delta_time * 1000.0,
+                "sim_ms": t_step_total,
+                "get_ms": t_get,
+                "mesh_ms": t_mesh,
+                "work_ms": t_work,
+                "render_ms": render_ms,
+                "step_count": step_count,
+            })
 
     def modal(self, context, event):
         global _interactive_running, _interactive_operator_instance
@@ -544,6 +658,20 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 sim.start_debug_recording(obj.name, max_frames=max_frames)
                 logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames})")
 
+        # Fast Playback の適用（重いモディファイアの一時無効化、布オブジェクト自身含む）
+        apply_fast_playback(context.scene, force=True, include_sim_objs=True)
+
+        # パフォーマンスサンプラー初期化
+        self._perf_samples = []
+
+        # ローカルビュー（描画隔離）の適用
+        self._isolated_areas = []
+        self._saved_selection = []
+        self._saved_active = None
+        settings = getattr(obj, "taremin_cloth", None)
+        if settings and getattr(settings, "isolate_viewport_view", True):
+            self._isolated_areas, self._saved_selection, self._saved_active = enter_isolated_view(context, obj)
+
         wm = context.window_manager
         # 60 FPS相当 (約16.6ms) の高精度タイマーを登録
         self._timer = wm.event_timer_add(0.016, window=context.window)
@@ -562,7 +690,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def cancel(self, context):
-        global _interactive_running, _interactive_operator_instance
+        global _interactive_running, _interactive_operator_instance, _last_benchmark_summary
         wm = context.window_manager
         if self._timer:
             wm.event_timer_remove(self._timer)
@@ -616,6 +744,100 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
                 sim.stop_debug_recording()
 
+        # ローカルビューの復帰
+        if self._isolated_areas:
+            exit_isolated_view(context, self._isolated_areas, self._saved_selection, self._saved_active)
+            self._isolated_areas.clear()
+
+        # Fast Playback の復元
+        restore_fast_playback(context.scene)
+
+        # パフォーマンスサンプリング結果の集計とレポート出力
+        summary_msg = ""
+        if self._perf_samples:
+            valid_samples = self._perf_samples[5:] if len(self._perf_samples) > 10 else self._perf_samples
+            if valid_samples:
+                fps_vals = [s["fps"] for s in valid_samples]
+                dt_vals = [s["dt_ms"] for s in valid_samples]
+                sim_vals = [s["sim_ms"] for s in valid_samples]
+                get_vals = [s["get_ms"] for s in valid_samples]
+                mesh_vals = [s["mesh_ms"] for s in valid_samples]
+                render_vals = [s["render_ms"] for s in valid_samples]
+
+                avg_fps = sum(fps_vals) / len(fps_vals)
+                min_fps = min(fps_vals)
+                max_fps = max(fps_vals)
+                avg_dt = sum(dt_vals) / len(dt_vals)
+                avg_sim = sum(sim_vals) / len(sim_vals)
+                avg_get = sum(get_vals) / len(get_vals)
+                avg_mesh = sum(mesh_vals) / len(mesh_vals)
+                avg_render = sum(render_vals) / len(render_vals)
+
+                _last_benchmark_summary = {
+                    "total_frames": len(self._perf_samples),
+                    "sampled_frames": len(valid_samples),
+                    "avg_fps": avg_fps,
+                    "min_fps": min_fps,
+                    "max_fps": max_fps,
+                    "avg_dt_ms": avg_dt,
+                    "avg_sim_ms": avg_sim,
+                    "avg_get_ms": avg_get,
+                    "avg_mesh_ms": avg_mesh,
+                    "avg_render_ms": avg_render,
+                }
+
+                logger.info(
+                    f"\n"
+                    f"========================================================\n"
+                    f"  [TareminCloth] Interactive Performance Summary\n"
+                    f"========================================================\n"
+                    f"  Sampled Frames:     {len(valid_samples)} frames\n"
+                    f"  Average FPS:        {avg_fps:5.1f} FPS ({avg_dt:4.1f} ms/frame)\n"
+                    f"  Min / Max FPS:      {min_fps:5.1f} / {max_fps:5.1f} FPS\n"
+                    f"  Time Breakdown:\n"
+                    f"    - Physics Sim:    {avg_sim:4.2f} ms ({avg_sim/avg_dt*100:4.1f}%)\n"
+                    f"    - GPU Readback:   {avg_get:4.2f} ms ({avg_get/avg_dt*100:4.1f}%)\n"
+                    f"    - Mesh Update:    {avg_mesh:4.2f} ms ({avg_mesh/avg_dt*100:4.1f}%)\n"
+                    f"    - Viewport/Wait:  {avg_render:4.2f} ms ({avg_render/avg_dt*100:4.1f}%)\n"
+                    f"========================================================"
+                )
+                summary_msg = f" | Avg FPS: {avg_fps:.1f} (Sim: {avg_sim:.1f}ms, Render: {avg_render:.1f}ms)"
+        self._perf_samples = []
+
         # インタラクティブモード停止時は、次回スムーズに停止位置から再開（Warm Resume）できるよう
         # シミュレータインスタンスおよびQuadトポロジーをそのまま保持する
-        self.report({'INFO'}, "Interactive Simulation Stopped (Paused)")
+        self.report({'INFO'}, f"Interactive Simulation Stopped (Paused){summary_msg}")
+
+
+class TAREMIN_CLOTH_OT_benchmark_fps(bpy.types.Operator):
+    """インタラクティブシミュレーションを約2秒間サンプリング計測し、詳細なFPS性能レポートを表示する"""
+    bl_idname = "taremin_cloth.benchmark_fps"
+    bl_label = "Benchmark FPS"
+    bl_description = "インタラクティブシミュレーションを自動で約2秒間実行し、実際のFPSおよび各処理時間を計測・表示します"
+    bl_options = {'REGISTER'}
+
+    _frame_counter = 0
+
+    @classmethod
+    def poll(cls, context):
+        return TAREMIN_CLOTH_OT_interactive.poll(context) and not is_interactive_running()
+
+    def execute(self, context):
+        self._frame_counter = 0
+
+        # インタラクティブシミュレーションを開始
+        bpy.ops.taremin_cloth.interactive()
+
+        # 約80ステップ（約1.5〜2秒）後に自動停止するタイマーを登録
+        def check_auto_finish():
+            if not is_interactive_running():
+                return None
+            self._frame_counter += 1
+            if self._frame_counter >= 80:
+                stop_interactive_if_running()
+                return None
+            return 0.02
+
+        bpy.app.timers.register(check_auto_finish, first_interval=0.05)
+        self.report({'INFO'}, "Benchmarking FPS... (will complete in ~2 seconds)")
+        return {'FINISHED'}

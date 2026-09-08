@@ -26,23 +26,24 @@ from ..utils.logger import logger
 _fast_playback_saved_mods = {}
 
 
-def apply_fast_playback(scene):
-    """シミュレーションに関係のないオブジェクトの重いモディファイアを一時無効化してDepsgraphを軽量化"""
+def apply_fast_playback(scene, force=False, include_sim_objs=False):
+    """シミュレーションに関係のないオブジェクト（またはシミュレーション対象含む）の重いモディファイアを一時無効化してDepsgraphを軽量化"""
     global _fast_playback_saved_mods
-    if not getattr(scene, "taremin_cloth_fast_playback", False):
+    if not force and not getattr(scene, "taremin_cloth_fast_playback", False):
         return
 
     sim_objs = set()
-    for obj in scene.objects:
-        if getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
-            sim_objs.add(obj)
-        if getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider:
-            sim_objs.add(obj)
+    if not include_sim_objs:
+        for obj in scene.objects:
+            if getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
+                sim_objs.add(obj)
+            if getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider:
+                sim_objs.add(obj)
 
     heavy_types = {'SUBSURF', 'SOLIDIFY', 'LATTICE', 'DATA_TRANSFER', 'WEIGHTED_NORMAL', 'NODES', 'WELD', 'BEVEL'}
 
     for obj in scene.objects:
-        if obj.type == 'MESH' and obj not in sim_objs and obj.modifiers:
+        if obj.type == 'MESH' and (include_sim_objs or obj not in sim_objs) and obj.modifiers:
             for mod in obj.modifiers:
                 if mod.type in heavy_types and mod.show_viewport:
                     key = (obj.name, mod.name)

@@ -48,6 +48,7 @@ from .ops import (
     TAREMIN_CLOTH_OT_clear_cache,
     TAREMIN_CLOTH_OT_apply_gpu_settings,
     TAREMIN_CLOTH_OT_interactive,
+    TAREMIN_CLOTH_OT_benchmark_fps,
     TAREMIN_CLOTH_OT_create_seam,
     TAREMIN_CLOTH_OT_add_elastic_group,
     TAREMIN_CLOTH_OT_remove_elastic_group,
