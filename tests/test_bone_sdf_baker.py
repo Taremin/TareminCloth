@@ -407,8 +407,60 @@ class TestBoneSdfBaker(unittest.TestCase):
             bake_res.joint_faces_by_pair[("CustomBone_Parent", "CustomBone_Child")]
         )
 
+    def test_thickness_and_margin_cache_signature(self):
+        """thickness や margin が変わった場合にキャッシュシグネチャが正しく変化することを検証"""
+        verts, tris = create_cube_mesh()
+        bone_names = ["Bone_Root"]
+        sig_base = compute_mesh_signature(verts, tris, bone_names, res=64, thickness=0.005, margin=0.2)
+        sig_thick = compute_mesh_signature(verts, tris, bone_names, res=64, thickness=0.0001, margin=0.2)
+        sig_margin = compute_mesh_signature(verts, tris, bone_names, res=64, thickness=0.005, margin=0.3)
+
+        self.assertNotEqual(sig_base, sig_thick, "thickness変更でキャッシュキーが異なること")
+        self.assertNotEqual(sig_base, sig_margin, "margin変更でキャッシュキーが異なること")
+
+    def test_update_bone_sdf_params(self):
+        """update_bone_sdf_params によりパラメータ列が正確に上書きされることを検証"""
+        from taremin_cloth.engine.sdf_baker import update_bone_sdf_params
+        bone_infos = np.zeros((2, 20), dtype=np.float32)
+        updated = update_bone_sdf_params(
+            bone_infos,
+            friction=0.8,
+            thickness=0.0001,
+            restitution=0.5,
+            weight_threshold=0.03,
+            blend_k=0.08,
+        )
+        self.assertAlmostEqual(updated[0, 11], 0.08, places=4)
+        self.assertAlmostEqual(updated[0, 16], 0.8, places=4)
+        self.assertAlmostEqual(updated[0, 17], 0.0001, places=6)
+        self.assertAlmostEqual(updated[0, 18], 0.5, places=4)
+        self.assertAlmostEqual(updated[0, 19], 0.03, places=4)
+
+    def test_large_thickness_aabb_expansion(self):
+        """thickness の増加に伴いベイク領域（AABB）が安全に拡張されることを検証"""
+        verts, tris = create_cube_mesh(size=1.0)
+        bone_weights = {"Bone": np.ones(len(verts), dtype=np.float32)}
+        bone_bind_matrices = {"Bone": np.eye(4, dtype=np.float32)}
+
+        res_thin = bake_bone_sdf_from_data(
+            mesh_verts=verts, mesh_tris=tris, bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices, resolution=16, margin=0.2, thickness=0.001
+        )
+        res_thick = bake_bone_sdf_from_data(
+            mesh_verts=verts, mesh_tris=tris, bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices, resolution=16, margin=0.2, thickness=0.05
+        )
+
+        size_thin = res_thin.bone_infos[0, 4:7] - res_thin.bone_infos[0, 0:3]
+        size_thick = res_thick.bone_infos[0, 4:7] - res_thick.bone_infos[0, 0:3]
+
+        # 厚みが0.049m増えたので、AABBは両側で約0.049*2 = 0.098m拡張されること
+        diff = size_thick[0] - size_thin[0]
+        self.assertGreater(diff, 0.09, f"thickness増加によりAABBが拡張されるべき: diff={diff}")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

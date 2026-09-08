@@ -17,18 +17,20 @@ from .sdf_baker import (
 
 _collider_cache = {}
 _bone_sdf_cache = {}
+_bone_sdf_signatures = {}
 
 
 def clear_collider_cache():
     """コライダーキャッシュをクリアする"""
-    global _collider_cache, _bone_sdf_cache
+    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures
     _collider_cache.clear()
     _bone_sdf_cache.clear()
+    _bone_sdf_signatures.clear()
 
 
 def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     """シーン内のコライダーオブジェクトをシミュレータに同期する（差分キャッシュ・ブロードフェーズ・ボーンSDF対応）"""
-    global _collider_cache, _bone_sdf_cache
+    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures
 
     if depsgraph is None:
         try:
@@ -163,8 +165,23 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     continue
 
                 update_mode = getattr(col_settings, "sdf_update_mode", "STATIC")
+                current_bone_sig = (
+                    obj.name,
+                    update_mode,
+                    getattr(col_settings, "sdf_resolution", "64"),
+                    round(float(getattr(col_settings, "sdf_margin", 0.2)), 4),
+                    round(float(getattr(col_settings, "thickness", 0.005)), 5),
+                    round(float(getattr(col_settings, "friction", 0.5)), 3),
+                    round(float(getattr(col_settings, "restitution", 0.0)), 3),
+                    round(float(getattr(col_settings, "weight_threshold", 0.02)), 4),
+                    round(float(getattr(col_settings, "blend_k", 0.05)), 4),
+                    bool(getattr(col_settings, "enable_joint_mesh", True)),
+                    round(float(getattr(col_settings, "joint_weight_threshold", 0.85)), 2),
+                )
 
-                if sim_id not in _bone_sdf_cache:
+                needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_bone_sig)
+
+                if needs_rebake:
                     bake_res = get_or_bake_bone_sdf_for_object(obj, col_settings)
                     if bake_res and bake_res.depth > 0:
                         if update_mode == 'DYNAMIC_GPU':
@@ -191,7 +208,8 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                                 dyn_data.get("bone_dependency_map", []),
                                 None,
                             )
-                            logger.info(f"[Collider Sync] フルGPU動的SDFコライダーを初期化しました (interval={update_interval})")
+                            _bone_sdf_signatures[sim_id] = current_bone_sig
+                            logger.info(f"[Collider Sync] フルGPU動的SDFコライダーを初期化/更新しました (interval={update_interval})")
                         else:
                             sim.set_bone_sdf_colliders(
                                 bake_res.width,
@@ -201,8 +219,12 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                                 bake_res.bone_infos,
                             )
                             _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res, 'STATIC')
+                            _bone_sdf_signatures[sim_id] = current_bone_sig
+                            logger.info(f"[Collider Sync] ボーンSDFコライダーを設定/更新しました: {obj.name}")
                     else:
                         bake_res = None
+                        _bone_sdf_cache.pop(sim_id, None)
+                        _bone_sdf_signatures.pop(sim_id, None)
                 else:
                     cache_entry = _bone_sdf_cache[sim_id]
                     bake_res = cache_entry[1]

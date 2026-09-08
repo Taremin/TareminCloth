@@ -191,15 +191,16 @@ pub fn bake_bone_sdf_gpu(
             max_pt = [0.1, 0.1, 0.1];
         }
 
-        // マージン付与と最小サイズ (5cm) 保証
+        // マージン付与と最小サイズ (5cm) 保証 (thickness を加算して大厚み時の境界外カリングを防止)
         let mut size = [
             (max_pt[0] - min_pt[0]).max(0.05),
             (max_pt[1] - min_pt[1]).max(0.05),
             (max_pt[2] - min_pt[2]).max(0.05),
         ];
         for k in 0..3 {
-            min_pt[k] -= size[k] * margin;
-            max_pt[k] += size[k] * margin;
+            let pad = size[k] * margin + thickness.max(0.0);
+            min_pt[k] -= pad;
+            max_pt[k] += pad;
             size[k] = max_pt[k] - min_pt[k];
         }
 

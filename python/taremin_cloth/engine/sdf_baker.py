@@ -370,17 +370,39 @@ def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) 
     return n_cols, n_rows, n_layers, safe_res, total_width, total_height, total_depth
 
 
+def update_bone_sdf_params(
+    bone_infos: np.ndarray,
+    friction: float = 0.5,
+    thickness: float = 0.005,
+    restitution: float = 0.0,
+    weight_threshold: float = 0.02,
+    blend_k: float = 0.05,
+) -> np.ndarray:
+    """既存のベイク結果（bone_infos）の衝突・マテリアルパラメータを最新値で更新する"""
+    updated = bone_infos.copy()
+    if len(updated) > 0 and updated.shape[1] >= 20:
+        updated[:, 11] = blend_k          # atlas_uvw_scale[3]
+        updated[:, 16] = friction         # params.x
+        updated[:, 17] = thickness        # params.y
+        updated[:, 18] = restitution      # params.z
+        updated[:, 19] = weight_threshold # params.w
+    return updated
+
+
 def compute_mesh_signature(
     verts: np.ndarray,
     tris: np.ndarray,
     bone_names: List[str],
     res: int,
+    margin: float = 0.2,
+    thickness: float = 0.005,
+    weight_threshold: float = 0.02,
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
 ) -> str:
     """メッシュと設定からユニークなキャッシュハッシュキーを生成する"""
     hasher = hashlib.sha256()
-    prefix = f"v8_hierarchy_hybrid_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}"
+    prefix = f"v9_sdf_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}_{margin:.3f}_{thickness:.5f}_{weight_threshold:.4f}"
     hasher.update(f"{prefix}_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
     # 先頭と末尾の数頂点をサンプリングしてハッシュ化
     sample_verts = verts[::max(1, len(verts) // 20)]
@@ -934,20 +956,38 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     bone_parent_map = {b.name: (b.parent.name if b.parent else None) for b in arm_data.bones}
 
     enable_joint_mesh = getattr(col_settings, "enable_joint_mesh", True)
-    joint_weight_threshold = getattr(col_settings, "joint_weight_threshold", 0.85)
+    joint_weight_threshold = float(getattr(col_settings, "joint_weight_threshold", 0.85))
+    margin = float(getattr(col_settings, "sdf_margin", 0.2))
+    weight_threshold = float(getattr(col_settings, "weight_threshold", 0.02))
+    thickness = float(getattr(col_settings, "thickness", 0.005))
+    friction = float(getattr(col_settings, "friction", 0.5))
+    restitution = float(getattr(col_settings, "restitution", 0.0))
+    blend_k = float(getattr(col_settings, "blend_k", 0.05))
 
-    # キャッシュチェック
+    # キャッシュチェック (thickness, margin, weight_threshold もシグネチャに含めて不整合を防止)
     cache_key = compute_mesh_signature(
         mesh_verts,
         mesh_tris,
         list(bone_weights.keys()),
         resolution,
+        margin=margin,
+        thickness=thickness,
+        weight_threshold=weight_threshold,
         enable_joint_mesh=enable_joint_mesh,
         joint_weight_threshold=joint_weight_threshold,
     )
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
         if cached is not None:
+            # 最新の衝突・マテリアルパラメータを確実に適用
+            cached.bone_infos = update_bone_sdf_params(
+                cached.bone_infos,
+                friction=friction,
+                thickness=thickness,
+                restitution=restitution,
+                weight_threshold=weight_threshold,
+                blend_k=blend_k,
+            )
             # 3Dテクスチャはキャッシュを即座に復元しつつ、関節面は最新の親子階層ロジックを適用
             if enable_joint_mesh:
                 cached.joint_face_indices, cached.joint_faces_by_pair = extract_hierarchy_joint_mesh_indices(

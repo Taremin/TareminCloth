@@ -651,16 +651,26 @@ class TareminColliderAnimSettings(PropertyGroup):
     )
 
 
+def _on_collider_prop_updated(self, context):
+    try:
+        from .engine.collider import clear_collider_cache
+        clear_collider_cache()
+    except Exception:
+        pass
+
+
 class TareminColliderSettings(PropertyGroup):
     is_collider: BoolProperty(
         name="Collider Enabled",
         description="このオブジェクトを剛体コライダーとして登録する",
         default=False,
+        update=_on_collider_prop_updated,
     )
     enabled: BoolProperty(
         name="Collider Active",
         description="このコライダーの衝突判定を有効にする（OFFで一時的に無効化）",
         default=True,
+        update=_on_collider_prop_updated,
     )
     last_collider_preset: StringProperty(
         name="Collider Preset",
@@ -677,6 +687,7 @@ class TareminColliderSettings(PropertyGroup):
             ('BONE_SDF', "Bone SDF", "ボーン局所SDFコライダー (素体・キャラクタ向け)"),
         ],
         default='MESH',
+        update=_on_collider_prop_updated,
     )
     sdf_resolution: EnumProperty(
         name="SDF Resolution",
@@ -688,6 +699,7 @@ class TareminColliderSettings(PropertyGroup):
             ('CUSTOM', "Custom", "カスタム解像度指定"),
         ],
         default='64',
+        update=_on_collider_prop_updated,
     )
     sdf_resolution_custom: IntProperty(
         name="Custom Resolution",
@@ -695,6 +707,7 @@ class TareminColliderSettings(PropertyGroup):
         default=128,
         min=16,
         max=512,
+        update=_on_collider_prop_updated,
     )
     sdf_margin: FloatProperty(
         name="SDF Margin",
@@ -702,6 +715,7 @@ class TareminColliderSettings(PropertyGroup):
         default=0.2,
         min=0.05,
         max=1.0,
+        update=_on_collider_prop_updated,
     )
     weight_threshold: FloatProperty(
         name="Weight Threshold",
@@ -709,6 +723,7 @@ class TareminColliderSettings(PropertyGroup):
         default=0.02,
         min=0.001,
         max=0.5,
+        update=_on_collider_prop_updated,
     )
     blend_k: FloatProperty(
         name="Blend Smoothness",
@@ -717,6 +732,7 @@ class TareminColliderSettings(PropertyGroup):
         min=0.001,
         max=0.5,
         unit='LENGTH',
+        update=_on_collider_prop_updated,
     )
     sdf_update_mode: EnumProperty(
         name="SDF Update Mode",
@@ -726,6 +742,7 @@ class TareminColliderSettings(PropertyGroup):
             ('DYNAMIC_GPU', "Dynamic Full GPU", "GPUスキニング(LBS)とGPU内SDF更新によりアニメーション変形に毎フレーム追従"),
         ],
         default='STATIC',
+        update=_on_collider_prop_updated,
     )
     sdf_dynamic_update_interval: IntProperty(
         name="Update Interval",
@@ -733,6 +750,7 @@ class TareminColliderSettings(PropertyGroup):
         default=1,
         min=1,
         max=10,
+        update=_on_collider_prop_updated,
     )
     sdf_cache_enabled: BoolProperty(
         name="Cache SDF",
@@ -743,6 +761,7 @@ class TareminColliderSettings(PropertyGroup):
         name="Joint Mesh Hybrid",
         description="関節部（腰・背骨・首など）の複数ボーンブレンド領域のみ部分メッシュコライダーを併用し、剛体SDFの角ばり突出を解消する（激しい屈曲アニメーション時に推奨）",
         default=True,
+        update=_on_collider_prop_updated,
     )
     joint_weight_threshold: FloatProperty(
         name="Joint Blend Threshold",
@@ -751,6 +770,7 @@ class TareminColliderSettings(PropertyGroup):
         min=0.5,
         max=0.99,
         precision=2,
+        update=_on_collider_prop_updated,
     )
     joint_rotation_threshold: FloatProperty(
         name="Activation Angle",
@@ -759,6 +779,7 @@ class TareminColliderSettings(PropertyGroup):
         min=0.0,
         max=45.0,
         precision=1,
+        update=_on_collider_prop_updated,
     )
     radius: FloatProperty(
         name="Radius",
@@ -767,6 +788,7 @@ class TareminColliderSettings(PropertyGroup):
         min=0.001,
         max=10.0,
         unit='LENGTH',
+        update=_on_collider_prop_updated,
     )
     thickness: FloatProperty(
         name="Thickness",
@@ -775,11 +797,13 @@ class TareminColliderSettings(PropertyGroup):
         min=0.0001,
         max=0.5,
         unit='LENGTH',
+        update=_on_collider_prop_updated,
     )
     single_sided: BoolProperty(
         name="Single Sided",
         description="片面衝突判定を有効化。メッシュ表面（法線方向）からの侵入を遮断し、裏側へめり込んだ場合も法線方向の表面へ押し戻して貫通を防止します",
         default=True,
+        update=_on_collider_prop_updated,
     )
     friction: FloatProperty(
         name="Friction",
@@ -787,6 +811,7 @@ class TareminColliderSettings(PropertyGroup):
         default=0.5,
         min=0.0,
         max=1.0,
+        update=_on_collider_prop_updated,
     )
     restitution: FloatProperty(
         name="Restitution",
@@ -794,6 +819,7 @@ class TareminColliderSettings(PropertyGroup):
         default=0.0,
         min=0.0,
         max=1.0,
+        update=_on_collider_prop_updated,
     )
     anim: PointerProperty(type=TareminColliderAnimSettings)
 
