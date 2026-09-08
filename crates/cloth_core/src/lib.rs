@@ -16,5 +16,8 @@ pub use renderer::{
     render_mesh_to_buffer, render_mesh_to_png_file, render_scene_to_buffer,
     render_scene_to_png_file, RenderOptions, RenderResult, SceneData,
 };
-pub use sdf_baker::{bake_bone_sdf_gpu, BoneInput, GpuBakeParams, GpuBakeTriangle, GpuBoneSdfBakeResult};
+pub use sdf_baker::{
+    bake_bone_sdf_gpu, bake_mesh_sdf_gpu, BoneInput, GpuBakeMeshParams, GpuBakeMeshTriangle,
+    GpuBakeParams, GpuBakeTriangle, GpuBoneSdfBakeResult, GpuMeshSdfBakeResult,
+};
 

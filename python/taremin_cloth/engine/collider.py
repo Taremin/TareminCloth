@@ -10,8 +10,10 @@ import numpy as np
 from ..utils.logger import logger
 from .sdf_baker import (
     get_or_bake_bone_sdf_for_object,
+    get_or_bake_mesh_sdf_for_object,
     get_armature_modifier,
     BoneSdfBakeResult,
+    MeshSdfBakeResult,
     extract_dynamic_sdf_setup_data,
 )
 
@@ -58,6 +60,10 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                         has_active_anim = True
                     elif obj.animation_data and obj.animation_data.action:
                         has_active_anim = True
+            elif col_settings.collider_type == 'MESH_SDF' and obj.type == 'MESH':
+                has_bone_sdf = True
+                if obj.animation_data and obj.animation_data.action:
+                    has_active_anim = True
             elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
                 # Armature変形、オブジェクトアニメーション、シェイプキーアニメーションがある場合は毎フレーム更新
                 if get_armature_modifier(obj) is not None:
@@ -91,6 +97,10 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 round(getattr(col_settings, "blend_k", 0.05), 4),
                 bool(getattr(col_settings, "enable_joint_mesh", True)),
                 round(getattr(col_settings, "joint_weight_threshold", 0.85), 2),
+                round(getattr(col_settings, "mesh_sdf_voxel_size", 0.004), 4),
+                round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
+                int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256)),
+                bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
             ))
 
     sim_id = id(sim)
@@ -233,6 +243,36 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 if update_mode == 'DYNAMIC_GPU':
                     continue
 
+            elif col_settings.collider_type == 'MESH_SDF' and obj.type == 'MESH':
+                current_mesh_sig = (
+                    obj.name,
+                    round(float(getattr(col_settings, "mesh_sdf_voxel_size", 0.004)), 4),
+                    round(float(getattr(col_settings, "mesh_sdf_margin", 0.02)), 4),
+                    round(float(getattr(col_settings, "thickness", 0.005)), 5),
+                    round(float(getattr(col_settings, "friction", 0.5)), 3),
+                    round(float(getattr(col_settings, "restitution", 0.0)), 3),
+                    int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256)),
+                    bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
+                )
+                needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_mesh_sig)
+                if needs_rebake:
+                    bake_res = get_or_bake_mesh_sdf_for_object(obj, col_settings)
+                    if bake_res and bake_res.depth > 0:
+                        sim.set_bone_sdf_colliders(
+                            bake_res.width,
+                            bake_res.height,
+                            bake_res.depth,
+                            bake_res.texture_bytes,
+                            bake_res.bone_infos,
+                        )
+                        _bone_sdf_cache[sim_id] = (obj, bake_res, 'MESH_SDF')
+                        _bone_sdf_signatures[sim_id] = current_mesh_sig
+                        logger.info(f"[Collider Sync] 単一メッシュ直方体SDFコライダーを設定/更新しました: {obj.name} ({bake_res.width}x{bake_res.height}x{bake_res.depth})")
+                    else:
+                        _bone_sdf_cache.pop(sim_id, None)
+                        _bone_sdf_signatures.pop(sim_id, None)
+                continue
+
                 # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（動的アクティブ化対応）
                 if bake_res and getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
                     rot_threshold_deg = float(getattr(col_settings, "joint_rotation_threshold", 2.0))
@@ -318,13 +358,29 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
         else:
             logger.debug("[Collider Sync] all_mesh_triangles は空です (0面)")
 
-    # 毎フレームのボーン変換行列更新 (BONE_SDF)
+    # 毎フレームのボーン変換行列更新 (BONE_SDF / MESH_SDF)
     if sim_id in _bone_sdf_cache:
         cache_entry = _bone_sdf_cache[sim_id]
-        arm_obj = cache_entry[0]
+        target_obj = cache_entry[0]
         bake_res = cache_entry[1]
-        if arm_obj and getattr(arm_obj, "pose", None):
-            eval_arm = arm_obj.evaluated_get(depsgraph) if depsgraph else arm_obj
+        mode = cache_entry[2] if len(cache_entry) >= 3 else 'STATIC'
+
+        if mode == 'MESH_SDF' and target_obj:
+            # 単一メッシュSDF: オブジェクトのワールド行列を1つの変換行列として同期
+            eval_obj = target_obj.evaluated_get(depsgraph) if depsgraph else target_obj
+            mat_world = np.array(eval_obj.matrix_world, dtype=np.float32)
+            w_arr_row = mat_world.reshape(1, 4, 4)
+            try:
+                inv_arr_row = np.linalg.inv(w_arr_row)
+            except np.linalg.LinAlgError:
+                inv_arr_row = np.eye(4, dtype=np.float32).reshape(1, 4, 4)
+
+            w_arr_col = np.ascontiguousarray(np.transpose(w_arr_row, (0, 2, 1)), dtype=np.float32)
+            inv_arr_col = np.ascontiguousarray(np.transpose(inv_arr_row, (0, 2, 1)), dtype=np.float32)
+            sim.update_bone_transforms(w_arr_col, inv_arr_col)
+
+        elif target_obj and getattr(target_obj, "pose", None):
+            eval_arm = target_obj.evaluated_get(depsgraph) if depsgraph else target_obj
             mat_arm_world = np.array(eval_arm.matrix_world, dtype=np.float32)
             world_mats = []
             for b_name in bake_res.bone_names:

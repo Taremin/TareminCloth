@@ -2,7 +2,9 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
-    bake_bone_sdf_gpu as core_bake_bone_sdf_gpu, BoneInput, ClothMesh, DynamicBoneSdfSetup,
+    bake_bone_sdf_gpu as core_bake_bone_sdf_gpu,
+    bake_mesh_sdf_gpu as core_bake_mesh_sdf_gpu,
+    BoneInput, ClothMesh, DynamicBoneSdfSetup,
     GpuBakeParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuClothSimulator,
     GpuContext, GpuMeshTriangle, GpuSkinningVertex,
 };
@@ -564,6 +566,67 @@ fn bake_bone_sdf_gpu<'py>(
     let py_mats = PyArray3::from_vec3(py, &mats_3d)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("bind_matrices変換失敗: {e}")))?;
     dict.set_item("bind_matrices", py_mats)?;
+
+    Ok(dict)
+}
+
+/// GPUコンピュートシェーダーを用いた単一メッシュ直方体SDFの並列ベイク
+#[pyfunction]
+#[pyo3(signature = (
+    mesh_verts,
+    mesh_tris,
+    voxel_size=0.004,
+    margin=0.02,
+    friction=0.5,
+    thickness=0.005,
+    restitution=0.0
+))]
+fn bake_mesh_sdf_gpu<'py>(
+    py: Python<'py>,
+    mesh_verts: PyReadonlyArray2<f32>,
+    mesh_tris: PyReadonlyArray2<i32>,
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let verts_view = mesh_verts.as_array();
+    let n_verts = verts_view.shape()[0];
+    let mut verts_vec = Vec::with_capacity(n_verts);
+    for row in verts_view.outer_iter() {
+        if row.len() >= 3 {
+            verts_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let tris_view = mesh_tris.as_array();
+    let n_tris = tris_view.shape()[0];
+    let mut tris_vec = Vec::with_capacity(n_tris);
+    for row in tris_view.outer_iter() {
+        if row.len() >= 3 {
+            tris_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let res = core_bake_mesh_sdf_gpu(
+        &verts_vec,
+        &tris_vec,
+        voxel_size,
+        margin,
+        friction,
+        thickness,
+        restitution,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU Mesh SDFベイク失敗: {e}")))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("texture_bytes", PyBytes::new(py, &res.texture_bytes))?;
+    dict.set_item("width", res.width)?;
+    dict.set_item("height", res.height)?;
+    dict.set_item("depth", res.depth)?;
+
+    let py_bone_info = PyArray1::from_slice(py, &res.bone_info);
+    dict.set_item("bone_info", py_bone_info)?;
 
     Ok(dict)
 }
@@ -1421,6 +1484,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_scene_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(render_scene_to_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(bake_bone_sdf_gpu, m)?)?;
+    m.add_function(wrap_pyfunction!(bake_mesh_sdf_gpu, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

@@ -690,6 +690,7 @@ class TareminClothColliderSettings(PropertyGroup):
             ('PLANE', "Plane", "平面コライダー"),
             ('MESH', "Mesh", "メッシュコライダー (カスタムポリゴンメッシュ)"),
             ('BONE_SDF', "Bone SDF", "ボーン局所SDFコライダー (素体・キャラクタ向け)"),
+            ('MESH_SDF', "Mesh SDF", "単一メッシュ直方体SDFコライダー (素体・マネキン・剛体向け)"),
         ],
         default='MESH',
         update=_on_collider_prop_updated,
@@ -784,6 +785,49 @@ class TareminClothColliderSettings(PropertyGroup):
         min=0.0,
         max=45.0,
         precision=1,
+        update=_on_collider_prop_updated,
+    )
+    mesh_sdf_voxel_size: FloatProperty(
+        name="Voxel Size",
+        description="メッシュSDFのボクセルサイズ (m)。小さいほど高精細 (例: 0.004 = 4mm)",
+        default=0.004,
+        min=0.0005,
+        max=0.05,
+        step=0.1,
+        precision=3,
+        unit='LENGTH',
+        update=_on_collider_prop_updated,
+    )
+    mesh_sdf_margin: FloatProperty(
+        name="SDF Margin",
+        description="メッシュ周囲のSDFマージン (m)",
+        default=0.02,
+        min=0.005,
+        max=0.2,
+        step=0.5,
+        precision=3,
+        unit='LENGTH',
+        update=_on_collider_prop_updated,
+    )
+    mesh_sdf_max_vram_mb: IntProperty(
+        name="Max VRAM (MB)",
+        description="メッシュSDFテクスチャの最大VRAM消費予算 (MB)。VRAM不足やクラッシュを防ぐ上限値",
+        default=256,
+        min=64,
+        max=4096,
+        step=64,
+        update=_on_collider_prop_updated,
+    )
+    mesh_sdf_auto_scale: BoolProperty(
+        name="Auto Fit VRAM",
+        description="推定VRAMが上限を超える場合、上限内に収まるようボクセルサイズを自動調整してクラッシュを防止する",
+        default=True,
+        update=_on_collider_prop_updated,
+    )
+    mesh_sdf_cache_enabled: BoolProperty(
+        name="Cache SDF",
+        description="メッシュSDFベイク結果をディスクキャッシュし、次回以降即時ロードする",
+        default=True,
         update=_on_collider_prop_updated,
     )
     radius: FloatProperty(

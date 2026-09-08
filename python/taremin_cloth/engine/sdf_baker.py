@@ -25,6 +25,32 @@ except ImportError:
     HAS_MATHUTILS_BVH = False
 
 
+class MeshSdfBakeResult:
+    """単一メッシュ直方体SDFベイク結果のコンテナ"""
+    def __init__(
+        self,
+        texture_bytes: bytes,
+        width: int,
+        height: int,
+        depth: int,
+        bone_info: np.ndarray,   # shape: [20]
+        voxel_size: float,
+    ):
+        self.texture_bytes = texture_bytes
+        self.width = width
+        self.height = height
+        self.depth = depth
+        self.bone_info = bone_info
+        # 互換用: shape [1, 20] の bone_infos
+        self.bone_infos = bone_info.reshape(1, 20) if bone_info.ndim == 1 else bone_info
+        self.res = width
+        self.voxel_size = voxel_size
+        self.bone_names = ["MeshSdfRoot"]
+        self.bind_matrices = np.eye(4, dtype=np.float32).reshape(1, 4, 4)
+        self.joint_face_indices = np.empty(0, dtype=np.int32)
+        self.joint_faces_by_pair = {}
+
+
 class BoneSdfBakeResult:
     """ボーンSDFベイク結果のコンテナ"""
     def __init__(
@@ -1025,6 +1051,229 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         save_cached_sdf(cache_key, result)
 
     return result
+
+
+def bake_mesh_sdf_from_data(
+    mesh_verts: np.ndarray,
+    mesh_tris: np.ndarray,
+    voxel_size: float = 0.004,
+    margin: float = 0.02,
+    friction: float = 0.5,
+    thickness: float = 0.005,
+    restitution: float = 0.0,
+) -> Optional[MeshSdfBakeResult]:
+    """
+    メッシュ頂点・三角形データからGPUコンピュートシェーダーを用いて単一メッシュSDFをベイクする
+    """
+    try:
+        import taremin_cloth_core
+        if hasattr(taremin_cloth_core, "bake_mesh_sdf_gpu"):
+            gpu_res = taremin_cloth_core.bake_mesh_sdf_gpu(
+                mesh_verts=mesh_verts.astype(np.float32),
+                mesh_tris=mesh_tris.astype(np.int32),
+                voxel_size=float(voxel_size),
+                margin=float(margin),
+                friction=float(friction),
+                thickness=float(thickness),
+                restitution=float(restitution),
+            )
+            return MeshSdfBakeResult(
+                texture_bytes=gpu_res["texture_bytes"],
+                width=gpu_res["width"],
+                height=gpu_res["height"],
+                depth=gpu_res["depth"],
+                bone_info=gpu_res["bone_info"],
+                voxel_size=voxel_size,
+            )
+    except Exception as e:
+        logger.warning(f"[Mesh SDF Baker] GPUベイク失敗: {e}")
+    return None
+
+
+def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = False) -> Optional[MeshSdfBakeResult]:
+    """
+    Blenderオブジェクト（アーマチュア不要）からメッシュを解析し、直方体SDFベイク結果を取得（またはキャッシュから読込）する
+    """
+    if not obj or obj.type != 'MESH':
+        return None
+
+    req_voxel_size = float(getattr(col_settings, "mesh_sdf_voxel_size", 0.004))
+    margin = float(getattr(col_settings, "mesh_sdf_margin", 0.02))
+    friction = float(getattr(col_settings, "friction", 0.5))
+    thickness = float(getattr(col_settings, "thickness", 0.005))
+    restitution = float(getattr(col_settings, "restitution", 0.0))
+    max_vram_mb = int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256))
+    auto_scale = bool(getattr(col_settings, "mesh_sdf_auto_scale", True))
+    cache_enabled = bool(getattr(col_settings, "mesh_sdf_cache_enabled", True))
+
+    depsgraph = bpy.context.evaluated_depsgraph_get() if bpy and hasattr(bpy, "context") and bpy.context else None
+    eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
+    mesh = eval_obj.to_mesh() if depsgraph else obj.data
+
+    n_verts = len(mesh.vertices)
+    if n_verts == 0:
+        if depsgraph:
+            eval_obj.to_mesh_clear()
+        return None
+
+    raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", raw_coords)
+    mesh_verts = raw_coords.reshape((n_verts, 3))
+
+    mesh.calc_loop_triangles()
+    n_tris = len(mesh.loop_triangles)
+    if n_tris == 0:
+        if depsgraph:
+            eval_obj.to_mesh_clear()
+        return None
+
+    tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("vertices", tri_indices)
+    mesh_tris = tri_indices.reshape((n_tris, 3))
+
+    if depsgraph:
+        eval_obj.to_mesh_clear()
+
+    # VRAM上限に基づくボクセルサイズの自動最適化 (Auto Fit VRAM)
+    min_pt = np.min(mesh_verts, axis=0)
+    max_pt = np.max(mesh_verts, axis=0)
+    padded_size = np.maximum(max_pt - min_pt, 0.05)
+    for k in range(3):
+        pad = max(padded_size[k] * margin, 0.04) + max(thickness, 0.0) + 0.02
+        padded_size[k] += pad * 2.0
+
+    voxel_size, is_clamped, raw_vram_mb = compute_effective_voxel_size(
+        padded_size, req_voxel_size, max_vram_mb, auto_scale
+    )
+    if is_clamped:
+        logger.info(
+            f"[Mesh SDF Baker] VRAM上限({max_vram_mb}MB)超過を検知 (推定{raw_vram_mb:.1f}MB): "
+            f"ボクセルサイズを自動調整 {req_voxel_size*1000:.1f}mm -> {voxel_size*1000:.1f}mm"
+        )
+
+    hasher = hashlib.sha256()
+    hasher.update(f"{mesh_verts.shape}_{mesh_tris.shape}".encode("utf-8"))
+    sample_verts = mesh_verts[::max(1, len(mesh_verts) // 20)]
+    hasher.update(sample_verts.tobytes())
+    mesh_sig = hasher.hexdigest()[:16]
+
+    cache_key = hashlib.md5(
+        f"mesh_sdf_{obj.name}_{mesh_sig}_{voxel_size:.5f}_{margin:.4f}_{friction:.3f}_{thickness:.4f}_{restitution:.3f}".encode()
+    ).hexdigest()
+
+    if cache_enabled and not force_rebake:
+        cached = load_cached_sdf(cache_key)
+        if cached is not None:
+            logger.info(f"[Mesh SDF Baker] キャッシュロード成功: '{obj.name}' ({cached.width}x{cached.height}x{cached.depth})")
+            return MeshSdfBakeResult(
+                texture_bytes=cached.texture_bytes,
+                width=cached.width,
+                height=cached.height,
+                depth=cached.depth,
+                bone_info=cached.bone_infos[0] if len(cached.bone_infos) > 0 else np.zeros(20, dtype=np.float32),
+                voxel_size=voxel_size,
+            )
+
+    t0 = time.time()
+    res = bake_mesh_sdf_from_data(
+        mesh_verts=mesh_verts,
+        mesh_tris=mesh_tris,
+        voxel_size=voxel_size,
+        margin=margin,
+        friction=friction,
+        thickness=thickness,
+        restitution=restitution,
+    )
+    elapsed = time.time() - t0
+
+    if res:
+        logger.info(
+            f"[Mesh SDF Baker] GPUベイク完了: '{obj.name}' "
+            f"寸法={res.width}x{res.height}x{res.depth} ({elapsed*1000:.1f}ms)"
+        )
+        if cache_enabled:
+            save_cached_sdf(cache_key, res)
+
+    return res
+
+
+def compute_effective_voxel_size(
+    size_xyz: np.ndarray,
+    requested_voxel_size: float,
+    max_vram_mb: int = 256,
+    auto_scale: bool = True,
+) -> Tuple[float, bool, float]:
+    """
+    指定のバウンディングボックスサイズと要求ボクセルサイズに対し、
+    最大VRAM予算(MB)を超えない実効ボクセルサイズを計算する。
+    戻り値: (effective_voxel_size, is_clamped, raw_vram_mb)
+    """
+    v_req = max(float(requested_voxel_size), 0.0005)
+    w = int(np.clip(np.ceil(size_xyz[0] / v_req), 8, 2048))
+    h = int(np.clip(np.ceil(size_xyz[1] / v_req), 8, 2048))
+    d = int(np.clip(np.ceil(size_xyz[2] / v_req), 8, 2048))
+    raw_vram_mb = (w * h * d * 4) / (1024 * 1024)
+
+    max_mb = max(int(max_vram_mb), 64)
+    if not auto_scale or raw_vram_mb <= max_mb:
+        return v_req, False, raw_vram_mb
+
+    # VRAM予算内に収めるための最小ボクセルサイズを逆算 (Volume / v^3 * 4 <= max_bytes)
+    target_bytes = max_mb * 1024 * 1024 * 0.95  # 安全係数 95%
+    vol = float(size_xyz[0] * size_xyz[1] * size_xyz[2])
+    min_v = (4.0 * vol / target_bytes) ** (1.0 / 3.0)
+
+    effective_v = max(v_req, float(min_v))
+    for _ in range(10):
+        w_c = int(np.clip(np.ceil(size_xyz[0] / effective_v), 8, 2048))
+        h_c = int(np.clip(np.ceil(size_xyz[1] / effective_v), 8, 2048))
+        d_c = int(np.clip(np.ceil(size_xyz[2] / effective_v), 8, 2048))
+        vram_c = (w_c * h_c * d_c * 4) / (1024 * 1024)
+        if vram_c <= max_mb:
+            break
+        effective_v *= 1.02
+
+    return effective_v, True, raw_vram_mb
+
+
+def estimate_mesh_sdf_info(
+    obj,
+    voxel_size: float = 0.004,
+    margin: float = 0.02,
+    thickness: float = 0.005,
+    max_vram_mb: int = 256,
+    auto_scale: bool = True,
+) -> Tuple[int, int, int, float, float, bool, float]:
+    """
+    オブジェクトのバウンディングボックスとボクセルサイズから推定されるSDF解像度とVRAM容量(MB)を計算する。
+    戻り値: (width, height, depth, effective_vram_mb, effective_voxel_size, is_clamped, raw_vram_mb)
+    """
+    if not obj or obj.type != 'MESH':
+        return 0, 0, 0, 0.0, float(voxel_size), False, 0.0
+
+    if hasattr(obj, "bound_box") and obj.bound_box:
+        corners = np.array(obj.bound_box, dtype=np.float32)
+        min_pt = np.min(corners, axis=0)
+        max_pt = np.max(corners, axis=0)
+    else:
+        min_pt = np.array([-0.5, -0.5, -0.5], dtype=np.float32)
+        max_pt = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+
+    padded_size = np.maximum(max_pt - min_pt, 0.05)
+    for k in range(3):
+        pad = max(padded_size[k] * margin, 0.04) + max(thickness, 0.0) + 0.02
+        padded_size[k] += pad * 2.0
+
+    effective_v, is_clamped, raw_vram_mb = compute_effective_voxel_size(
+        padded_size, voxel_size, max_vram_mb, auto_scale
+    )
+
+    w = int(np.clip(np.ceil(padded_size[0] / effective_v), 8, 2048))
+    h = int(np.clip(np.ceil(padded_size[1] / effective_v), 8, 2048))
+    d = int(np.clip(np.ceil(padded_size[2] / effective_v), 8, 2048))
+    effective_vram_mb = (w * h * d * 4) / (1024 * 1024)
+
+    return w, h, d, effective_vram_mb, effective_v, is_clamped, raw_vram_mb
 
 
 def extract_dynamic_sdf_setup_data(obj, arm_obj, bake_res: BoneSdfBakeResult) -> Dict[str, np.ndarray]:

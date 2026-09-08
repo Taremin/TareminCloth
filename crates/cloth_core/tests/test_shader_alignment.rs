@@ -9,7 +9,7 @@ use cloth_core::simulation::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
     GpuSkinningVertex, NormalParams, PinParams,
 };
-use cloth_core::sdf_baker::GpuBakeParams;
+use cloth_core::sdf_baker::{GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams};
 use cloth_core::spatial_hash::SpatialHashParams;
 
 use naga::front::wgsl;
@@ -80,6 +80,7 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("compute_normals.wgsl", include_str!("../src/shaders/compute_normals.wgsl")),
     ("extract_positions.wgsl", include_str!("../src/shaders/extract_positions.wgsl")),
     ("bake_sdf.wgsl", include_str!("../src/shaders/bake_sdf.wgsl")),
+    ("bake_mesh_sdf.wgsl", include_str!("../src/shaders/bake_mesh_sdf.wgsl")),
     ("skinning.wgsl", include_str!("../src/shaders/skinning.wgsl")),
     ("prep_bone_triangles.wgsl", include_str!("../src/shaders/prep_bone_triangles.wgsl")),
 ];
@@ -337,6 +338,30 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, GpuBakeParams, total_height);
             check_member!(filename, s, GpuBakeParams, total_depth);
             check_member!(filename, s, GpuBakeParams, row_pitch);
+        }
+
+        if let Some(s) = structs.get("BakeMeshParams") {
+            check_struct_size!(filename, s, GpuBakeMeshParams);
+            check_member!(filename, s, GpuBakeMeshParams, local_min);
+            check_member!(filename, s, GpuBakeMeshParams, tri_count);
+            check_member!(filename, s, GpuBakeMeshParams, local_max);
+            check_member!(filename, s, GpuBakeMeshParams, row_pitch);
+            check_member!(filename, s, GpuBakeMeshParams, width);
+            check_member!(filename, s, GpuBakeMeshParams, height);
+            check_member!(filename, s, GpuBakeMeshParams, depth);
+            check_member!(filename, s, GpuBakeMeshParams, _pad0);
+        }
+
+        if let Some(s) = structs.get("BakeMeshTriangle") {
+            check_struct_size!(filename, s, GpuBakeMeshTriangle);
+            check_member!(filename, s, GpuBakeMeshTriangle, p0);
+            check_member!(filename, s, GpuBakeMeshTriangle, _pad0);
+            check_member!(filename, s, GpuBakeMeshTriangle, p1);
+            check_member!(filename, s, GpuBakeMeshTriangle, _pad1);
+            check_member!(filename, s, GpuBakeMeshTriangle, p2);
+            check_member!(filename, s, GpuBakeMeshTriangle, _pad2);
+            check_member!(filename, s, GpuBakeMeshTriangle, normal);
+            check_member!(filename, s, GpuBakeMeshTriangle, _pad3);
         }
     }
 }

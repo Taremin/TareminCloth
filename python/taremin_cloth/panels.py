@@ -555,6 +555,44 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 row_cache = b_col.row(align=True)
                 row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text="Clear Cache", icon='TRASH')
                 row_cache.operator("taremin_cloth.rebake_bone_sdf", text="Rebake SDF", icon='FILE_REFRESH')
+            elif col_settings.collider_type == 'MESH_SDF':
+                b_col.prop(col_settings, "mesh_sdf_voxel_size")
+                b_col.prop(col_settings, "mesh_sdf_margin")
+                b_col.prop(col_settings, "thickness")
+
+                # VRAM上限予算と自動調整設定
+                box_mem = b_col.box()
+                box_mem.prop(col_settings, "mesh_sdf_max_vram_mb")
+                box_mem.prop(col_settings, "mesh_sdf_auto_scale")
+
+                # 推定解像度とVRAM容量の表示
+                from .engine.sdf_baker import estimate_mesh_sdf_info
+                w_est, h_est, d_est, vram_est, eff_v, is_clamped, raw_vram = estimate_mesh_sdf_info(
+                    obj,
+                    col_settings.mesh_sdf_voxel_size,
+                    col_settings.mesh_sdf_margin,
+                    col_settings.thickness,
+                    col_settings.mesh_sdf_max_vram_mb,
+                    col_settings.mesh_sdf_auto_scale,
+                )
+                if w_est > 0:
+                    if is_clamped:
+                        box_mem.label(
+                            text=f"上限({col_settings.mesh_sdf_max_vram_mb}MB)超過: 推定{raw_vram:.1f}MB",
+                            icon='ERROR',
+                        )
+                        box_mem.label(
+                            text=f"自動最適化: {eff_v*1000:.1f}mm ({w_est}x{h_est}x{d_est}, 約{vram_est:.1f}MB)",
+                            icon='CHECKMARK',
+                        )
+                    else:
+                        box_mem.label(text=f"解像度: {w_est}x{h_est}x{d_est} (約{vram_est:.1f}MB)", icon='INFO')
+
+                b_col.prop(col_settings, "mesh_sdf_cache_enabled")
+
+                row_cache = b_col.row(align=True)
+                row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text="Clear Cache", icon='TRASH')
+                row_cache.operator("taremin_cloth.rebake_bone_sdf", text="Rebake SDF", icon='FILE_REFRESH')
             b_col.prop(col_settings, "friction")
             b_col.prop(col_settings, "restitution")
 

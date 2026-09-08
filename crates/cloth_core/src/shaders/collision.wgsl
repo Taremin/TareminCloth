@@ -160,8 +160,12 @@ fn solve_bone_sdf_collision(
             continue;
         }
 
-        // トリリニア補間での隣接スライスにじみを防ぐ安全クランプ (スロット境界の 0.5ボクセル内側へ)
-        let eps_slice = (uvw_max - uvw_min) * 0.015;
+        // トリリニア補間での隣接スライスにじみを防ぐ安全クランプ
+        // 単一メッシュSDF (num_bones == 1u) の場合は隣接スライスが存在しないため、境界クランプを極小化 (0.002)
+        var eps_slice = (uvw_max - uvw_min) * 0.015;
+        if (params.num_bones == 1u) {
+            eps_slice = (uvw_max - uvw_min) * 0.002;
+        }
         let uvw_safe = clamp(uvw, uvw_min + eps_slice, uvw_max - eps_slice);
 
         // 4. トリリニアサンプリング (Distance, Alpha/Weight)
@@ -199,15 +203,31 @@ fn solve_bone_sdf_collision(
             let d_z_pos = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(uvw_safe.x, uvw_safe.y, clamp(uvw.z + eps_uv.z, w_min_safe, w_max_safe)), 0.0).r;
             let d_z_neg = textureSampleLevel(bone_sdf_texture, bone_sdf_sampler, vec3<f32>(uvw_safe.x, uvw_safe.y, clamp(uvw.z - eps_uv.z, w_min_safe, w_max_safe)), 0.0).r;
 
-            var grad_local = vec3<f32>(
-                d_x_pos - d_x_neg,
-                d_y_pos - d_y_neg,
-                d_z_pos - d_z_neg
-            );
+            var dx = d_x_pos - d_x_neg;
+            if (abs(dx) < 1e-6) {
+                dx = select(raw_dist - d_x_neg, d_x_pos - raw_dist, uvw.x < (u_min_safe + u_max_safe) * 0.5);
+            }
+            var dy = d_y_pos - d_y_neg;
+            if (abs(dy) < 1e-6) {
+                dy = select(raw_dist - d_y_neg, d_y_pos - raw_dist, uvw.y < (v_min_safe + v_max_safe) * 0.5);
+            }
+            var dz = d_z_pos - d_z_neg;
+            if (abs(dz) < 1e-6) {
+                dz = select(raw_dist - d_z_neg, d_z_pos - raw_dist, uvw.z < (w_min_safe + w_max_safe) * 0.5);
+            }
+
+            var grad_local = vec3<f32>(dx, dy, dz);
             let grad_len = length(grad_local);
-            var normal_local = vec3<f32>(0.0, 1.0, 0.0);
+            var normal_local = vec3<f32>(0.0, 0.0, 1.0);
             if (grad_len > 1e-6) {
                 normal_local = grad_local / grad_len;
+            } else {
+                let center_local = (info.aabb_min.xyz + info.aabb_max.xyz) * 0.5;
+                let diff_c = p_local - center_local;
+                let len_c = length(diff_c);
+                if (len_c > 1e-6) {
+                    normal_local = diff_c / len_c;
+                }
             }
 
             // ワールド法線へ変換

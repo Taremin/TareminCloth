@@ -277,16 +277,31 @@ class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return obj and getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider and obj.taremin_cloth_collider.collider_type == 'BONE_SDF'
+        return (
+            obj
+            and getattr(obj, "taremin_cloth_collider", None)
+            and obj.taremin_cloth_collider.is_collider
+            and obj.taremin_cloth_collider.collider_type in {'BONE_SDF', 'MESH_SDF'}
+        )
 
     def execute(self, context):
         obj = context.active_object
         col_settings = obj.taremin_cloth_collider
-        from ..engine.sdf_baker import get_or_bake_bone_sdf_for_object
-        result = get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake=True)
-        if result is not None:
-            self.report({'INFO'}, f"'{obj.name}' のボーンSDFを再ベイクしました: {len(result.bone_names)} ボーン ({result.width}x{result.height}x{result.depth})")
-            return {'FINISHED'}
+        if col_settings.collider_type == 'MESH_SDF':
+            from ..engine.sdf_baker import get_or_bake_mesh_sdf_for_object
+            result = get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake=True)
+            if result is not None:
+                self.report({'INFO'}, f"'{obj.name}' のメッシュSDFを再ベイクしました: ({result.width}x{result.height}x{result.depth})")
+                return {'FINISHED'}
+            else:
+                self.report({'ERROR'}, f"'{obj.name}' のメッシュSDFベイクに失敗しました")
+                return {'CANCELLED'}
         else:
-            self.report({'ERROR'}, f"'{obj.name}' のボーンSDFベイクに失敗しました。Armatureモディファイアとウェイトを確認してください")
-            return {'CANCELLED'}
+            from ..engine.sdf_baker import get_or_bake_bone_sdf_for_object
+            result = get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake=True)
+            if result is not None:
+                self.report({'INFO'}, f"'{obj.name}' のボーンSDFを再ベイクしました: {len(result.bone_names)} ボーン ({result.width}x{result.height}x{result.depth})")
+                return {'FINISHED'}
+            else:
+                self.report({'ERROR'}, f"'{obj.name}' のボーンSDFベイクに失敗しました。Armatureモディファイアとウェイトを確認してください")
+                return {'CANCELLED'}
