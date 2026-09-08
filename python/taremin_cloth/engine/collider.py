@@ -45,7 +45,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     has_bone_sdf = False
 
     for obj in scene.objects:
-        col_settings = getattr(obj, "taremin_collider", None)
+        col_settings = getattr(obj, "taremin_cloth_collider", None)
         if col_settings and col_settings.is_collider and getattr(col_settings, "enabled", True):
             collider_objs.append((obj, col_settings))
             anim_s = getattr(col_settings, "anim", None)

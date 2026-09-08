@@ -36,7 +36,7 @@ def apply_fast_playback(scene):
     for obj in scene.objects:
         if getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
             sim_objs.add(obj)
-        if getattr(obj, "taremin_collider", None) and obj.taremin_collider.is_collider:
+        if getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider:
             sim_objs.add(obj)
 
     heavy_types = {'SUBSURF', 'SOLIDIFY', 'LATTICE', 'DATA_TRANSFER', 'WEIGHTED_NORMAL', 'NODES', 'WELD', 'BEVEL'}
@@ -131,10 +131,11 @@ def get_or_create_simulator(obj):
     s_mode = 1 if getattr(settings, "solver_mode", "COLORING") == 'ATOMIC' else 0
     compact_rb = getattr(settings, "enable_compact_readback", True)
 
-    is_deformed = obj.get("_taremin_is_deformed", False)
+    is_deformed = obj.get("_taremin_cloth_is_deformed", False)
     rest_pos_2d = None
-    if is_deformed and "_taremin_rest_positions" in obj:
-        raw_rest = obj["_taremin_rest_positions"]
+    # レスト頂点座標の取得 (未変形キャッシュがあれば優先して使用)
+    if is_deformed and "_taremin_cloth_rest_positions" in obj:
+        raw_rest = obj["_taremin_cloth_rest_positions"]
         if len(raw_rest) == n_verts * 3 * 4:
             rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3))
 
@@ -211,7 +212,7 @@ def get_effective_substeps(obj, coords, dt, scene=None):
     sc = scene or getattr(bpy.context, "scene", None)
     if sc:
         for c_obj in sc.objects:
-            if hasattr(c_obj, "taremin_collider") and c_obj.taremin_collider.is_collider and getattr(c_obj.taremin_collider, "enabled", True):
+            if hasattr(c_obj, "taremin_cloth_collider") and c_obj.taremin_cloth_collider.is_collider and getattr(c_obj.taremin_cloth_collider, "enabled", True):
                 curr_loc = np.array(c_obj.matrix_world.translation, dtype=np.float32)
                 prev_loc = _collider_prev_locs_cache.get(c_obj.name)
                 _collider_prev_locs_cache[c_obj.name] = curr_loc
@@ -269,7 +270,7 @@ def cloth_frame_handler(scene):
     # コライダーのアニメーション駆動ステップ (タイムライン再生時もコライダーアニメーションを連動)
     any_collider_deformed = False
     for col_o in scene.objects:
-        c_set = getattr(col_o, "taremin_collider", None)
+        c_set = getattr(col_o, "taremin_cloth_collider", None)
         if c_set and c_set.is_collider and getattr(c_set, "enabled", True):
             if getattr(c_set, "anim", None) and c_set.anim.enabled:
                 anim_frame = current_frame - scene.frame_start
@@ -301,7 +302,7 @@ def cloth_frame_handler(scene):
                 coords[:] = cached_coords
                 obj.data.vertices.foreach_set("co", cached_coords)
                 obj.data.update()
-                obj["_taremin_is_deformed"] = True
+                obj["_taremin_cloth_is_deformed"] = True
                 continue
 
             # 2. フレームバッファリング判定
@@ -338,7 +339,7 @@ def cloth_frame_handler(scene):
                     coords[:] = latest_data
                     obj.data.vertices.foreach_set("co", latest_data)
                     obj.data.update()
-                    obj["_taremin_is_deformed"] = True
+                    obj["_taremin_cloth_is_deformed"] = True
                 else:
                     # バッファリング中: メッシュ更新・ビューポート描画をスキップ
                     pass
@@ -348,7 +349,7 @@ def cloth_frame_handler(scene):
                 if sim.fetch_positions(coords):
                     obj.data.vertices.foreach_set("co", coords)
                     obj.data.update()
-                    obj["_taremin_is_deformed"] = True
+                    obj["_taremin_cloth_is_deformed"] = True
                     if current_frame > 1:
                         obj_cache[current_frame - 1] = coords.copy()
 
@@ -367,4 +368,4 @@ def cloth_frame_handler(scene):
                 obj_cache[current_frame] = coords.copy()
                 obj.data.vertices.foreach_set("co", coords)
                 obj.data.update()
-                obj["_taremin_is_deformed"] = True
+                obj["_taremin_cloth_is_deformed"] = True

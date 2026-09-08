@@ -252,7 +252,7 @@ def step_collider_animation(
     Returns:
         (applied_progress, is_deformed)
     """
-    col_settings = getattr(col_obj, "taremin_collider", None)
+    col_settings = getattr(col_obj, "taremin_cloth_collider", None)
     if not col_settings or not col_settings.is_collider:
         return 0.0, False
 

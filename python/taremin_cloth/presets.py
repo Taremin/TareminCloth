@@ -149,7 +149,7 @@ CATEGORY_MAP = {
     },
     'collider': {
         'builtin': BUILTIN_COLLIDER_PRESETS,
-        'target_prop': 'taremin_collider',
+        'target_prop': 'taremin_cloth_collider',
         'subfolder': 'collider',
         'display_name': 'Collider',
     },
@@ -288,8 +288,8 @@ class TAREMIN_CLOTH_OT_apply_preset(Operator):
             obj.taremin_cloth.last_fabric_preset = self.preset_name
         elif self.category == 'simulation' and hasattr(obj, "taremin_cloth"):
             obj.taremin_cloth.last_simulation_preset = self.preset_name
-        elif self.category == 'collider' and hasattr(obj, "taremin_collider"):
-            obj.taremin_collider.last_collider_preset = self.preset_name
+        elif self.category == 'collider' and hasattr(obj, "taremin_cloth_collider"):
+            obj.taremin_cloth_collider.last_collider_preset = self.preset_name
 
         self.report({'INFO'}, f"プリセット '{self.preset_name}' を適用しました")
         return {'FINISHED'}
@@ -361,8 +361,8 @@ class TAREMIN_CLOTH_OT_save_preset(Operator):
             obj.taremin_cloth.last_fabric_preset = name
         elif self.category == 'simulation' and hasattr(obj, "taremin_cloth"):
             obj.taremin_cloth.last_simulation_preset = name
-        elif self.category == 'collider' and hasattr(obj, "taremin_collider"):
-            obj.taremin_collider.last_collider_preset = name
+        elif self.category == 'collider' and hasattr(obj, "taremin_cloth_collider"):
+            obj.taremin_cloth_collider.last_collider_preset = name
 
         self.report({'INFO'}, f"プリセット '{name}' を保存しました")
         return {'FINISHED'}
@@ -424,8 +424,8 @@ class TAREMIN_CLOTH_OT_delete_preset(Operator):
                     obj.taremin_cloth.last_fabric_preset = ""
                 elif self.category == 'simulation' and hasattr(obj, "taremin_cloth") and obj.taremin_cloth.last_simulation_preset == target_name:
                     obj.taremin_cloth.last_simulation_preset = ""
-                elif self.category == 'collider' and hasattr(obj, "taremin_collider") and obj.taremin_collider.last_collider_preset == target_name:
-                    obj.taremin_collider.last_collider_preset = ""
+                elif self.category == 'collider' and hasattr(obj, "taremin_cloth_collider") and obj.taremin_cloth_collider.last_collider_preset == target_name:
+                    obj.taremin_cloth_collider.last_collider_preset = ""
 
             self.report({'INFO'}, f"プリセット '{target_name}' を削除しました")
             return {'FINISHED'}
@@ -556,7 +556,7 @@ class TAREMIN_CLOTH_OT_batch_simulation_state(Operator):
 
         for obj in scene.objects:
             cloth_s = getattr(obj, "taremin_cloth", None)
-            col_s = getattr(obj, "taremin_collider", None)
+            col_s = getattr(obj, "taremin_cloth_collider", None)
 
             if self.action == 'ALL_ON':
                 if cloth_s and cloth_s.is_cloth:
@@ -639,7 +639,7 @@ class TAREMIN_CLOTH_OT_save_config_preset(Operator):
             if cloth_s and cloth_s.is_cloth:
                 cloth_states[obj.name] = bool(cloth_s.enabled)
 
-            col_s = getattr(obj, "taremin_collider", None)
+            col_s = getattr(obj, "taremin_cloth_collider", None)
             if col_s and col_s.is_collider:
                 collider_states[obj.name] = bool(col_s.enabled)
 
@@ -689,7 +689,7 @@ class TAREMIN_CLOTH_OT_apply_config_preset(Operator):
             if cloth_s and cloth_s.is_cloth and obj.name in cloth_states:
                 cloth_s.enabled = cloth_states[obj.name]
 
-            col_s = getattr(obj, "taremin_collider", None)
+            col_s = getattr(obj, "taremin_cloth_collider", None)
             if col_s and col_s.is_collider and obj.name in collider_states:
                 col_s.enabled = collider_states[obj.name]
 

@@ -35,7 +35,7 @@ def run_real_model_benchmark(n_frames=30):
         return
 
     # コライダーオブジェクトの確認
-    colliders = [obj for obj in bpy.data.objects if getattr(obj, "taremin_collider", None) and obj.taremin_collider.is_collider]
+    colliders = [obj for obj in bpy.data.objects if getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider]
     col_tri_count = 0
     for col in colliders:
         col_tri_count += len(col.data.polygons)

@@ -23,7 +23,7 @@ class TestDebugRecorder(unittest.TestCase):
     """シミュレーションデバッグ状態記録機能のユニットテスト"""
 
     def setUp(self):
-        self.temp_dir = tempfile.mkdtemp(prefix="taremin_test_debug_")
+        self.temp_dir = tempfile.mkdtemp(prefix="taremin_cloth_test_debug_")
 
     def tearDown(self):
         # 作成した一時ディレクトリとファイルを確実にクリーンアップ

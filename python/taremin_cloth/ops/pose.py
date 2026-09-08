@@ -28,7 +28,7 @@ class TAREMIN_CLOTH_OT_record_pose(bpy.types.Operator):
             self.report({'WARNING'}, "オブジェクトが選択されていません")
             return {'CANCELLED'}
 
-        col_settings = getattr(obj, "taremin_collider", None)
+        col_settings = getattr(obj, "taremin_cloth_collider", None)
         if not col_settings or not getattr(col_settings, "anim", None):
             self.report({'WARNING'}, "コライダー設定またはアニメーション設定が見つかりません")
             return {'CANCELLED'}
@@ -86,7 +86,7 @@ class TAREMIN_CLOTH_OT_apply_pose_preview(bpy.types.Operator):
         if not obj:
             return {'CANCELLED'}
 
-        col_settings = getattr(obj, "taremin_collider", None)
+        col_settings = getattr(obj, "taremin_cloth_collider", None)
         if not col_settings or not getattr(col_settings, "anim", None):
             return {'CANCELLED'}
 

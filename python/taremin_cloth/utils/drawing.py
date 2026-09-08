@@ -138,8 +138,8 @@ def get_smooth_color_line_shader():
 
 def get_edge_initial_length(obj, v0_idx, v1_idx):
     """オブジェクトの初期座標からエッジの初期自然長を算出する"""
-    if "_taremin_rest_positions" in obj:
-        raw = np.frombuffer(obj["_taremin_rest_positions"], dtype=np.float32)
+    if "_taremin_cloth_rest_positions" in obj:
+        raw = np.frombuffer(obj["_taremin_cloth_rest_positions"], dtype=np.float32)
         if len(raw) >= max(v0_idx, v1_idx) * 3 + 3:
             p0 = raw[v0_idx * 3 : v0_idx * 3 + 3]
             p1 = raw[v1_idx * 3 : v1_idx * 3 + 3]

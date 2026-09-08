@@ -231,8 +231,8 @@ def benchmark_with_mesh_collider(n_frames=60, substeps=20, solver_iterations=2):
     # Suzanne作成
     bpy.ops.mesh.primitive_monkey_add(size=1.5, location=(1.0, 1.0, 0.0))
     monkey = bpy.context.active_object
-    monkey.taremin_collider.is_collider = True
-    monkey.taremin_collider.collider_type = 'MESH'
+    monkey.taremin_cloth_collider.is_collider = True
+    monkey.taremin_cloth_collider.collider_type = 'MESH'
 
     # 布メッシュ作成
     nx, ny = 50, 50

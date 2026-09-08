@@ -37,7 +37,7 @@ def cache_rest_positions(obj, force=False):
     """メッシュのレストポーズ（初期頂点座標）をキャッシュする
     - 初回
     - トポロジー（頂点数、辺数、面数）が変更された場合 (Dirty)
-    - シミュレーションによる変形が起きていない初期状態（_taremin_is_deformed が False）の場合 (Dirty: ユーザーによる頂点移動編集)
+    - シミュレーションによる変形が起きていない初期状態（_taremin_cloth_is_deformed が False）の場合 (Dirty: ユーザーによる頂点移動編集)
     - force=True の場合
     にキャッシュを最新のメッシュ形状で更新する。
     """
@@ -48,8 +48,8 @@ def cache_rest_positions(obj, force=False):
     sig = _get_mesh_topology_signature(mesh)
     n_verts = len(mesh.vertices)
 
-    has_cache = "_taremin_rest_positions" in obj
-    is_deformed = obj.get("_taremin_is_deformed", False)
+    has_cache = "_taremin_cloth_rest_positions" in obj
+    is_deformed = obj.get("_taremin_cloth_is_deformed", False)
 
     # シミュレーションによる変形が起きている最中は、force=Trueであっても変形座標でレストポーズを汚染しないよう上書きを拒否
     if is_deformed:
@@ -57,9 +57,9 @@ def cache_rest_positions(obj, force=False):
         return
 
     cached_sig = None
-    if "_taremin_rest_signature" in obj:
+    if "_taremin_cloth_rest_signature" in obj:
         try:
-            cached_sig = tuple(obj["_taremin_rest_signature"])
+            cached_sig = tuple(obj["_taremin_cloth_rest_signature"])
         except Exception:
             cached_sig = None
 
@@ -79,11 +79,11 @@ def cache_rest_positions(obj, force=False):
     if need_update:
         coords = np.empty(n_verts * 3, dtype=np.float32)
         mesh.vertices.foreach_get("co", coords)
-        if "_taremin_rest_positions" in obj:
-            del obj["_taremin_rest_positions"]
-        obj["_taremin_rest_positions"] = coords.tobytes()
-        obj["_taremin_rest_signature"] = list(sig)
-        obj["_taremin_is_deformed"] = False
+        if "_taremin_cloth_rest_positions" in obj:
+            del obj["_taremin_cloth_rest_positions"]
+        obj["_taremin_cloth_rest_positions"] = coords.tobytes()
+        obj["_taremin_cloth_rest_signature"] = list(sig)
+        obj["_taremin_cloth_is_deformed"] = False
 
         logger.info(f"[Cache] Cached rest positions for '{obj.name}' ({n_verts} verts, sig={sig})")
     else:
@@ -107,14 +107,14 @@ def restore_rest_positions(obj, clear=False):
             clear_backup_fn = getattr(topology, "clear_pre_subdivision_backup", None)
             if clear_backup_fn:
                 clear_backup_fn(obj)
-            if "_taremin_rest_positions" in obj:
-                del obj["_taremin_rest_positions"]
-            if "_taremin_rest_signature" in obj:
-                del obj["_taremin_rest_signature"]
-            if "_taremin_is_deformed" in obj:
-                del obj["_taremin_is_deformed"]
+            if "_taremin_cloth_rest_positions" in obj:
+                del obj["_taremin_cloth_rest_positions"]
+            if "_taremin_cloth_rest_signature" in obj:
+                del obj["_taremin_cloth_rest_signature"]
+            if "_taremin_cloth_is_deformed" in obj:
+                del obj["_taremin_cloth_is_deformed"]
         else:
-            obj["_taremin_is_deformed"] = False
+            obj["_taremin_cloth_is_deformed"] = False
             obj.update_tag()
         return
 
@@ -127,8 +127,8 @@ def restore_rest_positions(obj, clear=False):
 
     # 3. レストポーズ座標の復元
     mesh = obj.data
-    if "_taremin_rest_positions" in obj:
-        initial_coords = np.frombuffer(obj["_taremin_rest_positions"], dtype=np.float32)
+    if "_taremin_cloth_rest_positions" in obj:
+        initial_coords = np.frombuffer(obj["_taremin_cloth_rest_positions"], dtype=np.float32)
         mesh_verts = len(mesh.vertices)
         cache_verts = len(initial_coords) // 3
         logger.debug(f"[Reset] Coordinate restoration check for '{obj.name}': Mesh verts={mesh_verts}, Cache verts={cache_verts}")
@@ -141,22 +141,22 @@ def restore_rest_positions(obj, clear=False):
                 f"[Reset] Vertex count mismatch for '{obj.name}': Mesh={mesh_verts}, Cache={cache_verts}. "
                 f"Skipping coordinate restoration to preserve user mesh edits."
             )
-            if not obj.get("_taremin_is_deformed", False):
+            if not obj.get("_taremin_cloth_is_deformed", False):
                 cache_rest_positions(obj, force=True)
 
     if clear:
         clear_backup_fn = getattr(topology, "clear_pre_subdivision_backup", None)
         if clear_backup_fn:
             clear_backup_fn(obj)
-        if "_taremin_rest_positions" in obj:
-            del obj["_taremin_rest_positions"]
-        if "_taremin_rest_signature" in obj:
-            del obj["_taremin_rest_signature"]
-        if "_taremin_is_deformed" in obj:
-            del obj["_taremin_is_deformed"]
+        if "_taremin_cloth_rest_positions" in obj:
+            del obj["_taremin_cloth_rest_positions"]
+        if "_taremin_cloth_rest_signature" in obj:
+            del obj["_taremin_cloth_rest_signature"]
+        if "_taremin_cloth_is_deformed" in obj:
+            del obj["_taremin_cloth_is_deformed"]
         logger.info(f"[Reset] Cleared all rest caches for '{obj.name}'")
     else:
-        obj["_taremin_is_deformed"] = False
+        obj["_taremin_cloth_is_deformed"] = False
         obj.update_tag()
 
 

@@ -69,7 +69,7 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
         ]
         collider_objs = [
             obj for obj in scene.objects
-            if getattr(obj, "taremin_collider", None) and obj.taremin_collider.is_collider
+            if getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider
         ]
 
         # --- シミュレーション構成プリセット & 一括操作 ---
@@ -136,8 +136,8 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
             for obj in collider_objs:
                 row = col_col.row(align=True)
                 is_active = (obj == active_obj)
-                is_col_enabled = obj.taremin_collider.enabled
-                col_type = obj.taremin_collider.collider_type
+                is_col_enabled = obj.taremin_cloth_collider.enabled
+                col_type = obj.taremin_cloth_collider.collider_type
 
                 # 形状に応じたアイコン決定
                 if col_type == 'SPHERE':
@@ -169,7 +169,7 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
 
                 # コライダー有効/無効トグル (PHYSICS アイコン)
                 row.prop(
-                    obj.taremin_collider,
+                    obj.taremin_cloth_collider,
                     "enabled",
                     text="",
                     icon='PHYSICS' if is_col_enabled else 'CHECKBOX_DEHLT',
@@ -466,7 +466,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             layout.label(text="オブジェクトを選択してください", icon='INFO')
             return
 
-        col_settings = getattr(obj, "taremin_collider", None)
+        col_settings = getattr(obj, "taremin_cloth_collider", None)
         if not col_settings:
             return
 

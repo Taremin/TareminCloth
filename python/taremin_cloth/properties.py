@@ -535,7 +535,7 @@ def _on_anim_progress_updated(self, context):
         pass
 
 
-class TareminColliderAnimSettings(PropertyGroup):
+class TareminClothColliderAnimSettings(PropertyGroup):
     """コライダーアニメーション駆動設定"""
     enabled: BoolProperty(
         name="Animation Enabled",
@@ -659,7 +659,7 @@ def _on_collider_prop_updated(self, context):
         pass
 
 
-class TareminColliderSettings(PropertyGroup):
+class TareminClothColliderSettings(PropertyGroup):
     is_collider: BoolProperty(
         name="Collider Enabled",
         description="このオブジェクトを剛体コライダーとして登録する",
@@ -821,17 +821,17 @@ class TareminColliderSettings(PropertyGroup):
         max=1.0,
         update=_on_collider_prop_updated,
     )
-    anim: PointerProperty(type=TareminColliderAnimSettings)
+    anim: PointerProperty(type=TareminClothColliderAnimSettings)
 
 
 def register():
-    for cls in (TareminClothElasticGroup, TareminClothObjectSettings, TareminColliderAnimSettings, TareminColliderSettings):
+    for cls in (TareminClothElasticGroup, TareminClothObjectSettings, TareminClothColliderAnimSettings, TareminClothColliderSettings):
         try:
             bpy.utils.register_class(cls)
         except ValueError:
             pass
     bpy.types.Object.taremin_cloth = PointerProperty(type=TareminClothObjectSettings)
-    bpy.types.Object.taremin_collider = PointerProperty(type=TareminColliderSettings)
+    bpy.types.Object.taremin_cloth_collider = PointerProperty(type=TareminClothColliderSettings)
     bpy.types.Scene.taremin_cloth_fast_playback = BoolProperty(
         name="Fast Playback",
         description="タイムライン再生中にシミュレーション対象外オブジェクトのモディファイアを一時バイパスしてBlenderのDepsgraph負荷を軽減します",
@@ -858,11 +858,12 @@ def unregister():
         del bpy.types.Scene.taremin_cloth_fast_playback
     if hasattr(bpy.types.Object, "taremin_cloth"):
         del bpy.types.Object.taremin_cloth
-    if hasattr(bpy.types.Object, "taremin_collider"):
-        del bpy.types.Object.taremin_collider
-    for cls in (TareminColliderSettings, TareminColliderAnimSettings, TareminClothObjectSettings, TareminClothElasticGroup):
+    if hasattr(bpy.types.Object, "taremin_cloth_collider"):
+        del bpy.types.Object.taremin_cloth_collider
+    for cls in (TareminClothColliderSettings, TareminClothColliderAnimSettings, TareminClothObjectSettings, TareminClothElasticGroup):
         try:
             bpy.utils.unregister_class(cls)
         except RuntimeError:
             pass
+
 

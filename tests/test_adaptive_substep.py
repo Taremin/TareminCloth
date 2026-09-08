@@ -33,6 +33,7 @@ class TestAdaptiveSubstep(unittest.TestCase):
         self.cloth_obj.taremin_cloth.enable_adaptive_substep = True
         self.cloth_obj.taremin_cloth.substeps = 20
         self.cloth_obj.taremin_cloth.min_substeps = 4
+        self.cloth_obj.taremin_cloth.max_substeps = 20
 
     def tearDown(self):
         clear_simulators()
@@ -73,7 +74,7 @@ class TestAdaptiveSubstep(unittest.TestCase):
         self.assertEqual(last_step, 4)
 
     def test_immediate_step_boost_on_rapid_motion(self):
-        """急激な頂点変位が発生した際、即座にサブステップが引き上げられることを検証 (CFL条件)"""
+        """急激な頂点変位が発生した際、FPS急落を防ぎながら滑らかにサブステップが引き上げられることを検証"""
         sim, coords = get_or_create_simulator(self.cloth_obj)
         _mesh_char_len_cache[self.cloth_obj.name] = 0.02  # cfl_margin = 0.01m
 
@@ -86,10 +87,18 @@ class TestAdaptiveSubstep(unittest.TestCase):
         moved_coords = coords.copy()
         moved_coords[0] += 0.15
 
-        step_boost = get_effective_substeps(self.cloth_obj, moved_coords, 1.0 / 60.0)
-        # 即座に引き上げられる（ヒステリシスによる制限を受けない）
-        self.assertGreaterEqual(step_boost, 15)
-        self.assertLessEqual(step_boost, 20)
+        # 1フレーム目: 急上昇による極端なFPSドロップを防ぐため最大+4ステップ上昇 (4 -> 8)
+        step1 = get_effective_substeps(self.cloth_obj, moved_coords, 1.0 / 60.0)
+        self.assertEqual(step1, 8)
+
+        # 急速な変位が継続した場合、ステップ数が目標値へスムーズに追従・上昇することを確認
+        cur_coords = moved_coords.copy()
+        step_curr = step1
+        for _ in range(4):
+            cur_coords[0] += 0.15
+            step_curr = get_effective_substeps(self.cloth_obj, cur_coords, 1.0 / 60.0)
+        self.assertGreaterEqual(step_curr, 15)
+        self.assertLessEqual(step_curr, 20)
 
     def test_collider_motion_boosts_substeps(self):
         """布が静止していても、コライダーが高速移動した際にサブステップ数が引き上げられることを検証"""
@@ -104,8 +113,8 @@ class TestAdaptiveSubstep(unittest.TestCase):
         # 球コライダーを作成
         bpy.ops.mesh.primitive_uv_sphere_add(radius=0.5, location=(0, 0, 0))
         col_obj = bpy.context.active_object
-        col_obj.taremin_collider.is_collider = True
-        col_obj.taremin_collider.collider_type = 'SPHERE'
+        col_obj.taremin_cloth_collider.is_collider = True
+        col_obj.taremin_cloth_collider.collider_type = 'SPHERE'
 
         # 1回目の呼び出しでコライダー位置キャッシュを登録
         get_effective_substeps(self.cloth_obj, coords, 1.0 / 60.0, scene=bpy.context.scene)
@@ -114,11 +123,21 @@ class TestAdaptiveSubstep(unittest.TestCase):
         col_obj.location.x += 0.2
         bpy.context.view_layer.update()
 
-        # 布座標は不変だがコライダー移動によりサブステップが即時ブースト
-        step_after_col_move = get_effective_substeps(
+        # 布座標は不変だがコライダー移動によりサブステップが段階的にブースト (4 -> 8)
+        step_col1 = get_effective_substeps(
             self.cloth_obj, coords, 1.0 / 60.0, scene=bpy.context.scene
         )
-        self.assertEqual(step_after_col_move, 20)
+        self.assertEqual(step_col1, 8)
+
+        # コライダー移動が継続した場合、上限 (20) まで段階的に引き上げられることを確認
+        step_after = step_col1
+        for _ in range(4):
+            col_obj.location.x += 0.2
+            bpy.context.view_layer.update()
+            step_after = get_effective_substeps(
+                self.cloth_obj, coords, 1.0 / 60.0, scene=bpy.context.scene
+            )
+        self.assertEqual(step_after, 20)
 
 
 if __name__ == "__main__":

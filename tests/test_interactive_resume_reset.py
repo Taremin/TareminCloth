@@ -44,7 +44,7 @@ class TestInteractiveResumeReset(unittest.TestCase):
         # 1回目のインタラクティブ開始（シミュレータ生成）
         sim1, coords1 = operators.get_or_create_simulator(obj)
         self.assertIsNotNone(sim1)
-        self.assertTrue("_taremin_rest_positions" in obj)
+        self.assertTrue("_taremin_cloth_rest_positions" in obj)
 
         # 初回のエッジ0の自然長を記録
         orig_edge0_rest_len = sim1.get_edge_initial_rest_length(0)
@@ -56,7 +56,7 @@ class TestInteractiveResumeReset(unittest.TestCase):
         deformed_coords[5] -= 1.5  # 頂点1のZを下げる
         obj.data.vertices.foreach_set("co", deformed_coords)
         obj.data.update()
-        obj["_taremin_is_deformed"] = True
+        obj["_taremin_cloth_is_deformed"] = True
 
         # 停止 (Paused: シミュレータは保持されるか、破棄されてもCold Resumeされる)
         # ここでシミュレータを再生成する状況（Cold Resume）をテストするため、あえてキャッシュをクリア
@@ -83,7 +83,7 @@ class TestInteractiveResumeReset(unittest.TestCase):
         restored_coords = np.empty(n_verts * 3, dtype=np.float32)
         obj.data.vertices.foreach_get("co", restored_coords)
         np.testing.assert_allclose(restored_coords, orig_coords, atol=1e-6)
-        self.assertFalse(obj.get("_taremin_is_deformed", False))
+        self.assertFalse(obj.get("_taremin_cloth_is_deformed", False))
 
     def test_apply_rest_shape(self):
         """Apply Rest Shape を実行すると、現在の変形形状が新しい初期レスト形状として確定されるかの検証"""
@@ -104,14 +104,14 @@ class TestInteractiveResumeReset(unittest.TestCase):
         deformed_coords[2] += 0.5
         obj.data.vertices.foreach_set("co", deformed_coords)
         obj.data.update()
-        obj["_taremin_is_deformed"] = True
-
-        # Apply Rest Shape を実行
+        obj["_taremin_cloth_is_deformed"] = True
+        
+        # 形状確定オペレーター実行
         bpy.ops.taremin_cloth.apply_rest_shape()
-
-        # is_deformed がリセットされ、新レスト座標が保存されていること
-        self.assertFalse(obj.get("_taremin_is_deformed", False))
-        cached_rest = np.frombuffer(obj["_taremin_rest_positions"], dtype=np.float32)
+        
+        # 確定後は未変形状態（False）に戻り、キャッシュ座標が更新されていること
+        self.assertFalse(obj.get("_taremin_cloth_is_deformed", False))
+        cached_rest = np.frombuffer(obj["_taremin_cloth_rest_positions"], dtype=np.float32)
         np.testing.assert_allclose(cached_rest, deformed_coords, atol=1e-6)
 
         # さらに変形させた後に Reset を押すと、この「新レスト形状」に戻ることを検証
@@ -119,7 +119,7 @@ class TestInteractiveResumeReset(unittest.TestCase):
         further_coords[5] += 1.0
         obj.data.vertices.foreach_set("co", further_coords)
         obj.data.update()
-        obj["_taremin_is_deformed"] = True
+        obj["_taremin_cloth_is_deformed"] = True
 
         bpy.ops.taremin_cloth.reset_selected()
 

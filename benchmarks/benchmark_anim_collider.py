@@ -33,17 +33,18 @@ def setup_benchmark_scene(subdivisions=2):
     bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=subdivisions, radius=1.0, location=(0, 0, 0))
     col_obj = bpy.context.active_object
     col_obj.name = "ColliderMesh"
-    col_obj.taremin_collider.is_collider = True
-    col_obj.taremin_collider.collider_type = 'MESH'
-
-    # シェイプキーを追加して変形アニメーションを構成
-    basis = col_obj.shape_key_add(name="Basis")
-    key1 = col_obj.shape_key_add(name="Morph")
-    # key1 で頂点を外側に膨らませる
-    for v in key1.data:
-        v.co *= 1.3
-
-    anim = col_obj.taremin_collider.anim
+    col_obj.taremin_cloth_collider.is_collider = True
+    col_obj.taremin_cloth_collider.collider_type = 'MESH'
+    col_obj.taremin_cloth_collider.thickness = 0.02
+    col_obj.taremin_cloth_collider.friction = 0.5
+    
+    # シェイプキー作成
+    sk_base = col_obj.shape_key_add(name="Basis")
+    sk_deform = col_obj.shape_key_add(name="Deform")
+    sk_deform.data[0].co.z += 1.0 # 頂点変形
+    
+    # アニメーション設定
+    anim = col_obj.taremin_cloth_collider.anim
     anim.enabled = True
     anim.target_type = 'SHAPE_KEY'
     anim.shape_key_name = "Morph"

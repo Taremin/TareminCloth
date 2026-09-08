@@ -214,7 +214,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             t0 = time.perf_counter()
             any_collider_deformed = False
             for col_o in context.scene.objects:
-                c_set = getattr(col_o, "taremin_collider", None)
+                c_set = getattr(col_o, "taremin_cloth_collider", None)
                 if c_set and c_set.is_collider and getattr(c_set, "enabled", True) and getattr(c_set, "anim", None) and c_set.anim.enabled:
                     _, deformed = anim_driver.step_collider_animation(col_o, self._anim_frame_counter)
                     if deformed:
@@ -255,7 +255,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         t0 = time.perf_counter()
         obj.data.vertices.foreach_set("co", coords)
         obj.data.update()
-        obj["_taremin_is_deformed"] = True
+        obj["_taremin_cloth_is_deformed"] = True
         t_mesh = (time.perf_counter() - t0) * 1000.0
 
         # FPS計測とオーバーレイ更新

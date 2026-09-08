@@ -82,13 +82,13 @@ def setup_benchmark_scene(collider_type='MESH', sdf_resolution='64'):
     mod.object = arm_obj
 
     # コライダー設定
-    body_obj.taremin_collider.is_collider = True
-    body_obj.taremin_collider.enabled = True
-    body_obj.taremin_collider.collider_type = collider_type
-    body_obj.taremin_collider.thickness = 0.015
+    body_obj.taremin_cloth_collider.is_collider = True
+    body_obj.taremin_cloth_collider.enabled = True
+    body_obj.taremin_cloth_collider.collider_type = collider_type
+    body_obj.taremin_cloth_collider.thickness = 0.015
     if collider_type == 'BONE_SDF':
-        body_obj.taremin_collider.sdf_resolution = sdf_resolution
-        body_obj.taremin_collider.sdf_cache_enabled = True
+        body_obj.taremin_cloth_collider.sdf_resolution = sdf_resolution
+        body_obj.taremin_cloth_collider.sdf_cache_enabled = True
 
     # 3. 布メッシュ作成 (25x25 = 625頂点, 1152三角形)
     bpy.ops.mesh.primitive_grid_add(x_subdivisions=24, y_subdivisions=24, size=0.9, location=(0.0, 0.0, 2.5))

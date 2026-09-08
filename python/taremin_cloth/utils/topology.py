@@ -15,32 +15,32 @@ def is_cross_subdivided(obj) -> bool:
     """オブジェクトが現在十字分割されているかを判定する"""
     if not obj or obj.type != 'MESH':
         return False
-    return "_taremin_cross_subdiv_map" in obj and len(obj["_taremin_cross_subdiv_map"]) > 0
+    return "_taremin_cloth_cross_subdiv_map" in obj and len(obj["_taremin_cloth_cross_subdiv_map"]) > 0
 
 
 def backup_pre_subdivision_mesh(obj):
     """十字分割前のメッシュ（トポロジー・座標・属性）を完全バックアップする"""
     if not obj or obj.type != 'MESH':
         return
-    if "_taremin_backup_mesh" in obj:
-        mesh_name = obj["_taremin_backup_mesh"]
+    if "_taremin_cloth_backup_mesh" in obj:
+        mesh_name = obj["_taremin_cloth_backup_mesh"]
         old_backup = bpy.data.meshes.get(mesh_name)
         if old_backup:
             # 変形中（is_deformed=True）の場合は初期状態保護のため上書きしない
-            if obj.get("_taremin_is_deformed", False):
+            if obj.get("_taremin_cloth_is_deformed", False):
                 return
             if len(old_backup.vertices) == len(obj.data.vertices) and len(old_backup.polygons) == len(obj.data.polygons):
                 return
             bpy.data.meshes.remove(old_backup, do_unlink=True)
 
     # 変形中に新規バックアップを作成することは避ける（すでに変形しているため）
-    if obj.get("_taremin_is_deformed", False) and "_taremin_backup_mesh" in obj:
+    if obj.get("_taremin_cloth_is_deformed", False) and "_taremin_cloth_backup_mesh" in obj:
         return
 
     backup = obj.data.copy()
-    backup.name = f".taremin_backup_{obj.name}"
+    backup.name = f".taremin_cloth_backup_{obj.name}"
     backup.use_fake_user = True
-    obj["_taremin_backup_mesh"] = backup.name
+    obj["_taremin_cloth_backup_mesh"] = backup.name
     logger.info(f"[Topology] Created pre-subdivision backup mesh for '{obj.name}' -> '{backup.name}' ({len(backup.vertices)} verts)")
 
 
@@ -48,10 +48,10 @@ def restore_pre_subdivision_mesh(obj) -> bool:
     """十字分割前の初期メッシュ（トポロジー・初期座標・属性）に完全復元する"""
     if not obj or obj.type != 'MESH':
         return False
-    if "_taremin_backup_mesh" not in obj:
+    if "_taremin_cloth_backup_mesh" not in obj:
         return False
 
-    mesh_name = obj["_taremin_backup_mesh"]
+    mesh_name = obj["_taremin_cloth_backup_mesh"]
     backup = bpy.data.meshes.get(mesh_name)
     if not backup:
         clear_pre_subdivision_backup(obj)
@@ -60,7 +60,7 @@ def restore_pre_subdivision_mesh(obj) -> bool:
     curr_verts = len(obj.data.vertices)
     backup_verts = len(backup.vertices)
     max_added_verts = len(backup.polygons)
-    subdiv_map = obj.get("_taremin_cross_subdiv_map")
+    subdiv_map = obj.get("_taremin_cloth_cross_subdiv_map")
     if subdiv_map:
         max_added_verts = len(subdiv_map)
 
@@ -80,10 +80,10 @@ def restore_pre_subdivision_mesh(obj) -> bool:
     bm.free()
     obj.data.update()
 
-    if "_taremin_cross_subdiv_map" in obj:
-        del obj["_taremin_cross_subdiv_map"]
-    if "_taremin_is_cross_subdivided" in obj:
-        del obj["_taremin_is_cross_subdivided"]
+    if "_taremin_cloth_cross_subdiv_map" in obj:
+        del obj["_taremin_cloth_cross_subdiv_map"]
+    if "_taremin_cloth_is_cross_subdivided" in obj:
+        del obj["_taremin_cloth_is_cross_subdivided"]
 
     logger.info(f"[Topology] Restored pre-subdivision mesh for '{obj.name}' from backup '{mesh_name}'")
     return True
@@ -93,17 +93,17 @@ def clear_pre_subdivision_backup(obj):
     """バックアップMeshデータブロックを完全に破棄する"""
     if not obj or obj.type != 'MESH':
         return
-    if "_taremin_backup_mesh" in obj:
-        mesh_name = obj["_taremin_backup_mesh"]
+    if "_taremin_cloth_backup_mesh" in obj:
+        mesh_name = obj["_taremin_cloth_backup_mesh"]
         backup = bpy.data.meshes.get(mesh_name)
         if backup:
             bpy.data.meshes.remove(backup, do_unlink=True)
             logger.debug(f"[Topology] Removed backup mesh block '{mesh_name}'")
-        del obj["_taremin_backup_mesh"]
-    if "_taremin_is_cross_subdivided" in obj:
-        del obj["_taremin_is_cross_subdivided"]
-    if "_taremin_cross_subdiv_map" in obj:
-        del obj["_taremin_cross_subdiv_map"]
+        del obj["_taremin_cloth_backup_mesh"]
+    if "_taremin_cloth_is_cross_subdivided" in obj:
+        del obj["_taremin_cloth_is_cross_subdivided"]
+    if "_taremin_cloth_cross_subdiv_map" in obj:
+        del obj["_taremin_cloth_cross_subdiv_map"]
 
 
 def evaluate_optimal_diagonal(p0, p1, p2, p3, pc):
@@ -209,7 +209,7 @@ def apply_cross_subdivision(obj) -> bool:
     """
     オブジェクトの四角面メッシュを十字分割（Poke Faces）する。
     - 四角面（4頂点面）のみを対象に中心頂点を追加して4つの三角形に分割する。
-    - 元のQuad頂点インデックスと中心頂点インデックスの対応マップを obj["_taremin_cross_subdiv_map"] に保存。
+    - 元のQuad頂点インデックスと中心頂点インデックスの対応マップを obj["_taremin_cloth_cross_subdiv_map"] に保存。
     - 成功した場合は True を返す。
     """
     if not obj or obj.type != 'MESH':
@@ -261,7 +261,7 @@ def apply_cross_subdivision(obj) -> bool:
     bm.free()
 
     # メタデータを保存
-    obj["_taremin_cross_subdiv_map"] = final_subdiv_map
+    obj["_taremin_cloth_cross_subdiv_map"] = final_subdiv_map
     logger.info(
         f"[Topology] Applied cross-subdivision to '{obj.name}': poked {len(final_subdiv_map)} quads "
         f"(mesh now has {len(mesh.vertices)} verts, {len(mesh.polygons)} polygons)"
@@ -289,7 +289,7 @@ def apply_post_process(obj, mode='OPTIMAL_TRI', flatness_threshold=5.0) -> bool:
     if not is_cross_subdivided(obj):
         return False
 
-    subdiv_map = list(obj.get("_taremin_cross_subdiv_map", []))
+    subdiv_map = list(obj.get("_taremin_cloth_cross_subdiv_map", []))
     if not subdiv_map:
         return False
 
@@ -396,8 +396,8 @@ def apply_post_process(obj, mode='OPTIMAL_TRI', flatness_threshold=5.0) -> bool:
     bm.free()
 
     # マップを削除（後処理完了）
-    if "_taremin_cross_subdiv_map" in obj:
-        del obj["_taremin_cross_subdiv_map"]
+    if "_taremin_cloth_cross_subdiv_map" in obj:
+        del obj["_taremin_cloth_cross_subdiv_map"]
     if mode == 'QUAD':
         clear_pre_subdivision_backup(obj)
 
@@ -433,7 +433,7 @@ def apply_dynamic_diagonal_triangulation(obj, rest_positions=None, preserve_flat
 
     引数:
         obj: 対象メッシュオブジェクト
-        rest_positions: レスト頂点座標の配列 (N, 3)。None の場合は "_taremin_rest_positions" または初期バックアップを参照
+        rest_positions: レスト頂点座標の配列 (N, 3)。None の場合は "_taremin_cloth_rest_positions" または初期バックアップを参照
         preserve_flat: 平坦な四角面を分割せずそのまま保持するかどうか
         flatness_threshold: 平坦判定の角度閾値（度）
     戻り値:
@@ -462,15 +462,15 @@ def apply_dynamic_diagonal_triangulation(obj, rest_positions=None, preserve_flat
     rest_pos_arr = None
     if rest_positions is not None and len(rest_positions) == n_verts:
         rest_pos_arr = np.array(rest_positions, dtype=np.float32)
-    elif "_taremin_rest_positions" in obj:
-        raw_rest = obj["_taremin_rest_positions"]
+    elif "_taremin_cloth_rest_positions" in obj:
+        raw_rest = obj["_taremin_cloth_rest_positions"]
         if len(raw_rest) == n_verts * 3:
             rest_pos_arr = np.array(raw_rest, dtype=np.float32).reshape((n_verts, 3))
     
     if rest_pos_arr is None:
         # バックアップメッシュの座標を参照
-        if "_taremin_backup_mesh" in obj:
-            b_mesh = bpy.data.meshes.get(obj["_taremin_backup_mesh"])
+        if "_taremin_cloth_backup_mesh" in obj:
+            b_mesh = bpy.data.meshes.get(obj["_taremin_cloth_backup_mesh"])
             if b_mesh and len(b_mesh.vertices) == n_verts:
                 c = np.empty(n_verts * 3, dtype=np.float32)
                 b_mesh.vertices.foreach_get("co", c)

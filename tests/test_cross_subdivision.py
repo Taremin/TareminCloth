@@ -162,7 +162,7 @@ class TestCrossSubdivision(unittest.TestCase):
         bpy.ops.mesh.primitive_plane_add(size=1.0)
         obj_ridge = bpy.context.active_object
         topology.apply_cross_subdivision(obj_ridge)
-        subdiv_map = obj_ridge["_taremin_cross_subdiv_map"]
+        subdiv_map = obj_ridge["_taremin_cloth_cross_subdiv_map"]
         v0_idx, v1_idx, v2_idx, v3_idx = subdiv_map[0]["quad_verts"]
         c_idx = subdiv_map[0]["center_vert_index"]
         # v0, v2, pc を持ち上げて対角線上にシワを形成（v1, v3はそのまま）
@@ -180,7 +180,7 @@ class TestCrossSubdivision(unittest.TestCase):
         bpy.ops.mesh.primitive_plane_add(size=1.0)
         obj_dome = bpy.context.active_object
         topology.apply_cross_subdivision(obj_dome)
-        subdiv_map = obj_dome["_taremin_cross_subdiv_map"]
+        subdiv_map = obj_dome["_taremin_cloth_cross_subdiv_map"]
         c_idx = subdiv_map[0]["center_vert_index"]
         # 中心点 pc だけを大きく持ち上げてドーム/テント状に変形
         obj_dome.data.vertices[c_idx].co.z += 0.6
@@ -241,17 +241,17 @@ class TestCrossSubdivision(unittest.TestCase):
         from taremin_cloth.operators import get_or_create_simulator
         sim, coords = get_or_create_simulator(obj)
 
-        # 十字分割されるが、古いセッションのように _taremin_backup_mesh が無い場合を再現
+        # 十字分割されるが、古いセッションのように _taremin_cloth_backup_mesh が無い場合を再現
         topology.apply_cross_subdivision(obj)
-        if "_taremin_backup_mesh" in obj:
-            del obj["_taremin_backup_mesh"]
+        if "_taremin_cloth_backup_mesh" in obj:
+            del obj["_taremin_cloth_backup_mesh"]
         self.assertEqual(len(obj.data.vertices), 5)
 
         # ユーザーが分割なしに切り替えて変形させた状態を再現
         obj.taremin_cloth.enable_cross_subdivision = False
         obj.data.vertices[0].co.z += 1.5
         obj.data.update()
-        obj["_taremin_is_deformed"] = True
+        obj["_taremin_cloth_is_deformed"] = True
 
         # リセット実行
         res = bpy.ops.taremin_cloth.reset_selected()
@@ -286,7 +286,7 @@ class TestCrossSubdivision(unittest.TestCase):
         # これによりADAPTIVE判定でQuad 0のみ十字分割が維持され、他はQuad/2三角化される
         obj.data.vertices[9].co.z += 1.5
         obj.data.update()
-        obj["_taremin_is_deformed"] = True
+        obj["_taremin_cloth_is_deformed"] = True
 
         # ADAPTIVE後処理を実行
         obj.taremin_cloth.post_process_mode = 'ADAPTIVE'

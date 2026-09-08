@@ -280,7 +280,7 @@ class TAREMIN_CLOTH_OT_restore_quad_topology(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return bool(obj and obj.type == 'MESH' and (topology.is_cross_subdivided(obj) or "_taremin_backup_mesh" in obj))
+        return bool(obj and obj.type == 'MESH' and (topology.is_cross_subdivided(obj) or "_taremin_cloth_backup_mesh" in obj))
 
     def execute(self, context):
         obj = context.active_object

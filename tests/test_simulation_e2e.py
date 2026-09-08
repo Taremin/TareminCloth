@@ -216,10 +216,10 @@ class TestSimulationE2E(unittest.TestCase):
         """Blenderシーン内の球コライダーに布が接触して貫通しないE2Eテスト"""
         bpy.ops.mesh.primitive_uv_sphere_add(radius=0.5, location=(0.0, 0.0, 0.0))
         collider_obj = bpy.context.active_object
-        collider_obj.taremin_collider.is_collider = True
-        collider_obj.taremin_collider.collider_type = 'SPHERE'
-        collider_obj.taremin_collider.radius = 0.5
-        collider_obj.taremin_collider.friction = 0.3
+        collider_obj.taremin_cloth_collider.is_collider = True
+        collider_obj.taremin_cloth_collider.collider_type = 'SPHERE'
+        collider_obj.taremin_cloth_collider.radius = 0.5
+        collider_obj.taremin_cloth_collider.friction = 0.3
 
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0, location=(0.0, 0.0, 1.0))
         cloth_obj = bpy.context.active_object
@@ -247,9 +247,9 @@ class TestSimulationE2E(unittest.TestCase):
         """Blenderシーン内のカスタムメッシュコライダー (Suzanne) に布が接触して貫通しないE2Eテスト"""
         bpy.ops.mesh.primitive_monkey_add(size=1.0, location=(0.0, 0.0, 0.0))
         monkey_obj = bpy.context.active_object
-        monkey_obj.taremin_collider.is_collider = True
-        monkey_obj.taremin_collider.collider_type = 'MESH'
-        monkey_obj.taremin_collider.thickness = 0.02
+        monkey_obj.taremin_cloth_collider.is_collider = True
+        monkey_obj.taremin_cloth_collider.collider_type = 'MESH'
+        monkey_obj.taremin_cloth_collider.thickness = 0.02
 
         # 布メッシュ (z=1.0)
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=0.8, location=(0.0, 0.0, 1.0))
@@ -522,10 +522,10 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.ops.mesh.primitive_monkey_add(size=2.0, location=(0.0, 0.0, 0.0))
         collider_obj = bpy.context.active_object
         bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-        collider_obj.taremin_collider.is_collider = True
-        collider_obj.taremin_collider.collider_type = 'MESH'
-        collider_obj.taremin_collider.thickness = 0.02
-        collider_obj.taremin_collider.friction = 0.8
+        collider_obj.taremin_cloth_collider.is_collider = True
+        collider_obj.taremin_cloth_collider.collider_type = 'MESH'
+        collider_obj.taremin_cloth_collider.thickness = 0.02
+        collider_obj.taremin_cloth_collider.friction = 0.8
 
         # Z=2.0m（以前の布下0.6m AABBでは届かない位置）に布グリッドを作成
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=6, y_subdivisions=6, size=1.0, location=(0.0, 0.0, 2.0))
@@ -791,9 +791,9 @@ class TestSimulationE2E(unittest.TestCase):
         # ICO球メッシュコライダー
         bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=1.0, location=(0.0, 0.0, 0.0))
         ico_obj = bpy.context.active_object
-        ico_obj.taremin_collider.is_collider = True
-        ico_obj.taremin_collider.collider_type = 'MESH'
-        ico_obj.taremin_collider.thickness = 0.02
+        ico_obj.taremin_cloth_collider.is_collider = True
+        ico_obj.taremin_cloth_collider.collider_type = 'MESH'
+        ico_obj.taremin_cloth_collider.thickness = 0.02
 
         # 布メッシュ (z=1.2 に配置)
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=6, y_subdivisions=6, size=1.6, location=(0.0, 0.0, 1.2))
@@ -852,8 +852,8 @@ class TestSimulationE2E(unittest.TestCase):
         # 2. コライダーオブジェクト作成
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0))
         cube_obj = bpy.context.active_object
-        cube_obj.taremin_collider.is_collider = True
-        cube_obj.taremin_collider.enabled = False  # ミュート状態
+        cube_obj.taremin_cloth_collider.is_collider = True
+        cube_obj.taremin_cloth_collider.enabled = False  # ミュート状態
 
         scene = bpy.context.scene
         orig_frame = scene.frame_current
@@ -865,7 +865,7 @@ class TestSimulationE2E(unittest.TestCase):
 
             # enabled=False なのでシミュレータが起動せず、未変形であること
             self.assertNotIn(cloth_obj.name, _simulators, "enabled=Falseの布はシミュレータが生成されないこと")
-            self.assertFalse(cloth_obj.get("_taremin_is_deformed", False), "enabled=Falseの布は変形フラグが立たないこと")
+            self.assertFalse(cloth_obj.get("_taremin_cloth_is_deformed", False), "enabled=Falseの布は変形フラグが立たないこと")
 
             # コライダー同期テスト (enabled=False のコライダーは登録されないこと)
             test_sim, _ = from_operators_get_or_create = (None, None)
@@ -881,7 +881,7 @@ class TestSimulationE2E(unittest.TestCase):
             self.assertNotIn(cube_obj.name, cached_col_names, "enabled=FalseのコライダーはGPU衝突判定から除外されること")
 
             # コライダーを有効化すると同期リストに含まれること
-            cube_obj.taremin_collider.enabled = True
+            cube_obj.taremin_cloth_collider.enabled = True
             sync_colliders(sim, scene, force=True)
             cached_col_names_active = [item[0] for item in _collider_cache.get(sim_id, ())]
             self.assertIn(cube_obj.name, cached_col_names_active, "enabled=Trueに切り替えるとGPU衝突判定に登録されること")

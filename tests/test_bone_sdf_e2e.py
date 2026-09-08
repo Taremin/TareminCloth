@@ -78,12 +78,12 @@ class TestBoneSdfE2E(unittest.TestCase):
         mod.object = arm_obj
 
         # コライダー設定
-        body_obj.taremin_collider.is_collider = True
-        body_obj.taremin_collider.enabled = True
-        body_obj.taremin_collider.collider_type = 'BONE_SDF'
-        body_obj.taremin_collider.sdf_resolution = '32'
-        body_obj.taremin_collider.thickness = 0.02
-        body_obj.taremin_collider.sdf_cache_enabled = True
+        body_obj.taremin_cloth_collider.is_collider = True
+        body_obj.taremin_cloth_collider.enabled = True
+        body_obj.taremin_cloth_collider.collider_type = 'BONE_SDF'
+        body_obj.taremin_cloth_collider.sdf_resolution = '32'
+        body_obj.taremin_cloth_collider.thickness = 0.02
+        body_obj.taremin_cloth_collider.sdf_cache_enabled = True
 
         return arm_obj, body_obj
 

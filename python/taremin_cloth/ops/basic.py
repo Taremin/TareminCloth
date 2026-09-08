@@ -135,7 +135,7 @@ class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
         for o in targets:
             clear_simulator_for_object(o.name)
             topology.clear_pre_subdivision_backup(o)
-            for prop in ("_taremin_rest_positions", "_taremin_rest_signature", "_taremin_is_deformed", "_taremin_cross_subdiv_map"):
+            for prop in ("_taremin_cloth_rest_positions", "_taremin_cloth_rest_signature", "_taremin_cloth_is_deformed", "_taremin_cloth_cross_subdiv_map"):
                 if prop in o:
                     try:
                         del o[prop]
@@ -277,11 +277,11 @@ class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return obj and getattr(obj, "taremin_collider", None) and obj.taremin_collider.is_collider and obj.taremin_collider.collider_type == 'BONE_SDF'
+        return obj and getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider and obj.taremin_cloth_collider.collider_type == 'BONE_SDF'
 
     def execute(self, context):
         obj = context.active_object
-        col_settings = obj.taremin_collider
+        col_settings = obj.taremin_cloth_collider
         from ..engine.sdf_baker import get_or_bake_bone_sdf_for_object
         result = get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake=True)
         if result is not None:

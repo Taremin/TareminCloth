@@ -32,7 +32,7 @@ class TestColliderAnimation(unittest.TestCase):
         """コライダーアニメーション設定プロパティが正しく初期化されるかテスト"""
         bpy.ops.mesh.primitive_cube_add(size=1.0)
         obj = bpy.context.active_object
-        col_settings = obj.taremin_collider
+        col_settings = obj.taremin_cloth_collider
         col_settings.is_collider = True
 
         self.assertTrue(hasattr(col_settings, "anim"))
@@ -122,7 +122,7 @@ class TestColliderAnimation(unittest.TestCase):
         """シェイプキーのアニメーション補間テスト"""
         bpy.ops.mesh.primitive_cube_add(size=1.0)
         obj = bpy.context.active_object
-        col_settings = obj.taremin_collider
+        col_settings = obj.taremin_cloth_collider
         col_settings.is_collider = True
         anim = col_settings.anim
         anim.enabled = True
@@ -176,7 +176,7 @@ class TestColliderAnimation(unittest.TestCase):
         self.assertAlmostEqual(pbone.rotation_euler.x, math.pi / 4, places=4)
 
         # コライダー設定との連携テスト
-        col_settings = armature.taremin_collider
+        col_settings = armature.taremin_cloth_collider
         col_settings.is_collider = True
         anim = col_settings.anim
         anim.enabled = True

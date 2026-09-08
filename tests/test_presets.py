@@ -118,21 +118,21 @@ class TestPresets(unittest.TestCase):
 
     def test_apply_collider_preset(self):
         """コライダープリセットの適用オペレーターの動作確認"""
-        self.obj.taremin_collider.is_collider = True
+        self.obj.taremin_cloth_collider.is_collider = True
 
         # Skin を適用
         res = bpy.ops.taremin_cloth.apply_preset(category='collider', preset_name="Skin (Human)")
         self.assertEqual(res, {'FINISHED'})
-        self.assertEqual(self.obj.taremin_collider.last_collider_preset, "Skin (Human)")
-        self.assertAlmostEqual(self.obj.taremin_collider.friction, 0.6)
-        self.assertAlmostEqual(self.obj.taremin_collider.restitution, 0.0)
+        self.assertEqual(self.obj.taremin_cloth_collider.last_collider_preset, "Skin (Human)")
+        self.assertAlmostEqual(self.obj.taremin_cloth_collider.friction, 0.6)
+        self.assertAlmostEqual(self.obj.taremin_cloth_collider.restitution, 0.0)
 
         # Smooth / Metal を適用
         res = bpy.ops.taremin_cloth.apply_preset(category='collider', preset_name="Smooth / Metal")
         self.assertEqual(res, {'FINISHED'})
-        self.assertEqual(self.obj.taremin_collider.last_collider_preset, "Smooth / Metal")
-        self.assertAlmostEqual(self.obj.taremin_collider.friction, 0.1)
-        self.assertAlmostEqual(self.obj.taremin_collider.restitution, 0.05)
+        self.assertEqual(self.obj.taremin_cloth_collider.last_collider_preset, "Smooth / Metal")
+        self.assertAlmostEqual(self.obj.taremin_cloth_collider.friction, 0.1)
+        self.assertAlmostEqual(self.obj.taremin_cloth_collider.restitution, 0.05)
 
     def test_custom_preset_save_load_and_delete(self):
         """カスタムプリセットの保存、再適用、削除の一連の動作確認"""
@@ -175,40 +175,40 @@ class TestPresets(unittest.TestCase):
 
         bpy.ops.mesh.primitive_cube_add()
         cube = bpy.context.active_object
-        cube.taremin_collider.is_collider = True
-        cube.taremin_collider.enabled = True
+        cube.taremin_cloth_collider.is_collider = True
+        cube.taremin_cloth_collider.enabled = True
 
         try:
             # 1. ALL_OFF
             bpy.ops.taremin_cloth.batch_simulation_state(action='ALL_OFF')
             self.assertFalse(self.obj.taremin_cloth.enabled)
-            self.assertFalse(cube.taremin_collider.enabled)
+            self.assertFalse(cube.taremin_cloth_collider.enabled)
 
             # 2. ALL_ON
             bpy.ops.taremin_cloth.batch_simulation_state(action='ALL_ON')
             self.assertTrue(self.obj.taremin_cloth.enabled)
-            self.assertTrue(cube.taremin_collider.enabled)
+            self.assertTrue(cube.taremin_cloth_collider.enabled)
 
             # 3. SOLO (cube がアクティブ)
             bpy.context.view_layer.objects.active = cube
             bpy.ops.taremin_cloth.batch_simulation_state(action='SOLO')
             self.assertFalse(self.obj.taremin_cloth.enabled)
-            self.assertTrue(cube.taremin_collider.enabled)
+            self.assertTrue(cube.taremin_cloth_collider.enabled)
 
             # 4. INVERT
             bpy.ops.taremin_cloth.batch_simulation_state(action='INVERT')
             self.assertTrue(self.obj.taremin_cloth.enabled)
-            self.assertFalse(cube.taremin_collider.enabled)
+            self.assertFalse(cube.taremin_cloth_collider.enabled)
 
             # 5. CLOTHS_ONLY
             bpy.ops.taremin_cloth.batch_simulation_state(action='CLOTHS_ONLY')
             self.assertTrue(self.obj.taremin_cloth.enabled)
-            self.assertFalse(cube.taremin_collider.enabled)
+            self.assertFalse(cube.taremin_cloth_collider.enabled)
 
             # 6. COLLIDERS_ONLY
             bpy.ops.taremin_cloth.batch_simulation_state(action='COLLIDERS_ONLY')
             self.assertFalse(self.obj.taremin_cloth.enabled)
-            self.assertTrue(cube.taremin_collider.enabled)
+            self.assertTrue(cube.taremin_cloth_collider.enabled)
         finally:
             if cube.name in bpy.data.objects:
                 bpy.data.objects.remove(cube, do_unlink=True)
@@ -220,8 +220,8 @@ class TestPresets(unittest.TestCase):
 
         bpy.ops.mesh.primitive_cube_add()
         cube = bpy.context.active_object
-        cube.taremin_collider.is_collider = True
-        cube.taremin_collider.enabled = False
+        cube.taremin_cloth_collider.is_collider = True
+        cube.taremin_cloth_collider.enabled = False
 
         preset_name = "__UnitTest_Scene_Config__"
 
@@ -234,19 +234,19 @@ class TestPresets(unittest.TestCase):
             # 状態を変更 (全OFF)
             bpy.ops.taremin_cloth.batch_simulation_state(action='ALL_OFF')
             self.assertFalse(self.obj.taremin_cloth.enabled)
-            self.assertFalse(cube.taremin_collider.enabled)
+            self.assertFalse(cube.taremin_cloth_collider.enabled)
 
             # プリセット適用 (保存時の状態に復元: Plane=True, Cube=False)
             res_apply = bpy.ops.taremin_cloth.apply_config_preset(preset_name=preset_name)
             self.assertEqual(res_apply, {'FINISHED'})
             self.assertTrue(self.obj.taremin_cloth.enabled)
-            self.assertFalse(cube.taremin_collider.enabled)
+            self.assertFalse(cube.taremin_cloth_collider.enabled)
 
             # ビルトインプリセット適用テスト
             res_builtin = bpy.ops.taremin_cloth.apply_config_preset(preset_name="All Enabled (全て有効)")
             self.assertEqual(res_builtin, {'FINISHED'})
             self.assertTrue(self.obj.taremin_cloth.enabled)
-            self.assertTrue(cube.taremin_collider.enabled)
+            self.assertTrue(cube.taremin_cloth_collider.enabled)
 
             # プリセット削除
             res_del = bpy.ops.taremin_cloth.delete_config_preset(preset_name=preset_name)

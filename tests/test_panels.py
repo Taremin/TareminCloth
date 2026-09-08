@@ -97,7 +97,7 @@ class TestPanels(unittest.TestCase):
         self.assertIn("taremin_cloth.interactive", operators)
         self.assertIn("taremin_cloth.reset_selected", operators)
         self.assertIn("taremin_cloth.reset_all", operators)
-        self.assertIn("taremin_cloth.clear_cache", operators)
+        self.assertIn("taremin_cloth.apply_rest_shape", operators)
         self.assertIn("taremin_cloth.save_preset", operators)
         self.assertIn("taremin_cloth.delete_preset", operators)
         self.assertIn("taremin_cloth.create_seam", operators)
@@ -140,7 +140,7 @@ class TestPanels(unittest.TestCase):
 
     def test_collider_panel_disabled(self):
         """Collider が無効な状態でのコライダーパネル描画テスト"""
-        self.obj.taremin_collider.is_collider = False
+        self.obj.taremin_cloth_collider.is_collider = False
 
         layout = render_panel(TAREMIN_CLOTH_PT_collider_panel)
         props = layout.get_props()
@@ -153,8 +153,8 @@ class TestPanels(unittest.TestCase):
 
     def test_collider_panel_enabled_sphere(self):
         """Collider (SPHERE) が有効な状態でのコライダーパネル描画テスト"""
-        self.obj.taremin_collider.is_collider = True
-        self.obj.taremin_collider.collider_type = 'SPHERE'
+        self.obj.taremin_cloth_collider.is_collider = True
+        self.obj.taremin_cloth_collider.collider_type = 'SPHERE'
 
         layout = render_panel(TAREMIN_CLOTH_PT_collider_panel)
         operators = layout.get_operators()
@@ -185,8 +185,8 @@ class TestPanels(unittest.TestCase):
 
     def test_collider_panel_enabled_mesh(self):
         """Collider (MESH) が有効な状態でのコライダーパネル描画テスト"""
-        self.obj.taremin_collider.is_collider = True
-        self.obj.taremin_collider.collider_type = 'MESH'
+        self.obj.taremin_cloth_collider.is_collider = True
+        self.obj.taremin_cloth_collider.collider_type = 'MESH'
 
         layout = render_panel(TAREMIN_CLOTH_PT_collider_panel)
         props = layout.get_props()
@@ -206,7 +206,7 @@ class TestPanels(unittest.TestCase):
         AttributeError でパネル描画がクラッシュしないことを検証するテスト。
         """
         self.obj.taremin_cloth.is_cloth = True
-        self.obj.taremin_collider.is_collider = True
+        self.obj.taremin_cloth_collider.is_collider = True
 
         # operator() が常に None を返すモックレイアウトを作成
         class NoneReturningLayout(MockLayout):
@@ -277,23 +277,24 @@ class TestPanels(unittest.TestCase):
 
         # 頂点を変形させ、変形フラグをセット
         self.obj.data.vertices[0].co.z += 2.0
-        self.obj.data.update()
-        self.obj["_taremin_is_deformed"] = True
-        self.assertTrue(self.obj.get("_taremin_is_deformed", False))
+        # シミュレーション変形フラグを立てる
+        self.obj["_taremin_cloth_is_deformed"] = True
+        self.assertTrue(self.obj.get("_taremin_cloth_is_deformed", False))
 
-        # 個別キャッシュクリア実行
+        # apply_rest_shape (対象オブジェクトのみ) 実行
         bpy.context.view_layer.objects.active = self.obj
-        res = bpy.ops.taremin_cloth.clear_cache(all_objects=False)
+        res = bpy.ops.taremin_cloth.apply_rest_shape(all_objects=False)
         self.assertEqual(res, {'FINISHED'})
 
-        # 変形フラグがクリアされ、変形後の最新位置が新たなレストポーズとして記憶されていること
-        self.assertFalse(self.obj.get("_taremin_is_deformed", False))
+        # is_deformed がリセットされ、新レスト形状がキャッシュされていることを検証
+        self.assertFalse(self.obj.get("_taremin_cloth_is_deformed", False))
+        self.assertTrue("_taremin_cloth_rest_positions" in self.obj)
         import numpy as np
-        new_cached = np.frombuffer(self.obj["_taremin_rest_positions"], dtype=np.float32)
+        new_cached = np.frombuffer(self.obj["_taremin_cloth_rest_positions"], dtype=np.float32)
         self.assertAlmostEqual(new_cached[2], 2.0, places=4, msg="最新の変形位置が新レストポーズになっていること")
 
         # 全体キャッシュクリア実行
-        res_all = bpy.ops.taremin_cloth.clear_cache(all_objects=True)
+        res_all = bpy.ops.taremin_cloth.apply_rest_shape(all_objects=True)
         self.assertEqual(res_all, {'FINISHED'})
 
     # -------------------------------------------------------------------------
@@ -303,7 +304,7 @@ class TestPanels(unittest.TestCase):
     def test_objects_panel_empty(self):
         """ClothおよびColliderが未設定状態でのオブジェクト一覧パネル描画テスト"""
         self.obj.taremin_cloth.is_cloth = False
-        self.obj.taremin_collider.is_collider = False
+        self.obj.taremin_cloth_collider.is_collider = False
 
         layout = render_panel(TAREMIN_CLOTH_PT_objects_panel)
         labels = layout.get_labels()
@@ -324,8 +325,8 @@ class TestPanels(unittest.TestCase):
         bpy.ops.mesh.primitive_cube_add()
         cube = bpy.context.active_object
         self.created_objects.append(cube)
-        cube.taremin_collider.is_collider = True
-        cube.taremin_collider.collider_type = 'SPHERE'
+        cube.taremin_cloth_collider.is_collider = True
+        cube.taremin_cloth_collider.collider_type = 'SPHERE'
 
         # パネルを描画
         layout = render_panel(TAREMIN_CLOTH_PT_objects_panel)
