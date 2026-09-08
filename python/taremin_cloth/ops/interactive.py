@@ -19,7 +19,6 @@ from ..engine.cache import (
 from ..engine.runner import (
     get_or_create_simulator,
     get_effective_substeps,
-    apply_fast_playback,
     restore_fast_playback,
 )
 from ..engine.collider import sync_colliders
@@ -657,9 +656,6 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 max_frames = getattr(prefs, "debug_max_frames", 3600)
                 sim.start_debug_recording(obj.name, max_frames=max_frames)
                 logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames})")
-
-        # Fast Playback の適用（重いモディファイアの一時無効化、布オブジェクト自身含む）
-        apply_fast_playback(context.scene, force=True, include_sim_objs=True)
 
         # パフォーマンスサンプラー初期化
         self._perf_samples = []

@@ -21,6 +21,50 @@ _collider_cache = {}
 _bone_sdf_cache = {}
 _bone_sdf_signatures = {}
 
+COLLIDER_IGNORED_MODIFIER_TYPES = {'SUBSURF', 'SOLIDIFY', 'MULTIRES', 'BEVEL'}
+
+
+def get_collider_eval_mesh(obj, depsgraph):
+    """
+    コライダー用評価メッシュを取得する。
+    LATTICEやARMATUREなどのデフォーマーは反映するが、
+    頂点・面を増殖・二重化するSUBSURFやSOLIDIFY等は一時無効化して取得する。
+    戻り値: (mesh, eval_obj, disabled_mods)
+    """
+    disabled_mods = []
+    for mod in getattr(obj, "modifiers", []):
+        if mod.type in COLLIDER_IGNORED_MODIFIER_TYPES and getattr(mod, "show_viewport", False):
+            mod.show_viewport = False
+            disabled_mods.append(mod)
+
+    eval_obj = None
+    try:
+        if disabled_mods:
+            if depsgraph is not None:
+                depsgraph.update()
+            else:
+                try:
+                    depsgraph = bpy.context.evaluated_depsgraph_get()
+                except Exception:
+                    depsgraph = None
+        eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
+        mesh = eval_obj.to_mesh() if depsgraph else obj.data
+        return mesh, eval_obj, disabled_mods
+    except Exception as e:
+        logger.warning(f"[Collider Sync] 評価メッシュ取得失敗、obj.dataにフォールバックします: {e}")
+        return getattr(obj, "data", None), None, disabled_mods
+
+
+def cleanup_collider_eval_mesh(eval_obj, disabled_mods):
+    """get_collider_eval_mesh で取得した評価メッシュとモディファイア状態を解放・復元する"""
+    if eval_obj is not None:
+        try:
+            eval_obj.to_mesh_clear()
+        except Exception:
+            pass
+    for mod in disabled_mods:
+        mod.show_viewport = True
+
 
 def clear_collider_cache():
     """コライダーキャッシュをクリアする"""
@@ -72,6 +116,15 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     has_active_anim = True
                 elif getattr(obj.data, "shape_keys", None) and obj.data.shape_keys.animation_data:
                     has_active_anim = True
+                else:
+                    for mod in getattr(obj, "modifiers", []):
+                        if mod.type == 'LATTICE' and getattr(mod, "object", None):
+                            lat_o = mod.object
+                            if (lat_o.animation_data and lat_o.animation_data.action) or (
+                                getattr(lat_o.data, "animation_data", None) and lat_o.data.animation_data.action
+                            ):
+                                has_active_anim = True
+                                break
 
             mat = obj.matrix_world
             mat_tuple = (
@@ -139,34 +192,36 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 cur_thickness = float(col_settings.thickness)
                 cur_restitution = float(restitution)
                 cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
-                eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
-                mesh = eval_obj.to_mesh() if depsgraph else obj.data
-                mesh.calc_loop_triangles()
-                n_verts = len(mesh.vertices)
-                n_tris = len(mesh.loop_triangles)
 
-                if n_verts > 0 and n_tris > 0:
-                    raw_coords = np.empty(n_verts * 3, dtype=np.float32)
-                    mesh.vertices.foreach_get("co", raw_coords)
-                    v_local = raw_coords.reshape((n_verts, 3))
+                mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
+                try:
+                    if mesh:
+                        mesh.calc_loop_triangles()
+                        n_verts = len(mesh.vertices)
+                        n_tris = len(mesh.loop_triangles)
 
-                    mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
-                    ones = np.ones((n_verts, 1), dtype=np.float32)
-                    v_homo = np.hstack([v_local, ones])
-                    v_world = (v_homo @ mat_np.T)[:, :3]
+                        if n_verts > 0 and n_tris > 0:
+                            raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+                            mesh.vertices.foreach_get("co", raw_coords)
+                            v_local = raw_coords.reshape((n_verts, 3))
 
-                    tri_indices = np.empty(n_tris * 3, dtype=np.int32)
-                    mesh.loop_triangles.foreach_get("vertices", tri_indices)
-                    tri_indices_2d = tri_indices.reshape((n_tris, 3))
-                    tri_coords = v_world[tri_indices_2d]
+                            target_obj = eval_obj if eval_obj else obj
+                            mat_np = np.array(target_obj.matrix_world, dtype=np.float32)
+                            ones = np.ones((n_verts, 1), dtype=np.float32)
+                            v_homo = np.hstack([v_local, ones])
+                            v_world = (v_homo @ mat_np.T)[:, :3]
 
-                    all_mesh_triangles.append(tri_coords)
-                    attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
-                    attr_block = np.tile(attr_row, (n_tris, 1))
-                    all_mesh_attributes.append(attr_block)
+                            tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+                            mesh.loop_triangles.foreach_get("vertices", tri_indices)
+                            tri_indices_2d = tri_indices.reshape((n_tris, 3))
+                            tri_coords = v_world[tri_indices_2d]
 
-                if depsgraph:
-                    eval_obj.to_mesh_clear()
+                            all_mesh_triangles.append(tri_coords)
+                            attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                            attr_block = np.tile(attr_row, (n_tris, 1))
+                            all_mesh_attributes.append(attr_block)
+                finally:
+                    cleanup_collider_eval_mesh(eval_obj, disabled_mods)
 
             elif col_settings.collider_type == 'BONE_SDF':
                 arm_mod = get_armature_modifier(obj)
