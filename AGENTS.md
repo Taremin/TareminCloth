@@ -91,6 +91,7 @@ python -m unittest tests/test_issue_f71.py
 | `render` | 指定フレームまたは連番・APNG動画をレンダリング（縫合線・コライダー自動表示、速度・歪み・法線ヒートマップ対応、Blender不要） | `python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 -o f71.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz --frames all --format apng -o anim.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 20 --color-by velocity -o vel.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 40 --color-by strain -o strain.png` |
 | `render-coloring` | 制約グラフ彩色（Welsh-Powell法）を可視化レンダリング | `python -m taremin_cloth.log_tools render-coloring input.jsonl.gz --type distance -o coloring.png` |
 | `check-intersections` | 指定フレームの自己交差三角形ペアを検出 | `python -m taremin_cloth.log_tools check-intersections input.jsonl.gz -f 71` |
+| `diff` | 2つのシミュレーションログ間で頂点位置の差分・誤差を比較 | `python -m taremin_cloth.log_tools diff log1.jsonl.gz log2.jsonl.gz --tolerance 1.0` |
 | `export-obj` | 指定フレームをOBJ形式でエクスポート | `python -m taremin_cloth.log_tools export-obj input.jsonl.gz -f 71 -o f71.obj` |
 
 ---
@@ -99,7 +100,14 @@ python -m unittest tests/test_issue_f71.py
 
 Blender API (`bpy`) に依存する統合テスト（オペレーター登録、頂点グループピン設定、縫合E2E、タイムライン再生など）の実行や、特定のBlenderバージョンでの検証には、`run_tests.py` および `tools/blender_manager.py` を使用します。
 
+### .blend ファイルのヘッドレス構造解析 (`tools/inspect_blend.py`)
+ユーザーから提供された `.blend` ファイルを開かずに、布・コライダー・ボーン構成・頂点数・面数をCLIで瞬時に把握できます：
+```bash
+python tools/inspect_blend.py path/to/model.blend
+```
+
 ### Blenderバージョンの自動解決とテスト実行
+
 
 ```bash
 # 利用可能なBlender一覧とキャッシュ容量を確認

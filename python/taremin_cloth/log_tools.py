@@ -553,6 +553,67 @@ def cmd_export_obj(args: argparse.Namespace) -> None:
     print(f"OBJエクスポート完了: Frame {target_f} -> {out_path}")
 
 
+def cmd_diff(args: argparse.Namespace) -> None:
+    """2つのシミュレーションログ間で頂点位置の差分・誤差を比較"""
+    log1 = args.log1
+    log2 = args.log2
+    tol = args.tolerance  # mm
+
+    meta1 = replayer.read_metadata(log1)
+    meta2 = replayer.read_metadata(log2)
+
+    print(f"==================================================")
+    print(f" Simulation Log Comparison")
+    print(f" Log 1: {os.path.basename(log1)} (Verts: {meta1.get('num_vertices')})")
+    print(f" Log 2: {os.path.basename(log2)} (Verts: {meta2.get('num_vertices')})")
+    print(f" Tolerance: {tol:.3f} mm")
+    print(f"==================================================")
+
+    frames1 = {f["frame_index"]: f for f in replayer.iter_frames(log1)}
+    frames2 = {f["frame_index"]: f for f in replayer.iter_frames(log2)}
+
+    common_frames = sorted(set(frames1.keys()) & set(frames2.keys()))
+    if not common_frames:
+        print("エラー: 共通するフレームが存在しません。")
+        sys.exit(1)
+
+    print(f"{'Frame':<8} | {'Max Diff (mm)':<15} | {'Mean Diff (mm)':<15} | {'Status':<10}")
+    print("-" * 55)
+
+    max_overall_diff = 0.0
+    exceeded_count = 0
+
+    for f_idx in common_frames:
+        p1 = np.array(frames1[f_idx]["positions"], dtype=np.float32).reshape((-1, 3))
+        p2 = np.array(frames2[f_idx]["positions"], dtype=np.float32).reshape((-1, 3))
+
+        if p1.shape != p2.shape:
+            print(f"エラー: 頂点形状が不一致です: {p1.shape} vs {p2.shape}")
+            sys.exit(1)
+
+        diffs = np.linalg.norm(p1 - p2, axis=1) * 1000.0  # mm
+        max_d = float(np.max(diffs))
+        mean_d = float(np.mean(diffs))
+
+        status = "OK"
+        if max_d > tol:
+            status = "EXCEEDED"
+            exceeded_count += 1
+
+        if max_d > max_overall_diff:
+            max_overall_diff = max_d
+
+        print(f"F{f_idx:<7} | {max_d:12.4f} mm | {mean_d:12.4f} mm | {status}")
+
+    print("-" * 55)
+    print(f"比較結果: 全 {len(common_frames)} フレーム中 {exceeded_count} フレームで許容誤差 ({tol} mm) を超過")
+    print(f"最大誤差: {max_overall_diff:.4f} mm")
+    if exceeded_count == 0:
+        print("[+] 両ログは完全に許容誤差内で一致しています。")
+    else:
+        print("[!] 挙動に有意な差分が検出されました。")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m taremin_cloth.log_tools",
@@ -625,6 +686,14 @@ def main() -> None:
     p_obj.add_argument("--frame", "-f", type=int, required=True, help="エクスポートフレーム番号")
     p_obj.add_argument("--output", "-o", required=True, help="出力OBJパス")
     p_obj.set_defaults(func=cmd_export_obj)
+
+    # 8. diff
+    p_diff = subparsers.add_parser("diff", help="2つのログファイル間で頂点位置の差分・誤差を比較")
+    p_diff.add_argument("log1", help="基準ログファイル (.jsonl.gz)")
+    p_diff.add_argument("log2", help="比較対象ログファイル (.jsonl.gz)")
+    p_diff.add_argument("--tolerance", "-t", type=float, default=1.0, help="許容変位閾値 (mm, デフォルト: 1.0)")
+    p_diff.set_defaults(func=cmd_diff)
+
 
     args = parser.parse_args()
     args.func(args)
