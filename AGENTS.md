@@ -122,3 +122,14 @@ blender_exe = resolve_blender("5.2")  # または resolve_blender("latest-lts")
 ```
 > [!TIP]
 > テストスクリプトや検証ツール内で `C:\Blender\...` などのパスをハードコードせず、必ず `tools.blender_manager.resolve_blender()` を利用して実行環境に依存しないパス解決を行ってください。
+
+---
+
+## 7. アーキテクチャ仕様書の同期運用 (`docs/architecture.md`)
+
+プロジェクトの物理アルゴリズム、GPUデータ構造、パイプライン設計は [docs/architecture.md](docs/architecture.md) に体系化されています。
+
+> [!IMPORTANT]
+> **「実装変更とアーキテクチャ仕様書の同期」**
+> - 新たな拘束（Constraint）の追加、GPUバッファレイアウト（`SimParams`, `GpuVertex` 等）の変更、またはパイプライン設計の改修を行う際は、必ず [docs/architecture.md](docs/architecture.md) の記述を最新の実装に合わせて更新・同期してください。
+> - 仕様とコードが乖離することを防ぎ、将来のAIエージェントおよび開発者が常に最新の設計意図を正確に把握できるように保守します。

@@ -93,7 +93,7 @@ Copy-Item target\release\taremin_cloth_core.dll taremin_cloth_core.pyd
 
 ```powershell
 # 例: アドオンディレクトリへシンボリックリンクを作成
-New-Item -ItemType SymbolicLink -Path "$env:APPDATA\Blender Foundation\Blender\5.2\scripts\addons\taremin_cloth" -Target "(Get-Location).Path"
+New-Item -ItemType SymbolicLink -Path "$env:APPDATA\Blender Foundation\Blender\5.2\scripts\addons\taremin_cloth" -Target (Get-Location).Path
 ```
 
 #### 配布用 zip をローカルで作成する場合:
