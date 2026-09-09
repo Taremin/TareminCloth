@@ -324,25 +324,6 @@ class TareminClothObjectSettings(PropertyGroup):
         precision=3,
         unit='LENGTH',
     )
-    # コライダー最適化 & リカバリー設定
-    enable_collider_cluster_culling: BoolProperty(
-        name="Linear BVH Culling",
-        description="大量のメッシュコライダー面を16面クラスタ単位でGPU階層カリングし、大幅に高速化します（複雑な衣服・人体向け）",
-        default=False,
-    )
-    enable_single_sided_recovery: BoolProperty(
-        name="Single-Sided Recovery",
-        description="片面メッシュコライダーの裏側に侵入した頂点を、安全ガード（面内部判定かつ直近表側接触なし）を満たす最近傍面から表側へ脱出させます",
-        default=True,
-    )
-    collider_sweep_margin_offset: FloatProperty(
-        name="Sweep Margin Offset",
-        description="高速移動するコライダー判定時の追加安全マージン (m)",
-        default=0.05,
-        min=0.001,
-        max=0.5,
-        unit='LENGTH',
-    )
     # 縫合（Sewing）
     enable_sewing: BoolProperty(
         name="Enable Sewing",
@@ -852,6 +833,27 @@ class TareminClothColliderSettings(PropertyGroup):
         name="Single Sided",
         description="片面衝突判定を有効化。メッシュ表面（法線方向）からの侵入を遮断し、裏側へめり込んだ場合も法線方向の表面へ押し戻して貫通を防止します",
         default=True,
+        update=_on_collider_prop_updated,
+    )
+    enable_single_sided_recovery: BoolProperty(
+        name="Single-Sided Recovery",
+        description="片面メッシュコライダーの裏側に侵入した頂点を、安全ガード（面内部判定かつ直近表側接触なし）を満たす最近傍面から表側へ脱出させます",
+        default=True,
+        update=_on_collider_prop_updated,
+    )
+    enable_cluster_culling: BoolProperty(
+        name="Linear BVH Culling",
+        description="大量のメッシュコライダー面を16面クラスタ単位でGPU階層カリングし、大幅に高速化します（複雑な衣服・人体向け）",
+        default=False,
+        update=_on_collider_prop_updated,
+    )
+    sweep_margin_offset: FloatProperty(
+        name="Sweep Margin Offset",
+        description="高速移動するコライダー判定時の追加安全マージン (m)",
+        default=0.05,
+        min=0.001,
+        max=0.5,
+        unit='LENGTH',
         update=_on_collider_prop_updated,
     )
     friction: FloatProperty(

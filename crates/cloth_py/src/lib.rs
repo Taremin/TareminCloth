@@ -962,7 +962,7 @@ impl ClothSimulator {
                 let f = row[0];
                 let t = row[1];
                 let r = row[2];
-                let s = if row[3] > 0.5 { 1u32 } else { 0u32 };
+                let s = row[3].round() as u32;
                 (f, t, r, s)
             } else {
                 (friction, thickness, restitution, default_flags)

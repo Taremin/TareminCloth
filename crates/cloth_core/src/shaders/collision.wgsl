@@ -486,7 +486,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         has_front_contact = true;
                     }
                 } else {
-                    if (params.enable_single_sided_recovery != 0u) {
+                    let recovery_disabled = (tri.flags & 2u) != 0u;
+                    let is_recovery_enabled = (params.enable_single_sided_recovery != 0u) && !recovery_disabled;
+                    if (is_recovery_enabled) {
                         let max_recovery_depth = target_dist * 3.0;
                         if (res.is_face && dist < max_recovery_depth && dist <= abs(signed_dist) * 1.1 + EPSILON) {
                             if (dist < best_recovery_depth) {
@@ -582,7 +584,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             has_front_contact = true;
                         }
                     } else {
-                        if (params.enable_single_sided_recovery != 0u) {
+                        let recovery_disabled = (tri.flags & 2u) != 0u;
+                        let is_recovery_enabled = (params.enable_single_sided_recovery != 0u) && !recovery_disabled;
+                        if (is_recovery_enabled) {
                             let max_recovery_depth = target_dist * 3.0;
                             if (res.is_face && dist < max_recovery_depth && dist <= abs(signed_dist) * 1.1 + EPSILON) {
                                 if (dist < best_recovery_depth) {

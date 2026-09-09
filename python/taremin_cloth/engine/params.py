@@ -74,13 +74,6 @@ def sync_cloth_parameters(sim, obj, scene=None):
     if hasattr(sim, "set_edge_margin_offset"):
         sim.set_edge_margin_offset(getattr(settings, "edge_margin_offset", 0.0))
 
-    # 5.6. コライダー最適化 & リカバリー
-    if hasattr(sim, "set_collider_options"):
-        sim.set_collider_options(
-            enable_cluster_culling=getattr(settings, "enable_collider_cluster_culling", False),
-            enable_single_sided_recovery=getattr(settings, "enable_single_sided_recovery", True),
-            sweep_margin=getattr(settings, "collider_sweep_margin_offset", 0.05),
-        )
 
     # 5.6. チューニングパラメータ (ソルバー方式・ワークグループサイズ)
     if hasattr(sim, "set_solver_mode"):

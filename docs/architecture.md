@@ -111,6 +111,23 @@ pub struct GpuPinConstraint {
     pub target_pos: [f32; 3],// 目標ワールド座標
     pub _pad2: f32,
 }
+
+// メッシュコライダー三角形 (GPU Buffer: Read-Only)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuMeshTriangle {
+    pub p0: [f32; 3],        // 頂点0ワールド座標
+    pub friction: f32,       // 摩擦係数
+    pub p1: [f32; 3],        // 頂点1ワールド座標
+    pub thickness: f32,      // コライダー表面厚み (m)
+    pub p2: [f32; 3],        // 頂点2ワールド座標
+    pub restitution: f32,    // 反発係数
+    pub flags: u32,          // ビットフラグ (bit 0: 片面判定, bit 1: リカバリー無効)
+    pub _pad: [f32; 3],      // 16バイトアライメントパディング
+}
+// flags ビットアサイン:
+// - bit 0 (0x1): is_single_sided (1=片面メッシュ, 0=両面メッシュ)
+// - bit 1 (0x2): recovery_disabled (1=片面裏抜け復帰無効, 0=復帰有効[デフォルト])
 ```
 
 ---

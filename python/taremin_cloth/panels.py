@@ -319,11 +319,6 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             box_col = layout.box()
             box_col.label(text="Collider Interaction", icon='PHYSICS')
             c_col = box_col.column(align=True)
-            c_col.prop(settings, "enable_collider_cluster_culling")
-            c_col.prop(settings, "enable_single_sided_recovery")
-            if settings.enable_collider_cluster_culling:
-                c_col.prop(settings, "collider_sweep_margin_offset")
-            c_col.separator()
             c_col.prop(settings, "enable_edge_collision")
             if settings.enable_edge_collision:
                 edge_sub = c_col.column(align=True)
@@ -497,6 +492,15 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             elif col_settings.collider_type == 'MESH':
                 b_col.prop(col_settings, "thickness")
                 b_col.prop(col_settings, "single_sided")
+                if col_settings.single_sided:
+                    sub_rec = b_col.column(align=True)
+                    sub_rec.prop(col_settings, "enable_single_sided_recovery", text="  Single-Sided Recovery")
+
+                box_opt = b_col.box()
+                box_opt.label(text="Optimization", icon='PREFERENCES')
+                box_opt.prop(col_settings, "enable_cluster_culling")
+                if col_settings.enable_cluster_culling:
+                    box_opt.prop(col_settings, "sweep_margin_offset")
             elif col_settings.collider_type == 'BONE_SDF':
                 arm_mod = None
                 if obj and getattr(obj, "type", None) == 'MESH':

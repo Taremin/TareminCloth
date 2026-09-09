@@ -141,8 +141,10 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 round(col_settings.friction, 3),
                 round(col_settings.radius, 4),
                 round(col_settings.thickness, 4),
-                round(getattr(col_settings, "restitution", 0.0), 3),
                 bool(getattr(col_settings, "single_sided", True)),
+                bool(getattr(col_settings, "enable_single_sided_recovery", True)),
+                bool(getattr(col_settings, "enable_cluster_culling", False)),
+                round(getattr(col_settings, "sweep_margin_offset", 0.05), 4),
                 bool(getattr(col_settings, "enabled", True)),
                 getattr(col_settings, "sdf_resolution", "64"),
                 round(getattr(col_settings, "sdf_margin", 0.2), 3),
@@ -191,7 +193,13 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 cur_friction = float(col_settings.friction)
                 cur_thickness = float(col_settings.thickness)
                 cur_restitution = float(restitution)
-                cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
+                is_single = bool(getattr(col_settings, "single_sided", True))
+                is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
+                cur_flags = 0.0
+                if is_single:
+                    cur_flags += 1.0
+                    if not is_recovery:
+                        cur_flags += 2.0
 
                 mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
                 try:
@@ -217,7 +225,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                             tri_coords = v_world[tri_indices_2d]
 
                             all_mesh_triangles.append(tri_coords)
-                            attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                            attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
                             attr_block = np.tile(attr_row, (n_tris, 1))
                             all_mesh_attributes.append(attr_block)
                 finally:
@@ -392,10 +400,16 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                                 cur_friction = float(col_settings.friction)
                                 cur_thickness = float(col_settings.thickness)
                                 cur_restitution = float(getattr(col_settings, "restitution", 0.0))
-                                cur_single_sided = 1.0 if getattr(col_settings, "single_sided", True) else 0.0
+                                is_single = bool(getattr(col_settings, "single_sided", True))
+                                is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
+                                cur_flags = 0.0
+                                if is_single:
+                                    cur_flags += 1.0
+                                    if not is_recovery:
+                                        cur_flags += 2.0
 
                                 all_mesh_triangles.append(joint_tri_coords)
-                                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_single_sided], dtype=np.float32)
+                                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
                                 attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
                                 all_mesh_attributes.append(attr_block)
 
@@ -412,6 +426,24 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
             logger.debug(f"[Collider Sync] sim.set_mesh_collider_triangles 実行: {len(tri_array)} 面")
         else:
             logger.debug("[Collider Sync] all_mesh_triangles は空です (0面)")
+
+        # メッシュコライダーの最適化設定を集約してシミュレータに反映
+        has_cluster_culling = False
+        max_sweep_margin = 0.05
+        for obj, col_settings in collider_objs:
+            if col_settings.collider_type == 'MESH':
+                if getattr(col_settings, "enable_cluster_culling", False):
+                    has_cluster_culling = True
+                sweep_m = float(getattr(col_settings, "sweep_margin_offset", 0.05))
+                if sweep_m > max_sweep_margin:
+                    max_sweep_margin = sweep_m
+
+        if hasattr(sim, "set_collider_options"):
+            sim.set_collider_options(
+                enable_cluster_culling=has_cluster_culling,
+                enable_single_sided_recovery=True,
+                sweep_margin=max_sweep_margin,
+            )
 
     # 毎フレームのボーン変換行列更新 (BONE_SDF / MESH_SDF)
     if sim_id in _bone_sdf_cache:
