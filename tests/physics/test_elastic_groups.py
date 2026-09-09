@@ -14,7 +14,7 @@ if str(root_dir) not in sys.path:
 
 import taremin_cloth_core
 import taremin_cloth
-from tests.panel_test_utils import render_panel
+from tests.fixtures.panel_test_utils import render_panel
 
 
 class TestElasticGroups(unittest.TestCase):

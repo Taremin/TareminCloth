@@ -8,7 +8,7 @@ from taremin_cloth.analysis import find_triangle_intersections
 class TestColliderCollisionPenetrationReplay(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.data_path = os.path.join(os.path.dirname(__file__), "data_penetration_f23_f25.jsonl.gz")
+        cls.data_path = os.path.join(os.path.dirname(__file__), "..", "fixtures", "data_penetration_f23_f25.jsonl.gz")
         cls.replayer = ClothReplayer(cls.data_path)
 
         edges = cls.replayer.edges

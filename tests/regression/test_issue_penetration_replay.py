@@ -17,7 +17,7 @@ from taremin_cloth.replayer import ClothReplayer, get_frame
 class TestPenetrationReplayRedGreen(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.data_path = os.path.join(os.path.dirname(__file__), "data_penetration_f46_f50.jsonl.gz")
+        cls.data_path = os.path.join(os.path.dirname(__file__), "..", "fixtures", "data_penetration_f46_f50.jsonl.gz")
         cls.replayer = ClothReplayer(cls.data_path)
 
         # 2枚の布の連結成分（アイランド）を分離

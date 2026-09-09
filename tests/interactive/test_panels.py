@@ -14,7 +14,7 @@ from taremin_cloth.panels import (
     TAREMIN_CLOTH_PT_main_panel,
     TAREMIN_CLOTH_PT_collider_panel,
 )
-from tests.panel_test_utils import render_panel, MockLayout
+from tests.fixtures.panel_test_utils import render_panel, MockLayout
 
 
 class TestPanels(unittest.TestCase):

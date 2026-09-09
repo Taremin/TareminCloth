@@ -381,7 +381,7 @@ def run_blender_unittest(
     python_expr = f"""
 import sys, unittest
 sys.path.insert(0, '.')
-suite = unittest.defaultTestLoader.discover('tests', pattern={pattern_arg})
+suite = unittest.defaultTestLoader.discover('tests', pattern={pattern_arg}, top_level_dir='.')
 runner = unittest.TextTestRunner(verbosity={verbosity})
 result = runner.run(suite)
 sys.exit(0 if result.wasSuccessful() else 1)

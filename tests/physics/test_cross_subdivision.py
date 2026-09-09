@@ -15,7 +15,7 @@ if str(root_dir) not in sys.path:
 import taremin_cloth
 from taremin_cloth.utils import topology
 from taremin_cloth.panels import TAREMIN_CLOTH_PT_main_panel
-from tests.panel_test_utils import render_panel
+from tests.fixtures.panel_test_utils import render_panel
 
 
 class TestCrossSubdivision(unittest.TestCase):

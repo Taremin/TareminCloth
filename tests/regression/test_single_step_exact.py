@@ -5,7 +5,7 @@ import taremin_cloth_core
 from taremin_cloth import replayer
 from taremin_cloth.replayer import ClothReplayer
 
-GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "golden_master")
+GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures", "golden_master")
 
 class TestSingleStepExact(unittest.TestCase):
     """
@@ -15,6 +15,8 @@ class TestSingleStepExact(unittest.TestCase):
 
     def test_case1_cloth_body_step_exact(self):
         log_body = 'frame_logs/cloth_debug_20260901_182137_cloth_body.jsonl.gz'
+        if not os.path.exists(log_body):
+            self.skipTest(f"Optional frame log not found: {log_body}")
         for fi in [1, 5, 10]:
             golden_path = os.path.join(GOLDEN_DIR, f"step_case1_f{fi}.npz")
             self.assertTrue(os.path.exists(golden_path))
@@ -42,6 +44,8 @@ class TestSingleStepExact(unittest.TestCase):
 
     def test_case2_plane_sphere_step_exact(self):
         log_plane = 'frame_logs/cloth_debug_20260902_025605_Plane.jsonl.gz'
+        if not os.path.exists(log_plane):
+            self.skipTest(f"Optional frame log not found: {log_plane}")
         for fi in [1, 10, 20]:
             golden_path = os.path.join(GOLDEN_DIR, f"step_case2_f{fi}.npz")
             self.assertTrue(os.path.exists(golden_path))
