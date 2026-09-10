@@ -336,6 +336,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 self_sub.prop(settings, "self_collision_max_displacement_ratio", text="  Max Step Ratio")
                 self_sub.prop(settings, "self_collision_max_iterations", text="  Search Limit")
                 self_sub.prop(settings, "enable_normal_untangling", text="  Normal Untangling")
+                self_sub.prop(settings, "coupled_self_collision_mode", text="  Coupled Mode")
+                if settings.coupled_self_collision_mode != 'OFF':
+                    self_sub.prop(settings, "post_collision_relaxation_iters", text="  Relax Steps")
             l_col.separator()
             l_col.prop(settings, "layer_id")
             row_thick = l_col.row(align=True)

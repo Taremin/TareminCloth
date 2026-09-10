@@ -84,27 +84,7 @@ impl GpuClothSimulator {
                 }
 
                 // 2. Distance Constraints Projection
-                if self.solver_mode == 1 {
-                    // Atomic Jacobi モード (全エッジを単一ディスパッチで一斉評価 + 頂点変位平均適用)
-                    if self.num_distance_constraints > 0 {
-                        let edge_workgroups = (self.num_distance_constraints + wg_size - 1) / wg_size;
-                        cpass.set_pipeline(&self.distance_atomic_solve_pipeline);
-                        cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
-                        cpass.dispatch_workgroups(edge_workgroups, 1, 1);
-                    }
-                    cpass.set_pipeline(&self.distance_atomic_apply_pipeline);
-                    cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
-                    cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-                } else {
-                    // Coloring モード (従来どおり全色グループを同一Pass内で連続ディスパッチ)
-                    cpass.set_pipeline(&self.distance_pipeline);
-                    for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
-                        if count > 0 {
-                            cpass.set_bind_group(0, &self.distance_bind_groups[color_idx], &[]);
-                            cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
-                        }
-                    }
-                }
+                self.dispatch_distance_constraints(&mut cpass, vert_workgroups, wg_size);
 
                 // 3. Sewing Constraints Projection
                 cpass.set_pipeline(&self.sewing_pipeline);
@@ -133,86 +113,62 @@ impl GpuClothSimulator {
                     cpass.set_bind_group(0, &self.collider_bind_group, &[]);
                     cpass.dispatch_workgroups(vert_workgroups, 1, 1);
                 }
-            }
 
-            // 5. 反復終了後にピン位置を適用 (Grab等)
-            if num_pins > 0 {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Final Pin Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.pin_pipeline);
-                cpass.set_bind_group(0, &self.pin_bind_group, &[]);
-                cpass.dispatch_workgroups(pin_workgroups, 1, 1);
-            }
+                drop(cpass);
 
-            // =========================================================================
-            // 6. エッジコライダー詳細衝突 & 自己衝突パス
-            // =========================================================================
-            // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突)
-            if has_colliders && self.enable_edge_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Edge Collision Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.edge_collision_pipeline);
-                for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
-                    if count > 0 {
-                        cpass.set_bind_group(0, &self.edge_collision_bind_groups[color_idx], &[]);
-                        cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
-                    }
+                // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
+                if self.enable_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
+                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop");
                 }
             }
 
-            // 6.3 法線計算パス (自己衝突用)
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Compute Normals Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.compute_normals_pipeline);
-                cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
+        // 5. 反復終了後にピン位置を適用 (Grab等)
+        if num_pins > 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Final Pin Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.pin_pipeline);
+            cpass.set_bind_group(0, &self.pin_bind_group, &[]);
+            cpass.dispatch_workgroups(pin_workgroups, 1, 1);
+        }
 
-            // 6.4 GPU空間ハッシュ構築 & 自己衝突パス (トポロジーCCD & 幾何反発)
-            if self.enable_self_collision {
-                let hash_clear_workgroups = (self.spatial_hash.table_size + wg_size - 1) / wg_size;
+        // =========================================================================
+        // 6. エッジコライダー詳細衝突 & 自己衝突パス
+        // =========================================================================
+        // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突)
+        if has_colliders && self.enable_edge_collision {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Edge Collision Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.edge_collision_pipeline);
+            for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
+                if count > 0 {
+                    cpass.set_bind_group(0, &self.edge_collision_bind_groups[color_idx], &[]);
+                    cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                }
+            }
+        }
+
+        // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
+        if self.enable_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
+            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer");
+        }
+
+        // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束を再適用してエッジ伸びを抑制)
+        if self.enable_self_collision
+            && (self.coupled_self_collision_mode == 1 || self.coupled_self_collision_mode == 3)
+            && self.post_collision_relaxation_iters > 0
+        {
+            for _ in 0..self.post_collision_relaxation_iters {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpatialHash Clear Pass"),
+                    label: Some("Post-Collision Relaxation Pass"),
                     timestamp_writes: None,
                 });
-                cpass.set_pipeline(&self.spatial_hash.clear_pipeline);
-                cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
-                cpass.dispatch_workgroups(hash_clear_workgroups, 1, 1);
+                self.dispatch_distance_constraints(&mut cpass, vert_workgroups, wg_size);
             }
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpatialHash Build Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.spatial_hash.build_pipeline);
-                cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Self Collision Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.self_collision_pipeline);
-                cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
-            if self.enable_self_collision {
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Self Collision Apply Pass"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.self_collision_apply_pipeline);
-                cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
-                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            }
+        }
 
             // 7. Update Vel & Commit Positions Pass
             {
@@ -642,5 +598,100 @@ impl GpuClothSimulator {
         self.reset_edge_rest_lengths();
         self.buffered_frame_count = 0;
         self.debug_recorder.clear();
+    }
+
+    /// 距離拘束（Atomic Jacobi または Coloring）を単一ComputePass内でディスパッチする
+    pub(crate) fn dispatch_distance_constraints(
+        &self,
+        cpass: &mut wgpu::ComputePass,
+        vert_workgroups: u32,
+        wg_size: u32,
+    ) {
+        if self.solver_mode == 1 {
+            // Atomic Jacobi モード (全エッジを単一ディスパッチで一斉評価 + 頂点変位平均適用)
+            if self.num_distance_constraints > 0 {
+                let edge_workgroups = (self.num_distance_constraints + wg_size - 1) / wg_size;
+                cpass.set_pipeline(&self.distance_atomic_solve_pipeline);
+                cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
+                cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+            }
+            cpass.set_pipeline(&self.distance_atomic_apply_pipeline);
+            cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        } else {
+            // Coloring モード (全色グループを連続ディスパッチ)
+            cpass.set_pipeline(&self.distance_pipeline);
+            for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
+                if count > 0 {
+                    cpass.set_bind_group(0, &self.distance_bind_groups[color_idx], &[]);
+                    cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                }
+            }
+        }
+    }
+
+    /// 自己衝突パス一式（法線計算・空間ハッシュクリア＆構築・自己衝突Solve＆Apply）をディスパッチする
+    pub(crate) fn dispatch_self_collision_passes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        vert_workgroups: u32,
+        wg_size: u32,
+        prefix: &str,
+    ) {
+        // 1. Compute Normals Pass
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("{prefix} Compute Normals Pass")),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.compute_normals_pipeline);
+            cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        }
+
+        // 2. SpatialHash Clear Pass
+        let hash_clear_workgroups = (self.spatial_hash.table_size + wg_size - 1) / wg_size;
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("{prefix} SpatialHash Clear Pass")),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.spatial_hash.clear_pipeline);
+            cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
+            cpass.dispatch_workgroups(hash_clear_workgroups, 1, 1);
+        }
+
+        // 3. SpatialHash Build Pass
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("{prefix} SpatialHash Build Pass")),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.spatial_hash.build_pipeline);
+            cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        }
+
+        // 4. Self Collision Pass (Solve)
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("{prefix} Self Collision Pass")),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.self_collision_pipeline);
+            cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        }
+
+        // 5. Self Collision Apply Pass
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("{prefix} Self Collision Apply Pass")),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.self_collision_apply_pipeline);
+            cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        }
     }
 }

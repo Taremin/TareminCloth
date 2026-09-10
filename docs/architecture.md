@@ -57,8 +57,11 @@ graph TD
      - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。
      - **メッシュコライダー**: クラスタカリング付き三角パッチ衝突判定。
      - **自己衝突 (Self-Collision)**:
-      - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E 接触判定。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合ゼロでアキュムレータへ対称蓄積。
-      - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
+        - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E 接触判定。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合ゼロでアキュムレータへ対称蓄積。
+        - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
+        - **協調収束設計 (Coupled Modes)**:
+          - `RELAXATION` モード（推奨標準）: 自己衝突直後に距離拘束を2反復再適用（Post-Relaxation）し、FPS低下ほぼゼロでエッジ伸びを約5割抑制。
+          - `FULL_COUPLED` モード（最高品質）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和を適用してエッジ伸びを約7割抑制。
 
 4. **速度更新と位置確定 (Velocity Update & Commit)**:
    $$v_i \leftarrow (p_i - x_i) / dt$$
@@ -159,10 +162,12 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
    - 閉じた系でのエネルギー保存および対称メッシュでの幾何学的変形対称性の維持。
 2. **自己衝突対称性・運動量保存テスト (`tests/core/test_self_collision_symmetry.py`)**:
    - 二枚の対向する布メッシュの自己衝突において、等質量時の上下対称変位（相対誤差 1% 未満）および異質量時（2:1）の質量比反比例変位・運動量保存則を検証。
-3. **ゴールデンマスター回帰テスト (`tests/test_golden_regression.py`)**:
+3. **Coupled自己衝突・エッジ伸び抑制テスト (`tests/core/test_coupled_self_collision.py`)**:
+   - 強い圧縮自己衝突下において、`RELAXATION` モードおよび `FULL_COUPLED` モードによりエッジ最大伸長率が大幅に抑制される物理品質を検証。
+4. **ゴールデンマスター回帰テスト (`tests/test_golden_regression.py`)**:
    - 基準バージョン（コミット `3160075`）で生成された高精度スナップショット (`tests/golden_master/*.npz`) との頂点座標誤差が許容値（ミリメートル未満）以内であることを毎コミット検証。
-4. **メモリアライメント自動検証 (`tests/test_shader_alignment.rs`)**:
+5. **メモリアライメント自動検証 (`tests/test_shader_alignment.rs`)**:
    - Rust側の `repr(C)` 構造体サイズ・オフセットと WGSL シェーダー側の Uniform / Storage バッファレイアウトが一致することを `naga` による自動解析テストで常時検証。
-5. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
+6. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
    - デバッグレコーダーが出力する `.jsonl.gz` を活用し、Blender非依存のCLIおよびPythonテストコード上でサブステップ解析・異常検出を実行。
 

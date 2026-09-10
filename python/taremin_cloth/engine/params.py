@@ -65,6 +65,22 @@ def sync_cloth_parameters(sim, obj, scene=None):
             enable_normal_untangling=getattr(settings, "enable_normal_untangling", True),
             max_iterations=max_iters,
         )
+    if hasattr(sim, "set_coupled_self_collision_options"):
+        mode_str = getattr(settings, "coupled_self_collision_mode", "RELAXATION")
+        if mode_str == "OFF":
+            mode_int = 0
+            relax_iters = 0
+        elif mode_str == "FULL_COUPLED":
+            mode_int = 3
+            relax_iters = getattr(settings, "post_collision_relaxation_iters", 1)
+            if relax_iters == 0:
+                relax_iters = 1
+        else:  # "RELAXATION"
+            mode_int = 1
+            relax_iters = getattr(settings, "post_collision_relaxation_iters", 2)
+            if relax_iters == 0:
+                relax_iters = 2
+        sim.set_coupled_self_collision_options(mode_int, relax_iters)
 
     # 5.5. エッジ詳細接触判定
     if hasattr(sim, "set_enable_edge_collision"):

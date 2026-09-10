@@ -861,6 +861,14 @@ impl ClothSimulator {
         );
     }
 
+    /// Coupled自己衝突モードと緩和イテレーション数を設定
+    /// mode: 0: 通常(反復外), 1: Post-Relaxation, 2: 反復内実行
+    /// relaxation_iters: Post-Relaxation時の距離拘束反復回数
+    #[pyo3(signature = (mode=0, relaxation_iters=1))]
+    fn set_coupled_self_collision_options(&mut self, mode: u32, relaxation_iters: u32) {
+        self.simulator.set_coupled_self_collision_options(mode, relaxation_iters);
+    }
+
     /// コンパクトリードバックの有効/無効を設定 (true: 12B/頂点, false: 48B/頂点)
     fn set_enable_compact_readback(&mut self, enable: bool) {
         self.simulator.set_enable_compact_readback(enable);

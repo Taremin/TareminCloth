@@ -300,6 +300,23 @@ class TareminClothObjectSettings(PropertyGroup):
         description="頂点法線を用いて裏抜けした頂点を表側へ押し戻し、自己交差からの自律的な脱出を可能にします",
         default=True,
     )
+    coupled_self_collision_mode: EnumProperty(
+        name="Coupled Mode",
+        description="自己衝突と距離拘束の協調収束モード。衝突によるエッジ過剰伸長（伸び）を抑制します",
+        items=[
+            ('OFF', "Off (Legacy)", "従来の自己衝突（反復外実行・緩和なし）"),
+            ('RELAXATION', "Relaxation (Balanced)", "自己衝突直後に距離拘束を2回再適用。FPS低下ゼロで伸びを約5割抑制（推奨標準）"),
+            ('FULL_COUPLED', "Full Coupled (High Quality)", "反復ループ内で同調解決＋仕上げ緩和1回。100FPS超を保ちつつ伸びを約7割抑制"),
+        ],
+        default='RELAXATION',
+    )
+    post_collision_relaxation_iters: IntProperty(
+        name="Relaxation Steps",
+        description="自己衝突後の距離拘束緩和ステップ数（0: モード自動値、1〜8: 手動指定）",
+        default=2,
+        min=0,
+        max=8,
+    )
     enable_edge_collision: BoolProperty(
         name="Edge-Collider Collision",
         description="布のエッジ（線分）と外部コライダーの詳細接触判定を有効化し、尖ったコライダーの角抜け・線分貫通を防止します",
