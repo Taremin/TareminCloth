@@ -56,7 +56,9 @@ graph TD
    - **衝突拘束 (Collisions)**:
      - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。
      - **メッシュコライダー**: クラスタカリング付き三角パッチ衝突判定。
-     - **自己衝突 (Self-Collision)**: 空間ハッシュに基づく頂点間反発。
+     - **自己衝突 (Self-Collision)**:
+      - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E 接触判定。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合ゼロでアキュムレータへ対称蓄積。
+      - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
 
 4. **速度更新と位置確定 (Velocity Update & Commit)**:
    $$v_i \leftarrow (p_i - x_i) / dt$$
@@ -131,6 +133,10 @@ pub struct GpuMeshTriangle {
 // flags ビットアサイン:
 // - bit 0 (0x1): is_single_sided (1=片面メッシュ, 0=両面メッシュ)
 // - bit 1 (0x2): recovery_disabled (1=片面裏抜け復帰無効, 0=復帰有効[デフォルト])
+
+// 自己衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write)
+// WGSL: struct AtomicAccum { dx: atomic<i32>, dy: atomic<i32>, dz: atomic<i32>, count: atomic<u32> }
+// 固定小数点 10^6 スケール (1μm 分解能) により、データ競合なしに対称な作用・反作用を蓄積
 ```
 
 ---
@@ -151,9 +157,12 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
 1. **物理不変量 (Invariants) 検証**:
    - シミュレーションの各ステップ後、全頂点座標および速度に NaN / Inf が発生しないことを機械的に保証。
    - 閉じた系でのエネルギー保存および対称メッシュでの幾何学的変形対称性の維持。
-2. **ゴールデンマスター回帰テスト (`tests/test_golden_regression.py`)**:
+2. **自己衝突対称性・運動量保存テスト (`tests/core/test_self_collision_symmetry.py`)**:
+   - 二枚の対向する布メッシュの自己衝突において、等質量時の上下対称変位（相対誤差 1% 未満）および異質量時（2:1）の質量比反比例変位・運動量保存則を検証。
+3. **ゴールデンマスター回帰テスト (`tests/test_golden_regression.py`)**:
    - 基準バージョン（コミット `3160075`）で生成された高精度スナップショット (`tests/golden_master/*.npz`) との頂点座標誤差が許容値（ミリメートル未満）以内であることを毎コミット検証。
-3. **メモリアライメント自動検証 (`tests/test_shader_alignment.rs`)**:
+4. **メモリアライメント自動検証 (`tests/test_shader_alignment.rs`)**:
    - Rust側の `repr(C)` 構造体サイズ・オフセットと WGSL シェーダー側の Uniform / Storage バッファレイアウトが一致することを `naga` による自動解析テストで常時検証。
-4. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
+5. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
    - デバッグレコーダーが出力する `.jsonl.gz` を活用し、Blender非依存のCLIおよびPythonテストコード上でサブステップ解析・異常検出を実行。
+

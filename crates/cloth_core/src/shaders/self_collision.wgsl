@@ -27,6 +27,18 @@ struct SelfCollisionParams {
     _pad3: u32,
 };
 
+struct AtomicAccum {
+    dx: atomic<i32>,
+    dy: atomic<i32>,
+    dz: atomic<i32>,
+    count: atomic<u32>,
+};
+
+struct ClosestBaryResult {
+    pt: vec3<f32>,
+    bary: vec3<f32>,
+};
+
 @group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;
 @group(0) @binding(1) var<storage, read> cell_heads: array<atomic<i32>>;
 @group(0) @binding(2) var<storage, read> vert_next: array<i32>;
@@ -38,8 +50,21 @@ struct SelfCollisionParams {
 @group(0) @binding(8) var<storage, read> island_ids: array<u32>;
 @group(0) @binding(9) var<storage, read> star_offsets: array<u32>;
 @group(0) @binding(10) var<storage, read> star_indices: array<GpuStarPair>;
+@group(0) @binding(11) var<storage, read_write> accum: array<AtomicAccum>;
 
 const EPSILON: f32 = 1e-7;
+const FIXED_SCALE: f32 = 1000000.0;
+const INV_FIXED_SCALE: f32 = 1.0 / FIXED_SCALE;
+
+fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    atomicAdd(&accum[v_idx].dx, ix);
+    atomicAdd(&accum[v_idx].dy, iy);
+    atomicAdd(&accum[v_idx].dz, iz);
+    atomicAdd(&accum[v_idx].count, 1u);
+}
 
 fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
     let p1 = 73856093u;
@@ -49,53 +74,53 @@ fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
     return n % table_size;
 }
 
-// 空間上の点 p から三角形 (a, b, c) への最近傍点
-fn closest_point_on_triangle(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> vec3<f32> {
+// 空間上の点 p から三角形 (a, b, c) への最近傍点および重心座標
+fn closest_point_on_triangle_bary(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> ClosestBaryResult {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
     let d1 = dot(ab, ap);
     let d2 = dot(ac, ap);
     if (d1 <= 0.0 && d2 <= 0.0) {
-        return a;
+        return ClosestBaryResult(a, vec3<f32>(1.0, 0.0, 0.0));
     }
 
     let bp = p - b;
     let d3 = dot(ab, bp);
     let d4 = dot(ac, bp);
     if (d3 >= 0.0 && d4 <= d3) {
-        return b;
+        return ClosestBaryResult(b, vec3<f32>(0.0, 1.0, 0.0));
     }
 
     let vc = d1 * d4 - d3 * d2;
     if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
         let v = d1 / (d1 - d3);
-        return a + v * ab;
+        return ClosestBaryResult(a + v * ab, vec3<f32>(1.0 - v, v, 0.0));
     }
 
     let cp = p - c;
     let d5 = dot(ab, cp);
     let d6 = dot(ac, cp);
     if (d6 >= 0.0 && d5 <= d6) {
-        return c;
+        return ClosestBaryResult(c, vec3<f32>(0.0, 0.0, 1.0));
     }
 
     let vb = d5 * d2 - d1 * d6;
     if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
         let w = d2 / (d2 - d6);
-        return a + w * ac;
+        return ClosestBaryResult(a + w * ac, vec3<f32>(1.0 - w, 0.0, w));
     }
 
     let va = d3 * d6 - d5 * d4;
     if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return b + w * (c - b);
+        return ClosestBaryResult(b + w * (c - b), vec3<f32>(0.0, 1.0 - w, w));
     }
 
     let denom = 1.0 / (va + vb + vc);
     let v = vb * denom;
     let w = vc * denom;
-    return a + ab * v + ac * w;
+    return ClosestBaryResult(a + ab * v + ac * w, vec3<f32>(1.0 - v - w, v, w));
 }
 
 // 線分 (p_old -> p_new) と 三角形 (a, b, c) の連続衝突判定 (CCD: Möller–Trumbore)
@@ -121,13 +146,13 @@ fn intersect_segment_triangle(
     let inv_det = 1.0 / det;
     let tvec = p_old - a;
     let u = dot(tvec, pvec) * inv_det;
-    if (u < -0.05 || u > 1.05) {
+    if (u < 0.0 || u > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
     let qvec = cross(tvec, e1);
     let v = dot(d, qvec) * inv_det;
-    if (v < -0.05 || (u + v) > 1.05) {
+    if (v < 0.0 || u + v > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -139,14 +164,11 @@ fn intersect_segment_triangle(
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
-// 2本の線分 (p0-p1) と (q0-q1) の最短距離パラメータ (s, t) in [0, 1]
-fn closest_points_segments(
-    p0: vec3<f32>, p1: vec3<f32>,
-    q0: vec3<f32>, q1: vec3<f32>
-) -> vec2<f32> {
-    let d1 = p1 - p0;
-    let d2 = q1 - q0;
-    let r = p0 - q0;
+// 2線分 p1-q1 と p2-q2 間の最短距離パラメータ (s, t) in [0, 1]^2
+fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3<f32>) -> vec2<f32> {
+    let d1 = q1 - p1;
+    let d2 = q2 - p2;
+    let r = p1 - p2;
     let a = dot(d1, d1);
     let e = dot(d2, d2);
     let f = dot(d2, r);
@@ -164,8 +186,9 @@ fn closest_points_segments(
 
     let b = dot(d1, d2);
     let denom = a * e - b * b;
+
     var s = 0.0;
-    if (abs(denom) > EPSILON) {
+    if (denom > EPSILON) {
         s = clamp((b * f - c * e) / denom, 0.0, 1.0);
     } else {
         s = 0.0;
@@ -223,15 +246,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let x_old_i = v_i.position; // サブステップ開始時の確定位置
-    var p_i = v_i.prev_pos;     // 現在の予測位置
+    let p_i = v_i.prev_pos;     // 現在の予測位置
     let thick_i = v_i.thickness;
 
     let cell = vec3<i32>(floor(p_i / params.cell_size));
-
-    var total_penalty_disp = vec3<f32>(0.0);
-    var penalty_count = 0.0;
-    var total_ccd_disp = vec3<f32>(0.0);
-    var ccd_count = 0.0;
 
     let thick_margin = vec3<f32>(thick_i * 1.5);
     let sweep_min = min(x_old_i, p_i) - thick_margin;
@@ -276,25 +294,35 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             let effective_thick = max(min_dist, edge_margin);
 
                             // ==========================================
-                            // 1. 球対球 (Vertex-Vertex) 幾何反発
+                            // 1. 球対球 (Vertex-Vertex) 幾何反発 (対称アトミック分配)
                             // ==========================================
-                            let delta_vv = p_i - p_j;
-                            let dist_vv = length(delta_vv);
+                            // 相手がピン留め（v_j.inv_mass <= 0）の場合は相手スレッドが処理しないため、
+                            // index < j の有無にかかわらず自スレッドが必ず処理して自頂点を退避させる。
+                            let both_dynamic = (v_j.inv_mass > 0.0);
+                            if (!both_dynamic || index < j) {
+                                let delta_vv = p_i - p_j;
+                                let dist_vv = length(delta_vv);
 
-                            if (dist_vv < effective_thick && dist_vv > EPSILON) {
-                                let n = delta_vv / dist_vv;
-                                let pen = effective_thick - dist_vv;
-                                let w_sum = v_i.inv_mass + v_j.inv_mass;
-                                let ratio = select(0.5, v_i.inv_mass / w_sum, w_sum > EPSILON);
+                                if (dist_vv < effective_thick && dist_vv > EPSILON) {
+                                    let n = delta_vv / dist_vv;
+                                    let pen = effective_thick - dist_vv;
+                                    let w_i = v_i.inv_mass;
+                                    let w_j = v_j.inv_mass;
+                                    let w_sum = w_i + w_j;
 
-                                if (v_j.inv_mass <= 0.0) {
-                                    let v_j_move = p_j - p_j_old;
-                                    let col_disp = n * pen + v_j_move * 0.5;
-                                    total_ccd_disp = total_ccd_disp + col_disp;
-                                    ccd_count = ccd_count + 1.0;
-                                } else {
-                                    total_penalty_disp = total_penalty_disp + n * (pen * ratio * 0.5);
-                                    penalty_count = penalty_count + 1.0;
+                                    if (w_sum > EPSILON) {
+                                        if (w_j <= 0.0) {
+                                            // 相手がピン留め（相手スレッドは停止しているため、自頂点のみ退避）
+                                            let v_j_move = p_j - p_j_old;
+                                            let col_disp = n * pen + v_j_move * 0.5;
+                                            add_disp_atomic(index, col_disp);
+                                        } else {
+                                            // 動的頂点同士：index < j により1回のみ評価され、質量比に応じて対称分配
+                                            let disp = n * (pen * 0.5);
+                                            add_disp_atomic(index, disp * (w_i / w_sum));
+                                            add_disp_atomic(j, -disp * (w_j / w_sum));
+                                        }
+                                    }
                                 }
                             }
 
@@ -343,25 +371,44 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let p_safe = rel_old_i + t_safe * move_vec;
                                             
                                             let ccd_disp = (p_safe - p_i) + push_disp;
-                                            total_ccd_disp = total_ccd_disp + ccd_disp;
-                                            ccd_count = ccd_count + 1.0;
+                                            add_disp_atomic(index, ccd_disp);
                                         } else {
-                                            // B) 最近傍点幾何反発
-                                            let q = closest_point_on_triangle(p_i, p_j, p_v0, p_v1);
-                                            let delta_vt = p_i - q;
+                                            // B) 最近傍点幾何反発（重心座標による作用反作用の対称分配）
+                                            let res_vt = closest_point_on_triangle_bary(p_i, p_j, p_v0, p_v1);
+                                            let delta_vt = p_i - res_vt.pt;
                                             let dist_vt = length(delta_vt);
 
                                             if (dist_vt < effective_thick && dist_vt > EPSILON) {
                                                 let n_vt = delta_vt / dist_vt;
                                                 let pen_vt = effective_thick - dist_vt;
                                                 if (tri_has_pin) {
-                                                    // 相手三角形がピン留め頂点を含む場合はコライダー押し出し（100%退避）
+                                                    // 相手三角形がピン留め頂点を含む場合は自頂点のみコライダー押し出し
                                                     let col_disp = n_vt * pen_vt + tri_move * 0.5;
-                                                    total_ccd_disp = total_ccd_disp + col_disp;
-                                                    ccd_count = ccd_count + 1.0;
+                                                    add_disp_atomic(index, col_disp);
                                                 } else {
-                                                    total_penalty_disp = total_penalty_disp + n_vt * (pen_vt * 0.6);
-                                                    penalty_count = penalty_count + 1.0;
+                                                    let w_i = v_i.inv_mass;
+                                                    let bary = res_vt.bary;
+                                                    let w_j = v_j.inv_mass;
+                                                    let w_v0 = v_v0.inv_mass;
+                                                    let w_v1 = v_v1.inv_mass;
+                                                    let w_tri = bary.x * bary.x * w_j + bary.y * bary.y * w_v0 + bary.z * bary.z * w_v1;
+                                                    let w_tot = w_i + w_tri;
+
+                                                    if (w_tot > EPSILON) {
+                                                        let total_pen = n_vt * (pen_vt * 0.6);
+                                                        // 自頂点
+                                                        add_disp_atomic(index, total_pen * (w_i / w_tot));
+                                                        // 相手三角形の3頂点（反作用）
+                                                        if (w_j > 0.0) {
+                                                            add_disp_atomic(j, -total_pen * (bary.x * w_j / w_tot));
+                                                        }
+                                                        if (w_v0 > 0.0) {
+                                                            add_disp_atomic(v0, -total_pen * (bary.y * w_v0 / w_tot));
+                                                        }
+                                                        if (w_v1 > 0.0) {
+                                                            add_disp_atomic(v1, -total_pen * (bary.z * w_v1 / w_tot));
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -369,10 +416,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 }
                             }
 
-
-
                             // ==========================================
-                            // 3. Edge-Edge (辺 対 辺) 幾何反発 + コライダー押し出し
+                            // 3. Edge-Edge (辺 対 辺) 幾何反発 (対称アトミック分配)
                             // ==========================================
                             if (!is_near_2hop) {
                                 let adj_i_start = adj_offsets[index];
@@ -385,7 +430,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                 for (var ei = 0u; ei < num_edges_i; ei = ei + 1u) {
                                     let ui = adj_indices[adj_i_start + ei];
-                                    let p_ui = vertices[ui].prev_pos;
+                                    let v_ui = vertices[ui];
+                                    let p_ui = v_ui.prev_pos;
 
                                     for (var ej = 0u; ej < num_edges_j; ej = ej + 1u) {
                                         let vj = adj_indices[adj_j_start + ej];
@@ -394,27 +440,67 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let p_vj = v_vj.prev_pos;
                                             let p_vj_old = v_vj.position;
 
-                                            let st = closest_points_segments(p_i, p_ui, p_j, p_vj);
-                                            let pt1 = p_i + st.x * (p_ui - p_i);
-                                            let pt2 = p_j + st.y * (p_vj - p_j);
+                                            let edge_j_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
+                                            // 相手エッジがピンの場合は自エッジ側が必ず処理。両方が動的エッジなら index < j で重複排除
+                                            if (edge_j_has_pin || index < j) {
+                                                let st = closest_points_segments(p_i, p_ui, p_j, p_vj);
+                                                let pt1 = p_i + st.x * (p_ui - p_i);
+                                                let pt2 = p_j + st.y * (p_vj - p_j);
 
-                                            let delta_ee = pt1 - pt2;
-                                            let dist_ee = length(delta_ee);
+                                                let delta_ee = pt1 - pt2;
+                                                let dist_ee = length(delta_ee);
 
-                                            if (dist_ee < effective_thick && dist_ee > EPSILON) {
-                                                let n_ee = delta_ee / dist_ee;
-                                                let pen_ee = effective_thick - dist_ee;
-                                                let weight_i = 1.0 - st.x;
+                                                if (dist_ee < effective_thick && dist_ee > EPSILON) {
+                                                    let n_ee = delta_ee / dist_ee;
+                                                    let pen_ee = effective_thick - dist_ee;
+                                                    let s = st.x;
+                                                    let t = st.y;
 
-                                                let edge_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
-                                                if (edge_has_pin) {
-                                                    let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
-                                                    let col_disp = n_ee * (pen_ee * weight_i) + edge_move * weight_i * 0.5;
-                                                    total_ccd_disp = total_ccd_disp + col_disp;
-                                                    ccd_count = ccd_count + 1.0;
-                                                } else {
-                                                    total_penalty_disp = total_penalty_disp + n_ee * (pen_ee * weight_i * 0.6);
-                                                    penalty_count = penalty_count + 1.0;
+                                                    let edge_i_has_pin = (v_i.inv_mass <= 0.0) || (v_ui.inv_mass <= 0.0);
+
+                                                    if (edge_j_has_pin) {
+                                                        let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
+                                                        let col_disp = n_ee * (pen_ee * (1.0 - s)) + edge_move * (1.0 - s) * 0.5;
+                                                        add_disp_atomic(index, col_disp);
+                                                        if (v_ui.inv_mass > 0.0) {
+                                                            let col_disp_ui = n_ee * (pen_ee * s) + edge_move * s * 0.5;
+                                                            add_disp_atomic(ui, col_disp_ui);
+                                                        }
+                                                    } else if (edge_i_has_pin) {
+                                                        let edge_move = ((p_i - x_old_i) + (p_ui - v_ui.position)) * 0.5;
+                                                        let col_disp = -n_ee * (pen_ee * (1.0 - t)) + edge_move * (1.0 - t) * 0.5;
+                                                        add_disp_atomic(j, col_disp);
+                                                        if (v_vj.inv_mass > 0.0) {
+                                                            let col_disp_vj = -n_ee * (pen_ee * t) + edge_move * t * 0.5;
+                                                            add_disp_atomic(vj, col_disp_vj);
+                                                        }
+                                                    } else {
+                                                        let w_i = v_i.inv_mass;
+                                                        let w_ui = v_ui.inv_mass;
+                                                        let w_j = v_j.inv_mass;
+                                                        let w_vj = v_vj.inv_mass;
+                                                        let w_e1 = (1.0 - s) * (1.0 - s) * w_i + s * s * w_ui;
+                                                        let w_e2 = (1.0 - t) * (1.0 - t) * w_j + t * t * w_vj;
+                                                        let w_tot = w_e1 + w_e2;
+
+                                                        if (w_tot > EPSILON) {
+                                                            let total_disp = n_ee * (pen_ee * 0.6);
+                                                            // エッジ1（自側）
+                                                            if (w_i > 0.0) {
+                                                                add_disp_atomic(index, total_disp * ((1.0 - s) * w_i / w_tot));
+                                                            }
+                                                            if (w_ui > 0.0) {
+                                                                add_disp_atomic(ui, total_disp * (s * w_ui / w_tot));
+                                                            }
+                                                            // エッジ2（相手側、反作用）
+                                                            if (w_j > 0.0) {
+                                                                add_disp_atomic(j, -total_disp * ((1.0 - t) * w_j / w_tot));
+                                                            }
+                                                            if (w_vj > 0.0) {
+                                                                add_disp_atomic(vj, -total_disp * (t * w_vj / w_tot));
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -430,33 +516,4 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
         }
     }
-
-    // 変位の適用とクランプ
-    var final_disp = vec3<f32>(0.0);
-
-    // 1. ペナルティ反発 (近接反発): 多数の近接点がある場合に平均化で反発力が弱まる（希釈）のを防ぐ
-    if (penalty_count > 0.0) {
-        // 反発ベクトルの合成: 単純平均ではなく、接触密度に応じた適切な剛性を維持
-        var avg_penalty = total_penalty_disp / max(1.0, sqrt(penalty_count));
-        if (params.enable_relief != 0u) {
-            avg_penalty = avg_penalty * params.relief_factor;
-        }
-        let p_len = length(avg_penalty);
-        let ratio = select(0.50, params.max_displacement_ratio, params.max_displacement_ratio > 0.0);
-        let max_penalty_step = min(local_edge_lengths[index] * ratio, 0.10);
-        if (p_len > max_penalty_step && p_len > EPSILON) {
-            avg_penalty = (avg_penalty / p_len) * max_penalty_step;
-        }
-        final_disp = final_disp + avg_penalty;
-    }
-
-    // 2. CCD (連続衝突判定): 貫通防止のハード制約なので、減衰・クランプをかけずに確実に面手前に留める
-    if (ccd_count > 0.0) {
-        let avg_ccd = total_ccd_disp / ccd_count;
-        final_disp = final_disp + avg_ccd;
-    }
-
-    p_i = p_i + final_disp;
-    v_i.prev_pos = p_i;
-    vertices[index] = v_i;
 }

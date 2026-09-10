@@ -62,6 +62,9 @@ pub struct SimulationResources {
     pub self_collision_pipeline: wgpu::ComputePipeline,
     pub self_collision_bind_group: wgpu::BindGroup,
     pub self_collision_params_buffer: wgpu::Buffer,
+    pub self_collision_accum_buffer: wgpu::Buffer,
+    pub self_collision_apply_pipeline: wgpu::ComputePipeline,
+    pub self_collision_apply_bind_group: wgpu::BindGroup,
     pub normals_buffer: wgpu::Buffer,
     pub local_edge_lengths_buffer: wgpu::Buffer,
     pub adj_offsets_buffer: wgpu::Buffer,
@@ -384,6 +387,14 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
+    let self_collision_accum_buffer_size = ((num_vertices as u64) * 16).max(64);
+    let self_collision_accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Self Collision Accum Buffer"),
+        size: self_collision_accum_buffer_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     // コンパクトリードバック用バッファ (各頂点: f32 x, y, z = 12 bytes)
     let compact_buffer_size = ((num_vertices as u64) * 3 * 4).max(64);
     let compact_position_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -461,6 +472,13 @@ pub fn build_simulation_resources(
         device,
         "Self Collision Shader",
         include_str!("../shaders/self_collision.wgsl"),
+        workgroup_size,
+    );
+
+    let self_collision_apply_shader = create_shader_with_wg_size(
+        device,
+        "Self Collision Apply Shader",
+        include_str!("../shaders/self_collision_apply.wgsl"),
         workgroup_size,
     );
 
@@ -1201,6 +1219,7 @@ pub fn build_simulation_resources(
             storage_ro(8),
             storage_ro(9),
             storage_ro(10),
+            storage_rw_at(11),
         ],
     });
 
@@ -1266,6 +1285,58 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 10,
                 resource: star_indices_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: self_collision_accum_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let self_collision_apply_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Self Collision Apply Bind Group Layout"),
+        entries: &[
+            storage_rw,
+            storage_rw_at(1),
+            uniform_entry(2),
+            storage_ro(3),
+        ],
+    });
+
+    let self_collision_apply_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Self Collision Apply Pipeline Layout"),
+        bind_group_layouts: &[&self_collision_apply_bgl],
+        push_constant_ranges: &[],
+    });
+
+    let self_collision_apply_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Self Collision Apply Pipeline"),
+        layout: Some(&self_collision_apply_pl),
+        module: &self_collision_apply_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let self_collision_apply_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Self Collision Apply Bind Group"),
+        layout: &self_collision_apply_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: self_collision_accum_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: self_collision_params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: local_edge_lengths_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1374,6 +1445,9 @@ pub fn build_simulation_resources(
         self_collision_pipeline,
         self_collision_bind_group,
         self_collision_params_buffer,
+        self_collision_accum_buffer,
+        self_collision_apply_pipeline,
+        self_collision_apply_bind_group,
         normals_buffer,
         local_edge_lengths_buffer,
         adj_offsets_buffer,

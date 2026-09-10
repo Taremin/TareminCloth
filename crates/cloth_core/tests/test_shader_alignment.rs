@@ -83,6 +83,7 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("bake_mesh_sdf.wgsl", include_str!("../src/shaders/bake_mesh_sdf.wgsl")),
     ("skinning.wgsl", include_str!("../src/shaders/skinning.wgsl")),
     ("prep_bone_triangles.wgsl", include_str!("../src/shaders/prep_bone_triangles.wgsl")),
+    ("self_collision_apply.wgsl", include_str!("../src/shaders/self_collision_apply.wgsl")),
 ];
 
 macro_rules! check_member {

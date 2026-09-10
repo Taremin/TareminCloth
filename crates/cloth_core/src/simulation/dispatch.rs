@@ -204,6 +204,15 @@ impl GpuClothSimulator {
                 cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }
+            if self.enable_self_collision {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Self Collision Apply Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.self_collision_apply_pipeline);
+                cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
 
             // 7. Update Vel & Commit Positions Pass
             {

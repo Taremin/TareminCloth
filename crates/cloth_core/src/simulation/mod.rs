@@ -146,6 +146,10 @@ pub struct GpuClothSimulator {
     pub(crate) self_collision_bind_group: wgpu::BindGroup,
     pub(crate) self_collision_params_buffer: wgpu::Buffer,
     #[allow(dead_code)]
+    pub(crate) self_collision_accum_buffer: wgpu::Buffer,
+    pub(crate) self_collision_apply_pipeline: wgpu::ComputePipeline,
+    pub(crate) self_collision_apply_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
     pub(crate) normals_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     pub(crate) local_edge_lengths_buffer: wgpu::Buffer,
@@ -307,6 +311,9 @@ impl GpuClothSimulator {
             self_collision_pipeline: res.self_collision_pipeline,
             self_collision_bind_group: res.self_collision_bind_group,
             self_collision_params_buffer: res.self_collision_params_buffer,
+            self_collision_accum_buffer: res.self_collision_accum_buffer,
+            self_collision_apply_pipeline: res.self_collision_apply_pipeline,
+            self_collision_apply_bind_group: res.self_collision_apply_bind_group,
             normals_buffer: res.normals_buffer,
             local_edge_lengths_buffer: res.local_edge_lengths_buffer,
             adj_offsets_buffer: res.adj_offsets_buffer,
