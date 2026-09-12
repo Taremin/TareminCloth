@@ -2,5 +2,6 @@
 members = [
     "crates/cloth_core",
     "crates/cloth_py",
+    "crates/cloth_gui",
 ]
 resolver = "2"

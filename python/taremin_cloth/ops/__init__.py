@@ -40,6 +40,16 @@ from .pose import (
     TAREMIN_CLOTH_OT_record_pose,
     TAREMIN_CLOTH_OT_apply_pose_preview,
 )
+from .gui import (
+    TAREMIN_CLOTH_OT_launch_gui,
+    TAREMIN_CLOTH_OT_connect_gui,
+    TAREMIN_CLOTH_OT_gui_preview,
+    TAREMIN_CLOTH_OT_stop_gui_preview,
+    TAREMIN_CLOTH_OT_apply_gui_pose,
+    TAREMIN_CLOTH_OT_sync_gui_colliders,
+    is_gui_preview_running,
+    get_gui_fps_stats,
+)
 
 OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_toggle_cloth,
@@ -66,6 +76,12 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_auto_fit_thickness,
     TAREMIN_CLOTH_OT_clear_bone_sdf_cache,
     TAREMIN_CLOTH_OT_rebake_bone_sdf,
+    TAREMIN_CLOTH_OT_launch_gui,
+    TAREMIN_CLOTH_OT_connect_gui,
+    TAREMIN_CLOTH_OT_gui_preview,
+    TAREMIN_CLOTH_OT_stop_gui_preview,
+    TAREMIN_CLOTH_OT_apply_gui_pose,
+    TAREMIN_CLOTH_OT_sync_gui_colliders,
 )
 
 __all__ = [

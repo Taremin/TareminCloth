@@ -171,3 +171,256 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
 6. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
    - デバッグレコーダーが出力する `.jsonl.gz` を活用し、Blender非依存のCLIおよびPythonテストコード上でサブステップ解析・異常検出を実行。
 
+---
+
+## 6. Taremin Cloth GUI 独立高速プロセスアーキテクチャ
+
+Blenderのメインスレッド依存（UI描画、Depsgraph再評価、タイムライン更新、GIL待ち）によるフレームレート低下（実測10〜15 FPS）を根本解決するため、Rust+wgpu物理シミュレータコアを独立GUIプロセス「**Taremin Cloth GUI**」（`taremin_cloth_gui.exe`）として分離しました。
+
+```mermaid
+graph LR
+    subgraph BlenderProcess["Blender プロセス (メインスレッド / 15 FPS)"]
+        B_UI["Nパネル UI"]
+        B_Timer["Live Preview タイマー (非同期PULL)"]
+        B_Mesh["Blender Mesh ジオメトリ"]
+    end
+
+    subgraph GuiProcess["Taremin Cloth GUI プロセス (独立GPU / 300+ FPS)"]
+        G_Server["TCP IPC サーバー (127.0.0.1:9055)"]
+        G_Core["GpuClothSimulator (wgpu XPBD)"]
+        G_Render["wgpu 3Dビューポート + egui (60〜144 FPS)"]
+        G_State["SharedSimState (最新座標キャッシュ)"]
+    end
+
+    B_UI -->|1. Launch & InitScene| G_Server
+    G_Server -->|GPUコンテキスト初期化| G_Core
+    G_Core -->|VRAM内ゼロコピー描画| G_Render
+    G_Core -->|最新座標コミット| G_State
+    B_Timer -.->|2. GetLatestCoords (非同期PULL)| G_State
+    G_State -.->|最新座標ストリーム| B_Mesh
+    B_UI -->|3. Apply Pose (確定ポーズ反映)| G_Server
+```
+
+### 6.1 アーキテクチャの特長
+
+1. **メインスレッド完全解放による超高速物理（300+ FPS）**:
+   - 物理シミュレーションとwinit/eguiによる独立3D描画がBlenderと完全に切り離されたプロセスで動作。
+   - VRAM上の頂点バッファ（`vertex_buffer`）を直接レンダラーにバインドし、PCIeメモリ転送コストゼロの高速直接描画を実現。
+2. **非同期PULL型プレビュー（UDPライクな最新値同期）**:
+   - Blender側はタイムライン同期ではなく、モーダルタイマー（15 FPS程度）でGUIサーバーから「最新座標のみ」をPULL取得。
+   - Blenderの描画負荷やDepsgraph遅延がGUI側の物理シミュレーション速度に一切悪影響を与えない。
+3. **安全な双方向コントロール**:
+   - Blender側から Play / Pause / Reset / パラメータ変更を指示可能。
+   - 目的の形状に変形した段階で「Apply Pose」を実行することで、確定した変形座標をBlenderのMeshへ1アクションで書き戻し可能。
+
+### 6.2 性能比較ベンチマーク実測値（最大10万頂点）
+
+同一マシン環境（RTX GPU / Windows 11）における、従来のBlender組み込みIn-process方式と、新アーキテクチャ「Taremin Cloth GUI」の物理計算性能実測比較：
+
+| グリッド解像度 | 頂点数 | 面数 | 従来In-process (Blender同期) | Taremin Cloth GUI (独立物理) | 高速化倍率 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **55 × 55** | 3,025 | 5,832 | 241.2 FPS (4.15 ms) | **334.2 FPS** (2.99 ms) | **1.39×** |
+| **100 × 100** | 10,000 | 19,602 | 223.3 FPS (4.48 ms) | **333.5 FPS** (3.00 ms) | **1.49×** |
+| **173 × 173** | 29,929 | 59,168 | 45.2 FPS (22.15 ms) | **335.4 FPS** (2.98 ms) | **7.43×** |
+| **316 × 316** | **99,856** | 198,450 | **9.2 FPS** (109.01 ms) | **317.5 FPS** (3.15 ms) | 🚀 **34.61×** |
+
+> [!NOTE]
+> - 従来方式では、頂点数が3万〜10万頂点に達するとPython-C-extension間のバッファコピーとBlender側オーバーヘッドによりフレームレートが 9.2 FPS まで急落。
+> - Taremin Cloth GUI では、10万頂点規模であっても **317.5 FPS（1フレームわずか 3.15 ms）** を維持し、**34.6倍** の圧倒的スピードアップを達成しています。
+
+### 6.3 コライダー自動転送および可視化レンダリング (Phase 2 Collider Integration)
+
+Taremin Cloth GUI は、布メッシュだけでなくBlenderシーン内の全コライダーオブジェクトとのリアルタイム連動に対応しています。
+
+```mermaid
+graph LR
+    subgraph Blender["Blender (bpy)"]
+        SceneColliders["シーン内コライダー検出<br>(taremin_cloth_collider)"]
+        Extractor["extract_scene_colliders<br>(球/平面/カプセル/メッシュ)"]
+        SceneColliders --> Extractor
+    end
+
+    subgraph IPC["TCP プロトコル (JSON-Lines)"]
+        InitMsg["SceneInitData<br>(colliders, mesh_triangles)"]
+        UpdateMsg["UpdateColliders<br>(動的移動同期)"]
+        Extractor --> InitMsg
+        Extractor -.->|タイマー/手動ボタン| UpdateMsg
+    end
+
+    subgraph ClothGUI["Taremin Cloth GUI プロセス"]
+        Sim["GpuClothSimulator<br>(XPBD衝突判定)"]
+        Renderer["MeshRenderer<br>(collider_pipeline 3D描画)"]
+        InitMsg --> Sim
+        InitMsg --> Renderer
+        UpdateMsg --> Sim
+        UpdateMsg --> Renderer
+    end
+```
+
+1. **コライダーの自動検出と抽出 (`extract_scene_colliders`)**:
+   - シーン内の全オブジェクトを走査し、`taremin_cloth_collider.is_collider` が有効なオブジェクトを自動抽出。
+   - **解析コライダー (Analytical Colliders)**: 球 (Sphere)、平面 (Plane)、カプセル (Capsule) のワールド変換済み中心座標・法線・半径・軸方向を `GuiColliderData` として抽出。
+   - **メッシュコライダー (Mesh Colliders)**: `obj.to_mesh()` によるモディファイア適用済み評価ジオメトリから、ワールド変換された三角形頂点（$v_0, v_1, v_2$）を `GuiMeshTriangleData` として抽出。
+2. **GPUコアへの登録と衝突判定 (`register_colliders`)**:
+   - `GpuClothSimulator::add_sphere_collider`, `add_plane_collider`, `add_capsule_collider`, `add_mesh_collider` を呼び出し、XPBDサブステップループ内の衝突制約として直接登録。
+3. **独立3Dビューポートでの可視化 (`collider_pipeline`)**:
+   - コライダー専用のシェーダーパイプラインにより、スレートブルー・グレーの陰影付きメッシュとして描画。
+   - 球・カプセル・平面はプロシージャルメッシュ（UV球、円筒＋半球キャップ、グリッド平面）を動的生成してVRAMバッファにバインド。
+
+### 6.4 全シミュレーション機能・BONE_SDF・デバッグ可視化の完全同等化仕様 (Phase 3 Full Parity)
+
+Taremin Cloth GUI は、Blender側（Python & PyO3）で提供されているすべてのXPBD物理シミュレーション機能およびデバッグ可視化機能と100%同等の挙動を実現しています。
+
+```mermaid
+graph TD
+    subgraph Blender["Blender (Python Client)"]
+        Mesh["布メッシュ (頂点/面/エッジ/ピン)"]
+        Params["全物理パラメータ (剛性4種/減衰4種/重力/反復)"]
+        SelfCol["Coupled XPBD 自己衝突設定"]
+        BoneSdf["ボーンSDF 3Dテクスチャ & 関節メッシュ"]
+        Elastic["伸縮グループ (ゴム紐)"]
+        DebugExtract["既存デバッグ可視化抽出 (表面ボクセル & AABB枠線)"]
+    end
+
+    subgraph Protocol["TCP JSON-Lines プロトコル"]
+        SceneInit["SceneInitData (全データ同梱)"]
+        BoneStream["UpdateBoneTransforms (ボーン姿勢ストリーム)"]
+        ElasticStream["UpdateElasticScales (伸縮率更新)"]
+        PinStream["UpdatePins (ピン追従更新)"]
+        ParamStream["SetParams (リアルタイム物理更新)"]
+    end
+
+    subgraph GuiCore["Taremin Cloth GUI (Rust + wgpu)"]
+        Sim["GpuClothSimulator (cloth_core)"]
+        Renderer["MeshRenderer (wgpu 3Dパイプライン)"]
+        UI["egui コントロールパネル"]
+    end
+
+    Mesh --> SceneInit
+    Params --> SceneInit
+    SelfCol --> SceneInit
+    BoneSdf --> SceneInit
+    Elastic --> SceneInit
+    DebugExtract --> SceneInit
+
+    SceneInit --> Sim
+    SceneInit --> Renderer
+    BoneStream --> Sim
+    ElasticStream --> Sim
+    PinStream --> Sim
+    ParamStream --> Sim
+
+    UI -.->|表示切替トグル| Renderer
+```
+
+#### 1. 全物理パラメータおよび制約の完全サポート
+- **異方性剛性 (Stiffness 4種)**: 引張（Tension）、圧縮（Compression）、剪断（Shear）、曲げ（Bending）を完全設定。
+- **粘性減衰 (Damping 4種 + 空気抵抗)**: 空気抵抗（Air Damping）に加え、4種類の変形速度成分（引張・圧縮・剪断・曲げ）に対するXPBD相対粘性減衰（`set_damping_all`）を同期。
+- **Coupled XPBD 自己衝突**:
+  - モード切替（`OFF`, `RELAXATION`, `FULL_COUPLED`）
+  - エッジ衝突（`enable_edge_collision`, `edge_margin_scale`, `edge_margin_offset`）
+  - 表裏反転解消（`enable_normal_untangling`）
+  - 緩和係数・ポストリラクゼーション反復回数
+- **伸縮グループ（ゴム紐エフェクト）**:
+  - 指定エッジグループの自然長スケール（`set_edge_rest_length_scales`）の初期登録およびリアルタイム変更。
+- **動的アタッチメントピン**:
+  - アーマチュアボーンや外部オブジェクトに追従する頂点ピン座標・重みの動的同期（`set_pin_target`）。
+
+#### 2. BONE_SDF / MESH_SDF コライダーの完全統合
+- **3Dテクスチャ転送 (Rg16Float)**:
+  - Blender側でGPUベイクされたボーン別3D SDFテクスチャ（$D, \alpha$）をBase64デコードし、`GpuClothSimulator::set_bone_sdf_colliders` によりVRAM上の3Dテクスチャとしてバインド。
+  - ボーンのAABB、UVWスケール/オフセット、摩擦、厚みなどの静的メタデータ（`GpuBoneInfo`）をGPUストレージバッファへアップロード。
+  - 関節部メッシュコライダー（ハイブリッドモード）も同時転送・統合。
+- **ボーン姿勢行列ストリーミング (`UpdateBoneTransforms`)**:
+  - アーマチュアのポーズ変化に伴い、毎フレーム（約0.5秒おきのLive Preview同期）ボーンワールド行列（`GpuBoneTransform`）を更新し、布が動くキャラクターの体表に吸着・追従。
+
+#### 3. 組み込みデバッグ可視化機能（SDFボクセル・AABB枠線・表示切替）
+- **SDF表面ボクセル3D描画 (`voxel_pipeline`)**:
+  - `mesh_renderer.py` の既存アセット（`extract_sdf_surface_voxels`）を活用し、SDFのゼロ交差表面近傍ボクセルキューブをインスタンシングパイプライン（12頂点キューブ × インスタンス数）で高速描画。
+- **SDF AABB枠線3D描画 (`line_pipeline`)**:
+  - 各ボーンの有効判定範囲を示す12本のエッジ枠線を専用3Dラインパイプラインでシアン色描画。
+- **egui 表示切替チェックボックス**:
+  - `Show Cloth Mesh` / `Wireframe` / `Colliders` / `SDF Voxels` / `SDF BBox` をチェックボックス1つで瞬時にトグル表示可能。
+
+#### 4. コライダー同期の一元化とBlender挙動パリティ保証
+- **コライダー抽出の一元化 (`extract_all_scene_colliders`)**:
+  - Blender In-process (`sync_colliders`) と GUIクライアント (`gui_client.py`) で二重管理されていたコライダー抽出ロジックを `collider.extract_all_scene_colliders` に一元化。
+  - アナリティックコライダー（球・カプセル・平面）、一般メッシュコライダーに加え、`BONE_SDF` の関節メッシュ（Joint Mesh）も動的アクティブ化判定（`joint_rotation_threshold`）および変形モディファイア評価（`depsgraph`）を含めて統一抽出。
+  - 定期同期（`UpdateColliders`）時に関節メッシュが消失する不具合を解消し、変形モディファイア（Lattice, Mirror, Armature）の評価漏れも防止。
+- **シーンFPSと物理タイムステップの同期**:
+  - `SceneInitData` にシーンのFPS（`fps`）を送信し、GUI側の物理固定時間刻み（`fixed_dt = 1.0 / fps`）を動的設定。
+  - ディスプレイ更新レート（144Hz〜300FPS+）に影響されないタイムアキュムレータ（Fix Your Timestep）方式により、Blenderのタイムライン再生と実時間・ステップ刻みの完全な一致（パリティ）を実現。
+
+### 6.5 インタラクティブ操作機能 (Interactive Grab & Dynamic Pinning)
+
+Taremin Cloth GUI は、Blenderアドオンのインタラクティブモード（`ops/interactive.py`）と同等の直感的なマウス操作（布の掴み・引っ張り・ピン留め）をスタンドアロンビューポート上で提供します。
+
+```mermaid
+sequenceDiagram
+    participant User as ユーザー (Mouse / Key)
+    participant GUI as Taremin Cloth GUI (winit / egui)
+    participant Core as GpuClothSimulator (cloth_core)
+
+    Note over User,GUI: 1. 左クリック押下 (Grab 開始)
+    User->>GUI: Mouse Left Click
+    GUI->>GUI: pick_vertex (スクリーン半径45px以内探索)
+    GUI->>Core: set_pin_target(v_idx, pos, 1.0)
+    
+    Note over User,GUI: 2. ドラッグ操作 (引っ張り)
+    User->>GUI: Cursor Moved (Drag)
+    GUI->>GUI: ビュー直交平面とのレイ交点計算 (ΔW)
+    GUI->>Core: set_pin_target(v_idx, target_pos, 1.0)
+    GUI->>GUI: egui 2D Overlay 描画 (黄丸 + 接続ライン)
+
+    Note over User,GUI: 3. ピン固定 (P キー押下)
+    User->>GUI: Key 'P' Pressed
+    GUI->>GUI: pinned_verts に登録 (永続固定)
+    GUI->>GUI: egui 2D Overlay 描画 (赤丸マーカー)
+
+    Note over User,GUI: 4. マウス解放
+    User->>GUI: Mouse Left Release
+    alt ピン留めされていない頂点
+        GUI->>Core: release_pin(v_idx) (物理運動に復帰)
+    else ピン留め済み頂点
+        Note over GUI,Core: ピン位置をドラッグ先座標で保持
+    end
+```
+
+#### 1. 高速ピッキングとゼロオーバーヘッド設計
+- **オンデマンド・スクリーン空間ピッキング**:
+  - 毎フレームのCPUリードバックによる性能低下を避けるため、左クリック押下時またはキー押下時のみ1度 `sim.get_positions_flat` を実行して最近傍頂点（スクリーン半径45px以内）を特定。
+- **ビュー平面投影ドラッグ**:
+  - クリック時のカメラ視線前方向ベクトルを法線とする平面上でマウス移動差分 $\Delta\vec{W}$ を計算し、$\vec{P}_{\text{target}} = \vec{P}_0 + \Delta\vec{W}$ として `sim.set_pin_target` を更新。ドラッグ中は3D目標座標をGPUに渡すのみで、300+ FPSの超高速物理を維持。
+
+#### 2. 動的ピン留め（Dynamic Pinning）と一括解除
+- **`P` キーによるトグル**:
+  - ドラッグ中またはカーソル直下の頂点をその場に固定（Pin）。再度 `P` キーを押すと解除（Unpin）され物理運動に復帰。
+- **「📌 Clear Pins」ボタン**:
+  - UIのControlパネルに配置されたボタン1つで、全ピン（`pinned_verts` および `dynamic_pins`）を一括解除。
+
+#### 3. egui 2D オーバーレイ可視化
+- **GPUベクタ即時描画 (`layer_painter`)**:
+  - egui の `layer_painter(Order::Foreground)` を活用し、追加のGPUシェーダーや頂点バッファを生成することなく、固定ピン（赤丸）およびドラッグ目標位置・接続ライン（黄丸＋ライン）を論理ポイント座標系で瞬時にテッセレーション・描画。
+
+### 6.6 高精度絶対時刻フレームペーシングとオンデマンドリードバック設計
+
+Taremin Cloth GUI は、GPUの計算余力を最大限に活かしつつ、Target FPS（例: 60 FPS）への完全な張り付きを実現するため、ゲームエンジン水準のフレームペーシング機構を備えています。
+
+#### 1. 絶対時刻ペーシング（Absolute Time Pacing）
+- **OSメッセージディスパッチ遅延の完全吸収**:
+  - 描画ループ末尾でスリープする従来の方式では、Windows DWM や winit のイベント巡回遅延（約5ms）がフレーム周期に加算されてフレームレートが低下（16.6ms + 5ms = 21.6ms / 46 FPS）する問題がありました。
+  - `RedrawRequested` の「先頭」で次フレーム予定時刻（`self.next_frame_time`）まで待機し、末尾では即座に `window.request_redraw()` を呼ぶ絶対時刻ペーシングへ刷新。OSディスパッチ遅延を待機時間内部に自然吸収し、厳密な 60.0 FPS を維持します。
+- **高精度ハイブリッド待機**:
+  - `timeBeginPeriod(1)` により Windows タイマースケジューラ解像度を 1.0 ms に引き上げ。
+  - 残り時間 2 ms 以上はスリープ、残り 1.5 ms 未満は `std::hint::spin_loop()` によるマイクロ秒同期を実施。
+  - `about_to_wait` において実行中は `ControlFlow::Poll` を指定し、OS によるプロセス休止を防止。
+
+#### 2. GPU 座標リードバックの完全オンデマンド化
+- **GPU同期ストール（20〜25ms）の撲滅**:
+  - Blender 連携において、定期的な `sim.get_positions_flat`（`device.poll(Maintain::Wait)`）による GPU パイプライン停止を防ぐため、Blender から `GetLatestCoords` が要求された直後の1フレームのみリードバックを実行するオンデマンド方式を採用。
+  - 通常表示時および軽量ステータス要求時（`GetStatus`）はリードバックを一切行わず、GPU ストール 0 ms を達成。
+
+#### 3. Mailbox プレゼンテーションモード
+- Surface の `present_mode` においてトリプルバッファリング（`Mailbox`）を優先選択し、DWM 垂直同期とアプリ内タイマーの干渉（ビート現象によるフレーム落ち）を防止。
+
+

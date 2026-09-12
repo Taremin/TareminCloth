@@ -241,6 +241,28 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             if op_clr:
                 op_clr.all_objects = False
 
+            # 独立GUIモード (Taremin Cloth GUI)
+            box_gui = layout.box()
+            box_gui.label(text="Taremin Cloth GUI (Standalone)", icon='WINDOW')
+            from .engine.gui_client import get_gui_client
+            from .ops.gui import is_gui_preview_running, get_gui_fps_stats
+            client = get_gui_client()
+            col_gui = box_gui.column(align=True)
+            if client.is_connected:
+                b_fps, g_fps = get_gui_fps_stats()
+                stat_text = f"● Connected | GUI: {g_fps:.0f} FPS" if g_fps > 0 else "● Connected"
+                col_gui.label(text=stat_text, icon='CHECKMARK')
+                row_ctrl = col_gui.row(align=True)
+                if is_gui_preview_running():
+                    row_ctrl.operator("taremin_cloth.stop_gui_preview", text="Stop Preview", icon='CANCEL')
+                else:
+                    row_ctrl.operator("taremin_cloth.gui_preview", text="Live Preview", icon='PLAY')
+                row_ctrl.operator("taremin_cloth.apply_gui_pose", text="Apply to Mesh", icon='CHECKMARK')
+                col_gui.operator("taremin_cloth.sync_gui_colliders", text="Sync Colliders", icon='FILE_REFRESH')
+            else:
+                col_gui.operator("taremin_cloth.launch_gui", text="Launch Taremin Cloth GUI", icon='WINDOW')
+                col_gui.operator("taremin_cloth.connect_gui", text="Connect to Existing GUI", icon='LINKED')
+
             # 全体操作 (Scene Simulation)
             box_global = layout.box()
             box_global.label(text="Scene Simulation", icon='PHYSICS')

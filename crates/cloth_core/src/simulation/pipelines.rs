@@ -147,7 +147,8 @@ pub fn build_simulation_resources(
         contents: bytemuck::cast_slice(&mesh.vertices),
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::VERTEX,
     });
 
     // 距離拘束バッファ
@@ -297,7 +298,7 @@ pub fn build_simulation_resources(
     });
 
     // ボーンSDF用バッファ & 初期ダミー3Dテクスチャ
-    let max_bones = 128;
+    let max_bones = 1024;
     let bone_info_buffer_size = (max_bones * std::mem::size_of::<GpuBoneInfo>()) as u64;
     let bone_info_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Bone Info Buffer"),

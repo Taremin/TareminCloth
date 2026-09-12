@@ -1,0 +1,26 @@
+[package]
+name = "cloth_gui"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+
+[[bin]]
+name = "taremin_cloth_gui"
+path = "src/main.rs"
+
+[dependencies]
+cloth_core = { path = "../cloth_core" }
+wgpu = "24.0"
+bytemuck = { version = "1.21", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+glam = "0.29"
+winit = "0.30"
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
+base64 = "0.22"
+

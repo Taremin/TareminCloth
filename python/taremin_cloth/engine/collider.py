@@ -165,9 +165,327 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     logger.debug(f"[Collider Sync] Frame {getattr(scene, 'frame_current', -1)}: state_changed={state_changed} (force={force}, has_active_anim={has_active_anim})")
     if state_changed:
         _collider_cache[sim_id] = state_key
+def extract_all_scene_colliders(scene=None, depsgraph=None):
+    """
+    シーン内のすべてのコライダー（球、平面、カプセル、一般メッシュ、および BONE_SDF の関節メッシュ）を抽出する。
+    Blender In-process (sync_colliders) および Taremin Cloth GUI (gui_client) の両方で使用され、完全な挙動一致を保証する。
+    """
+    import bpy
+    if scene is None:
+        scene = bpy.context.scene
+
+    analytic_colliders = []
+    mesh_triangles_data = []
+    all_mesh_triangles = []
+    all_mesh_attributes = []
+    has_cluster_culling = False
+    max_sweep_margin = 0.05
+
+    for obj in getattr(scene, "objects", []):
+        col_settings = getattr(obj, "taremin_cloth_collider", None)
+        if not col_settings or not getattr(col_settings, "is_collider", False) or not getattr(col_settings, "enabled", True):
+            continue
+
+        world_mat = obj.matrix_world
+        loc = world_mat.translation
+        restitution = float(getattr(col_settings, "restitution", 0.0))
+        friction = float(getattr(col_settings, "friction", 0.5))
+
+        if col_settings.collider_type == 'SPHERE':
+            radius = float(col_settings.radius * max(obj.scale))
+            analytic_colliders.append({
+                "collider_type": 0,
+                "friction": friction,
+                "restitution": restitution,
+                "point_a": [float(loc.x), float(loc.y), float(loc.z)],
+                "radius": radius,
+                "point_b": [0.0, 0.0, 0.0],
+            })
+        elif col_settings.collider_type == 'PLANE':
+            normal = [0.0, 0.0, 1.0]
+            if hasattr(bpy.types, "mathutils"):
+                norm_vec = world_mat.to_3x3() @ bpy.types.mathutils.Vector((0.0, 0.0, 1.0))
+                normal = [float(norm_vec.x), float(norm_vec.y), float(norm_vec.z)]
+            analytic_colliders.append({
+                "collider_type": 2,
+                "friction": friction,
+                "restitution": restitution,
+                "point_a": [float(loc.x), float(loc.y), float(loc.z)],
+                "radius": 0.0,
+                "point_b": normal,
+            })
+        elif col_settings.collider_type == 'CAPSULE':
+            radius = float(col_settings.radius)
+            pt_a = [float(loc.x), float(loc.y), float(loc.z - radius)]
+            pt_b = [float(loc.x), float(loc.y), float(loc.z + radius)]
+            analytic_colliders.append({
+                "collider_type": 1,
+                "friction": friction,
+                "restitution": restitution,
+                "point_a": pt_a,
+                "radius": radius,
+                "point_b": pt_b,
+            })
+        elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
+            cur_friction = float(col_settings.friction)
+            cur_thickness = float(col_settings.thickness)
+            cur_restitution = float(restitution)
+            is_single = bool(getattr(col_settings, "single_sided", True))
+            is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
+            cur_flags = 0.0
+            if is_single:
+                cur_flags += 1.0
+                if not is_recovery:
+                    cur_flags += 2.0
+
+            if getattr(col_settings, "enable_cluster_culling", False):
+                has_cluster_culling = True
+            sweep_m = float(getattr(col_settings, "sweep_margin_offset", 0.05))
+            if sweep_m > max_sweep_margin:
+                max_sweep_margin = sweep_m
+
+            mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
+            try:
+                if mesh:
+                    mesh.calc_loop_triangles()
+                    n_verts = len(mesh.vertices)
+                    n_tris = len(mesh.loop_triangles)
+
+                    if n_verts > 0 and n_tris > 0:
+                        raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+                        mesh.vertices.foreach_get("co", raw_coords)
+                        v_local = raw_coords.reshape((n_verts, 3))
+
+                        target_obj = eval_obj if eval_obj else obj
+                        mat_np = np.array(target_obj.matrix_world, dtype=np.float32)
+                        ones = np.ones((n_verts, 1), dtype=np.float32)
+                        v_homo = np.hstack([v_local, ones])
+                        v_world = (v_homo @ mat_np.T)[:, :3]
+
+                        tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+                        mesh.loop_triangles.foreach_get("vertices", tri_indices)
+                        tri_indices_2d = tri_indices.reshape((n_tris, 3))
+                        tri_coords = v_world[tri_indices_2d]
+
+                        all_mesh_triangles.append(tri_coords)
+                        attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
+                        attr_block = np.tile(attr_row, (n_tris, 1))
+                        all_mesh_attributes.append(attr_block)
+
+                        for tri in tri_coords:
+                            mesh_triangles_data.append({
+                                "p0": [float(tri[0][0]), float(tri[0][1]), float(tri[0][2])],
+                                "p1": [float(tri[1][0]), float(tri[1][1]), float(tri[1][2])],
+                                "p2": [float(tri[2][0]), float(tri[2][1]), float(tri[2][2])],
+                                "friction": cur_friction,
+                                "thickness": cur_thickness,
+                                "restitution": cur_restitution,
+                                "flags": int(cur_flags),
+                            })
+            finally:
+                cleanup_collider_eval_mesh(eval_obj, disabled_mods)
+
+        elif col_settings.collider_type == 'BONE_SDF':
+            arm_mod = get_armature_modifier(obj)
+            if not arm_mod or not arm_mod.object:
+                continue
+
+            update_mode = getattr(col_settings, "sdf_update_mode", "STATIC")
+            # DYNAMIC_GPU の場合はGPU側でメッシュ変形に追従するため、関節メッシュハイブリッドの重いCPU to_mesh()評価はスキップ
+            if update_mode == 'DYNAMIC_GPU':
+                continue
+
+            bake_res = get_or_bake_bone_sdf_for_object(obj, col_settings)
+            if not bake_res or bake_res.depth == 0:
+                continue
+
+            # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（動的アクティブ化対応）
+            if getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
+                rot_threshold_deg = float(getattr(col_settings, "joint_rotation_threshold", 2.0))
+                rot_threshold_rad = math.radians(rot_threshold_deg)
+
+                active_indices = None
+                if rot_threshold_deg <= 0.0 or not bake_res.joint_faces_by_pair:
+                    active_indices = bake_res.joint_face_indices
+                else:
+                    arm_obj = arm_mod.object
+                    active_pair_faces = []
+                    if arm_obj and arm_obj.pose:
+                        for (p_name, c_name), p_faces in bake_res.joint_faces_by_pair.items():
+                            pb_c = arm_obj.pose.bones.get(c_name)
+                            if not pb_c:
+                                continue
+                            delta_angle = 0.0
+                            rot_mode = pb_c.rotation_mode
+                            if rot_mode == 'QUATERNION':
+                                q = pb_c.rotation_quaternion
+                                delta_angle = 2.0 * math.acos(min(abs(float(q[0])), 1.0))
+                            elif rot_mode == 'AXIS_ANGLE':
+                                delta_angle = abs(float(pb_c.rotation_axis_angle[0]))
+                            else:
+                                e = pb_c.rotation_euler
+                                delta_angle = math.sqrt(float(e.x)**2 + float(e.y)**2 + float(e.z)**2)
+
+                            if delta_angle >= rot_threshold_rad:
+                                active_pair_faces.append(p_faces)
+
+                    if active_pair_faces:
+                        active_indices = np.unique(np.concatenate(active_pair_faces))
+                    else:
+                        active_indices = np.empty(0, dtype=np.int32)
+
+                if active_indices is not None and len(active_indices) > 0:
+                    mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
+                    try:
+                        if mesh:
+                            mesh.calc_loop_triangles()
+                            n_verts = len(mesh.vertices)
+                            n_tris = len(mesh.loop_triangles)
+
+                            if n_verts > 0 and n_tris > 0:
+                                raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+                                mesh.vertices.foreach_get("co", raw_coords)
+                                v_local = raw_coords.reshape((n_verts, 3))
+
+                                target_obj = eval_obj if eval_obj else obj
+                                mat_np = np.array(target_obj.matrix_world, dtype=np.float32)
+                                ones = np.ones((n_verts, 1), dtype=np.float32)
+                                v_homo = np.hstack([v_local, ones])
+                                v_world = (v_homo @ mat_np.T)[:, :3]
+
+                                tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+                                mesh.loop_triangles.foreach_get("vertices", tri_indices)
+                                tri_indices_2d = tri_indices.reshape((n_tris, 3))
+
+                                valid_joint_idx = active_indices[active_indices < n_tris]
+                                if len(valid_joint_idx) > 0:
+                                    joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
+                                    cur_friction = float(col_settings.friction)
+                                    cur_thickness = float(col_settings.thickness)
+                                    cur_restitution = float(getattr(col_settings, "restitution", 0.0))
+                                    is_single = bool(getattr(col_settings, "single_sided", True))
+                                    is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
+                                    cur_flags = 0.0
+                                    if is_single:
+                                        cur_flags += 1.0
+                                        if not is_recovery:
+                                            cur_flags += 2.0
+
+                                    all_mesh_triangles.append(joint_tri_coords)
+                                    attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
+                                    attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
+                                    all_mesh_attributes.append(attr_block)
+
+                                    for tri in joint_tri_coords:
+                                        mesh_triangles_data.append({
+                                            "p0": [float(tri[0][0]), float(tri[0][1]), float(tri[0][2])],
+                                            "p1": [float(tri[1][0]), float(tri[1][1]), float(tri[1][2])],
+                                            "p2": [float(tri[2][0]), float(tri[2][1]), float(tri[2][2])],
+                                            "friction": cur_friction,
+                                            "thickness": cur_thickness,
+                                            "restitution": cur_restitution,
+                                            "flags": int(cur_flags),
+                                        })
+                    finally:
+                        cleanup_collider_eval_mesh(eval_obj, disabled_mods)
+
+    return {
+        "analytic_colliders": analytic_colliders,
+        "mesh_triangles_data": mesh_triangles_data,
+        "all_mesh_triangles": all_mesh_triangles,
+        "all_mesh_attributes": all_mesh_attributes,
+        "has_cluster_culling": has_cluster_culling,
+        "max_sweep_margin": max_sweep_margin,
+    }
+
+
+def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
+    """
+    Blender シーン内のすべてのコライダーオブジェクトの最新位置・姿勢を
+    GpuClothSimulator コアに同期する。
+    """
+    collider_objs = []
+    col_state = []
+    has_active_anim = False
+    has_bone_sdf = False
+
+    for obj in scene.objects:
+        col_settings = getattr(obj, "taremin_cloth_collider", None)
+        if col_settings and col_settings.is_collider and getattr(col_settings, "enabled", True):
+            collider_objs.append((obj, col_settings))
+            anim_s = getattr(col_settings, "anim", None)
+            if anim_s and anim_s.enabled:
+                has_active_anim = True
+            if col_settings.collider_type == 'BONE_SDF':
+                has_bone_sdf = True
+                update_mode = getattr(col_settings, "sdf_update_mode", "STATIC")
+                # DYNAMIC_GPU の場合はGPU側で変形追従するため、CPU側で毎フレーム clear_colliders() や to_mesh() を回さない
+                if update_mode != 'DYNAMIC_GPU' and getattr(col_settings, "enable_joint_mesh", True):
+                    if get_armature_modifier(obj) is not None:
+                        has_active_anim = True
+                    elif obj.animation_data and obj.animation_data.action:
+                        has_active_anim = True
+            elif col_settings.collider_type == 'MESH_SDF' and obj.type == 'MESH':
+                has_bone_sdf = True
+                if obj.animation_data and obj.animation_data.action:
+                    has_active_anim = True
+            elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
+                if get_armature_modifier(obj) is not None:
+                    has_active_anim = True
+                elif obj.animation_data and obj.animation_data.action:
+                    has_active_anim = True
+                elif getattr(obj.data, "shape_keys", None) and obj.data.shape_keys.animation_data:
+                    has_active_anim = True
+                else:
+                    for mod in getattr(obj, "modifiers", []):
+                        if mod.type == 'LATTICE' and getattr(mod, "object", None):
+                            lat_o = mod.object
+                            if (lat_o.animation_data and lat_o.animation_data.action) or (
+                                getattr(lat_o.data, "animation_data", None) and lat_o.data.animation_data.action
+                            ):
+                                has_active_anim = True
+                                break
+
+            mat = obj.matrix_world
+            mat_tuple = (
+                round(mat[0][0], 4), round(mat[0][1], 4), round(mat[0][2], 4), round(mat[0][3], 4),
+                round(mat[1][0], 4), round(mat[1][1], 4), round(mat[1][2], 4), round(mat[1][3], 4),
+                round(mat[2][0], 4), round(mat[2][1], 4), round(mat[2][2], 4), round(mat[2][3], 4),
+            )
+            v_len = len(obj.data.vertices) if obj.type == 'MESH' else 0
+            col_state.append((
+                obj.name,
+                col_settings.collider_type,
+                mat_tuple,
+                v_len,
+                round(col_settings.friction, 3),
+                round(col_settings.radius, 4),
+                round(col_settings.thickness, 4),
+                bool(getattr(col_settings, "single_sided", True)),
+                bool(getattr(col_settings, "enable_single_sided_recovery", True)),
+                round(getattr(col_settings, "sdf_margin", 0.2), 3),
+                round(getattr(col_settings, "weight_threshold", 0.02), 4),
+                round(getattr(col_settings, "blend_k", 0.05), 4),
+                bool(getattr(col_settings, "enable_joint_mesh", True)),
+                round(getattr(col_settings, "joint_weight_threshold", 0.85), 2),
+                round(getattr(col_settings, "mesh_sdf_voxel_size", 0.004), 4),
+                round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
+                int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256)),
+                bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
+            ))
+
+    sim_id = id(sim)
+    state_key = tuple(col_state)
+    state_changed = force or has_active_anim or (_collider_cache.get(sim_id) != state_key)
+
+    logger.debug(f"[Collider Sync] Frame {getattr(scene, 'frame_current', -1)}: state_changed={state_changed} (force={force}, has_active_anim={has_active_anim})")
+    if state_changed:
+        _collider_cache[sim_id] = state_key
         sim.clear_colliders()
         all_mesh_triangles = []
         all_mesh_attributes = []
+        has_cluster_culling = False
+        max_sweep_margin = 0.05
 
         for obj, col_settings in collider_objs:
             world_mat = obj.matrix_world
@@ -201,6 +519,12 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     if not is_recovery:
                         cur_flags += 2.0
 
+                if getattr(col_settings, "enable_cluster_culling", False):
+                    has_cluster_culling = True
+                sweep_m = float(getattr(col_settings, "sweep_margin_offset", 0.05))
+                if sweep_m > max_sweep_margin:
+                    max_sweep_margin = sweep_m
+
                 mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
                 try:
                     if mesh:
@@ -222,9 +546,8 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                             tri_indices = np.empty(n_tris * 3, dtype=np.int32)
                             mesh.loop_triangles.foreach_get("vertices", tri_indices)
                             tri_indices_2d = tri_indices.reshape((n_tris, 3))
-                            tri_coords = v_world[tri_indices_2d]
+                            all_mesh_triangles.append(v_world[tri_indices_2d])
 
-                            all_mesh_triangles.append(tri_coords)
                             attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
                             attr_block = np.tile(attr_row, (n_tris, 1))
                             all_mesh_attributes.append(attr_block)
@@ -336,86 +659,6 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                         _bone_sdf_signatures.pop(sim_id, None)
                 continue
 
-                # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（動的アクティブ化対応）
-                if bake_res and getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
-                    rot_threshold_deg = float(getattr(col_settings, "joint_rotation_threshold", 2.0))
-                    rot_threshold_rad = math.radians(rot_threshold_deg)
-
-                    # 動的アクティブ化判定
-                    active_indices = None
-                    if rot_threshold_deg <= 0.0 or not bake_res.joint_faces_by_pair:
-                        # 0度以下設定またはペア情報がない場合は全関節面をアクティブ
-                        active_indices = bake_res.joint_face_indices
-                    else:
-                        arm_obj = arm_mod.object
-                        active_pair_faces = []
-                        if arm_obj and arm_obj.pose:
-                            for (p_name, c_name), p_faces in bake_res.joint_faces_by_pair.items():
-                                pb_c = arm_obj.pose.bones.get(c_name)
-                                if not pb_c:
-                                    continue
-                                delta_angle = 0.0
-                                rot_mode = pb_c.rotation_mode
-                                if rot_mode == 'QUATERNION':
-                                    q = pb_c.rotation_quaternion
-                                    delta_angle = 2.0 * math.acos(min(abs(float(q[0])), 1.0))
-                                elif rot_mode == 'AXIS_ANGLE':
-                                    delta_angle = abs(float(pb_c.rotation_axis_angle[0]))
-                                else:
-                                    e = pb_c.rotation_euler
-                                    delta_angle = math.sqrt(float(e.x)**2 + float(e.y)**2 + float(e.z)**2)
-
-                                if delta_angle >= rot_threshold_rad:
-                                    active_pair_faces.append(p_faces)
-
-                        if active_pair_faces:
-                            active_indices = np.unique(np.concatenate(active_pair_faces))
-                        else:
-                            active_indices = np.empty(0, dtype=np.int32)
-
-                    if active_indices is not None and len(active_indices) > 0:
-                        eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
-                        mesh = eval_obj.to_mesh() if depsgraph else obj.data
-                        mesh.calc_loop_triangles()
-                        n_verts = len(mesh.vertices)
-                        n_tris = len(mesh.loop_triangles)
-
-                        if n_verts > 0 and n_tris > 0:
-                            raw_coords = np.empty(n_verts * 3, dtype=np.float32)
-                            mesh.vertices.foreach_get("co", raw_coords)
-                            v_local = raw_coords.reshape((n_verts, 3))
-
-                            mat_np = np.array(eval_obj.matrix_world, dtype=np.float32)
-                            ones = np.ones((n_verts, 1), dtype=np.float32)
-                            v_homo = np.hstack([v_local, ones])
-                            v_world = (v_homo @ mat_np.T)[:, :3]
-
-                            tri_indices = np.empty(n_tris * 3, dtype=np.int32)
-                            mesh.loop_triangles.foreach_get("vertices", tri_indices)
-                            tri_indices_2d = tri_indices.reshape((n_tris, 3))
-
-                            valid_joint_idx = active_indices[active_indices < n_tris]
-                            if len(valid_joint_idx) > 0:
-                                joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
-                                cur_friction = float(col_settings.friction)
-                                cur_thickness = float(col_settings.thickness)
-                                cur_restitution = float(getattr(col_settings, "restitution", 0.0))
-                                is_single = bool(getattr(col_settings, "single_sided", True))
-                                is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
-                                cur_flags = 0.0
-                                if is_single:
-                                    cur_flags += 1.0
-                                    if not is_recovery:
-                                        cur_flags += 2.0
-
-                                all_mesh_triangles.append(joint_tri_coords)
-                                attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
-                                attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
-                                all_mesh_attributes.append(attr_block)
-
-                        if depsgraph:
-                            eval_obj.to_mesh_clear()
-
         if all_mesh_triangles:
             tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]
             attr_array = np.vstack(all_mesh_attributes) if len(all_mesh_attributes) > 1 else all_mesh_attributes[0]
@@ -426,17 +669,6 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
             logger.debug(f"[Collider Sync] sim.set_mesh_collider_triangles 実行: {len(tri_array)} 面")
         else:
             logger.debug("[Collider Sync] all_mesh_triangles は空です (0面)")
-
-        # メッシュコライダーの最適化設定を集約してシミュレータに反映
-        has_cluster_culling = False
-        max_sweep_margin = 0.05
-        for obj, col_settings in collider_objs:
-            if col_settings.collider_type == 'MESH':
-                if getattr(col_settings, "enable_cluster_culling", False):
-                    has_cluster_culling = True
-                sweep_m = float(getattr(col_settings, "sweep_margin_offset", 0.05))
-                if sweep_m > max_sweep_margin:
-                    max_sweep_margin = sweep_m
 
         if hasattr(sim, "set_collider_options"):
             sim.set_collider_options(

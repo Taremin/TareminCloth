@@ -16,7 +16,7 @@ use crate::mesh::{
 };
 use crate::spatial_hash::GpuSpatialHash;
 use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
-use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
+pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
 
 /// 動的ボーンSDF（GPU LBS + インメモリSDF更新）の初期設定データ
@@ -359,6 +359,16 @@ impl GpuClothSimulator {
         }
     }
 
+    /// GPU頂点バッファへの参照を取得する（レンダーパイプラインへのバインド用）
+    pub fn vertex_buffer(&self) -> &wgpu::Buffer {
+        &self.vertex_buffer
+    }
+
+    /// GPU法線バッファへの参照を取得する
+    pub fn normals_buffer(&self) -> &wgpu::Buffer {
+        &self.normals_buffer
+    }
+
     /// 自己衝突および貫通解消オプションを設定する
     pub fn set_self_collision_options(
         &mut self,
@@ -427,6 +437,11 @@ impl GpuClothSimulator {
     /// 拘束解決の反復回数を設定する (1 サブステップあたり)
     pub fn set_solver_iterations(&mut self, iterations: u32) {
         self.solver_iterations = iterations.max(1);
+    }
+
+    /// 重力ベクトルを設定する
+    pub fn set_gravity(&mut self, gx: f32, gy: f32, gz: f32) {
+        self.gravity = [gx, gy, gz];
     }
 
     /// 剛性パラメータ（伸縮剛性・曲げ剛性）を動的に更新する (後方互換用)
@@ -700,11 +715,39 @@ impl GpuClothSimulator {
         // 3. ボーン静的情報をアップロード
         self.bone_infos = bone_infos.to_vec();
         if !self.bone_infos.is_empty() {
+            let req_size = (self.bone_infos.len() * std::mem::size_of::<GpuBoneInfo>()) as u64;
+            if self.bone_info_buffer.size() < req_size {
+                self.bone_info_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Bone Info Buffer (Resized)"),
+                    size: req_size.max(32768),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+
             queue.write_buffer(
                 &self.bone_info_buffer,
                 0,
                 bytemuck::cast_slice(&self.bone_infos),
             );
+
+            // デフォルトの単位行列でボーン変換行列を初期化（未設定時のゼロ行列によるNaN防止）
+            let identity_transform = GpuBoneTransform {
+                world_matrix: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                inv_world_matrix: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+            };
+            let default_transforms = vec![identity_transform; self.bone_infos.len()];
+            self.update_bone_transforms(&default_transforms);
         }
 
         self.enable_bone_sdf = !self.bone_infos.is_empty();
@@ -718,11 +761,27 @@ impl GpuClothSimulator {
     pub fn update_bone_transforms(&mut self, transforms: &[GpuBoneTransform]) {
         self.bone_transforms = transforms.to_vec();
         if !self.bone_transforms.is_empty() {
+            let req_size = (self.bone_transforms.len() * std::mem::size_of::<GpuBoneTransform>()) as u64;
+            let mut need_recreate = false;
+            if self.bone_transform_buffer.size() < req_size {
+                self.bone_transform_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Bone Transform Buffer (Resized)"),
+                    size: req_size.max(65536),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                need_recreate = true;
+            }
+
             self.context.queue.write_buffer(
                 &self.bone_transform_buffer,
                 0,
                 bytemuck::cast_slice(&self.bone_transforms),
             );
+
+            if need_recreate {
+                self.recreate_collider_bind_group();
+            }
         }
     }
 
