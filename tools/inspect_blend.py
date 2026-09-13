@@ -21,6 +21,7 @@ repo_root = tools_dir.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
+addon_python_dir = repo_root / "python"
 from tools.blender_manager import resolve_blender
 
 
@@ -28,6 +29,16 @@ BLENDER_INSPECT_SCRIPT = r"""
 import sys
 import json
 import bpy
+
+if "--" in sys.argv:
+    addon_path = sys.argv[sys.argv.index("--") + 1]
+    if addon_path not in sys.path:
+        sys.path.insert(0, addon_path)
+    try:
+        import taremin_cloth
+        taremin_cloth.register()
+    except Exception as e:
+        print(f"[!] taremin_cloth アドオンの登録に失敗しました: {e}", file=sys.stderr)
 
 def inspect():
     scene = bpy.context.scene
@@ -111,6 +122,8 @@ def inspect_blend_file(blend_path: Path, blender_version: str | None = None) -> 
         str(blend_path),
         "--python-expr",
         BLENDER_INSPECT_SCRIPT,
+        "--",
+        str(addon_python_dir),
     ]
 
     res = subprocess.run(
