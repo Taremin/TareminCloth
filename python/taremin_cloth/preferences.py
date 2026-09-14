@@ -43,6 +43,7 @@ def save_preferences_to_disk(prefs=None) -> bool:
         "debug_output_dir": getattr(prefs, "debug_output_dir", ""),
         "debug_filename_template": getattr(prefs, "debug_filename_template", "cloth_debug_{datetime}_{object}.{ext}"),
         "debug_max_frames": getattr(prefs, "debug_max_frames", 3600),
+        "enable_standalone_gui": getattr(prefs, "enable_standalone_gui", False),
     }
     filepath = get_preferences_filepath()
     try:
@@ -101,6 +102,8 @@ def apply_saved_preferences(prefs=None) -> bool:
             prefs.debug_filename_template = data["debug_filename_template"]
         if "debug_max_frames" in data and hasattr(prefs, "debug_max_frames"):
             prefs.debug_max_frames = data["debug_max_frames"]
+        if "enable_standalone_gui" in data and hasattr(prefs, "enable_standalone_gui"):
+            prefs.enable_standalone_gui = bool(data["enable_standalone_gui"])
     finally:
         _is_restoring = False
 
@@ -129,6 +132,10 @@ def _on_gpu_device_update(self, context):
 
 def _on_debug_pref_update(self, context):
     """デバッグ設定変更時に保存"""
+    save_preferences_to_disk(self)
+
+
+def _on_standalone_gui_update(self, context):
     save_preferences_to_disk(self)
 
 
@@ -271,6 +278,13 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         update=_on_debug_pref_update,
     )
 
+    enable_standalone_gui: BoolProperty(
+        name="Enable Standalone GUI Client",
+        description="外部プロセスの独立GPUシミュレーションGUIクライアントを有効化します（実験的機能）",
+        default=False,
+        update=_on_standalone_gui_update,
+    )
+
     def draw(self, context):
         global _has_restored_preferences
         if not _has_restored_preferences:
@@ -313,6 +327,11 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         row_prev = col_debug.row()
         row_prev.alignment = 'RIGHT'
         row_prev.label(text="Format: gzip JSON Lines (.jsonl.gz)", icon='INFO')
+
+        # Experimental Features
+        box_exp = layout.box()
+        box_exp.label(text="Experimental Features", icon='EXPERIMENTAL')
+        box_exp.prop(self, "enable_standalone_gui", text="Enable Standalone GUI Client")
 
 
 

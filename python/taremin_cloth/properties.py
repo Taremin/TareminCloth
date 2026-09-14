@@ -92,6 +92,8 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1000.0,
         min=0.1,
         max=100000.0,
+        soft_min=1.0,
+        soft_max=10000.0,
     )
     compression_stiffness: FloatProperty(
         name="Compression",
@@ -99,6 +101,8 @@ class TareminClothObjectSettings(PropertyGroup):
         default=100.0,
         min=0.1,
         max=100000.0,
+        soft_min=1.0,
+        soft_max=10000.0,
     )
     shear_stiffness: FloatProperty(
         name="Shear",
@@ -106,6 +110,8 @@ class TareminClothObjectSettings(PropertyGroup):
         default=100.0,
         min=0.1,
         max=100000.0,
+        soft_min=1.0,
+        soft_max=5000.0,
     )
     bending_stiffness: FloatProperty(
         name="Bending",
@@ -113,6 +119,8 @@ class TareminClothObjectSettings(PropertyGroup):
         default=10.0,
         min=0.0,
         max=1000.0,
+        soft_min=0.0,
+        soft_max=200.0,
     )
     # 後方互換用エイリアス
     stiffness: FloatProperty(
@@ -121,6 +129,8 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1000.0,
         min=0.1,
         max=100000.0,
+        soft_min=1.0,
+        soft_max=10000.0,
     )
 
     # 減衰 (Damping)
@@ -130,6 +140,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=5.0,
         min=0.0,
         max=50.0,
+        soft_max=25.0,
     )
     compression_damping: FloatProperty(
         name="Compression",
@@ -137,6 +148,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=5.0,
         min=0.0,
         max=50.0,
+        soft_max=25.0,
     )
     shear_damping: FloatProperty(
         name="Shear",
@@ -144,6 +156,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=5.0,
         min=0.0,
         max=50.0,
+        soft_max=25.0,
     )
     bending_damping: FloatProperty(
         name="Bending",
@@ -151,6 +164,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=0.5,
         min=0.0,
         max=50.0,
+        soft_max=10.0,
     )
     air_damping: FloatProperty(
         name="Air",
@@ -158,15 +172,18 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1.0,
         min=0.0,
         max=50.0,
+        soft_max=10.0,
     )
 
     # シミュレーション設定 (Settings)
     gravity: FloatProperty(
-        name="Gravity",
-        description="重力倍率 (1.0=標準重力、0.0=無重力。Blenderのシーン重力と連動)",
+        name="Gravity Scale",
+        description="重力倍率 (1.0=シーン重力準拠、0.0=無重力。Blenderのシーン重力 scene.gravity と連動)",
         default=1.0,
-        min=0.0,
+        min=-10.0,
         max=10.0,
+        soft_min=0.0,
+        soft_max=2.0,
     )
     substeps: IntProperty(
         name="Quality Steps",
