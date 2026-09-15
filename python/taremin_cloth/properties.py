@@ -64,6 +64,31 @@ class TareminClothElasticGroup(PropertyGroup):
         self.edge_indices_str = ",".join(str(i) for i in indices)
 
 
+def _on_self_collision_purpose_updated(self, context):
+    """自己衝突の用途プリセットが変更された時にパラメータを自動更新する"""
+    try:
+        if getattr(self, "self_collision_purpose", 'STANDARD') == 'CUSTOM':
+            return
+        obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
+        if obj:
+            from .utils.self_collision_fit import fit_self_collision_for_object
+            fit_self_collision_for_object(obj, self, self.self_collision_purpose)
+    except Exception:
+        pass
+
+
+def _on_enable_self_collision_updated(self, context):
+    """自己衝突が有効化された際に、初回自動フィッティングを実行する"""
+    try:
+        if getattr(self, "enable_self_collision", False) and getattr(self, "self_collision_purpose", 'STANDARD') != 'CUSTOM':
+            obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
+            if obj:
+                from .utils.self_collision_fit import fit_self_collision_for_object
+                fit_self_collision_for_object(obj, self, self.self_collision_purpose)
+    except Exception:
+        pass
+
+
 class TareminClothObjectSettings(PropertyGroup):
     is_cloth: BoolProperty(
         name="Cloth Enabled",
@@ -278,6 +303,19 @@ class TareminClothObjectSettings(PropertyGroup):
         name="Self Collision",
         description="自己衝突およびレイヤー衝突を有効化する（GPU空間ハッシュを使用）",
         default=False,
+        update=_on_enable_self_collision_updated,
+    )
+    self_collision_purpose: EnumProperty(
+        name="Purpose",
+        description="布の用途に応じた自己衝突パラメータの最適化プリセット",
+        items=[
+            ('STANDARD', "Standard (一般衣服)", "シャツ、ズボン、ワンピース等の標準的な布地向け（負荷と安定性のバランス）"),
+            ('SKIRT', "Skirt / Folds (プリーツ・多重折り)", "スカート、フリル、リボン等、布が密集して重なり合う形状向け（高精度・伸び抑制）"),
+            ('THIN', "Thin / Delicate (薄手・シルク)", "スカーフ、シルク、極薄の布地向け（マイルドな反発で破裂防止）"),
+            ('CUSTOM', "Custom (手動設定)", "詳細モードで自由にパラメータを微調整するモード"),
+        ],
+        default='STANDARD',
+        update=_on_self_collision_purpose_updated,
     )
     self_collision_relief_factor: FloatProperty(
         name="Relief Factor",
@@ -679,18 +717,58 @@ def _on_collider_prop_updated(self, context):
         pass
 
 
+def _on_collider_purpose_updated(self, context):
+    try:
+        from .utils.collider_detect import PURPOSE_TO_COLLIDER_TYPE, detect_collider_type
+        if self.collider_purpose == 'AUTO':
+            obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
+            if obj:
+                self.collider_type = detect_collider_type(obj)
+        elif self.collider_purpose in PURPOSE_TO_COLLIDER_TYPE:
+            self.collider_type = PURPOSE_TO_COLLIDER_TYPE[self.collider_purpose]
+    except Exception:
+        pass
+    _on_collider_prop_updated(self, context)
+
+
+def _on_is_collider_updated(self, context):
+    if self.is_collider and getattr(self, "collider_purpose", 'AUTO') == 'AUTO':
+        try:
+            from .utils.collider_detect import detect_collider_type
+            obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
+            if obj:
+                self.collider_type = detect_collider_type(obj)
+        except Exception:
+            pass
+    _on_collider_prop_updated(self, context)
+
+
 class TareminClothColliderSettings(PropertyGroup):
     is_collider: BoolProperty(
         name="Collider Enabled",
         description="このオブジェクトを剛体コライダーとして登録する",
         default=False,
-        update=_on_collider_prop_updated,
+        update=_on_is_collider_updated,
     )
     enabled: BoolProperty(
         name="Collider Active",
         description="このコライダーの衝突判定を有効にする（OFFで一時的に無効化）",
         default=True,
         update=_on_collider_prop_updated,
+    )
+    collider_purpose: EnumProperty(
+        name="Collider Purpose",
+        description="コライダーの用途・目的（自動判別または目的別プリセット）",
+        items=[
+            ('AUTO', "Auto Detect", "オブジェクト構造から自動推定・選択"),
+            ('CHARACTER', "Character Body", "素体・アバター (Bone SDF)"),
+            ('MANNEQUIN', "Mannequin / Prop", "マネキン・家具 (Mesh SDF)"),
+            ('FLOOR', "Floor / Ground", "床・地面 (Plane)"),
+            ('SPHERE', "Sphere", "球体 (Sphere)"),
+            ('CUSTOM', "Custom / Simple", "カスタムメッシュ (Mesh)"),
+        ],
+        default='AUTO',
+        update=_on_collider_purpose_updated,
     )
     last_collider_preset: StringProperty(
         name="Collider Preset",
@@ -932,9 +1010,20 @@ def register():
         description="現在適用されている構成プリセット名",
         default="",
     )
+    bpy.types.Scene.taremin_cloth_ui_mode = EnumProperty(
+        name="UI Mode",
+        description="Taremin Cloth のUI表示モード（簡単モード / 詳細モード）",
+        items=[
+            ('SIMPLE', "Simple", "初心者・日常作業向けの簡易UIモード（主要プリセットと基本設定のみ）", 'PLAY', 0),
+            ('ADVANCED', "Advanced", "全物理パラメータ・内部設定を編集可能な詳細UIモード", 'PREFERENCES', 1),
+        ],
+        default='SIMPLE',
+    )
 
 
 def unregister():
+    if hasattr(bpy.types.Scene, "taremin_cloth_ui_mode"):
+        del bpy.types.Scene.taremin_cloth_ui_mode
     if hasattr(bpy.types.Scene, "taremin_cloth_active_config_preset"):
         del bpy.types.Scene.taremin_cloth_active_config_preset
     if hasattr(bpy.types.Scene, "taremin_cloth_config_presets_json"):

@@ -22,6 +22,8 @@ subpackages = [
             "mesh_extract",
             "drawing",
             "topology",
+            "collider_detect",
+            "self_collision_fit",
         ],
     ),
     (

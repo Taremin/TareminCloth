@@ -64,6 +64,8 @@ from .ops import (
     TAREMIN_CLOTH_OT_auto_fit_thickness,
     TAREMIN_CLOTH_OT_clear_bone_sdf_cache,
     TAREMIN_CLOTH_OT_rebake_bone_sdf,
+    TAREMIN_CLOTH_OT_auto_detect_collider,
+    TAREMIN_CLOTH_OT_auto_fit_self_collision,
     TAREMIN_CLOTH_OT_launch_gui,
     TAREMIN_CLOTH_OT_connect_gui,
     TAREMIN_CLOTH_OT_gui_preview,

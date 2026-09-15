@@ -305,3 +305,68 @@ class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
             else:
                 self.report({'ERROR'}, f"'{obj.name}' のボーンSDFベイクに失敗しました。Armatureモディファイアとウェイトを確認してください")
                 return {'CANCELLED'}
+
+
+class TAREMIN_CLOTH_OT_auto_detect_collider(bpy.types.Operator):
+    """選択中オブジェクトの構造から最適なコライダー形状を自動推定・設定します"""
+    bl_idname = "taremin_cloth.auto_detect_collider"
+    bl_label = "Auto Detect Collider Type"
+    bl_description = "オブジェクトの構造（モディファイア・頂点ウェイト・面数等）を解析して最適なコライダータイプを自動設定します"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and getattr(obj, "taremin_cloth_collider", None) and obj.taremin_cloth_collider.is_collider
+
+    def execute(self, context):
+        from ..utils.collider_detect import detect_collider_type
+        obj = context.active_object
+        col_settings = obj.taremin_cloth_collider
+        detected = detect_collider_type(obj)
+        col_settings.collider_type = detected
+        col_settings.collider_purpose = 'AUTO'
+        type_names = {
+            'BONE_SDF': "Bone SDF (素体・キャラクタ)",
+            'MESH_SDF': "Mesh SDF (マネキン・剛体)",
+            'PLANE': "Plane (床・地面)",
+            'SPHERE': "Sphere (球体)",
+            'MESH': "Mesh (単純メッシュ)",
+        }
+        self.report({'INFO'}, f"コライダー形状を自動判定しました: {type_names.get(detected, detected)}")
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_auto_fit_self_collision(bpy.types.Operator):
+    """メッシュのエッジ長と用途に基づき、最適な自己衝突パラメータを自動設定します"""
+    bl_idname = "taremin_cloth.auto_fit_self_collision"
+    bl_label = "Auto Fit Self Collision"
+    bl_description = "メッシュのエッジ長と用途（Standard/Skirt/Thin）に基づき自己衝突パラメータを自動算出・適用します（Custom時は無効）"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj
+            and obj.type == 'MESH'
+            and getattr(obj, "taremin_cloth", None)
+            and obj.taremin_cloth.is_cloth
+            and getattr(obj.taremin_cloth, "self_collision_purpose", 'STANDARD') != 'CUSTOM'
+        )
+
+    def execute(self, context):
+        from ..utils.self_collision_fit import fit_self_collision_for_object
+        obj = context.active_object
+        settings = obj.taremin_cloth
+        params = fit_self_collision_for_object(obj, settings)
+        if params:
+            thick_mm = params['thickness'] * 1000.0
+            purpose_items = dict(settings.rna_type.properties['self_collision_purpose'].enum_items)
+            purpose_label = purpose_items[settings.self_collision_purpose].name if settings.self_collision_purpose in purpose_items else settings.self_collision_purpose
+            self.report({'INFO'}, f"自己衝突パラメータを最適化しました: 厚み {thick_mm:.1f} mm ({purpose_label})")
+            return {'FINISHED'}
+        else:
+            self.report({'WARNING'}, "メッシュにエッジが存在しないため、自己衝突パラメータを自動設定できませんでした")
+            return {'CANCELLED'}
+

@@ -894,6 +894,144 @@ class TestSimulationE2E(unittest.TestCase):
             if cube_obj.name in bpy.data.objects:
                 bpy.data.objects.remove(cube_obj, do_unlink=True)
 
+    def test_ui_mode_and_subpanel_poll(self):
+        """簡単モード / 詳細モードの切り替えとサブパネルpoll非表示制御のE2Eテスト"""
+        from taremin_cloth.panels import (
+            TAREMIN_CLOTH_PT_pinning,
+            TAREMIN_CLOTH_PT_fabric,
+            TAREMIN_CLOTH_PT_forces,
+            TAREMIN_CLOTH_PT_collisions,
+            TAREMIN_CLOTH_PT_pattern,
+            TAREMIN_CLOTH_PT_quality,
+        )
+
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0, 0, 0))
+        cloth_obj = bpy.context.active_object
+        cloth_obj.taremin_cloth.is_cloth = True
+
+        scene = bpy.context.scene
+        context = bpy.context
+
+        try:
+            # デフォルトは SIMPLE モード
+            scene.taremin_cloth_ui_mode = 'SIMPLE'
+            self.assertEqual(scene.taremin_cloth_ui_mode, 'SIMPLE')
+
+            # 簡単モード時、サブパネルは poll が False（非表示）になること
+            self.assertFalse(TAREMIN_CLOTH_PT_pinning.poll(context))
+            self.assertFalse(TAREMIN_CLOTH_PT_fabric.poll(context))
+            self.assertFalse(TAREMIN_CLOTH_PT_forces.poll(context))
+            self.assertFalse(TAREMIN_CLOTH_PT_collisions.poll(context))
+            self.assertFalse(TAREMIN_CLOTH_PT_pattern.poll(context))
+            self.assertFalse(TAREMIN_CLOTH_PT_quality.poll(context))
+
+            # 簡単モードでも Sewing 設定の変更が可能であること
+            cloth_obj.taremin_cloth.enable_sewing = True
+            self.assertTrue(cloth_obj.taremin_cloth.enable_sewing)
+
+            # ADVANCED モードに切り替え
+            scene.taremin_cloth_ui_mode = 'ADVANCED'
+            self.assertEqual(scene.taremin_cloth_ui_mode, 'ADVANCED')
+
+            # 詳細モード時、布がアクティブならサブパネルの poll が True になること
+            self.assertTrue(TAREMIN_CLOTH_PT_pinning.poll(context))
+            self.assertTrue(TAREMIN_CLOTH_PT_fabric.poll(context))
+            self.assertTrue(TAREMIN_CLOTH_PT_forces.poll(context))
+            self.assertTrue(TAREMIN_CLOTH_PT_collisions.poll(context))
+            self.assertTrue(TAREMIN_CLOTH_PT_pattern.poll(context))
+            self.assertTrue(TAREMIN_CLOTH_PT_quality.poll(context))
+
+        finally:
+            scene.taremin_cloth_ui_mode = 'SIMPLE'
+            if cloth_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(cloth_obj, do_unlink=True)
+
+    def test_collider_auto_detection_and_purpose_sync(self):
+        """Blender実機オブジェクトに対するコライダー自動判別および目的別選択のE2Eテスト"""
+        # 1. 球体オブジェクトでの自動判別テスト
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=1.0, location=(0, 0, 0))
+        sphere_obj = bpy.context.active_object
+        sphere_obj.taremin_cloth_collider.is_collider = True
+
+        try:
+            # is_collider=True で自動判別が走り、SPHERE と判定されること
+            self.assertEqual(sphere_obj.taremin_cloth_collider.collider_type, 'SPHERE')
+
+            # 手動で目的を CHARACTER に変更 -> BONE_SDF に連動
+            sphere_obj.taremin_cloth_collider.collider_purpose = 'CHARACTER'
+            self.assertEqual(sphere_obj.taremin_cloth_collider.collider_type, 'BONE_SDF')
+
+            # 手動で目的を FLOOR に変更 -> PLANE に連動
+            sphere_obj.taremin_cloth_collider.collider_purpose = 'FLOOR'
+            self.assertEqual(sphere_obj.taremin_cloth_collider.collider_type, 'PLANE')
+
+            # 自動判別オペレーターを実行
+            bpy.ops.taremin_cloth.auto_detect_collider()
+            self.assertEqual(sphere_obj.taremin_cloth_collider.collider_type, 'SPHERE')
+            self.assertEqual(sphere_obj.taremin_cloth_collider.collider_purpose, 'AUTO')
+
+        finally:
+            if sphere_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(sphere_obj, do_unlink=True)
+
+        # 2. 平面オブジェクト（床）での自動判別テスト
+        bpy.ops.mesh.primitive_plane_add(size=10.0, location=(0, 0, 0))
+        floor_obj = bpy.context.active_object
+        floor_obj.taremin_cloth_collider.is_collider = True
+
+        try:
+            self.assertEqual(floor_obj.taremin_cloth_collider.collider_type, 'PLANE')
+        finally:
+            if floor_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(floor_obj, do_unlink=True)
+
+    def test_self_collision_purpose_and_auto_fit(self):
+        """自己衝突の用途プリセット切り替えと Auto Fit オペレーターのE2Eテスト"""
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=5, y_subdivisions=5, size=1.0, location=(0, 0, 0))
+        cloth_obj = bpy.context.active_object
+        cloth_obj.taremin_cloth.is_cloth = True
+
+        settings = cloth_obj.taremin_cloth
+
+        try:
+            # 初期状態: enable_self_collision = False
+            self.assertFalse(settings.enable_self_collision)
+            self.assertEqual(settings.self_collision_purpose, 'STANDARD')
+
+            # 有効化時に初回自動フィッティングが走り、適正厚みがセットされること
+            settings.enable_self_collision = True
+            self.assertTrue(settings.enable_self_collision)
+            self.assertGreater(settings.thickness, 0.001)
+            self.assertEqual(settings.coupled_self_collision_mode, 'RELAXATION')
+
+            # 用途を SKIRT（プリーツ・スカート）に変更 -> FULL_COUPLED に自動連動
+            settings.self_collision_purpose = 'SKIRT'
+            self.assertEqual(settings.coupled_self_collision_mode, 'FULL_COUPLED')
+            self.assertEqual(settings.self_collision_max_iterations, '512')
+            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.15, places=2)
+
+            # 用途を THIN（薄手・シルク）に変更 -> マイルドな 0.10 に連動
+            settings.self_collision_purpose = 'THIN'
+            self.assertEqual(settings.coupled_self_collision_mode, 'RELAXATION')
+            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.10, places=2)
+
+            # 手動で Auto Fit オペレーターを実行
+            settings.self_collision_purpose = 'STANDARD'
+            from taremin_cloth.ops.basic import TAREMIN_CLOTH_OT_auto_fit_self_collision
+            self.assertTrue(TAREMIN_CLOTH_OT_auto_fit_self_collision.poll(bpy.context))
+            res = bpy.ops.taremin_cloth.auto_fit_self_collision()
+            self.assertEqual(res, {'FINISHED'})
+            self.assertEqual(settings.coupled_self_collision_mode, 'RELAXATION')
+            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.20, places=2)
+
+            # 用途を CUSTOM に変更した時、Auto Fit ボタンは disable (poll = False) になること
+            settings.self_collision_purpose = 'CUSTOM'
+            self.assertFalse(TAREMIN_CLOTH_OT_auto_fit_self_collision.poll(bpy.context))
+
+        finally:
+            if cloth_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(cloth_obj, do_unlink=True)
+
 
 if __name__ == "__main__":
     unittest.main()
