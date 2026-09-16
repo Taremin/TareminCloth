@@ -16,6 +16,7 @@ from .basic import (
     TAREMIN_CLOTH_OT_rebake_bone_sdf,
     TAREMIN_CLOTH_OT_auto_detect_collider,
     TAREMIN_CLOTH_OT_auto_fit_self_collision,
+    TAREMIN_CLOTH_OT_save_as_shape_key,
 )
 from .interactive import (
     FPSCounter,
@@ -80,6 +81,7 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_rebake_bone_sdf,
     TAREMIN_CLOTH_OT_auto_detect_collider,
     TAREMIN_CLOTH_OT_auto_fit_self_collision,
+    TAREMIN_CLOTH_OT_save_as_shape_key,
     TAREMIN_CLOTH_OT_launch_gui,
     TAREMIN_CLOTH_OT_connect_gui,
     TAREMIN_CLOTH_OT_gui_preview,
@@ -95,6 +97,7 @@ __all__ = [
     "TAREMIN_CLOTH_OT_reset_all",
     "TAREMIN_CLOTH_OT_reset_simulation",
     "TAREMIN_CLOTH_OT_apply_rest_shape",
+    "TAREMIN_CLOTH_OT_save_as_shape_key",
     "TAREMIN_CLOTH_OT_clear_cache",
     "TAREMIN_CLOTH_OT_apply_gpu_settings",
     "TAREMIN_CLOTH_OT_interactive",

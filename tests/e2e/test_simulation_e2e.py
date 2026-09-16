@@ -1032,6 +1032,91 @@ class TestSimulationE2E(unittest.TestCase):
             if cloth_obj.name in bpy.data.objects:
                 bpy.data.objects.remove(cloth_obj, do_unlink=True)
 
+    def test_save_as_shape_key_e2e(self):
+        """シミュレーション変形形状を別オブジェクトのシェイプキーとして保存・蓄積するE2Eテスト"""
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1.0)
+        cloth_obj = bpy.context.active_object
+        cloth_obj.name = "ShapeKeyTestCloth"
+
+        try:
+            bpy.ops.taremin_cloth.toggle_cloth()
+            self.assertTrue(cloth_obj.taremin_cloth.is_cloth)
+
+            n_verts = len(cloth_obj.data.vertices)
+            initial_coords = np.empty(n_verts * 3, dtype=np.float32)
+            cloth_obj.data.vertices.foreach_get("co", initial_coords)
+
+            # 1. 頂点座標を変形（変形1）
+            deformed1 = initial_coords.copy()
+            deformed1[2] += 0.5  # 頂点0のZを変更
+            cloth_obj.data.vertices.foreach_set("co", deformed1)
+            cloth_obj.data.update()
+
+            # 初回保存（引数なし: デフォルト名 Cloth_Shape）
+            res = bpy.ops.taremin_cloth.save_as_shape_key()
+            self.assertEqual(res, {'FINISHED'})
+
+            # ShapeKeyTestCloth_Shapes が生成されていること
+            target_obj = bpy.context.scene.objects.get("ShapeKeyTestCloth_Shapes")
+            self.assertIsNotNone(target_obj)
+            self.assertEqual(target_obj.type, 'MESH')
+            self.assertIsNotNone(target_obj.data.shape_keys)
+
+            key_blocks = target_obj.data.shape_keys.key_blocks
+            self.assertEqual(len(key_blocks), 2)
+            self.assertEqual(key_blocks[0].name, "Basis")
+            self.assertEqual(key_blocks[1].name, "Cloth_Shape")
+            self.assertAlmostEqual(key_blocks[1].value, 1.0)
+
+            # Basis は初期形状、Cloth_Shape は変形1形状であること
+            basis_coords = np.empty(n_verts * 3, dtype=np.float32)
+            key_blocks[0].data.foreach_get("co", basis_coords)
+            np.testing.assert_array_almost_equal(basis_coords, initial_coords, decimal=4)
+
+            shape1_coords = np.empty(n_verts * 3, dtype=np.float32)
+            key_blocks[1].data.foreach_get("co", shape1_coords)
+            np.testing.assert_array_almost_equal(shape1_coords, deformed1, decimal=4)
+
+            # 元の布オブジェクトの選択状態が維持されていること
+            self.assertEqual(bpy.context.active_object, cloth_obj)
+
+            # 2. 再度変形（変形2）して2回目の保存（Blender自動連番で Cloth_Shape.001 になる）
+            deformed2 = initial_coords.copy()
+            deformed2[5] += 0.8  # 頂点1のZを変更
+            cloth_obj.data.vertices.foreach_set("co", deformed2)
+            cloth_obj.data.update()
+
+            res2 = bpy.ops.taremin_cloth.save_as_shape_key()
+            self.assertEqual(res2, {'FINISHED'})
+
+            # 同じターゲットオブジェクトに3つ目のキー（Cloth_Shape.001）が追加されたこと
+            self.assertEqual(len(key_blocks), 3)
+            self.assertEqual(key_blocks[2].name, "Cloth_Shape.001")
+            self.assertAlmostEqual(key_blocks[1].value, 0.0, msg="旧キーのウェイトは0.0にリセットされること")
+            self.assertAlmostEqual(key_blocks[2].value, 1.0, msg="新規キーのみウェイト1.0になること")
+            self.assertEqual(target_obj.active_shape_key_index, 2, "新規キーがアクティブシェイプキーとして選択されること")
+
+            shape2_coords = np.empty(n_verts * 3, dtype=np.float32)
+            key_blocks[2].data.foreach_get("co", shape2_coords)
+            np.testing.assert_array_almost_equal(shape2_coords, deformed2, decimal=4)
+
+            # 3. 十字分割中のガード検証
+            cloth_obj.taremin_cloth.triangulation_mode = 'CROSS_SUBDIV'
+            bpy.ops.taremin_cloth.apply_cross_subdivision()
+            self.assertTrue(taremin_cloth.utils.topology.is_cross_subdivided(cloth_obj))
+
+            res_blocked = bpy.ops.taremin_cloth.save_as_shape_key()
+            self.assertEqual(res_blocked, {'CANCELLED'})
+
+            # Quad復元
+            bpy.ops.taremin_cloth.restore_quad_topology()
+
+        finally:
+            if "ShapeKeyTestCloth" in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects["ShapeKeyTestCloth"], do_unlink=True)
+            if "ShapeKeyTestCloth_Shapes" in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects["ShapeKeyTestCloth_Shapes"], do_unlink=True)
+
 
 if __name__ == "__main__":
     unittest.main()

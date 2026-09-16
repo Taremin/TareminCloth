@@ -611,6 +611,18 @@
   "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "シミュレーション中の頂点オーバーヘッドゼロ。停止時に歪みに沿ってQuadを分割 (推奨)",
   "Show Key Guide": "キー操作ガイドを表示",
   "Show HUD Help": "HUD操作ガイドを表示",
-  "Display interactive shortcut key guide overlay in 3D viewport": "シミュレーション中に3Dビューポート上に操作キーのショートカットガイドを表示します",
-  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[左ドラッグ] 頂点移動  |  [P] ピン留め/解除  |  [Esc / 右クリック] 終了"
+  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[左ドラッグ] 頂点移動  |  [P] ピン留め/解除  |  [Esc / 右クリック] 終了",
+  "Save as Shape Key": "シェイプキーとして保存",
+  "Shape Key Name": "シェイプキー名",
+  "Name of the new shape key (default: Cloth_Shape)": "新しいシェイプキー名（デフォルト: Cloth_Shape）",
+  "Target Mode": "出力先モード",
+  "Target object destination mode": "出力先オブジェクトの決定モード",
+  "Auto Target (_Shapes)": "自動ターゲット (_Shapes)",
+  "Add to <Object>_Shapes object or create if not exists": "<オブジェクト名>_Shapes オブジェクトに追加（未作成時は新規作成）",
+  "New Object": "新規オブジェクト",
+  "Always create a new snapshot object": "常に新しいスナップショットオブジェクトを作成",
+  "Save current simulation deformed shape as a shape key in target shapes object": "現在のシミュレーション変形形状を出力先シェイプオブジェクトのシェイプキーとして保存します",
+  "Saved shape key '%s' to '%s'": "シェイプキー '%s' を '%s' に保存しました",
+  "Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.": "メッシュが十字分割されている間はシェイプキーを保存できません。先にQuadトポロジーを復元してください",
+  "Mesh has no vertices": "メッシュに頂点が存在しません"
 }

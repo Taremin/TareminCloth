@@ -33,6 +33,8 @@ class TAREMIN_CLOTH_OT_toggle_cloth(bpy.types.Operator):
         settings.is_cloth = not settings.is_cloth
         if not settings.is_cloth:
             restore_rest_positions(obj, clear=True)
+        else:
+            cache_rest_positions(obj, force=True)
         clear_simulators()
         self.report({'INFO'}, f"Cloth enabled: {settings.is_cloth}")
         return {'FINISHED'}
@@ -383,4 +385,153 @@ class TAREMIN_CLOTH_OT_auto_fit_self_collision(bpy.types.Operator):
         else:
             self.report({'WARNING'}, "メッシュにエッジが存在しないため、自己衝突パラメータを自動設定できませんでした")
             return {'CANCELLED'}
+
+
+class TAREMIN_CLOTH_OT_save_as_shape_key(bpy.types.Operator):
+    """Save current simulation deformed shape as a shape key in target shapes object"""
+    bl_idname = "taremin_cloth.save_as_shape_key"
+    bl_label = "Save as Shape Key"
+    bl_description = "Save current simulation deformed shape as a shape key in target shapes object"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    shape_key_name: bpy.props.StringProperty(
+        name="Shape Key Name",
+        description="Name of the new shape key (default: Cloth_Shape)",
+        default="",
+    )
+    target_mode: bpy.props.EnumProperty(
+        name="Target Mode",
+        description="Target object destination mode",
+        items=[
+            ('AUTO_TARGET', "Auto Target (_Shapes)", "Add to <Object>_Shapes object or create if not exists"),
+            ('NEW_OBJECT', "New Object", "Always create a new snapshot object"),
+        ],
+        default='AUTO_TARGET',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(
+            obj
+            and obj.type == 'MESH'
+            and getattr(obj, "taremin_cloth", None)
+            and obj.taremin_cloth.is_cloth
+        )
+
+    def execute(self, context):
+        cloth_obj = context.active_object
+        if not cloth_obj or cloth_obj.type != 'MESH':
+            self.report({'WARNING'}, i18n.trans("Please select a mesh object"))
+            return {'CANCELLED'}
+
+        # 1. 十字分割チェック（トポロジー保護）
+        if topology.is_cross_subdivided(cloth_obj):
+            self.report(
+                {'WARNING'},
+                i18n.trans("Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.")
+            )
+            return {'CANCELLED'}
+
+        mesh = cloth_obj.data
+        n_verts = len(mesh.vertices)
+        if n_verts == 0:
+            self.report({'WARNING'}, i18n.trans("Mesh has no vertices"))
+            return {'CANCELLED'}
+
+        # 2. 現在の変形座標を取得
+        import numpy as np
+        curr_coords = np.empty(n_verts * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("co", curr_coords)
+
+        # 3. レストポーズ初期座標を取得（変形前形状）
+        if "_taremin_cloth_rest_positions" in cloth_obj:
+            initial_coords = np.frombuffer(cloth_obj["_taremin_cloth_rest_positions"], dtype=np.float32)
+            if len(initial_coords) != n_verts * 3:
+                initial_coords = curr_coords.copy()
+        else:
+            initial_coords = curr_coords.copy()
+
+        # 4. 出力先オブジェクト（受け皿）の解決
+        target_name = f"{cloth_obj.name}_Shapes"
+        target_obj = None
+
+        if self.target_mode == 'AUTO_TARGET' and context.scene:
+            candidate = context.scene.objects.get(target_name)
+            if candidate and candidate.type == 'MESH' and len(candidate.data.vertices) == n_verts:
+                target_obj = candidate
+
+        is_new_target = (target_obj is None)
+        if is_new_target:
+            # ターゲットオブジェクトを新規作成
+            new_mesh = mesh.copy()
+            new_name = target_name if self.target_mode == 'AUTO_TARGET' else f"{cloth_obj.name}_Snapshot"
+            new_mesh.name = new_name
+            target_obj = bpy.data.objects.new(new_name, new_mesh)
+            target_obj.matrix_world = cloth_obj.matrix_world.copy()
+
+            # 既存のシェイプキーをクリーンアップ
+            if target_obj.data.shape_keys:
+                if hasattr(target_obj, "shape_key_clear"):
+                    target_obj.shape_key_clear()
+                else:
+                    while target_obj.data.shape_keys.key_blocks:
+                        target_obj.shape_key_remove(target_obj.data.shape_keys.key_blocks[0])
+
+            # 布設定は無効にして純粋な展示・レンダリングメッシュとする
+            if hasattr(target_obj, "taremin_cloth"):
+                target_obj.taremin_cloth.is_cloth = False
+
+            # コレクションにリンク
+            parent_col = cloth_obj.users_collection[0] if getattr(cloth_obj, "users_collection", None) else (context.collection or context.scene.collection)
+            parent_col.objects.link(target_obj)
+
+            # メッシュ本体の頂点座標を初期レスト座標（変形前）にリセット
+            target_obj.data.vertices.foreach_set("co", initial_coords)
+            target_obj.data.update()
+
+            # Basis キーを作成し、初期レスト座標をセット
+            basis = target_obj.shape_key_add(name="Basis", from_mix=False)
+            basis.data.foreach_set("co", initial_coords)
+            target_obj.data.update()
+
+        # 既存ターゲットだが Basis キーがない場合のフォールバック
+        if not target_obj.data.shape_keys:
+            target_obj.data.vertices.foreach_set("co", initial_coords)
+            target_obj.data.update()
+            basis = target_obj.shape_key_add(name="Basis", from_mix=False)
+            basis.data.foreach_set("co", initial_coords)
+            target_obj.data.update()
+
+        # 5. 新規シェイプキーを追加
+        # 既存シェイプキーの変形が加算合成されてメッシュが崩れるのを防ぐため、
+        # 既存キーのウェイトを 0.0 にリセットし、今回追加する新規キーのみを 1.0 にする
+        if target_obj.data.shape_keys:
+            for kb in target_obj.data.shape_keys.key_blocks:
+                kb.value = 0.0
+
+        key_name = self.shape_key_name.strip() or "Cloth_Shape"
+        key = target_obj.shape_key_add(name=key_name, from_mix=False)
+        key.data.foreach_set("co", curr_coords)
+        key.value = 1.0
+
+        # 新規キーをアクティブシェイプキーとして選択
+        if target_obj.data.shape_keys:
+            target_obj.active_shape_key_index = len(target_obj.data.shape_keys.key_blocks) - 1
+
+        target_obj.data.update()
+
+        # 6. 元の布オブジェクトのアクティブ・選択状態を維持
+        if hasattr(context, "view_layer") and context.view_layer:
+            context.view_layer.objects.active = cloth_obj
+            cloth_obj.select_set(True)
+
+        logger.info(f"[ShapeKey] Saved shape key '{key.name}' to '{target_obj.name}' (verts={n_verts})")
+        self.report(
+            {'INFO'},
+            i18n.trans("Saved shape key '%s' to '%s'") % (key.name, target_obj.name)
+        )
+        return {'FINISHED'}
+
 

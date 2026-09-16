@@ -611,6 +611,18 @@
   "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "Zero vertex overhead during sim; split quads along strain on stop (Recommended)",
   "Show Key Guide": "Show Key Guide",
   "Show HUD Help": "Show HUD Help",
-  "Display interactive shortcut key guide overlay in 3D viewport": "Display interactive shortcut key guide overlay in 3D viewport",
-  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit"
+  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit",
+  "Save as Shape Key": "Save as Shape Key",
+  "Shape Key Name": "Shape Key Name",
+  "Name of the new shape key (default: Cloth_Shape)": "Name of the new shape key (default: Cloth_Shape)",
+  "Target Mode": "Target Mode",
+  "Target object destination mode": "Target object destination mode",
+  "Auto Target (_Shapes)": "Auto Target (_Shapes)",
+  "Add to <Object>_Shapes object or create if not exists": "Add to <Object>_Shapes object or create if not exists",
+  "New Object": "New Object",
+  "Always create a new snapshot object": "Always create a new snapshot object",
+  "Save current simulation deformed shape as a shape key in target shapes object": "Save current simulation deformed shape as a shape key in target shapes object",
+  "Saved shape key '%s' to '%s'": "Saved shape key '%s' to '%s'",
+  "Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.": "Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.",
+  "Mesh has no vertices": "Mesh has no vertices"
 }
