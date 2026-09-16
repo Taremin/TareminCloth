@@ -101,6 +101,12 @@ def sync_cloth_parameters(sim, obj, scene=None):
     if hasattr(sim, "set_enable_compact_readback"):
         sim.set_enable_compact_readback(getattr(settings, "enable_compact_readback", True))
 
+    # 5.7. 縫合パラメータ (剛性・密着ロック)
+    if hasattr(sim, "set_sewing_stiffness"):
+        sim.set_sewing_stiffness(getattr(settings, "sewing_stiffness", 10000.0))
+    if hasattr(sim, "set_enable_sewing_lock"):
+        sim.set_enable_sewing_lock(getattr(settings, "enable_sewing_lock", True))
+
     # 6. 伸縮グループ (Elastic Bands / Edge Scaling)
     sync_elastic_groups(sim, obj)
 

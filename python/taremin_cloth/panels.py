@@ -302,6 +302,8 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             col_sew.prop(settings, "enable_sewing", text=i18n.trans("Enable Sewing"))
             if settings.enable_sewing:
                 col_sew.prop(settings, "sewing_shrink_speed", text=i18n.trans("Shrink Speed"))
+                col_sew.prop(settings, "sewing_stiffness", text=i18n.trans("Stiffness"))
+                col_sew.prop(settings, "enable_sewing_lock", text=i18n.trans("Lock When Closed"))
                 col_sew.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam (Select 2 Verts)"), icon='EDGESEL')
 
             # 3. 素材プリセット (Fabric Material)
@@ -562,6 +564,8 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
         s_col.prop(settings, "enable_sewing")
         if settings.enable_sewing:
             s_col.prop(settings, "sewing_shrink_speed")
+            s_col.prop(settings, "sewing_stiffness")
+            s_col.prop(settings, "enable_sewing_lock")
             s_col.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam Between 2 Verts"), icon='EDGESEL')
 
         # 伸縮グループ (Elastic Bands)

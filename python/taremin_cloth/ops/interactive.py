@@ -19,10 +19,10 @@ from ..engine.cache import (
 from ..engine.runner import (
     get_or_create_simulator,
     get_effective_substeps,
+    step_cloth_scene,
+    step_cloth_object,
     restore_fast_playback,
 )
-from ..engine.collider import sync_colliders
-from ..engine.params import sync_cloth_parameters
 from ..preferences import get_preferences
 from ..utils import drawing, topology, anim_driver
 from ..utils.logger import logger
@@ -308,61 +308,27 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             self._accumulator = FIXED_DT
 
         step_count = 0
-        t_anim_total = 0.0
-        t_col_total = 0.0
-        t_param_total = 0.0
+        while self._accumulator >= FIXED_DT and step_count < step_limit:
+            self._accumulator -= FIXED_DT
+            step_count += 1
+
         t_step_total = 0.0
-
-        # アキュムレータが 1/60 秒以上蓄積されている場合、同期処理とステップを実行
-        if self._accumulator >= FIXED_DT:
-            # コライダーのアニメーション駆動ステップ
-            t0 = time.perf_counter()
-            any_collider_deformed = False
-            for col_o in context.scene.objects:
-                c_set = getattr(col_o, "taremin_cloth_collider", None)
-                if c_set and c_set.is_collider and getattr(c_set, "enabled", True) and getattr(c_set, "anim", None) and c_set.anim.enabled:
-                    _, deformed = anim_driver.step_collider_animation(col_o, self._anim_frame_counter)
-                    if deformed:
-                        any_collider_deformed = True
-            self._anim_frame_counter += 1
-
-            depsgraph = context.evaluated_depsgraph_get()
-            if any_collider_deformed:
-                context.view_layer.update()
-                depsgraph = context.evaluated_depsgraph_get()
-            t_anim_total = (time.perf_counter() - t0) * 1000.0
-
-            # コライダー同期とパラメータ同期はフレームあたり1回のみ実施
-            t0 = time.perf_counter()
-            sync_colliders(sim, context.scene, depsgraph=depsgraph, force=any_collider_deformed, cloth_obj=obj)
-            t_col_total = (time.perf_counter() - t0) * 1000.0
-
-            t0 = time.perf_counter()
-            sync_cloth_parameters(sim, obj, context.scene)
-            actual_substeps = get_effective_substeps(obj, coords, FIXED_DT, scene=context.scene)
-            t_param_total = (time.perf_counter() - t0) * 1000.0
-
-            while self._accumulator >= FIXED_DT and step_count < step_limit:
-                t0 = time.perf_counter()
-                sim.step(dt=FIXED_DT, substeps=actual_substeps, solver_iterations=settings.solver_iterations if settings else 1)
-                t_step_total += (time.perf_counter() - t0) * 1000.0
-
-                self._accumulator -= FIXED_DT
-                step_count += 1
-
-        # 物理ステップが実際に進んだ場合のみ、GPUリードバック、メッシュ頂点更新、再描画を実行
         t_get = 0.0
         t_mesh = 0.0
+
+        # アキュムレータが 1/60 秒以上蓄積されていた場合、共通の step_cloth_scene を呼び出して実行
         if step_count > 0:
             t0 = time.perf_counter()
-            sim.get_positions(coords)
-            t_get = (time.perf_counter() - t0) * 1000.0
-
-            t0 = time.perf_counter()
-            obj.data.vertices.foreach_set("co", coords)
-            obj.data.update()
-            obj["_taremin_cloth_is_deformed"] = True
-            t_mesh = (time.perf_counter() - t0) * 1000.0
+            step_cloth_scene(
+                context.scene,
+                dt=FIXED_DT,
+                anim_frame=self._anim_frame_counter,
+                target_objs=[obj],
+                update_mesh=True,
+                steps_per_frame=step_count,
+            )
+            self._anim_frame_counter += 1
+            t_step_total = (time.perf_counter() - t0) * 1000.0
 
             # 3Dビューポートの再描画要求
             has_redrawn = False

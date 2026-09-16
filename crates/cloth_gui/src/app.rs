@@ -278,7 +278,10 @@ impl GuiApp {
             data.shear_stiffness,
             data.bending_stiffness,
             data.sewing_shrink_speed,
+            None,
+            None,
         );
+
 
         let mut sim = GpuClothSimulator::with_options(
             Arc::clone(context),

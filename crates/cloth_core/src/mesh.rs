@@ -55,8 +55,10 @@ pub struct GpuSewingConstraint {
     pub target_rest_len: f32,
     pub shrink_speed: f32,
     pub compliance: f32,
-    pub _pad: [f32; 2],
+    pub lock_on_close: f32,
+    pub _pad1: f32,
 }
+
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -94,7 +96,8 @@ pub struct SimParams {
     pub num_distance_constraints: u32,
     pub num_bending_constraints: u32,
     pub num_sewing_constraints: u32,
-    pub _pad: [f32; 2],
+    pub sewing_compliance: f32,
+    pub enable_sewing_lock: f32,
 }
 
 #[repr(C)]
@@ -171,6 +174,8 @@ impl ClothMesh {
         shear_stiffness: f32,
         bending_stiffness: f32,
         sewing_shrink_speed: f32,
+        sewing_stiffness: Option<f32>,
+        enable_sewing_lock: Option<bool>,
     ) -> Self {
         let n_verts = positions.len();
         let mut vertices = Vec::with_capacity(n_verts);
@@ -359,7 +364,15 @@ impl ClothMesh {
 
         // 3. 縫合拘束
         let mut sewing_constraints = Vec::new();
-        let sew_compliance = if tension_stiffness > 0.0 { 1.0 / (tension_stiffness * 1000.0) } else { 0.0 };
+        let sew_stiff = sewing_stiffness.unwrap_or(10000.0);
+        let sew_compliance = if sew_stiff >= 5000.0 {
+            0.0 // 完全非伸縮 (Inextensible PBD)
+        } else if sew_stiff > 0.0 {
+            1.0 / (sew_stiff * 1000.0)
+        } else {
+            1e10
+        };
+        let lock_val = if enable_sewing_lock.unwrap_or(true) { 1.0 } else { 0.0 };
 
         if let Some(sew_pairs) = sewing_springs {
             for &[v0, v1] in sew_pairs {
@@ -378,7 +391,8 @@ impl ClothMesh {
                         target_rest_len: 0.0,
                         shrink_speed: sewing_shrink_speed.max(0.1),
                         compliance: sew_compliance,
-                        _pad: [0.0; 2],
+                        lock_on_close: lock_val,
+                        _pad1: 0.0,
                     });
                 }
             }
@@ -410,15 +424,80 @@ impl ClothMesh {
             }
         }
 
-        // 縫合エッジ（sewing_springs）で結ばれた頂点ペアも隣接頂点として登録（セルフコリジョンの誤爆を除外）
+        // 縫合エッジ（sewing_springs）で結ばれた頂点ペアのトポロジー同一視（ホップ数0換算・完全縮約グラフ）
+        // 縫合ペア (v0, v1) を同一結節点（縮約頂点）とみなし、完成形メッシュと同一の
+        // 1ホップ・2ホップトポロジー隣接距離を自己衝突除外グラフ（adj_lists）に対称構築する。
         if let Some(sewing_pairs) = sewing_springs {
+            // 1. Union-Find で縫合ペアを同一グループに統合
+            let mut parent: Vec<usize> = (0..n_verts).collect();
+            fn find_root(p: &mut [usize], mut i: usize) -> usize {
+                let mut root = i;
+                while root != p[root] {
+                    root = p[root];
+                }
+                while i != root {
+                    let next = p[i];
+                    p[i] = root;
+                    i = next;
+                }
+                root
+            }
+            fn union_roots(p: &mut [usize], i: usize, j: usize) {
+                let root_i = find_root(p, i);
+                let root_j = find_root(p, j);
+                if root_i != root_j {
+                    p[root_j] = root_i;
+                }
+            }
+
             for &[v0, v1] in sewing_pairs {
                 if (v0 as usize) < n_verts && (v1 as usize) < n_verts && v0 != v1 {
-                    adj_lists[v0 as usize].push(v1);
-                    adj_lists[v1 as usize].push(v0);
+                    union_roots(&mut parent, v0 as usize, v1 as usize);
+                }
+            }
+
+            // 2. 代表頂点ごとの実頂点グループを構築
+            let mut group_verts: Vec<Vec<u32>> = vec![Vec::new(); n_verts];
+            for i in 0..n_verts {
+                let rep = find_root(&mut parent, i);
+                group_verts[rep].push(i as u32);
+            }
+
+            // 3. 同一結節点グループ内の全頂点同士を 1ホップ隣接登録
+            for g in &group_verts {
+                if g.len() > 1 {
+                    for &u in g {
+                        for &v in g {
+                            if u != v {
+                                adj_lists[u as usize].push(v);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. 同一結節点グループに接続する全隣接頂点を相互に共有（完全対称登録）
+            let base_adj = adj_lists.clone();
+            for g in &group_verts {
+                if g.len() > 1 {
+                    let mut shared_neighbors = std::collections::HashSet::new();
+                    for &u in g {
+                        for &n in &base_adj[u as usize] {
+                            if !g.contains(&n) {
+                                shared_neighbors.insert(n);
+                            }
+                        }
+                    }
+                    for &u in g {
+                        for &n in &shared_neighbors {
+                            adj_lists[u as usize].push(n);
+                            adj_lists[n as usize].push(u); // 対称性保証
+                        }
+                    }
                 }
             }
         }
+
 
 
         let mut local_edge_lengths = Vec::with_capacity(n_verts);
@@ -566,6 +645,8 @@ mod tests {
             1000.0,
             10.0,
             1.0,
+            None,
+            None,
         );
 
         // 頂点数4
@@ -617,7 +698,44 @@ mod tests {
         let mesh = ClothMesh::from_raw(
             &positions, &edges, Some(&faces), None, None, None, None,
             0, 0.005, 1000.0, 1000.0, 1000.0, 10.0, 1.0,
+            None, None,
         );
         assert_eq!(mesh.island_ids, vec![0, 0, 0, 1, 1, 1]);
     }
+
+    #[test]
+    fn test_sewing_topology_zero_hop() {
+        // 2つの独立したエッジ: (0-1) と (2-3)
+        // 縫合エッジ: (1-2)
+        // 縫合により 1 と 2 が同一結節点化され、0 から 3 はメッシュ2ホップ (0->1(=2)->3) と同一視される
+        let positions = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0], [3.0, 0.0, 0.0],
+        ];
+        let edges = [[0, 1], [2, 3]];
+        let sew = [[1, 2]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&sew), None, None,
+            0, 0.005, 1000.0, 1000.0, 1000.0, 10.0, 1.0,
+            Some(10000.0), Some(true),
+        );
+
+        // 頂点1の隣接に 0 だけでなく 3 (頂点2の隣接) も含まれていること
+        let v1_start = mesh.adj_offsets[1] as usize;
+        let v1_end = mesh.adj_offsets[2] as usize;
+        let v1_adjs = &mesh.adj_indices[v1_start..v1_end];
+        assert!(v1_adjs.contains(&0));
+        assert!(v1_adjs.contains(&2));
+        assert!(v1_adjs.contains(&3), "縫合ペアの隣接頂点3が頂点1の近傍に共有されていること");
+
+        // 頂点2の隣接にも 0 (頂点1の隣接) が含まれていること
+        let v2_start = mesh.adj_offsets[2] as usize;
+        let v2_end = mesh.adj_offsets[3] as usize;
+        let v2_adjs = &mesh.adj_indices[v2_start..v2_end];
+        assert!(v2_adjs.contains(&0), "縫合ペアの隣接頂点0が頂点2の近傍に共有されていること");
+        assert!(v2_adjs.contains(&1));
+        assert!(v2_adjs.contains(&3));
+    }
+
 }

@@ -281,9 +281,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     // 枝切り: ハッシュ値が同じでも実際の空間セルが異なる場合はスキップ（ハッシュ衝突排除）
                     let j_cell = vec3<i32>(floor(p_j / params.cell_size));
                     if (all(j_cell == neighbor_cell) && index != j) {
-                        let is_direct_edge = is_adjacent_vert(index, j);
+                        let is_near_2hop = is_topologically_near(index, j);
 
-                        if (!is_direct_edge) {
+                        if (!is_near_2hop) {
                             let p_j_old = v_j.position;
                             let thick_j = v_j.thickness;
 
@@ -329,8 +329,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             // ==========================================
                             // 2. Vertex-Triangle (頂点 対 面) 相対CCD & 幾何反発
                             // ==========================================
-                            let is_near_2hop = is_topologically_near(index, j);
-                            if (!is_near_2hop) {
                                 let star_start = star_offsets[j];
                                 let star_end = star_offsets[j + 1u];
 
@@ -414,13 +412,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                         }
                                     }
                                 }
-                            }
 
                             // ==========================================
                             // 3. Edge-Edge (辺 対 辺) 幾何反発 (対称アトミック分配)
                             // ==========================================
-                            if (!is_near_2hop) {
-                                let adj_i_start = adj_offsets[index];
+                            let adj_i_start = adj_offsets[index];
                                 let adj_i_end = adj_offsets[index + 1u];
                                 let adj_j_start = adj_offsets[j];
                                 let adj_j_end = adj_offsets[j + 1u];
@@ -496,7 +492,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                             if (w_j > 0.0) {
                                                                 add_disp_atomic(j, -total_disp * ((1.0 - t) * w_j / w_tot));
                                                             }
-                                                            if (w_vj > 0.0) {
+                                                            if (v_vj.inv_mass > 0.0) {
                                                                 add_disp_atomic(vj, -total_disp * (t * w_vj / w_tot));
                                                             }
                                                         }
@@ -506,14 +502,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                         }
                                     }
                                 }
-                            }
-
                         }
                     }
                     other_idx = vert_next[j];
                     iter_count = iter_count + 1u;
                 }
             }
-        }
+}
     }
 }

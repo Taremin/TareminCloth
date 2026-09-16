@@ -18,7 +18,12 @@ impl GpuClothSimulator {
             num_distance_constraints: self.num_distance_constraints,
             num_bending_constraints: self.num_bending_constraints,
             num_sewing_constraints: self.num_sewing_constraints,
-            _pad: [0.0; 2],
+            sewing_compliance: if self.sewing_stiffness >= 5000.0 {
+                0.0
+            } else {
+                1.0 / (self.sewing_stiffness * 1000.0)
+            },
+            enable_sewing_lock: if self.enable_sewing_lock { 1.0 } else { 0.0 },
         };
 
         self.context.queue.write_buffer(
@@ -156,7 +161,7 @@ impl GpuClothSimulator {
             self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer");
         }
 
-        // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束を再適用してエッジ伸びを抑制)
+        // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
         if self.enable_self_collision
             && (self.coupled_self_collision_mode == 1 || self.coupled_self_collision_mode == 3)
             && self.post_collision_relaxation_iters > 0
@@ -167,6 +172,17 @@ impl GpuClothSimulator {
                     timestamp_writes: None,
                 });
                 self.dispatch_distance_constraints(&mut cpass, vert_workgroups, wg_size);
+
+                // 縫合拘束も同時に適用して、距離拘束による縫合ペアの再開口を防止
+                if self.num_sewing_constraints > 0 {
+                    cpass.set_pipeline(&self.sewing_pipeline);
+                    for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
+                        if count > 0 {
+                            cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
+                            cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                        }
+                    }
+                }
             }
         }
 

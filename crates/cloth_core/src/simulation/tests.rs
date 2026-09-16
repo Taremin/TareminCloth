@@ -28,6 +28,8 @@ mod tests {
             5000.0,
             0.0,
             1.0,
+            None,
+            None,
         );
         let mut sim = GpuClothSimulator::new(ctx, mesh);
 
@@ -79,6 +81,8 @@ mod tests {
             5000.0,
             0.0,
             1.0,
+            None,
+            None,
         );
         let mut sim = GpuClothSimulator::new(ctx, mesh);
 
@@ -137,6 +141,8 @@ mod tests {
             5000.0,
             0.0,
             1.0,
+            None,
+            None,
         );
         let mut sim = GpuClothSimulator::new(ctx, mesh);
         sim.gravity = [0.0, 0.0, 0.0]; // 無重力
@@ -201,6 +207,8 @@ mod tests {
             1000.0,
             10.0,
             1.0,
+            None,
+            None,
         );
 
         let mut sim = GpuClothSimulator::new(ctx, mesh);
@@ -253,6 +261,8 @@ mod tests {
             5000.0,
             0.0,
             1.0,
+            None,
+            None,
         );
         let mut sim = GpuClothSimulator::new(ctx, mesh);
 

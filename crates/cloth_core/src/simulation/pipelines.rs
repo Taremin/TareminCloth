@@ -27,7 +27,9 @@ pub struct SimulationResources {
     pub vertex_buffer: wgpu::Buffer,
     pub dist_buffer: wgpu::Buffer,
     pub bend_buffer: wgpu::Buffer,
+    pub sew_buffer: wgpu::Buffer,
     pub params_buffer: wgpu::Buffer,
+
     pub staging_buffer: wgpu::Buffer,
     pub staging_buffers: [wgpu::Buffer; 2],
     pub accum_buffer: wgpu::Buffer,
@@ -204,7 +206,8 @@ pub fn build_simulation_resources(
         target_rest_len: 0.0,
         shrink_speed: 0.0,
         compliance: 0.0,
-        _pad: [0.0; 2],
+        lock_on_close: 0.0,
+        _pad1: 0.0,
     };
     let sew_contents: &[u8] = if mesh.sewing_constraints.is_empty() {
         bytemuck::bytes_of(&dummy_sew)
@@ -350,7 +353,8 @@ pub fn build_simulation_resources(
         num_distance_constraints,
         num_bending_constraints,
         num_sewing_constraints,
-        _pad: [0.0; 2],
+        sewing_compliance: 0.0,
+        enable_sewing_lock: 1.0,
     };
 
     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1411,6 +1415,7 @@ pub fn build_simulation_resources(
         vertex_buffer,
         dist_buffer,
         bend_buffer,
+        sew_buffer,
         params_buffer,
         staging_buffer,
         staging_buffers: [staging_buffer_0, staging_buffer_1],

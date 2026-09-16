@@ -1168,6 +1168,47 @@ class TestSimulationE2E(unittest.TestCase):
             if "QuickPinTestCloth" in bpy.data.objects:
                 bpy.data.objects.remove(bpy.data.objects["QuickPinTestCloth"], do_unlink=True)
 
+    def test_step_cloth_scene_e2e(self):
+        """共通関数 step_cloth_scene を用いたフレーム進行とパラメータ同期・メッシュ反映のE2Eテスト"""
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0)
+        obj = bpy.context.active_object
+        obj.name = "StepSceneTestCloth"
+        obj.taremin_cloth.is_cloth = True
+        obj.taremin_cloth.stiffness = 10000.0
+        obj.taremin_cloth.bending_stiffness = 20.0
+
+        vg = obj.vertex_groups.new(name="Pin")
+        pin_indices = []
+        for v in obj.data.vertices:
+            if v.co.y > 0.4:
+                vg.add([v.index], 1.0, 'REPLACE')
+                pin_indices.append(v.index)
+
+        init_coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
+        obj.data.vertices.foreach_get("co", init_coords)
+        init_pos = init_coords.reshape((-1, 3))
+
+        scene = bpy.context.scene
+
+        # 共通関数 step_cloth_scene を呼び出して20フレーム進行
+        for f in range(20):
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
+            self.assertIn("StepSceneTestCloth", res)
+
+        cur_coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
+        obj.data.vertices.foreach_get("co", cur_coords)
+        cur_pos = cur_coords.reshape((-1, 3))
+
+        # ピン留め頂点が固定されていること
+        for p_idx in pin_indices:
+            np.testing.assert_allclose(cur_pos[p_idx], init_pos[p_idx], atol=1e-5)
+
+        # 自由端が重力で落下していること
+        self.assertLess(np.min(cur_pos[:, 2]), -0.01)
+        self.assertTrue(obj.get("_taremin_cloth_is_deformed", False))
+
+        bpy.data.objects.remove(obj, do_unlink=True)
+
 
 if __name__ == "__main__":
     unittest.main()

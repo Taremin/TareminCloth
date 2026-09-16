@@ -29,6 +29,42 @@ graph TD
 | **ビルド基盤** | **Maturin** | RustクレートをBlenderから直接利用可能な拡張モジュール（`.pyd` / `.so`）として自動ビルド。 |
 | **アドオンUI/連携** | **Blender Python (`bpy`)** | Blender 3.6 LTS / 4.x / 5.x 対応。モーダルオペレーター、NパネルUI、アニメーションドライバー統合。 |
 
+### 1.2 シミュレーション実行パイプラインとフレーム進行ライフサイクル
+
+シミュレーションの1フレーム進行ライフサイクルは、モーダルオペレーター（インタラクティブモード）、タイムライン再生ハンドラー、およびE2Eテスト環境の間で完全に同一の挙動を保証するため、共通関数 `step_cloth_scene` および `step_cloth_object` （`engine/runner.py`）に一元集約されています。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as モーダルUI / タイムライン / テスト
+    participant Runner as step_cloth_scene / step_cloth_object
+    participant Anim as anim_driver
+    participant SyncCol as sync_colliders
+    participant SyncParam as sync_cloth_parameters & pins
+    participant GPU as ClothSimulator (wgpu)
+    participant Mesh as Blender Mesh
+
+    User->>Runner: 呼び出し (dt, anim_frame, ...)
+    Runner->>Anim: コライダーアニメーション駆動
+    opt コライダー変形時
+        Runner->>Runner: view_layer.update() & depsgraph再取得
+    end
+    Runner->>SyncCol: コライダーSDF / メッシュ同期
+    Runner->>SyncParam: パラメータ・剛性・ピン同期
+    Runner->>Runner: CFL適応サブステップ動的算出
+    Runner->>GPU: sim.step(dt, substeps, solver_iterations)
+    opt update_mesh=True
+        Runner->>GPU: sim.get_positions(coords)
+        Runner->>Mesh: foreach_set("co") & update()
+    end
+    Runner-->>User: (sim, coords) を返却
+```
+
+- **`step_cloth_object(obj, scene, dt, ...)`**:
+  単一布オブジェクトに対する完全な同期・物理ステップ・メッシュ更新ライフサイクル。
+- **`step_cloth_scene(scene, dt, anim_frame, ...)`**:
+  シーン内のコライダーアニメーションを一括更新し、指定（または全）布オブジェクトに対して `step_cloth_object` を実行。テストや検証スクリプトでもこの関数を呼ぶことで、UI実行時と100%同一の物理・パラメータ同期環境で検証が可能。
+
 ---
 
 ## 2. 物理シミュレーション仕様 (XPBD)
@@ -52,16 +88,16 @@ graph TD
    - **距離拘束 (Distance Constraints)**: グラフ彩色（Welsh-Powell法）により色グループごとにGPU完全並列で伸縮補正。
    - **曲げ拘束 (Bending Constraints)**: 隣接2三角形の二面角（Dihedral Angle）に基づく曲率補正。
    - **固定・追従ピン拘束 (Pin & Attachment Constraints)**: 頂点グループウェイトおよびターゲット位置・ボーン追従。
-   - **縫合拘束 (Sewing Constraints)**: 型紙エッジ間を時間経過に伴い収縮（スプリング）させて衣服を仕立てる。
+   - **縫合拘束 (Sewing Constraints)**: 型紙エッジ間を時間経過に伴い収縮（スプリング）させて衣服を仕立てる。縫合エッジペアはトポロジー近接判定においてUnion-Find完全縮約トポロジーグラフ（ホップ数0換算・結節点隣接の相互対称登録）として扱われ、自己衝突（2ホップ除外）との誤爆拮抗を物理的に排除する。また、収縮完了時の密着剛体ロックオプション（`lock_on_close`）をサポート。
    - **衝突拘束 (Collisions)**:
      - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。
      - **メッシュコライダー**: クラスタカリング付き三角パッチ衝突判定。
      - **自己衝突 (Self-Collision)**:
-        - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E 接触判定。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合を回避してアキュムレータへ対称蓄積。
+        - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E / V-V 接触判定。2ホップトポロジー近傍判定をV-V、V-T、E-Eで一貫して統一適用。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合を回避してアキュムレータへ対称蓄積。
         - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
         - **協調収束設計 (Coupled Modes)**:
-          - `RELAXATION` モード（推奨標準）: 自己衝突直後に距離拘束を2反復再適用（Post-Relaxation）し、実測153.2 FPSを維持したままエッジ伸びを約5割抑制。
-          - `FULL_COUPLED` モード（高精度設定）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和を適用してエッジ伸びを約7割抑制。
+          - `RELAXATION` モード（推奨標準）: 自己衝突直後に距離拘束および縫合拘束を2反復再適用（Post-Relaxation）。エッジ過剰伸長を約5割抑制しつつ、距離拘束による縫合ペア引き戻しを完全に防ぎ、自己衝突ON時でも0.00mmの完全密着縫合を保証。実測153.2 FPSを維持。
+          - `FULL_COUPLED` モード（高精度設定）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和（距離拘束＋縫合拘束）を適用してエッジ伸びを約7割抑制。
 
 4. **速度更新と位置確定 (Velocity Update & Commit)**:
    $$v_i \leftarrow (p_i - x_i) / dt$$
@@ -118,6 +154,20 @@ pub struct GpuPinConstraint {
     pub _pad: [f32; 2],
     pub target_pos: [f32; 3],// 目標ワールド座標
     pub _pad2: f32,
+}
+
+// 縫合拘束 (GPU Storage Buffer: Read/Write)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuSewingConstraint {
+    pub v0: u32,             // 縫合頂点0
+    pub v1: u32,             // 縫合頂点1
+    pub current_rest_len: f32,// 現在の目標自然長 (m)
+    pub target_rest_len: f32, // 最終収縮目標長 (通常 0.0)
+    pub shrink_speed: f32,   // 収縮速度 (m/s)
+    pub compliance: f32,     // コンプライアンス (0.0: 完全非伸縮 PBD)
+    pub lock_on_close: f32,  // 1.0: 密着時に実効コンプライアンス0.0で剛体ロック
+    pub _pad1: f32,          // 32バイトアライメントパディング
 }
 
 // メッシュコライダー三角形 (GPU Buffer: Read-Only)

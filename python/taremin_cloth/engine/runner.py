@@ -160,6 +160,8 @@ def get_or_create_simulator(obj):
         shear_stiffness=settings.shear_stiffness,
         bending_stiffness=settings.bending_stiffness,
         sewing_shrink_speed=settings.sewing_shrink_speed,
+        sewing_stiffness=getattr(settings, "sewing_stiffness", 10000.0),
+        enable_sewing_lock=getattr(settings, "enable_sewing_lock", True),
         workgroup_size=wg_size,
         solver_mode=s_mode,
         enable_compact_readback=compact_rb,
@@ -256,6 +258,136 @@ def get_effective_substeps(obj, coords, dt, scene=None):
     current_steps = max(min_steps, min(max_steps, current_steps))
     _effective_substeps_cache[obj_name] = current_steps
     return current_steps
+
+
+def step_cloth_object(
+    obj,
+    scene,
+    dt: float = 1.0 / 60.0,
+    depsgraph=None,
+    force_sync_colliders: bool = False,
+    update_mesh: bool = True,
+    substeps: int = None,
+    solver_iterations: int = None,
+    skip_sync: bool = False,
+):
+    """単一の布オブジェクトに対し、コライダー同期・パラメータ同期・物理ステップ・メッシュ更新を実行する。
+
+    Args:
+        obj: Blenderメッシュオブジェクト
+        scene: 対象Blenderシーン
+        dt: 時間刻み (秒)
+        depsgraph: 評価済みDepsgraph (Noneの場合は自動取得)
+        force_sync_colliders: コライダー変形時などに強制再同期するか
+        update_mesh: 物理ステップ後にCPU頂点座標を取得してメッシュへ反映するか
+        substeps: サブステップ数 (Noneの場合は get_effective_substeps で動的算出)
+        solver_iterations: ソルバー反復回数 (Noneの場合は settings.solver_iterations)
+        skip_sync: 同期処理をスキップして物理ステップのみ進めるか (同一フレーム内の複数ステップ実行用)
+
+    Returns:
+        tuple[taremin_cloth_core.ClothSimulator, np.ndarray]: (sim, coords)
+    """
+    sim, coords = get_or_create_simulator(obj)
+    settings = getattr(obj, "taremin_cloth", None)
+
+    if not skip_sync:
+        if depsgraph is None:
+            try:
+                depsgraph = bpy.context.evaluated_depsgraph_get()
+            except Exception:
+                depsgraph = None
+
+        sync_colliders(sim, scene, depsgraph=depsgraph, force=force_sync_colliders, cloth_obj=obj)
+        sync_cloth_parameters(sim, obj, scene)
+        sync_attachment_pins(sim, obj, scene)
+
+    actual_substeps = substeps if substeps is not None else get_effective_substeps(obj, coords, dt, scene=scene)
+    actual_iters = solver_iterations if solver_iterations is not None else (getattr(settings, "solver_iterations", 1) if settings else 1)
+
+    sim.step(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
+
+    if update_mesh:
+        sim.get_positions(coords)
+        obj.data.vertices.foreach_set("co", coords)
+        obj.data.update()
+        obj["_taremin_cloth_is_deformed"] = True
+
+    return sim, coords
+
+
+def step_cloth_scene(
+    scene,
+    dt: float = 1.0 / 60.0,
+    anim_frame: int = None,
+    depsgraph=None,
+    target_objs: list = None,
+    update_mesh: bool = True,
+    steps_per_frame: int = 1,
+) -> dict:
+    """シーン内のコライダーアニメーションを更新し、対象布オブジェクト群のシミュレーションを1フレーム進める。
+
+    Args:
+        scene: 対象Blenderシーン
+        dt: 1ステップの時間刻み (秒)
+        anim_frame: コライダーアニメーションのフレーム番号 (Noneの場合は scene.frame_current)
+        depsgraph: 評価済みDepsgraph (Noneの場合は自動評価)
+        target_objs: 対象布オブジェクトのリスト (Noneの場合はシーン内の全有効布オブジェクト)
+        update_mesh: 物理ステップ後にメッシュ頂点を更新するか
+        steps_per_frame: 1フレーム内に進めるシミュレーションステップ数 (デフォルト1)
+
+    Returns:
+        dict[str, tuple]: {obj.name: (sim, coords)} の辞書
+    """
+    # 1. コライダーのアニメーション駆動ステップ
+    any_collider_deformed = False
+    current_frame = anim_frame if anim_frame is not None else scene.frame_current
+
+    for col_o in scene.objects:
+        c_set = getattr(col_o, "taremin_cloth_collider", None)
+        if c_set and c_set.is_collider and getattr(c_set, "enabled", True):
+            if getattr(c_set, "anim", None) and c_set.anim.enabled:
+                _, deformed = anim_driver.step_collider_animation(col_o, current_frame)
+                if deformed:
+                    any_collider_deformed = True
+            elif col_o.type == 'MESH' and (c_set.collider_type == 'MESH' or (c_set.collider_type == 'BONE_SDF' and getattr(c_set, "enable_joint_mesh", True))):
+                if col_o.find_armature() or (col_o.animation_data and col_o.animation_data.action):
+                    any_collider_deformed = True
+
+    # 2. 必要に応じてDepsgraphを再評価
+    if depsgraph is None:
+        try:
+            if any_collider_deformed and hasattr(bpy.context, "view_layer") and bpy.context.view_layer:
+                bpy.context.view_layer.update()
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+        except Exception:
+            depsgraph = None
+
+    # 3. 対象布オブジェクトの決定
+    if target_objs is not None:
+        objs = [o for o in target_objs if o.type == 'MESH' and hasattr(o, "taremin_cloth") and o.taremin_cloth.is_cloth and getattr(o.taremin_cloth, "enabled", True)]
+    else:
+        objs = [o for o in scene.objects if o.type == 'MESH' and hasattr(o, "taremin_cloth") and o.taremin_cloth.is_cloth and getattr(o.taremin_cloth, "enabled", True)]
+
+    results = {}
+    for obj in objs:
+        sim = None
+        coords = None
+        for s_idx in range(steps_per_frame):
+            do_update = update_mesh and (s_idx == steps_per_frame - 1)
+            skip_sync = (s_idx > 0)
+            sim, coords = step_cloth_object(
+                obj,
+                scene,
+                dt=dt,
+                depsgraph=depsgraph,
+                force_sync_colliders=any_collider_deformed,
+                update_mesh=do_update,
+                skip_sync=skip_sync,
+            )
+        if sim is not None and coords is not None:
+            results[obj.name] = (sim, coords)
+
+    return results
 
 
 def cloth_frame_handler(scene):
@@ -365,13 +497,15 @@ def cloth_frame_handler(scene):
                 sim.step_async(dt=dt, substeps=actual_substeps, solver_iterations=settings.solver_iterations)
 
             else:
-                # 同期実行モード
-                sync_colliders(sim, scene, depsgraph, force=any_collider_deformed, cloth_obj=obj)
-                sync_cloth_parameters(sim, obj, scene)
-                sync_attachment_pins(sim, obj, scene)
-                sim.step(dt=dt, substeps=actual_substeps, solver_iterations=settings.solver_iterations)
-                sim.get_positions(coords)
+                # 同期実行モード: 共通の step_cloth_object を呼び出して実行
+                sim, coords = step_cloth_object(
+                    obj,
+                    scene,
+                    dt=dt,
+                    depsgraph=depsgraph,
+                    force_sync_colliders=any_collider_deformed,
+                    update_mesh=True,
+                    substeps=actual_substeps,
+                    solver_iterations=settings.solver_iterations,
+                )
                 obj_cache[current_frame] = coords.copy()
-                obj.data.vertices.foreach_set("co", coords)
-                obj.data.update()
-                obj["_taremin_cloth_is_deformed"] = True

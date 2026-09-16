@@ -57,7 +57,10 @@ pub struct GpuClothSimulator {
     pub(crate) vertex_buffer: wgpu::Buffer,
     pub(crate) dist_buffer: wgpu::Buffer,
     pub(crate) bend_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    pub(crate) sew_buffer: wgpu::Buffer,
     pub(crate) params_buffer: wgpu::Buffer,
+
     pub(crate) staging_buffer: wgpu::Buffer,
     // 非同期ダブルバッファリング用
     pub(crate) staging_buffers: [wgpu::Buffer; 2],
@@ -194,12 +197,16 @@ pub struct GpuClothSimulator {
     pub(crate) edge_collision_pipeline: wgpu::ComputePipeline,
     pub(crate) edge_collision_bind_groups: Vec<wgpu::BindGroup>,
 
+    pub sewing_stiffness: f32,
+    pub enable_sewing_lock: bool,
+
     // デバッグ記録用
     pub mesh_edges: Vec<[u32; 2]>,
     pub mesh_faces: Vec<[u32; 3]>,
     pub debug_recorder: SimulationDebugRecorder,
     pub original_inv_masses: Vec<f32>,
 }
+
 
 impl GpuClothSimulator {
     pub fn new(context: Arc<GpuContext>, mesh: ClothMesh) -> Self {
@@ -245,7 +252,9 @@ impl GpuClothSimulator {
             vertex_buffer: res.vertex_buffer,
             dist_buffer: res.dist_buffer,
             bend_buffer: res.bend_buffer,
+            sew_buffer: res.sew_buffer,
             params_buffer: res.params_buffer,
+
             staging_buffer: res.staging_buffer,
             staging_buffers: res.staging_buffers,
             staging_idx: 0,
@@ -352,7 +361,10 @@ impl GpuClothSimulator {
             collider_sweep_margin_offset: 0.05,
             edge_collision_pipeline: res.edge_collision_pipeline,
             edge_collision_bind_groups: res.edge_collision_bind_groups,
+            sewing_stiffness: 10000.0,
+            enable_sewing_lock: true,
             mesh_edges,
+
             mesh_faces,
             debug_recorder: SimulationDebugRecorder::default(),
             original_inv_masses: mesh.vertices.iter().map(|v| v.inv_mass).collect(),
@@ -515,8 +527,18 @@ impl GpuClothSimulator {
         }
     }
 
+    pub fn set_sewing_stiffness(&mut self, stiffness: f32) {
+        self.sewing_stiffness = stiffness.max(1.0);
+    }
+
+    /// 縫合完了時の密着ロック有効/無効を設定する
+    pub fn set_enable_sewing_lock(&mut self, enabled: bool) {
+        self.enable_sewing_lock = enabled;
+    }
+
     /// 大域空気減衰率（Air Damping / Velocity Damping）を設定する
     pub fn set_damping(&mut self, damping: f32) {
+
         self.damping = damping.max(0.0);
     }
 

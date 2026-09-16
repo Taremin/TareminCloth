@@ -640,7 +640,7 @@ pub struct ClothSimulator {
 #[pymethods]
 impl ClothSimulator {
     #[new]
-    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None))]
+    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None))]
     fn new(
         positions: PyReadonlyArray2<f32>,
         edges: PyReadonlyArray2<u32>,
@@ -654,6 +654,8 @@ impl ClothSimulator {
         stiffness: f32,
         bending_stiffness: f32,
         sewing_shrink_speed: f32,
+        sewing_stiffness: Option<f32>,
+        enable_sewing_lock: Option<bool>,
         compression_stiffness: Option<f32>,
         shear_stiffness: Option<f32>,
         workgroup_size: u32,
@@ -742,7 +744,10 @@ impl ClothSimulator {
             sh_stiffness,
             bending_stiffness,
             sewing_shrink_speed,
+            sewing_stiffness,
+            enable_sewing_lock,
         );
+
 
         let mut simulator = GpuClothSimulator::with_options(ctx, mesh, workgroup_size, solver_mode);
         if let Some(compact) = enable_compact_readback {
@@ -1423,7 +1428,20 @@ impl ClothSimulator {
         );
     }
 
+    /// 縫合剛性を動的に更新する
+    #[pyo3(signature = (stiffness=10000.0))]
+    fn set_sewing_stiffness(&mut self, stiffness: f32) {
+        self.simulator.set_sewing_stiffness(stiffness);
+    }
+
+    /// 縫合完了時の密着ロック有効/無効を動的に設定する
+    #[pyo3(signature = (enabled=true))]
+    fn set_enable_sewing_lock(&mut self, enabled: bool) {
+        self.simulator.set_enable_sewing_lock(enabled);
+    }
+
     /// 頂点数を取得
+
     #[getter]
     fn get_num_vertices(&self) -> u32 {
         self.simulator.num_vertices

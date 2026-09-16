@@ -434,6 +434,19 @@ class TareminClothObjectSettings(PropertyGroup):
         min=0.01,
         max=50.0,
     )
+    sewing_stiffness: FloatProperty(
+        name="Sewing Stiffness",
+        description="Stiffness of sewing constraints (>= 5000: rigid closure)",
+        default=10000.0,
+        min=1.0,
+        max=50000.0,
+        soft_max=10000.0,
+    )
+    enable_sewing_lock: BoolProperty(
+        name="Lock When Closed",
+        description="Lock sewing edges rigidly once fully contracted, preventing gap reopen",
+        default=True,
+    )
     # ピン留め・アタッチメント
     pin_target_object: PointerProperty(
         name="Pin Target",

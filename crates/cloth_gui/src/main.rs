@@ -105,7 +105,10 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                         data.shear_stiffness,
                         data.bending_stiffness,
                         data.sewing_shrink_speed,
+                        None,
+                        None,
                     );
+
 
                     let mut sim = GpuClothSimulator::with_options(
                         Arc::clone(&gpu_context),

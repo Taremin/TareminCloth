@@ -176,6 +176,8 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, SimParams, num_distance_constraints);
             check_member!(filename, s, SimParams, num_bending_constraints);
             check_member!(filename, s, SimParams, num_sewing_constraints);
+            check_member!(filename, s, SimParams, sewing_compliance);
+            check_member!(filename, s, SimParams, enable_sewing_lock);
         }
 
         if let Some(s) = structs.get("CollisionParams") {
@@ -301,7 +303,9 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, GpuSewingConstraint, target_rest_len);
             check_member!(filename, s, GpuSewingConstraint, shrink_speed);
             check_member!(filename, s, GpuSewingConstraint, compliance);
+            check_member!(filename, s, GpuSewingConstraint, lock_on_close);
         }
+
 
         if let Some(s) = structs.get("GpuStarPair") {
             check_struct_size!(filename, s, GpuStarPair);

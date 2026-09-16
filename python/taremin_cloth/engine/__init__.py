@@ -35,6 +35,8 @@ from .runner import (
     restore_fast_playback,
     get_or_create_simulator,
     get_effective_substeps,
+    step_cloth_object,
+    step_cloth_scene,
     cloth_frame_handler,
 )
 
@@ -64,5 +66,8 @@ __all__ = [
     "restore_fast_playback",
     "get_or_create_simulator",
     "get_effective_substeps",
+    "step_cloth_object",
+    "step_cloth_scene",
     "cloth_frame_handler",
 ]
+

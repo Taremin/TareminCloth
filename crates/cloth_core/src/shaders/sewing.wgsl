@@ -14,7 +14,7 @@ struct GpuSewingConstraint {
     target_rest_len: f32,
     shrink_speed: f32,
     compliance: f32,
-    _pad0: f32,
+    lock_on_close: f32,
     _pad1: f32,
 };
 
@@ -26,8 +26,8 @@ struct SimParams {
     num_distance_constraints: u32,
     num_bending_constraints: u32,
     num_sewing_constraints: u32,
-    _pad0: f32,
-    _pad1: f32,
+    sewing_compliance: f32,
+    enable_sewing_lock: f32,
 };
 
 struct DispatchInfo {
@@ -77,10 +77,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     sewing_constraints[constraint_idx] = c;
 
     let dir = delta / dist;
-    let alpha = c.compliance / (dt * dt);
+
+    // 密着ロック (Lock When Closed)
+    // 自然長が目標自然長 (0.0) に達し、かつ距離が布厚み程度以下に近接している場合、
+    // enable_sewing_lock > 0.5 であれば実効コンプライアンスを 0.0 (完全非伸縮) として隙間の再開口を防止
+    var effective_compliance = params.sewing_compliance;
+    let lock_thresh = max(vertices[c.v0].thickness + vertices[c.v1].thickness, 0.005);
+    if (params.enable_sewing_lock > 0.5 && c.current_rest_len <= c.target_rest_len + 1e-4 && dist <= lock_thresh) {
+        effective_compliance = 0.0;
+    }
+
+    let alpha = effective_compliance / (dt * dt);
     let c_val = dist - c.current_rest_len;
     let delta_lambda = -c_val / (w_sum + alpha);
 
     vertices[c.v0].prev_pos += w0 * delta_lambda * dir;
     vertices[c.v1].prev_pos -= w1 * delta_lambda * dir;
 }
+

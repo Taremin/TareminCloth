@@ -61,6 +61,8 @@ for mod in modules:
         drawing = mod
         break
 
+from .engine.runner import step_cloth_object, step_cloth_scene
+
 
 _is_registered = False
 
