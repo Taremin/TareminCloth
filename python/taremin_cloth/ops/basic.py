@@ -535,3 +535,87 @@ class TAREMIN_CLOTH_OT_save_as_shape_key(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class TAREMIN_CLOTH_OT_create_pin_group(bpy.types.Operator):
+    """Create a new vertex group for pinning and switch to weight paint mode"""
+    bl_idname = "taremin_cloth.create_pin_group"
+    bl_label = "Create Pin Group"
+    bl_description = "Create a new vertex group for pinning and switch to weight paint mode"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(
+            obj
+            and obj.type == 'MESH'
+            and getattr(obj, "taremin_cloth", None)
+            and obj.taremin_cloth.is_cloth
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        settings = obj.taremin_cloth
+
+        # 1. 新規頂点グループを作成（同名重複時はBlenderが自動で Cloth_Pin.001 等を採番）
+        new_vg = obj.vertex_groups.new(name="Cloth_Pin")
+        settings.pin_vertex_group = new_vg.name
+        obj.vertex_groups.active_index = new_vg.index
+
+        # 2. ウェイトペイントモードへ移行
+        if context.mode != 'PAINT_WEIGHT' and bpy.ops.object.mode_set.poll():
+            bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
+
+        msg = i18n.trans("Created pin vertex group '%s' and switched to Weight Paint mode") % new_vg.name
+        logger.info(f"[Pin] {msg}")
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_toggle_weight_paint(bpy.types.Operator):
+    """Toggle between Object Mode and Weight Paint Mode for active pin vertex group"""
+    bl_idname = "taremin_cloth.toggle_weight_paint"
+    bl_label = "Toggle Weight Paint"
+    bl_description = "Toggle between Object Mode and Weight Paint Mode for active pin vertex group"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(
+            obj
+            and obj.type == 'MESH'
+            and getattr(obj, "taremin_cloth", None)
+            and obj.taremin_cloth.is_cloth
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        settings = obj.taremin_cloth
+
+        if context.mode == 'PAINT_WEIGHT':
+            if bpy.ops.object.mode_set.poll():
+                bpy.ops.object.mode_set(mode='OBJECT')
+            self.report({'INFO'}, i18n.trans("Switched to Object Mode"))
+            return {'FINISHED'}
+
+        # オブジェクトモード等からウェイトペイントモードへ移行
+        vg_name = (settings.pin_vertex_group or "").strip() or "Cloth_Pin"
+        vg = obj.vertex_groups.get(vg_name)
+        if not vg:
+            vg = obj.vertex_groups.new(name=vg_name)
+            settings.pin_vertex_group = vg.name
+
+        obj.vertex_groups.active_index = vg.index
+
+        if bpy.ops.object.mode_set.poll():
+            bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
+
+        msg = i18n.trans("Switched to Weight Paint Mode (%s)") % vg.name
+        logger.info(f"[Pin] {msg}")
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+

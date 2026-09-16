@@ -286,7 +286,11 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             box_pin = layout.box()
             box_pin.label(text=i18n.trans("Attachment & Pinning"), icon='PINNED')
             col_pin = box_pin.column(align=True)
-            col_pin.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text=i18n.trans("Pin Group"))
+            row_pin = col_pin.row(align=True)
+            row_pin.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text=i18n.trans("Pin Group"))
+            row_pin.operator("taremin_cloth.create_pin_group", text="", icon='ADD')
+            is_wpaint = bool(context and context.mode == 'PAINT_WEIGHT')
+            row_pin.operator("taremin_cloth.toggle_weight_paint", text="", icon='WPAINT_HLT', depress=is_wpaint)
             col_pin.prop(settings, "pin_target_object", text=i18n.trans("Target Object"))
             if settings.pin_target_object and settings.pin_target_object.type == 'ARMATURE':
                 col_pin.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text=i18n.trans("Bone"))
@@ -372,7 +376,11 @@ class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
         settings = obj.taremin_cloth
 
         col = layout.column(align=True)
-        col.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text=i18n.trans("Pin Group"))
+        row_pin = col.row(align=True)
+        row_pin.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text=i18n.trans("Pin Group"))
+        row_pin.operator("taremin_cloth.create_pin_group", text="", icon='ADD')
+        is_wpaint = bool(context and context.mode == 'PAINT_WEIGHT')
+        row_pin.operator("taremin_cloth.toggle_weight_paint", text="", icon='WPAINT_HLT', depress=is_wpaint)
         col.prop(settings, "pin_color", text=i18n.trans("Pin Color"))
 
         row_pin_opts = col.row(align=True)

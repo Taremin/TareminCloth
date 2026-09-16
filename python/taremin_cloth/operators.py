@@ -46,6 +46,8 @@ from .ops import (
     TAREMIN_CLOTH_OT_reset_simulation,
     TAREMIN_CLOTH_OT_apply_rest_shape,
     TAREMIN_CLOTH_OT_save_as_shape_key,
+    TAREMIN_CLOTH_OT_create_pin_group,
+    TAREMIN_CLOTH_OT_toggle_weight_paint,
     TAREMIN_CLOTH_OT_clear_cache,
     TAREMIN_CLOTH_OT_apply_gpu_settings,
     TAREMIN_CLOTH_OT_interactive,

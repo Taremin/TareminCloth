@@ -624,5 +624,12 @@
   "Save current simulation deformed shape as a shape key in target shapes object": "Save current simulation deformed shape as a shape key in target shapes object",
   "Saved shape key '%s' to '%s'": "Saved shape key '%s' to '%s'",
   "Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.": "Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.",
-  "Mesh has no vertices": "Mesh has no vertices"
+  "Mesh has no vertices": "Mesh has no vertices",
+  "Create Pin Group": "Create Pin Group",
+  "Create a new vertex group for pinning and switch to weight paint mode": "Create a new vertex group for pinning and switch to weight paint mode",
+  "Created pin vertex group '%s' and switched to Weight Paint mode": "Created pin vertex group '%s' and switched to Weight Paint mode",
+  "Toggle Weight Paint": "Toggle Weight Paint",
+  "Toggle between Object Mode and Weight Paint Mode for active pin vertex group": "Toggle between Object Mode and Weight Paint Mode for active pin vertex group",
+  "Switched to Object Mode": "Switched to Object Mode",
+  "Switched to Weight Paint Mode (%s)": "Switched to Weight Paint Mode (%s)"
 }

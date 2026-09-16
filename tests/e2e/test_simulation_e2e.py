@@ -1117,6 +1117,57 @@ class TestSimulationE2E(unittest.TestCase):
             if "ShapeKeyTestCloth_Shapes" in bpy.data.objects:
                 bpy.data.objects.remove(bpy.data.objects["ShapeKeyTestCloth_Shapes"], do_unlink=True)
 
+    def test_quick_pinning_e2e(self):
+        """ピン留め頂点グループの自動作成・ウェイトペイントモード連携のE2Eテスト"""
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1.0)
+        cloth_obj = bpy.context.active_object
+        cloth_obj.name = "QuickPinTestCloth"
+
+        try:
+            bpy.ops.taremin_cloth.toggle_cloth()
+            self.assertTrue(cloth_obj.taremin_cloth.is_cloth)
+
+            # 1. 新規ピン頂点グループ作成
+            self.assertEqual(bpy.context.mode, 'OBJECT')
+            res = bpy.ops.taremin_cloth.create_pin_group()
+            self.assertEqual(res, {'FINISHED'})
+
+            # グループ Cloth_Pin が作成され、設定に反映されていること
+            self.assertIn("Cloth_Pin", cloth_obj.vertex_groups)
+            self.assertEqual(cloth_obj.taremin_cloth.pin_vertex_group, "Cloth_Pin")
+            self.assertEqual(cloth_obj.vertex_groups.active.name, "Cloth_Pin")
+
+            # ウェイトペイントモードに移行していること
+            self.assertEqual(bpy.context.mode, 'PAINT_WEIGHT')
+
+            # 2. トグルオペレーターでオブジェクトモードへ復帰
+            res_toggle1 = bpy.ops.taremin_cloth.toggle_weight_paint()
+            self.assertEqual(res_toggle1, {'FINISHED'})
+            self.assertEqual(bpy.context.mode, 'OBJECT')
+
+            # 3. トグルオペレーターで再度ウェイトペイントモードへ移行
+            res_toggle2 = bpy.ops.taremin_cloth.toggle_weight_paint()
+            self.assertEqual(res_toggle2, {'FINISHED'})
+            self.assertEqual(bpy.context.mode, 'PAINT_WEIGHT')
+            self.assertEqual(cloth_obj.vertex_groups.active.name, "Cloth_Pin")
+
+            # 4. 2回目の新規作成（インクリメントCloth_Pin.001の検証）
+            res_create2 = bpy.ops.taremin_cloth.create_pin_group()
+            self.assertEqual(res_create2, {'FINISHED'})
+            self.assertIn("Cloth_Pin.001", cloth_obj.vertex_groups)
+            self.assertEqual(cloth_obj.taremin_cloth.pin_vertex_group, "Cloth_Pin.001")
+            self.assertEqual(cloth_obj.vertex_groups.active.name, "Cloth_Pin.001")
+
+            # 終了処理としてオブジェクトモードに復帰
+            bpy.ops.taremin_cloth.toggle_weight_paint()
+            self.assertEqual(bpy.context.mode, 'OBJECT')
+
+        finally:
+            if bpy.context.mode != 'OBJECT' and bpy.ops.object.mode_set.poll():
+                bpy.ops.object.mode_set(mode='OBJECT')
+            if "QuickPinTestCloth" in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects["QuickPinTestCloth"], do_unlink=True)
+
 
 if __name__ == "__main__":
     unittest.main()

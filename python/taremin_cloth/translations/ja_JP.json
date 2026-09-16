@@ -624,5 +624,12 @@
   "Save current simulation deformed shape as a shape key in target shapes object": "現在のシミュレーション変形形状を出力先シェイプオブジェクトのシェイプキーとして保存します",
   "Saved shape key '%s' to '%s'": "シェイプキー '%s' を '%s' に保存しました",
   "Cannot save shape key while mesh is cross-subdivided. Please restore quad topology first.": "メッシュが十字分割されている間はシェイプキーを保存できません。先にQuadトポロジーを復元してください",
-  "Mesh has no vertices": "メッシュに頂点が存在しません"
+  "Mesh has no vertices": "メッシュに頂点が存在しません",
+  "Create Pin Group": "ピン頂点グループを作成",
+  "Create a new vertex group for pinning and switch to weight paint mode": "ピン留め用の頂点グループを新規作成し、ウェイトペイントモードへ移行します",
+  "Created pin vertex group '%s' and switched to Weight Paint mode": "ピン頂点グループ '%s' を作成し、ウェイトペイントモードに移行しました",
+  "Toggle Weight Paint": "ウェイトペイント切り替え",
+  "Toggle between Object Mode and Weight Paint Mode for active pin vertex group": "選択中ピングループのオブジェクトモードとウェイトペイントモードを切り替えます",
+  "Switched to Object Mode": "オブジェクトモードに切り替えました",
+  "Switched to Weight Paint Mode (%s)": "ウェイトペイントモードに切り替えました (%s)"
 }
