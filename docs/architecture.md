@@ -423,4 +423,68 @@ Taremin Cloth GUI は、GPUの計算余力を活かしつつ、目標フレー�
 #### 3. Mailbox プレゼンテーションモード
 - Surface の `present_mode` においてトリプルバッファリング（`Mailbox`）を優先選択し、DWM 垂直同期とアプリ内タイマーの干渉（ビート現象によるフレーム落ち）を防止。
 
+---
+
+## 7. 国際化 (i18n: Internationalization) 設計
+
+Taremin Cloth は、Blender標準の翻訳システム（`bpy.app.translations`）に準拠した多言語UI管理モジュール（`taremin_cloth.i18n`）を備えています。デフォルト言語を英語（`en_US`）とし、日本語（`ja_JP`）に対応しています。
+
+```mermaid
+graph TD
+    subgraph Blender UI
+        Panel[パネル: TAREMIN_CLOTH_PT_*<br>bl_translation_context: TareminCloth]
+        Prop[プロパティ: RNA定義 / bl_description]
+        DynStr[動的UI文字列 / trans]
+        OpBtn[オペレーターボタン / layout.operator]
+    end
+
+    subgraph i18n Subsystem
+        Dict[TRANSLATIONS_DICT]
+        AppTrans[bpy.app.translations API]
+    end
+
+    Panel -->|pgettext_iface msg, TareminCloth| AppTrans
+    Prop -->|pgettext_iface msg, TareminCloth| AppTrans
+    DynStr -->|trans msg, TareminCloth| AppTrans
+    OpBtn -->|trans msg, TareminCloth (事前翻訳)| AppTrans
+    Dict -->|TareminCloth 単一コンテキスト登録| AppTrans
+    AppTrans -->|ja_JP: 日本語UI表示| Panel
+    AppTrans -->|ja_JP: 日本語プロパティ・説明文| Prop
+    AppTrans -->|ja_JP: 日本語ボタン| OpBtn
+```
+
+### 7.1 名前空間完全隔離アーキテクチャ (`TareminCloth` 単一コンテキスト + 事前翻訳)
+
+- **他アドオンおよびBlender標準への干渉・被干渉の完全防止**:
+  - 一般コンテキスト `*`（`bpy.app.translations.contexts.default`）や標準コンテキスト `Operator` にメッセージを登録すると、他のすべてのアドオンやBlender本体の同名メッセージを上書きしてしまう危険性や、逆に他アドオンによってTaremin Clothの翻訳が破壊されるリスクが生じます。
+  - 本アドオンでは、**一般コンテキスト `*` および `Operator` コンテキストへの登録を一切行わない（各0件維持）完全名前空間隔離** を実現しています。
+- **RNAプロパティ描画におけるコンテキスト強制問題と事前翻訳（Pre-translation）**:
+  - BlenderのC++描画ルーチン（`layout.prop`）は、親パネルの `bl_translation_context` を無視し、RNAプロパティ定義自身の `translation_context`（デフォルトは `*`）で辞書を検索します。このため、一般コンテキスト `*` を排除した環境では、カスタムラベル（`layout.prop(..., text="...")`）が英語のまま未翻訳になる問題が生じます。
+  - これを根本解決するため、UI描画層（`panels.py`, `preferences.py`, `presets.py`）内のすべての固定テキスト・オペレーターボタンを **`text=i18n.trans("...")` による事前翻訳** で渡すアーキテクチャを採用しています。これにより、Blender内部のコンテキスト強制を完全に回避し、一般コンテキスト `*` や `Operator` を汚染することなく100%確実に日本語が表示されます。
+  - ラベルを指定しない自動プロパティ名描画に対しては、`properties.py` および `preferences.py` の全プロパティ定義関数（`FloatProperty`, `IntProperty`, `BoolProperty`, `EnumProperty`, `StringProperty`, `FloatVectorProperty`）にラッパー（`_wrap_prop`）を適用し、プロパティ定義側で `translation_context=i18n.CONTEXT`（`"TareminCloth"`）を自動付与しています。
+- **オペレーターの `bl_translation_context` と `Operator` コンテキストの完全排除**:
+  - UIパネル上のボタン描画はすべて事前翻訳（`text=i18n.trans("...")`）されるため、Blender内部の `Operator` 辞書検索はバイパスされます。
+  - パネル外での表示（F3オペレーター検索、Undo履歴、Keymap、ツールチップ等）に対しては、アドオン内の全オペレータークラス（`ops.*`, `presets.*`）に `bl_translation_context = i18n.CONTEXT`（`"TareminCloth"`）を明示的に付与しています。
+  - Blender C++ 内部のオペレーター名解決ルーチン（`WM_operatortype_name`）は、`ot->translation_context` が指定されていれば `"Operator"` ではなくそのコンテキストで辞書引きを行う仕様となっているため、`i18n.py` の辞書登録側で `("Operator", msgid)` への自動展開を行う必要が一切なくなり、**`"TareminCloth"` 単一コンテキストのみへの完全純化** を達成しています。
+- **動的ラベル・メニュータイトルの接頭辞分離翻訳**:
+  - `Selected: {obj.name}` や `Cloth Objects ({count})` などの動的変数を埋め込むUI要素については、固定接頭辞部分（`Selected:`, `Cloth Objects` 等）を `i18n.trans()` 経由で翻訳してから文字列結合を行うパターンに統一しています。
+- **英語マスター (`en_US.json`) 基準の JSON ファイル分離データ管理**:
+  - 翻訳辞書データは `i18n.py` のソースコード内から完全に排除され、`python/taremin_cloth/translations/*.json` に独立ファイルとして分離管理されています。
+  - `en_US.json` を英語マスター（全メッセージIDがキーと値として定義された基準ひな形）とし、各言語ファイル（`ja_JP.json`、将来の `zh_CN.json` 等）は `en_US.json` と 1:1 に完全対応するキー構造を持ちます。
+  - `i18n.py` は純粋な動的ファイルローダーとして機能し、新言語の追加時にも Python コードの修正が一切不要（JSON を配置するだけで即座に自動認識）なアーキテクチャを実現しています。
+
+### 7.2 翻訳完全性検証テストとライフサイクル管理
+
+- **完全性検証テストスイート (`tests/core/test_i18n.py`)**:
+  - `TestI18nStrictBlenderUsage`: アドオン登録時にBlenderが認識する全RNA構造体（Properties/Enum）、全オペレーター（`bl_label`/`bl_description`/プロパティ）、全パネル/メニュー、動的Enumアイテム、UI引数を完全抽出し、辞書内の全エントリが **100% 実際に使われていること（デッドキー0件）** を機械的に厳密検証。
+  - `TestI18nDynamicUIDraw`: `MockLayout`（UIインスペクター）により、オブジェクト未選択、布・コライダー無効、簡単モード、詳細モード、全コライダー種別（Sphere, Capsule, Plane, Mesh, Bone SDF, Mesh SDF）、アニメーション駆動など **全UI状態マトリクスを網羅** して全パネルの `draw()` を動的実行。日本語文字（ひらがな・カタカナ・漢字）の含有判定により、事前翻訳された英字混じりテキスト（例: "Taremin Cloth GUIを起動", "FPSを表示"）の誤検知を防ぎつつ、未翻訳の英語テキストを1件の漏れもなく確実に検知。
+  - `TestI18nRNACoverage`: 全設定クラス（RNA定義・Enum選択肢）および全オペレーターを走査し、辞書登録漏れ（未翻訳キー）を自動検知。
+- **再登録・リロード耐性**:
+  - `i18n.register()` では、アドオンの再読み込み（F8やスクリプト再実行）時に `ValueError` が発生することを防ぐため、事前に `bpy.app.translations.unregister(__name__)` を例外安全に呼び出してから再登録を行います。
+- **CLI・スタンドアロン実行との透過性**:
+  - `HAS_BPY` および `IS_REAL_BLENDER` チェックにより、Blender GUIが存在しないヘッドレス環境や単体テスト・CLIツール（`log_tools`）から呼び出された場合でも、未定義エラーを起こさず安全にフォールバック（原文英語をそのまま返却）します。
+
+
+
+
 

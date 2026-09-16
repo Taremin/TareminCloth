@@ -1,16 +1,18 @@
 import bpy
+from . import i18n
 from .operators import is_interactive_running
 from .utils import topology
 
 
 class TAREMIN_CLOTH_UL_elastic_groups(bpy.types.UIList):
     """伸縮グループ一覧のUIList"""
+    bl_translation_context = i18n.CONTEXT
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
             row.prop(item, "enabled", text="")
             row.prop(item, "name", text="", emboss=False, icon='EDGESEL')
-            row.prop(item, "scale", text="Scale", slider=True)
+            row.prop(item, "scale", text=i18n.trans("Scale"), slider=True)
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             layout.label(text="", icon='EDGESEL')
@@ -24,24 +26,24 @@ def _draw_diagnostics_box(layout, context):
         return
 
     box_diag = layout.box()
-    box_diag.label(text="GPU & Diagnostics", icon='PREFERENCES')
+    box_diag.label(text=i18n.trans("GPU & Diagnostics"), icon='PREFERENCES')
 
     col = box_diag.column(align=True)
-    col.prop(prefs, "gpu_backend", text="Backend")
-    col.prop(prefs, "gpu_device", text="Device")
+    col.prop(prefs, "gpu_backend", text=i18n.trans("Backend"))
+    col.prop(prefs, "gpu_device", text=i18n.trans("Device"))
 
     row_status = box_diag.row(align=True)
     active_name = prefs.active_device_name
     active_be = prefs.active_backend_name
     if active_name and active_name != "Unknown":
-        row_status.label(text=f"Active: {active_name} ({active_be})", icon='CHECKMARK')
+        row_status.label(text=f"{i18n.trans('Active:')} {active_name} ({active_be})", icon='CHECKMARK')
     else:
-        row_status.label(text="Active: 未初期化 (Auto)", icon='INFO')
+        row_status.label(text=i18n.trans("Active: Uninitialized (Auto)"), icon='INFO')
 
-    box_diag.operator("taremin_cloth.apply_gpu_settings", text="Apply GPU Settings", icon='FILE_REFRESH')
+    box_diag.operator("taremin_cloth.apply_gpu_settings", text=i18n.trans("Apply GPU Settings"), icon='FILE_REFRESH')
 
     row_log = box_diag.row(align=True)
-    row_log.label(text="Log Level:", icon='CONSOLE')
+    row_log.label(text=i18n.trans("Log Level:"), icon='CONSOLE')
     row_log.prop(prefs, "log_level", text="")
 
 
@@ -53,6 +55,7 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_order = 0
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
@@ -79,31 +82,31 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
         # --- シミュレーション構成プリセット & 一括操作 ---
         box_config = layout.box()
         row_cfg = box_config.row(align=True)
-        preset_title = scene.taremin_cloth_active_config_preset or "Config Preset"
+        preset_title = scene.taremin_cloth_active_config_preset or i18n.trans("Config Preset")
         row_cfg.menu("TAREMIN_CLOTH_MT_config_presets", text=preset_title, icon='SETTINGS')
         row_cfg.operator("taremin_cloth.save_config_preset", text="", icon='ADD')
         if scene.taremin_cloth_active_config_preset:
             row_cfg.operator("taremin_cloth.delete_config_preset", text="", icon='REMOVE')
 
         row_batch = box_config.row(align=True)
-        op_on = row_batch.operator("taremin_cloth.batch_simulation_state", text="All ON")
+        op_on = row_batch.operator("taremin_cloth.batch_simulation_state", text=i18n.trans("All ON"))
         op_on.action = 'ALL_ON'
-        op_off = row_batch.operator("taremin_cloth.batch_simulation_state", text="All OFF")
+        op_off = row_batch.operator("taremin_cloth.batch_simulation_state", text=i18n.trans("All OFF"))
         op_off.action = 'ALL_OFF'
-        op_solo = row_batch.operator("taremin_cloth.batch_simulation_state", text="Solo")
+        op_solo = row_batch.operator("taremin_cloth.batch_simulation_state", text=i18n.trans("Solo"))
         op_solo.action = 'SOLO'
 
         row_glob = box_config.row(align=True)
-        row_glob.operator("taremin_cloth.reset_all", text="Reset All", icon='RECOVER_LAST')
-        op_clr_all = row_glob.operator("taremin_cloth.apply_rest_shape", text="Apply All", icon='CHECKMARK')
+        row_glob.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
+        op_clr_all = row_glob.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply All"), icon='CHECKMARK')
         if op_clr_all:
             op_clr_all.all_objects = True
-        row_glob.operator("taremin_cloth.clear_cache", text="Clear Cache", icon='TRASH')
+        row_glob.operator("taremin_cloth.clear_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
 
         # --- Cloth Objects セクション ---
         box_cloth = layout.box()
         row_c_hdr = box_cloth.row(align=True)
-        row_c_hdr.label(text=f"Cloth Objects ({len(cloth_objs)})", icon='MOD_CLOTH')
+        row_c_hdr.label(text=f"{i18n.trans('Cloth Objects')} ({len(cloth_objs)})", icon='MOD_CLOTH')
 
         if cloth_objs:
             col_c = box_cloth.column(align=True)
@@ -135,12 +138,12 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
                 # ビューポート可視性トグル（目のアイコン）
                 row.prop(obj, "hide_viewport", text="", emboss=False)
         else:
-            box_cloth.label(text="Clothが設定されたオブジェクトはありません", icon='INFO')
+            box_cloth.label(text=i18n.trans("No cloth objects configured"), icon='INFO')
 
         # --- Collider Objects セクション ---
         box_col = layout.box()
         row_col_hdr = box_col.row(align=True)
-        row_col_hdr.label(text=f"Collider Objects ({len(collider_objs)})", icon='PHYSICS')
+        row_col_hdr.label(text=f"{i18n.trans('Collider Objects')} ({len(collider_objs)})", icon='PHYSICS')
 
         if collider_objs:
             col_col = box_col.column(align=True)
@@ -157,6 +160,8 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
                     col_icon = 'MESH_CAPSULE'
                 elif col_type == 'PLANE':
                     col_icon = 'MESH_PLANE'
+                elif col_type == 'BONE_SDF':
+                    col_icon = 'ARMATURE_DATA'
                 else:
                     col_icon = 'MESH_DATA'
 
@@ -175,8 +180,10 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
                     'CAPSULE': "Capsule",
                     'PLANE': "Plane",
                     'MESH': "Mesh",
+                    'BONE_SDF': "Bone SDF",
+                    'MESH_SDF': "Mesh SDF",
                 }
-                row.label(text=type_labels.get(col_type, col_type))
+                row.label(text=i18n.trans(type_labels.get(col_type, col_type)))
 
                 # コライダー有効/無効トグル (PHYSICS アイコン)
                 row.prop(
@@ -189,7 +196,7 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
                 # ビューポート可視性トグル
                 row.prop(obj, "hide_viewport", text="", emboss=False)
         else:
-            box_col.label(text="Colliderが設定されたオブジェクトはありません", icon='INFO')
+            box_col.label(text=i18n.trans("No collider objects configured"), icon='INFO')
 
 
 def _is_cloth_active(context):
@@ -219,6 +226,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_order = 1
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
@@ -230,7 +238,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
         obj = context.active_object
 
         if not obj or obj.type != 'MESH':
-            layout.label(text="メッシュオブジェクトを選択してください", icon='INFO')
+            layout.label(text=i18n.trans("Please select a mesh object"), icon='INFO')
             return
 
         # スケール未適用警告 (Scale != 1.0)
@@ -238,9 +246,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
         if abs(scale.x - 1.0) > 1e-3 or abs(scale.y - 1.0) > 1e-3 or abs(scale.z - 1.0) > 1e-3:
             box_warn = layout.box()
             box_warn.alert = True
-            box_warn.label(text=f"未適用スケール: ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='ERROR')
-            box_warn.label(text="物理演算の破綻を防ぐためスケールを適用してください")
-            op_scale = box_warn.operator("object.transform_apply", text="Apply Scale (Ctrl+A)", icon='CHECKMARK')
+            box_warn.label(text=f"{i18n.trans('Unapplied Scale:')} ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='ERROR')
+            box_warn.label(text=i18n.trans("Please apply scale to avoid simulation instability"))
+            op_scale = box_warn.operator("object.transform_apply", text=i18n.trans("Apply Scale (Ctrl+A)"), icon='CHECKMARK')
             op_scale.location = False
             op_scale.rotation = False
             op_scale.scale = True
@@ -251,10 +259,10 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
 
         col = layout.column(align=True)
         if not settings.is_cloth:
-            col.operator("taremin_cloth.toggle_cloth", text="Enable Cloth", icon='MOD_CLOTH')
+            col.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Enable Cloth"), icon='MOD_CLOTH')
             return
 
-        col.operator("taremin_cloth.toggle_cloth", text="Disable Cloth", icon='CANCEL')
+        col.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Disable Cloth"), icon='CANCEL')
 
         ui_mode = getattr(scene, "taremin_cloth_ui_mode", "SIMPLE") if scene else "SIMPLE"
 
@@ -262,82 +270,82 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             # --- 簡単モード (Simple Mode) ---
             # 個別操作 (Quick Controls)
             box_selected = layout.box()
-            box_selected.label(text=f"Selected: {obj.name}", icon='OBJECT_DATA')
+            box_selected.label(text=f"{i18n.trans('Selected:')} {obj.name}", icon='OBJECT_DATA')
             col_sel = box_selected.column(align=True)
-            col_sel.prop(settings, "enabled", text="Simulation Active", icon='PHYSICS')
+            col_sel.prop(settings, "enabled", text=i18n.trans("Simulation Active"), icon='PHYSICS')
             if is_interactive_running():
-                col_sel.operator("taremin_cloth.interactive", text="Stop Interactive Mode", icon='CANCEL', depress=True)
+                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Stop Interactive Mode"), icon='CANCEL', depress=True)
             else:
-                col_sel.operator("taremin_cloth.interactive", text="Interactive Mode (Grab/Drag)", icon='HAND', depress=False)
+                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
-            row_sel.operator("taremin_cloth.reset_selected", text="Reset", icon='FILE_REFRESH')
-            row_sel.operator("taremin_cloth.clear_cache", text="Clear Cache", icon='TRASH')
+            row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
+            row_sel.operator("taremin_cloth.clear_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
 
             # 1. 固定 (Attachment & Pinning)
             box_pin = layout.box()
-            box_pin.label(text="Attachment & Pinning", icon='PINNED')
+            box_pin.label(text=i18n.trans("Attachment & Pinning"), icon='PINNED')
             col_pin = box_pin.column(align=True)
-            col_pin.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text="Pin Group")
-            col_pin.prop(settings, "pin_target_object", text="Target Object")
+            col_pin.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text=i18n.trans("Pin Group"))
+            col_pin.prop(settings, "pin_target_object", text=i18n.trans("Target Object"))
             if settings.pin_target_object and settings.pin_target_object.type == 'ARMATURE':
-                col_pin.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text="Bone")
+                col_pin.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text=i18n.trans("Bone"))
 
             # 2. 縫合 (Sewing)
             box_sew = layout.box()
-            box_sew.label(text="Sewing", icon='MOD_CLOTH')
+            box_sew.label(text=i18n.trans("Sewing"), icon='MOD_CLOTH')
             col_sew = box_sew.column(align=True)
-            col_sew.prop(settings, "enable_sewing", text="Enable Sewing")
+            col_sew.prop(settings, "enable_sewing", text=i18n.trans("Enable Sewing"))
             if settings.enable_sewing:
-                col_sew.prop(settings, "sewing_shrink_speed", text="Shrink Speed")
-                col_sew.operator("taremin_cloth.create_seam", text="Create Seam (Select 2 Verts)", icon='EDGESEL')
+                col_sew.prop(settings, "sewing_shrink_speed", text=i18n.trans("Shrink Speed"))
+                col_sew.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam (Select 2 Verts)"), icon='EDGESEL')
 
             # 3. 素材プリセット (Fabric Material)
             box_mat = layout.box()
-            box_mat.label(text="Fabric Material", icon='MATERIAL')
+            box_mat.label(text=i18n.trans("Fabric Material"), icon='MATERIAL')
             row_preset = box_mat.row(align=True)
-            preset_title = f"Material: {settings.last_fabric_preset}" if settings.last_fabric_preset else "Material Preset"
+            preset_title = f"{i18n.trans('Material:')} {settings.last_fabric_preset}" if settings.last_fabric_preset else i18n.trans("Material Preset")
             row_preset.menu("TAREMIN_CLOTH_MT_fabric_presets", text=preset_title, icon='MATERIAL')
             row_thick = box_mat.row(align=True)
-            row_thick.prop(settings, "thickness", text="Thickness")
-            row_thick.operator("taremin_cloth.auto_fit_thickness", text="Auto Fit", icon='FIXED_SIZE')
+            row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
+            row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
 
             # 4. 自己衝突 (Self Collision)
             box_sc = layout.box()
-            box_sc.label(text="Self Collision", icon='PHYSICS')
+            box_sc.label(text=i18n.trans("Self Collision"), icon='PHYSICS')
             col_sc = box_sc.column(align=True)
-            col_sc.prop(settings, "enable_self_collision", text="Enable Self Collision")
+            col_sc.prop(settings, "enable_self_collision", text=i18n.trans("Enable Self Collision"))
             if settings.enable_self_collision:
                 row_sc = col_sc.row(align=True)
-                row_sc.prop(settings, "self_collision_purpose", text="Purpose")
-                row_sc.operator("taremin_cloth.auto_fit_self_collision", text="Auto Fit", icon='FIXED_SIZE')
-                col_sc.prop(settings, "thickness", text="Thickness")
+                row_sc.prop(settings, "self_collision_purpose", text=i18n.trans("Purpose"))
+                row_sc.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+                col_sc.prop(settings, "thickness", text=i18n.trans("Thickness"))
 
             # 4. 重力 (Forces & Gravity)
             box_grav = layout.box()
-            box_grav.label(text="Forces & Gravity", icon='FORCE_VORTEX')
+            box_grav.label(text=i18n.trans("Forces & Gravity"), icon='FORCE_VORTEX')
             col_grav = box_grav.column(align=True)
             col_grav.prop(settings, "gravity", slider=True)
 
             # 5. シミュレーション品質プリセット (Simulation Quality)
             box_qual = layout.box()
-            box_qual.label(text="Simulation Quality", icon='PREFERENCES')
+            box_qual.label(text=i18n.trans("Simulation Quality"), icon='PREFERENCES')
             row_q = box_qual.row(align=True)
-            sim_preset_title = f"Quality: {settings.last_simulation_preset}" if settings.last_simulation_preset else "Quality Preset"
+            sim_preset_title = f"{i18n.trans('Quality:')} {settings.last_simulation_preset}" if settings.last_simulation_preset else i18n.trans("Quality Preset")
             row_q.menu("TAREMIN_CLOTH_MT_simulation_presets", text=sim_preset_title, icon='SETTINGS')
         else:
             # --- 詳細モード (Advanced Mode) ---
             box_selected = layout.box()
-            box_selected.label(text=f"Selected: {obj.name}", icon='OBJECT_DATA')
+            box_selected.label(text=f"{i18n.trans('Selected:')} {obj.name}", icon='OBJECT_DATA')
             col_sel = box_selected.column(align=True)
-            col_sel.prop(settings, "enabled", text="Simulation Active", icon='PHYSICS')
+            col_sel.prop(settings, "enabled", text=i18n.trans("Simulation Active"), icon='PHYSICS')
             if is_interactive_running():
-                col_sel.operator("taremin_cloth.interactive", text="Stop Interactive Mode", icon='CANCEL', depress=True)
+                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Stop Interactive Mode"), icon='CANCEL', depress=True)
             else:
-                col_sel.operator("taremin_cloth.interactive", text="Interactive Mode (Grab/Drag)", icon='HAND', depress=False)
+                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
-            row_sel.operator("taremin_cloth.reset_selected", text="Reset", icon='FILE_REFRESH')
-            row_sel.operator("taremin_cloth.clear_cache", text="Clear Cache", icon='TRASH')
-            op_clr = row_sel.operator("taremin_cloth.apply_rest_shape", text="Apply Rest", icon='CHECKMARK')
+            row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
+            row_sel.operator("taremin_cloth.clear_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
+            op_clr = row_sel.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply Rest"), icon='CHECKMARK')
             if op_clr:
                 op_clr.all_objects = False
 
@@ -350,6 +358,7 @@ class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -361,17 +370,17 @@ class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
         settings = obj.taremin_cloth
 
         col = layout.column(align=True)
-        col.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text="Pin Group")
-        col.prop(settings, "pin_color", text="Pin Color")
+        col.prop_search(settings, "pin_vertex_group", obj, "vertex_groups", text=i18n.trans("Pin Group"))
+        col.prop(settings, "pin_color", text=i18n.trans("Pin Color"))
 
         row_pin_opts = col.row(align=True)
-        row_pin_opts.prop(settings, "pin_overlay_interactive_only", text="Interactive Only")
-        row_pin_opts.prop(settings, "overlay_depth_test", text="Depth Test (Z)")
+        row_pin_opts.prop(settings, "pin_overlay_interactive_only", text=i18n.trans("Interactive Only"))
+        row_pin_opts.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
         col.separator()
-        col.prop(settings, "pin_target_object", text="Target Object")
+        col.prop(settings, "pin_target_object", text=i18n.trans("Target Object"))
         if settings.pin_target_object and settings.pin_target_object.type == 'ARMATURE':
-            col.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text="Bone")
+            col.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text=i18n.trans("Bone"))
 
 
 class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
@@ -382,6 +391,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -394,7 +404,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
 
         # プリセットセレクター
         row_preset = layout.row(align=True)
-        preset_title = f"Material: {settings.last_fabric_preset}" if settings.last_fabric_preset else "Material Preset"
+        preset_title = f"{i18n.trans('Material:')} {settings.last_fabric_preset}" if settings.last_fabric_preset else i18n.trans("Material Preset")
         row_preset.menu("TAREMIN_CLOTH_MT_fabric_presets", text=preset_title, icon='MATERIAL')
         op_add = row_preset.operator("taremin_cloth.save_preset", text="", icon='ADD')
         if op_add:
@@ -405,7 +415,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
 
         # 剛性 (Stiffness)
         box_stiff = layout.box()
-        box_stiff.label(text="Stiffness (剛性)", icon='PHYSICS')
+        box_stiff.label(text=i18n.trans("Stiffness"), icon='PHYSICS')
         s_col = box_stiff.column(align=True)
         s_col.prop(settings, "tension_stiffness", slider=True)
         s_col.prop(settings, "compression_stiffness", slider=True)
@@ -414,7 +424,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
 
         # 減衰 (Damping)
         box_damp = layout.box()
-        box_damp.label(text="Damping (減衰)", icon='FORCE_DRAG')
+        box_damp.label(text=i18n.trans("Damping"), icon='FORCE_DRAG')
         d_col = box_damp.column(align=True)
         d_col.prop(settings, "air_damping", slider=True)
         d_col.prop(settings, "tension_damping", slider=True)
@@ -424,8 +434,8 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
 
         # 物性厚み (Thickness)
         row_thick = layout.row(align=True)
-        row_thick.prop(settings, "thickness", text="Thickness")
-        row_thick.operator("taremin_cloth.auto_fit_thickness", text="Auto Fit", icon='FIXED_SIZE')
+        row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
+        row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
 
 
 class TAREMIN_CLOTH_PT_forces(bpy.types.Panel):
@@ -436,6 +446,7 @@ class TAREMIN_CLOTH_PT_forces(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -454,9 +465,9 @@ class TAREMIN_CLOTH_PT_forces(bpy.types.Panel):
         box_info = layout.box()
         if scene and getattr(scene, "use_gravity", True):
             sg = scene.gravity
-            box_info.label(text=f"Scene Gravity: ({sg.x:.1f}, {sg.y:.1f}, {sg.z:.1f}) m/s²", icon='PHYSICS')
+            box_info.label(text=f"{i18n.trans('Scene Gravity:')} ({sg.x:.1f}, {sg.y:.1f}, {sg.z:.1f}) m/s²", icon='PHYSICS')
         else:
-            box_info.label(text="Scene Gravity: 無効 (0 m/s²)", icon='INFO')
+            box_info.label(text=i18n.trans("Scene Gravity: Disabled (0 m/s²)"), icon='INFO')
 
 
 class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
@@ -468,6 +479,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -480,37 +492,37 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
 
         # コライダー接触
         box_col = layout.box()
-        box_col.label(text="Collider Interaction", icon='PHYSICS')
+        box_col.label(text=i18n.trans("Collider Interaction"), icon='PHYSICS')
         c_col = box_col.column(align=True)
         c_col.prop(settings, "enable_edge_collision")
         if settings.enable_edge_collision:
             edge_sub = c_col.column(align=True)
-            edge_sub.prop(settings, "edge_margin_scale", text="Margin Scale")
-            edge_sub.prop(settings, "edge_margin_offset", text="Margin Offset")
+            edge_sub.prop(settings, "edge_margin_scale", text=i18n.trans("Margin Scale"))
+            edge_sub.prop(settings, "edge_margin_offset", text=i18n.trans("Margin Offset"))
 
         # 自己・レイヤー衝突
         box_layer = layout.box()
-        box_layer.label(text="Self & Layer Collision", icon='RENDERLAYERS')
+        box_layer.label(text=i18n.trans("Self & Layer Collision"), icon='RENDERLAYERS')
         l_col = box_layer.column(align=True)
         l_col.prop(settings, "enable_self_collision")
         if settings.enable_self_collision:
             row_p = l_col.row(align=True)
-            row_p.prop(settings, "self_collision_purpose", text="Purpose")
-            row_p.operator("taremin_cloth.auto_fit_self_collision", text="Auto Fit", icon='FIXED_SIZE')
+            row_p.prop(settings, "self_collision_purpose", text=i18n.trans("Purpose"))
+            row_p.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
 
             self_sub = l_col.column(align=True)
-            self_sub.prop(settings, "self_collision_relief_factor", text="Relief Factor")
-            self_sub.prop(settings, "self_collision_max_displacement_ratio", text="Max Step Ratio")
-            self_sub.prop(settings, "self_collision_max_iterations", text="Search Limit")
-            self_sub.prop(settings, "enable_normal_untangling", text="Normal Untangling")
-            self_sub.prop(settings, "coupled_self_collision_mode", text="Coupled Mode")
+            self_sub.prop(settings, "self_collision_relief_factor", text=i18n.trans("Relief Factor"))
+            self_sub.prop(settings, "self_collision_max_displacement_ratio", text=i18n.trans("Max Step Ratio"))
+            self_sub.prop(settings, "self_collision_max_iterations", text=i18n.trans("Search Limit"))
+            self_sub.prop(settings, "enable_normal_untangling", text=i18n.trans("Normal Untangling"))
+            self_sub.prop(settings, "coupled_self_collision_mode", text=i18n.trans("Coupled Mode"))
             if settings.coupled_self_collision_mode != 'OFF':
-                self_sub.prop(settings, "post_collision_relaxation_iters", text="Relax Steps")
+                self_sub.prop(settings, "post_collision_relaxation_iters", text=i18n.trans("Relax Steps"))
         l_col.separator()
         l_col.prop(settings, "layer_id")
         row_thick = l_col.row(align=True)
         row_thick.prop(settings, "thickness")
-        row_thick.operator("taremin_cloth.auto_fit_thickness", text="Auto Fit", icon='FIXED_SIZE')
+        row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
 
 
 class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
@@ -522,6 +534,7 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -534,16 +547,16 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
 
         # 縫合 (Sewing)
         box_sew = layout.box()
-        box_sew.label(text="Sewing (Pattern Seaming)", icon='MOD_CLOTH')
+        box_sew.label(text=i18n.trans("Sewing (Pattern Seaming)"), icon='MOD_CLOTH')
         s_col = box_sew.column(align=True)
         s_col.prop(settings, "enable_sewing")
         if settings.enable_sewing:
             s_col.prop(settings, "sewing_shrink_speed")
-            s_col.operator("taremin_cloth.create_seam", text="Create Seam Between 2 Verts", icon='EDGESEL')
+            s_col.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam Between 2 Verts"), icon='EDGESEL')
 
         # 伸縮グループ (Elastic Bands)
         box_elastic = layout.box()
-        box_elastic.label(text="Elastic Bands / Edge Scaling", icon='MOD_SHRINKWRAP')
+        box_elastic.label(text=i18n.trans("Elastic Bands / Edge Scaling"), icon='MOD_SHRINKWRAP')
         row = box_elastic.row()
         row.template_list(
             "TAREMIN_CLOTH_UL_elastic_groups",
@@ -564,17 +577,17 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
         if 0 <= settings.active_elastic_group_index < len(settings.elastic_groups):
             active_grp = settings.elastic_groups[settings.active_elastic_group_index]
             col_details = box_elastic.column(align=True)
-            col_details.prop(active_grp, "name", text="Name")
-            col_details.prop(active_grp, "scale", text="Scale (Rest Length)", slider=True)
-            col_details.prop(active_grp, "color", text="Line Color")
+            col_details.prop(active_grp, "name", text=i18n.trans("Name"))
+            col_details.prop(active_grp, "scale", text=i18n.trans("Scale (Rest Length)"), slider=True)
+            col_details.prop(active_grp, "color", text=i18n.trans("Line Color"))
             n_edges = len(active_grp.get_edge_indices())
-            col_details.label(text=f"Registered Edges: {n_edges}", icon='INFO')
+            col_details.label(text=f"{i18n.trans('Registered Edges:')} {n_edges}", icon='INFO')
 
         row_elastic_disp = box_elastic.row(align=True)
-        row_elastic_disp.prop(settings, "show_elastic_overlay", text="Show Overlay")
+        row_elastic_disp.prop(settings, "show_elastic_overlay", text=i18n.trans("Show Overlay"))
         if settings.show_elastic_overlay:
-            row_elastic_disp.prop(settings, "elastic_overlay_interactive_only", text="Interactive Only")
-            row_elastic_disp.prop(settings, "overlay_depth_test", text="Depth Test (Z)")
+            row_elastic_disp.prop(settings, "elastic_overlay_interactive_only", text=i18n.trans("Interactive Only"))
+            row_elastic_disp.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
 
 class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
@@ -586,6 +599,7 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -599,7 +613,7 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
         # 品質プリセット
         box_sim = layout.box()
         row = box_sim.row(align=True)
-        sim_preset_title = f"Quality: {settings.last_simulation_preset}" if settings.last_simulation_preset else "Quality Preset"
+        sim_preset_title = f"{i18n.trans('Quality:')} {settings.last_simulation_preset}" if settings.last_simulation_preset else i18n.trans("Quality Preset")
         row.menu("TAREMIN_CLOTH_MT_simulation_presets", text=sim_preset_title, icon='SETTINGS')
         op_add = row.operator("taremin_cloth.save_preset", text="", icon='ADD')
         if op_add:
@@ -614,12 +628,12 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
         sim_col.prop(settings, "enable_adaptive_substep")
         if settings.enable_adaptive_substep:
             row_steps = sim_col.row(align=True)
-            row_steps.prop(settings, "min_substeps", text="Min")
-            row_steps.prop(settings, "max_substeps", text="Max")
+            row_steps.prop(settings, "min_substeps", text=i18n.trans("Min"))
+            row_steps.prop(settings, "max_substeps", text=i18n.trans("Max"))
 
         # ソルバー & パフォーマンス
         box_perf = layout.box()
-        box_perf.label(text="Performance Tuning", icon='PREFERENCES')
+        box_perf.label(text=i18n.trans("Performance Tuning"), icon='PREFERENCES')
         p_col = box_perf.column(align=True)
         p_col.prop(settings, "solver_mode")
         row_buf = p_col.row(align=True)
@@ -639,6 +653,7 @@ class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -650,7 +665,7 @@ class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):
         settings = obj.taremin_cloth
 
         t_col = layout.column(align=True)
-        t_col.prop(settings, "triangulation_mode", text="Mode")
+        t_col.prop(settings, "triangulation_mode", text=i18n.trans("Mode"))
 
         if settings.triangulation_mode == 'DYNAMIC_DIAGONAL':
             t_col.prop(settings, "dynamic_preserve_flat")
@@ -659,8 +674,8 @@ class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):
             t_col.prop(settings, "auto_triangulate_on_stop")
 
             row_topo_ops = t_col.row(align=True)
-            row_topo_ops.operator("taremin_cloth.apply_dynamic_diagonal", text="Split by Strain", icon='MOD_TRIANGULATE')
-            row_topo_ops.operator("taremin_cloth.restore_quad_topology", text="Restore Quad", icon='RECOVER_LAST')
+            row_topo_ops.operator("taremin_cloth.apply_dynamic_diagonal", text=i18n.trans("Split by Strain"), icon='MOD_TRIANGULATE')
+            row_topo_ops.operator("taremin_cloth.restore_quad_topology", text=i18n.trans("Restore Quad"), icon='RECOVER_LAST')
 
         elif settings.triangulation_mode == 'CROSS_SUBDIV':
             t_col.prop(settings, "post_process_mode")
@@ -671,10 +686,10 @@ class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):
             row_topo_ops = t_col.row(align=True)
             is_subdivided = topology.is_cross_subdivided(obj)
             if not is_subdivided:
-                row_topo_ops.operator("taremin_cloth.apply_cross_subdivision", text="Subdivide Quads (Poke)", icon='MOD_TRIANGULATE')
+                row_topo_ops.operator("taremin_cloth.apply_cross_subdivision", text=i18n.trans("Subdivide Quads (Poke)"), icon='MOD_TRIANGULATE')
             else:
-                row_topo_ops.operator("taremin_cloth.apply_post_process", text="Apply Post-Process", icon='CHECKMARK')
-                row_topo_ops.operator("taremin_cloth.restore_quad_topology", text="Restore Quad", icon='RECOVER_LAST')
+                row_topo_ops.operator("taremin_cloth.apply_post_process", text=i18n.trans("Apply Post-Process"), icon='CHECKMARK')
+                row_topo_ops.operator("taremin_cloth.restore_quad_topology", text=i18n.trans("Restore Quad"), icon='RECOVER_LAST')
 
 
 class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
@@ -686,6 +701,7 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -697,16 +713,16 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
         settings = obj.taremin_cloth
 
         col = layout.column(align=True)
-        col.prop(settings, "interactive_realtime_sync", text="Real-time Sync")
+        col.prop(settings, "interactive_realtime_sync", text=i18n.trans("Real-time Sync"))
         if settings.interactive_realtime_sync:
-            col.prop(settings, "interactive_max_steps", text="Max Steps / Frame")
-        col.prop(settings, "isolate_viewport_view", text="Isolate View (Local)")
+            col.prop(settings, "interactive_max_steps", text=i18n.trans("Max Steps / Frame"))
+        col.prop(settings, "isolate_viewport_view", text=i18n.trans("Isolate View (Local)"))
         row_fps = col.row(align=True)
-        row_fps.prop(settings, "show_fps_overlay", text="Show FPS")
+        row_fps.prop(settings, "show_fps_overlay", text=i18n.trans("Show FPS"))
         if settings.show_fps_overlay:
             row_fps.prop(settings, "fps_overlay_position", text="")
         col.separator()
-        col.operator("taremin_cloth.benchmark_fps", text="Benchmark FPS (2 sec)", icon='TIME')
+        col.operator("taremin_cloth.benchmark_fps", text=i18n.trans("Benchmark FPS (2 sec)"), icon='TIME')
 
 
 class TAREMIN_CLOTH_PT_gui_experimental(bpy.types.Panel):
@@ -718,6 +734,7 @@ class TAREMIN_CLOTH_PT_gui_experimental(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -736,18 +753,19 @@ class TAREMIN_CLOTH_PT_gui_experimental(bpy.types.Panel):
         col_gui = layout.column(align=True)
         if client.is_connected:
             b_fps, g_fps = get_gui_fps_stats()
-            stat_text = f"● Connected | GUI: {g_fps:.0f} FPS" if g_fps > 0 else "● Connected"
+            conn_txt = i18n.trans("Connected")
+            stat_text = f"● {conn_txt} | GUI: {g_fps:.0f} FPS" if g_fps > 0 else f"● {conn_txt}"
             col_gui.label(text=stat_text, icon='CHECKMARK')
             row_ctrl = col_gui.row(align=True)
             if is_gui_preview_running():
-                row_ctrl.operator("taremin_cloth.stop_gui_preview", text="Stop Preview", icon='CANCEL')
+                row_ctrl.operator("taremin_cloth.stop_gui_preview", text=i18n.trans("Stop Preview"), icon='CANCEL')
             else:
-                row_ctrl.operator("taremin_cloth.gui_preview", text="Live Preview", icon='PLAY')
-            row_ctrl.operator("taremin_cloth.apply_gui_pose", text="Apply to Mesh", icon='CHECKMARK')
-            col_gui.operator("taremin_cloth.sync_gui_colliders", text="Sync Colliders", icon='FILE_REFRESH')
+                row_ctrl.operator("taremin_cloth.gui_preview", text=i18n.trans("Live Preview"), icon='PLAY')
+            row_ctrl.operator("taremin_cloth.apply_gui_pose", text=i18n.trans("Apply to Mesh"), icon='CHECKMARK')
+            col_gui.operator("taremin_cloth.sync_gui_colliders", text=i18n.trans("Sync Colliders"), icon='FILE_REFRESH')
         else:
-            col_gui.operator("taremin_cloth.launch_gui", text="Launch Taremin Cloth GUI", icon='WINDOW')
-            col_gui.operator("taremin_cloth.connect_gui", text="Connect to Existing GUI", icon='LINKED')
+            col_gui.operator("taremin_cloth.launch_gui", text=i18n.trans("Launch Taremin Cloth GUI"), icon='WINDOW')
+            col_gui.operator("taremin_cloth.connect_gui", text=i18n.trans("Connect to Existing GUI"), icon='LINKED')
 
 
 class TAREMIN_CLOTH_PT_diagnostics(bpy.types.Panel):
@@ -759,6 +777,7 @@ class TAREMIN_CLOTH_PT_diagnostics(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
 
     @classmethod
     def poll(cls, context):
@@ -776,6 +795,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
     bl_order = 2
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
@@ -787,7 +807,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
         obj = context.active_object
 
         if not obj:
-            layout.label(text="オブジェクトを選択してください", icon='INFO')
+            layout.label(text=i18n.trans("Please select an object"), icon='INFO')
             return
 
         # スケール未適用警告 (Scale != 1.0)
@@ -795,9 +815,9 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
         if abs(scale.x - 1.0) > 1e-3 or abs(scale.y - 1.0) > 1e-3 or abs(scale.z - 1.0) > 1e-3:
             box_warn = layout.box()
             box_warn.alert = True
-            box_warn.label(text=f"未適用スケール: ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='ERROR')
-            box_warn.label(text="接触判定のズレを防ぐためスケールを適用してください")
-            op_scale = box_warn.operator("object.transform_apply", text="Apply Scale (Ctrl+A)", icon='CHECKMARK')
+            box_warn.label(text=f"{i18n.trans('Unapplied Scale:')} ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='ERROR')
+            box_warn.label(text=i18n.trans("Please apply scale to avoid contact detection errors"))
+            op_scale = box_warn.operator("object.transform_apply", text=i18n.trans("Apply Scale (Ctrl+A)"), icon='CHECKMARK')
             op_scale.location = False
             op_scale.rotation = False
             op_scale.scale = True
@@ -807,9 +827,9 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             return
 
         col = layout.column(align=True)
-        col.prop(col_settings, "is_collider", text="Enable Collider", icon='PHYSICS')
+        col.prop(col_settings, "is_collider", text=i18n.trans("Enable Collider"), icon='PHYSICS')
         if col_settings.is_collider:
-            col.prop(col_settings, "enabled", text="Collider Active", icon='PHYSICS')
+            col.prop(col_settings, "enabled", text=i18n.trans("Collider Active"), icon='PHYSICS')
 
         if not col_settings.is_collider:
             return
@@ -819,42 +839,43 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
         if ui_mode == 'SIMPLE':
             # --- 簡単モード (Simple Mode) ---
             box = layout.box()
-            box.label(text="Collider Setup (Simple)", icon='PHYSICS')
+            box.label(text=i18n.trans("Collider Setup (Simple)"), icon='PHYSICS')
             b_col = box.column(align=True)
 
             # 目的別選択と自動判別
             row_p = b_col.row(align=True)
-            row_p.prop(col_settings, "collider_purpose", text="Purpose")
+            row_p.prop(col_settings, "collider_purpose", text=i18n.trans("Purpose"))
             row_p.operator("taremin_cloth.auto_detect_collider", text="", icon='FILE_REFRESH')
 
             # 判定された形状の表示
             type_names = {
-                'BONE_SDF': ("Bone SDF (素体・キャラクタ)", 'ARMATURE_DATA'),
-                'MESH_SDF': ("Mesh SDF (マネキン・剛体)", 'MESH_DATA'),
-                'PLANE': ("Plane (床・地面)", 'MESH_PLANE'),
-                'SPHERE': ("Sphere (球体)", 'MESH_UVSPHERE'),
-                'CAPSULE': ("Capsule (カプセル)", 'MESH_CAPSULE'),
-                'MESH': ("Mesh (単純メッシュ)", 'MESH_DATA'),
+                'BONE_SDF': ("Bone SDF (Character Body)", 'ARMATURE_DATA'),
+                'MESH_SDF': ("Mesh SDF (Mannequin/Rigid)", 'MESH_DATA'),
+                'PLANE': ("Plane (Floor/Ground)", 'MESH_PLANE'),
+                'SPHERE': ("Sphere", 'MESH_UVSPHERE'),
+                'CAPSULE': ("Capsule", 'MESH_CAPSULE'),
+                'MESH': ("Mesh (Simple)", 'MESH_DATA'),
             }
             name_icon = type_names.get(col_settings.collider_type, (col_settings.collider_type, 'PHYSICS'))
-            b_col.label(text=f"Type: {name_icon[0]}", icon=name_icon[1])
+            type_label = i18n.trans(name_icon[0])
+            b_col.label(text=f"{i18n.trans('Type:')} {type_label}", icon=name_icon[1])
 
             # 形状に応じた主要パラメータ
             if col_settings.collider_type in {'SPHERE', 'CAPSULE'}:
-                b_col.prop(col_settings, "radius", text="Radius")
+                b_col.prop(col_settings, "radius", text=i18n.trans("Radius"))
             else:
-                b_col.prop(col_settings, "thickness", text="Thickness")
+                b_col.prop(col_settings, "thickness", text=i18n.trans("Thickness"))
             b_col.prop(col_settings, "friction", slider=True)
 
             # SDF系の場合のワンクリックベイクボタン
             if col_settings.collider_type in {'BONE_SDF', 'MESH_SDF'}:
                 b_col.separator()
-                b_col.operator("taremin_cloth.rebake_bone_sdf", text="Bake / Update SDF", icon='FILE_REFRESH')
+                b_col.operator("taremin_cloth.rebake_bone_sdf", text=i18n.trans("Bake / Update SDF"), icon='FILE_REFRESH')
         else:
             # --- 詳細モード (Advanced Mode) ---
             box = layout.box()
             row = box.row(align=True)
-            col_preset_title = f"Collider: {col_settings.last_collider_preset}" if col_settings.last_collider_preset else "Collider Preset"
+            col_preset_title = f"{i18n.trans('Collider:')} {col_settings.last_collider_preset}" if col_settings.last_collider_preset else i18n.trans("Collider Preset")
             row.menu("TAREMIN_CLOTH_MT_collider_presets", text=col_preset_title, icon='PHYSICS')
             op_add = row.operator("taremin_cloth.save_preset", text="", icon='ADD')
             if op_add:
@@ -867,7 +888,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
 
             # クイック目的設定・自動判別
             row_p = b_col.row(align=True)
-            row_p.prop(col_settings, "collider_purpose", text="Purpose")
+            row_p.prop(col_settings, "collider_purpose", text=i18n.trans("Purpose"))
             row_p.operator("taremin_cloth.auto_detect_collider", text="", icon='FILE_REFRESH')
 
             b_col.prop(col_settings, "collider_type")
@@ -878,10 +899,10 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 b_col.prop(col_settings, "single_sided")
                 if col_settings.single_sided:
                     sub_rec = b_col.column(align=True)
-                    sub_rec.prop(col_settings, "enable_single_sided_recovery", text="  Single-Sided Recovery")
+                    sub_rec.prop(col_settings, "enable_single_sided_recovery", text=f"  {i18n.trans('Single-Sided Recovery')}")
 
                 box_opt = b_col.box()
-                box_opt.label(text="Optimization", icon='PREFERENCES')
+                box_opt.label(text=i18n.trans("Optimization"), icon='PREFERENCES')
                 box_opt.prop(col_settings, "enable_cluster_culling")
                 if col_settings.enable_cluster_culling:
                     box_opt.prop(col_settings, "sweep_margin_offset")
@@ -895,10 +916,10 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 if not arm_mod:
                     box_warn = b_col.box()
                     box_warn.alert = True
-                    box_warn.label(text="Armatureモディファイアが必要です", icon='ERROR')
-                    box_warn.label(text="スキニングされた素体メッシュに設定してください")
+                    box_warn.label(text=i18n.trans("Armature modifier required"), icon='ERROR')
+                    box_warn.label(text=i18n.trans("Configure on a skinned character mesh"))
                 else:
-                    b_col.label(text=f"Armature: {arm_mod.object.name}", icon='ARMATURE_DATA')
+                    b_col.label(text=f"{i18n.trans('Armature:')} {arm_mod.object.name}", icon='ARMATURE_DATA')
 
                 b_col.prop(col_settings, "sdf_resolution")
                 if col_settings.sdf_resolution == 'CUSTOM':
@@ -916,10 +937,10 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                     if safe_res < req_res:
                         box_ovf = b_col.box()
                         box_ovf.alert = True
-                        box_ovf.label(text=f"警告: 解像度がGPU上限(2048px)を超過します", icon='ERROR')
-                        box_ovf.label(text=f"ボーン数({n_bones_est})に対する安全解像度: {safe_res}以下")
+                        box_ovf.label(text=i18n.trans("Warning: Resolution exceeds GPU limit (2048px)"), icon='ERROR')
+                        box_ovf.label(text=f"{i18n.trans('Safe resolution for bone count')}({n_bones_est}): <={safe_res}")
                     else:
-                        b_col.label(text=f"SDFテクスチャ: {total_w}x{total_h}x{total_d} (約{vram_mb:.0f}MB)", icon='INFO')
+                        b_col.label(text=f"{i18n.trans('SDF Texture:')} {total_w}x{total_h}x{total_d} ({i18n.trans('Approx.')}{vram_mb:.0f}MB)", icon='INFO')
 
                 b_col.prop(col_settings, "sdf_margin")
                 b_col.prop(col_settings, "weight_threshold")
@@ -931,18 +952,18 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
 
                 # ハイブリッドコライダー（関節部メッシュ補完）
                 box_hybrid = b_col.box()
-                box_hybrid.prop(col_settings, "enable_joint_mesh", text="Joint Mesh Hybrid", icon='MOD_MESHDEFORM')
+                box_hybrid.prop(col_settings, "enable_joint_mesh", text=i18n.trans("Joint Mesh Hybrid"), icon='MOD_MESHDEFORM')
                 if col_settings.enable_joint_mesh:
                     col_h = box_hybrid.column(align=True)
                     col_h.prop(col_settings, "joint_weight_threshold")
-                    col_h.prop(col_settings, "joint_rotation_threshold", text="Activation Angle (°)")
-                    col_h.label(text="屈曲した関節のみ動的にメッシュ化し高速化", icon='INFO')
+                    col_h.prop(col_settings, "joint_rotation_threshold", text=i18n.trans("Activation Angle (°)"))
+                    col_h.label(text=i18n.trans("Dynamically mesh only bent joints for speedup"), icon='INFO')
 
                 b_col.prop(col_settings, "sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)
-                row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text="Clear Cache", icon='TRASH')
-                row_cache.operator("taremin_cloth.rebake_bone_sdf", text="Rebake SDF", icon='FILE_REFRESH')
+                row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
+                row_cache.operator("taremin_cloth.rebake_bone_sdf", text=i18n.trans("Rebake SDF"), icon='FILE_REFRESH')
             elif col_settings.collider_type == 'MESH_SDF':
                 b_col.prop(col_settings, "mesh_sdf_voxel_size")
                 b_col.prop(col_settings, "mesh_sdf_margin")
@@ -966,21 +987,21 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 if w_est > 0:
                     if is_clamped:
                         box_mem.label(
-                            text=f"上限({col_settings.mesh_sdf_max_vram_mb}MB)超過: 推定{raw_vram:.1f}MB",
+                            text=f"{i18n.trans('Limit exceeded')}({col_settings.mesh_sdf_max_vram_mb}MB): {i18n.trans('Estimated:')} {raw_vram:.1f}MB",
                             icon='ERROR',
                         )
                         box_mem.label(
-                            text=f"自動最適化: {eff_v*1000:.1f}mm ({w_est}x{h_est}x{d_est}, 約{vram_est:.1f}MB)",
+                            text=f"{i18n.trans('Auto-optimized:')} {eff_v*1000:.1f}mm ({w_est}x{h_est}x{d_est}, {i18n.trans('Approx.')}{vram_est:.1f}MB)",
                             icon='CHECKMARK',
                         )
                     else:
-                        box_mem.label(text=f"解像度: {w_est}x{h_est}x{d_est} (約{vram_est:.1f}MB)", icon='INFO')
+                        box_mem.label(text=f"{i18n.trans('Resolution:')} {w_est}x{h_est}x{d_est} ({i18n.trans('Approx.')}{vram_est:.1f}MB)", icon='INFO')
 
                 b_col.prop(col_settings, "mesh_sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)
-                row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text="Clear Cache", icon='TRASH')
-                row_cache.operator("taremin_cloth.rebake_bone_sdf", text="Rebake SDF", icon='FILE_REFRESH')
+                row_cache.operator("taremin_cloth.clear_bone_sdf_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
+                row_cache.operator("taremin_cloth.rebake_bone_sdf", text=i18n.trans("Rebake SDF"), icon='FILE_REFRESH')
             b_col.prop(col_settings, "friction")
             b_col.prop(col_settings, "restitution")
 
@@ -988,63 +1009,63 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             anim = getattr(col_settings, "anim", None)
             if anim:
                 box_anim = layout.box()
-                box_anim.label(text="Collider Animation", icon='ARMATURE_DATA')
+                box_anim.label(text=i18n.trans("Collider Animation"), icon='ARMATURE_DATA')
                 col_anim = box_anim.column(align=True)
-                col_anim.prop(anim, "enabled", text="Enable Animation", icon='PLAY')
+                col_anim.prop(anim, "enabled", text=i18n.trans("Enable Animation"), icon='PLAY')
 
                 if anim.enabled:
-                    col_anim.prop(anim, "target_type", text="Type")
+                    col_anim.prop(anim, "target_type", text=i18n.trans("Type"))
 
                     if anim.target_type == 'SHAPE_KEY':
                         if obj.type == 'MESH' and obj.data and obj.data.shape_keys:
-                            col_anim.prop_search(anim, "shape_key_name", obj.data.shape_keys, "key_blocks", text="Shape Key")
+                            col_anim.prop_search(anim, "shape_key_name", obj.data.shape_keys, "key_blocks", text=i18n.trans("Shape Key"))
                         else:
-                            col_anim.prop(anim, "shape_key_name", text="Shape Key")
+                            col_anim.prop(anim, "shape_key_name", text=i18n.trans("Shape Key"))
                         row_vals = col_anim.row(align=True)
-                        row_vals.prop(anim, "start_value", text="Start")
-                        row_vals.prop(anim, "end_value", text="End")
+                        row_vals.prop(anim, "start_value", text=i18n.trans("Start"))
+                        row_vals.prop(anim, "end_value", text=i18n.trans("End"))
 
                     elif anim.target_type == 'POSE_BLEND':
-                        col_anim.prop(anim, "armature_obj", text="Armature")
+                        col_anim.prop(anim, "armature_obj", text=i18n.trans("Armature"))
 
                         # ポーズ記録ボタン
                         row_rec = col_anim.row(align=True)
-                        op_rec_start = row_rec.operator("taremin_cloth.record_pose", text="Rec Start (0.0)", icon='KEY_HLT')
+                        op_rec_start = row_rec.operator("taremin_cloth.record_pose", text=i18n.trans("Rec Start (0.0)"), icon='KEY_HLT')
                         op_rec_start.slot = 'START'
-                        op_rec_target = row_rec.operator("taremin_cloth.record_pose", text="Rec Target (1.0)", icon='KEY_HLT')
+                        op_rec_target = row_rec.operator("taremin_cloth.record_pose", text=i18n.trans("Rec Target (1.0)"), icon='KEY_HLT')
                         op_rec_target.slot = 'TARGET'
 
                         # プレビュー・レストボタン
                         row_prev = col_anim.row(align=True)
-                        op_prev_start = row_prev.operator("taremin_cloth.apply_pose_preview", text="0.0", icon='REW')
+                        op_prev_start = row_prev.operator("taremin_cloth.apply_pose_preview", text=i18n.trans("0.0"), icon='REW')
                         op_prev_start.slot = 'START'
-                        op_prev_target = row_prev.operator("taremin_cloth.apply_pose_preview", text="1.0", icon='FF')
+                        op_prev_target = row_prev.operator("taremin_cloth.apply_pose_preview", text=i18n.trans("1.0"), icon='FF')
                         op_prev_target.slot = 'TARGET'
-                        op_prev_rest = row_prev.operator("taremin_cloth.apply_pose_preview", text="Rest", icon='FILE_REFRESH')
+                        op_prev_rest = row_prev.operator("taremin_cloth.apply_pose_preview", text=i18n.trans("Rest"), icon='FILE_REFRESH')
                         op_prev_rest.slot = 'REST'
 
                     elif anim.target_type == 'ACTION':
-                        col_anim.prop(anim, "armature_obj", text="Armature")
-                        col_anim.prop(anim, "action", text="Action")
+                        col_anim.prop(anim, "armature_obj", text=i18n.trans("Armature"))
+                        col_anim.prop(anim, "action", text=i18n.trans("Action"))
                         row_f = col_anim.row(align=True)
-                        row_f.prop(anim, "frame_start", text="Start F")
-                        row_f.prop(anim, "frame_end", text="End F")
+                        row_f.prop(anim, "frame_start", text=i18n.trans("Start F"))
+                        row_f.prop(anim, "frame_end", text=i18n.trans("End F"))
 
                     # 再生サイクル設定
                     box_cycle = col_anim.box()
-                    box_cycle.label(text="Playback Settings", icon='TIME')
+                    box_cycle.label(text=i18n.trans("Playback Settings"), icon='TIME')
                     c_col = box_cycle.column(align=True)
-                    c_col.prop(anim, "play_mode", text="Mode")
-                    c_col.prop(anim, "cycle_frames", text="Cycle Frames")
+                    c_col.prop(anim, "play_mode", text=i18n.trans("Mode"))
+                    c_col.prop(anim, "cycle_frames", text=i18n.trans("Cycle Frames"))
 
                     if anim.play_mode in {'REPEAT', 'PINGPONG'}:
                         row_loop = c_col.row(align=True)
-                        row_loop.prop(anim, "infinite_loop", text="Infinite")
+                        row_loop.prop(anim, "infinite_loop", text=i18n.trans("Infinite"))
                         if not anim.infinite_loop:
-                            row_loop.prop(anim, "loop_count", text="Loops")
+                            row_loop.prop(anim, "loop_count", text=i18n.trans("Loops"))
 
-                    c_col.prop(anim, "easing", text="Easing")
-                    c_col.prop(anim, "progress", text="Progress", slider=True)
+                    c_col.prop(anim, "easing", text=i18n.trans("Easing"))
+                    c_col.prop(anim, "progress", text=i18n.trans("Progress"), slider=True)
 
 
 classes = (

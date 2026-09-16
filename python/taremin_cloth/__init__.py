@@ -29,6 +29,7 @@ subpackages = [
     (
         "",
         [
+            "i18n",
             "preferences",
             "properties",
             "presets",

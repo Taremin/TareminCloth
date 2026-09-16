@@ -11,12 +11,14 @@ from ..engine.cache import (
     clear_simulator_for_object,
 )
 from ..utils import topology
+from .. import i18n
 
 
 class TAREMIN_CLOTH_OT_create_seam(bpy.types.Operator):
     """選択された2頂点間に縫合エッジ（Loose Edge）を作成する"""
     bl_idname = "taremin_cloth.create_seam"
     bl_label = "Create Seam"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -59,6 +61,7 @@ class TAREMIN_CLOTH_OT_add_elastic_group(bpy.types.Operator):
     """選択された辺から新規伸縮グループ（ゴム紐）を作成する"""
     bl_idname = "taremin_cloth.add_elastic_group"
     bl_label = "Add Elastic Group"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -95,6 +98,7 @@ class TAREMIN_CLOTH_OT_remove_elastic_group(bpy.types.Operator):
     """アクティブな伸縮グループを削除する"""
     bl_idname = "taremin_cloth.remove_elastic_group"
     bl_label = "Remove Elastic Group"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -118,6 +122,7 @@ class TAREMIN_CLOTH_OT_assign_elastic_edges(bpy.types.Operator):
     """選択された辺をアクティブな伸縮グループに割り当てる（上書き）"""
     bl_idname = "taremin_cloth.assign_elastic_edges"
     bl_label = "Assign Selected Edges"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -154,6 +159,7 @@ class TAREMIN_CLOTH_OT_select_elastic_edges(bpy.types.Operator):
     """アクティブな伸縮グループに登録されている辺を3Dビューで選択する"""
     bl_idname = "taremin_cloth.select_elastic_edges"
     bl_label = "Select Group Edges"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -190,6 +196,7 @@ class TAREMIN_CLOTH_OT_apply_cross_subdivision(bpy.types.Operator):
     """選択中のメッシュの四角面を十字分割（Poke Faces）する"""
     bl_idname = "taremin_cloth.apply_cross_subdivision"
     bl_label = "Apply Cross Subdivision"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -218,6 +225,7 @@ class TAREMIN_CLOTH_OT_apply_post_process(bpy.types.Operator):
     """シミュレーション結果に基づいてトポロジー後処理を実行する"""
     bl_idname = "taremin_cloth.apply_post_process"
     bl_label = "Apply Post-Process"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -245,6 +253,7 @@ class TAREMIN_CLOTH_OT_apply_dynamic_diagonal(bpy.types.Operator):
     """歪み（Strain）に基づいて四角面をシワの稜線に沿った最適な2つの三角形に分割する"""
     bl_idname = "taremin_cloth.apply_dynamic_diagonal"
     bl_label = "Split by Strain"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -275,6 +284,7 @@ class TAREMIN_CLOTH_OT_restore_quad_topology(bpy.types.Operator):
     """十字分割または動的分割されたメッシュを元の四角面（Quad）に復元する"""
     bl_idname = "taremin_cloth.restore_quad_topology"
     bl_label = "Restore Quad Topology"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -295,10 +305,11 @@ class TAREMIN_CLOTH_OT_restore_quad_topology(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_auto_fit_thickness(bpy.types.Operator):
-    """メッシュのエッジ長スケールに基づき、貫通・破綻を起こさない適正な布の厚みを自動設定する"""
+    """Automatically calculate and apply recommended cloth thickness based on average edge length"""
     bl_idname = "taremin_cloth.auto_fit_thickness"
     bl_label = "Auto Fit Thickness"
-    bl_description = "メッシュの平均エッジ長を測定し、貫通を防ぐ推奨の厚みを自動算出・適用します"
+    bl_description = "Measure average edge length and automatically calculate and apply recommended thickness to prevent penetration"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'UNDO'}
 
     def execute(self, context):

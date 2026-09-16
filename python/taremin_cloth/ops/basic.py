@@ -13,12 +13,14 @@ from ..engine.cache import (
 )
 from ..utils import topology
 from ..utils.logger import logger
+from .. import i18n
 
 
 class TAREMIN_CLOTH_OT_toggle_cloth(bpy.types.Operator):
     """選択オブジェクトのClothシミュレーション有効/無効を切り替える"""
     bl_idname = "taremin_cloth.toggle_cloth"
     bl_label = "Toggle Cloth"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -40,6 +42,7 @@ class TAREMIN_CLOTH_OT_reset_selected(bpy.types.Operator):
     """選択中のClothオブジェクトのみを初期レスト位置にリセットする"""
     bl_idname = "taremin_cloth.reset_selected"
     bl_label = "Reset Selected Cloth"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -65,6 +68,7 @@ class TAREMIN_CLOTH_OT_reset_all(bpy.types.Operator):
     """シーン内のすべてのClothシミュレーションを初期状態にリセットする"""
     bl_idname = "taremin_cloth.reset_all"
     bl_label = "Reset All Simulation"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -93,6 +97,7 @@ class TAREMIN_CLOTH_OT_reset_simulation(bpy.types.Operator):
     """シミュレーションを初期状態にリセットする（全体リセット互換）"""
     bl_idname = "taremin_cloth.reset_simulation"
     bl_label = "Reset Simulation"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -100,15 +105,16 @@ class TAREMIN_CLOTH_OT_reset_simulation(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
-    """現在の変形メッシュ形状をシミュレーションの新しい初期レスト形状（自然長）として確定する"""
+    """Bake current deformed mesh shape as the new initial state (rest pose)"""
     bl_idname = "taremin_cloth.apply_rest_shape"
     bl_label = "Apply Rest Shape"
-    bl_description = "現在の変形メッシュ形状をシミュレーションの新しい初期状態（レストポーズ）として確定します"
+    bl_description = "Bake the current deformed mesh shape as the new initial state (rest pose) for simulation"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     all_objects: bpy.props.BoolProperty(
         name="All Objects",
-        description="シーン内のすべてのClothオブジェクトに適用する",
+        description="Apply to all cloth objects in scene",
         default=False,
     )
 
@@ -154,14 +160,16 @@ class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
-    """【互換用】古いキャッシュやバックアップを破棄し、現在のメッシュ形状を初期状態として再記憶します"""
+    """[Compatibility] Discard old cache and backups, and re-capture current mesh shape as initial state"""
     bl_idname = "taremin_cloth.clear_cache"
     bl_label = "Clear Cache"
-    bl_description = "古いキャッシュやバックアップを破棄し、現在のメッシュ形状を初期状態として再記憶します（Apply Rest Shapeと同等）"
+    bl_description = "Discard old cache and backups, and re-capture the current mesh shape as initial state (same as Apply Rest Shape)"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     all_objects: bpy.props.BoolProperty(
         name="All Objects",
+        description="Apply to all cloth objects in scene",
         default=False,
     )
 
@@ -174,10 +182,11 @@ class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_apply_gpu_settings(bpy.types.Operator):
-    """GPUバックエンドおよびデバイス設定を適用し、GPUコンテキストを再初期化する"""
+    """Apply GPU backend and device settings, and reinitialize GPU context"""
     bl_idname = "taremin_cloth.apply_gpu_settings"
     bl_label = "Apply GPU Settings"
-    bl_description = "選択したバックエンドおよびGPUデバイスを適用し、GPUコンテキストを再初期化します（シミュレーションはリセットされます）"
+    bl_description = "Apply selected backend and GPU device, and reinitialize GPU context (resets simulation)"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -215,15 +224,16 @@ class TAREMIN_CLOTH_OT_apply_gpu_settings(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_select_object(bpy.types.Operator):
-    """指定した布またはコライダーオブジェクトを選択してアクティブにする"""
+    """Select and activate specified cloth or collider object"""
     bl_idname = "taremin_cloth.select_object"
     bl_label = "Select Object"
-    bl_description = "指定した布またはコライダーオブジェクトを選択してアクティブにします"
+    bl_description = "Select and activate the specified cloth or collider object"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'UNDO'}
 
     object_name: bpy.props.StringProperty(
         name="Object Name",
-        description="選択するオブジェクトの名前",
+        description="Name of the object to select",
         default="",
     )
 
@@ -254,10 +264,11 @@ class TAREMIN_CLOTH_OT_select_object(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_clear_bone_sdf_cache(bpy.types.Operator):
-    """保存されているすべてのボーンSDFキャッシュを消去します"""
+    """Clear all stored bone SDF cache files on disk"""
     bl_idname = "taremin_cloth.clear_bone_sdf_cache"
     bl_label = "Clear Bone SDF Cache"
-    bl_description = "ディスクに保存されているすべてのボーンSDFキャッシュファイルを削除します"
+    bl_description = "Delete all bone SDF cache files stored on disk"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -268,10 +279,11 @@ class TAREMIN_CLOTH_OT_clear_bone_sdf_cache(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
-    """アクティブな素体オブジェクトのボーンSDFを強制的に再ベイクします"""
+    """Force rebake bone SDF for active body object"""
     bl_idname = "taremin_cloth.rebake_bone_sdf"
     bl_label = "Rebake Bone SDF"
-    bl_description = "キャッシュを使用せず、現在のメッシュとボーン構造からボーン局所SDFを再計算します"
+    bl_description = "Bypass cache and recompute bone-local SDF from the current mesh and bone hierarchy"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -308,10 +320,11 @@ class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_auto_detect_collider(bpy.types.Operator):
-    """選択中オブジェクトの構造から最適なコライダー形状を自動推定・設定します"""
+    """Automatically detect and set optimal collider shape based on object structure"""
     bl_idname = "taremin_cloth.auto_detect_collider"
     bl_label = "Auto Detect Collider Type"
-    bl_description = "オブジェクトの構造（モディファイア・頂点ウェイト・面数等）を解析して最適なコライダータイプを自動設定します"
+    bl_description = "Analyze object structure (modifiers, vertex weights, poly count, etc.) to automatically configure the optimal collider type"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -338,10 +351,11 @@ class TAREMIN_CLOTH_OT_auto_detect_collider(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_auto_fit_self_collision(bpy.types.Operator):
-    """メッシュのエッジ長と用途に基づき、最適な自己衝突パラメータを自動設定します"""
+    """Automatically configure optimal self-collision parameters based on edge length and purpose"""
     bl_idname = "taremin_cloth.auto_fit_self_collision"
     bl_label = "Auto Fit Self Collision"
-    bl_description = "メッシュのエッジ長と用途（Standard/Skirt/Thin）に基づき自己衝突パラメータを自動算出・適用します（Custom時は無効）"
+    bl_description = "Automatically calculate and apply self-collision parameters based on edge length and preset (disabled for Custom)"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

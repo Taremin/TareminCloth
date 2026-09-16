@@ -4,6 +4,7 @@ from pathlib import Path
 import bpy
 from bpy.props import StringProperty, EnumProperty
 from bpy.types import Operator, Menu
+from . import i18n
 
 # -----------------------------------------------------------------------------
 # ビルトインプリセット定義
@@ -257,15 +258,16 @@ class TAREMIN_CLOTH_OT_apply_preset(Operator):
     """指定したプリセットを適用します"""
     bl_idname = "taremin_cloth.apply_preset"
     bl_label = "Apply Preset"
-    bl_description = "指定したプリセットを適用します"
+    bl_description = "Apply the specified preset"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     category: EnumProperty(
         name="Category",
         items=[
-            ('fabric', "Fabric", "布素材"),
-            ('simulation', "Simulation", "シミュレーション品質"),
-            ('collider', "Collider", "コライダー"),
+            ('fabric', "Fabric", "Cloth material preset"),
+            ('simulation', "Simulation", "Simulation quality preset"),
+            ('collider', "Collider", "Collider preset"),
         ],
     )
     preset_name: StringProperty(name="Preset Name")
@@ -299,20 +301,21 @@ class TAREMIN_CLOTH_OT_save_preset(Operator):
     """現在のパラメータをカスタムプリセットとして保存します"""
     bl_idname = "taremin_cloth.save_preset"
     bl_label = "Save Preset"
-    bl_description = "現在のパラメータをカスタムプリセットとして保存します"
+    bl_description = "Save current parameters as a custom preset"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     category: EnumProperty(
         name="Category",
         items=[
-            ('fabric', "Fabric", "布素材"),
-            ('simulation', "Simulation", "シミュレーション品質"),
-            ('collider', "Collider", "コライダー"),
+            ('fabric', "Fabric", "Cloth material preset"),
+            ('simulation', "Simulation", "Simulation quality preset"),
+            ('collider', "Collider", "Collider preset"),
         ],
     )
     preset_name: StringProperty(
         name="Preset Name",
-        description="保存するプリセット名",
+        description="Name of the preset to save",
         default="My Preset",
     )
 
@@ -379,15 +382,16 @@ class TAREMIN_CLOTH_OT_delete_preset(Operator):
     """保存されたカスタムプリセットを削除します"""
     bl_idname = "taremin_cloth.delete_preset"
     bl_label = "Delete Preset"
-    bl_description = "保存されたカスタムプリセットを削除します"
+    bl_description = "Delete saved custom preset"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     category: EnumProperty(
         name="Category",
         items=[
-            ('fabric', "Fabric", "布素材"),
-            ('simulation', "Simulation", "シミュレーション品質"),
-            ('collider', "Collider", "コライダー"),
+            ('fabric', "Fabric", "Cloth material preset"),
+            ('simulation', "Simulation", "Simulation quality preset"),
+            ('collider', "Collider", "Collider preset"),
         ],
     )
     preset_name: EnumProperty(
@@ -441,19 +445,20 @@ class TAREMIN_CLOTH_MT_fabric_presets(Menu):
     """布素材プリセットメニュー"""
     bl_label = "Fabric Presets"
     bl_idname = "TAREMIN_CLOTH_MT_fabric_presets"
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Built-in Presets", icon='MATERIAL')
+        layout.label(text=i18n.trans("Built-in Presets"), icon='MATERIAL')
         for name in BUILTIN_FABRIC_PRESETS.keys():
-            op = layout.operator("taremin_cloth.apply_preset", text=name)
+            op = layout.operator("taremin_cloth.apply_preset", text=i18n.trans(name))
             op.category = 'fabric'
             op.preset_name = name
 
         custom_presets = get_custom_presets('fabric')
         if custom_presets:
             layout.separator()
-            layout.label(text="Custom Presets", icon='PRESET')
+            layout.label(text=i18n.trans("Custom Presets"), icon='PRESET')
             for name in custom_presets.keys():
                 op = layout.operator("taremin_cloth.apply_preset", text=name)
                 op.category = 'fabric'
@@ -464,19 +469,20 @@ class TAREMIN_CLOTH_MT_simulation_presets(Menu):
     """シミュレーション品質プリセットメニュー"""
     bl_label = "Simulation Presets"
     bl_idname = "TAREMIN_CLOTH_MT_simulation_presets"
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Built-in Presets", icon='SETTINGS')
+        layout.label(text=i18n.trans("Built-in Presets"), icon='SETTINGS')
         for name in BUILTIN_SIMULATION_PRESETS.keys():
-            op = layout.operator("taremin_cloth.apply_preset", text=name)
+            op = layout.operator("taremin_cloth.apply_preset", text=i18n.trans(name))
             op.category = 'simulation'
             op.preset_name = name
 
         custom_presets = get_custom_presets('simulation')
         if custom_presets:
             layout.separator()
-            layout.label(text="Custom Presets", icon='PRESET')
+            layout.label(text=i18n.trans("Custom Presets"), icon='PRESET')
             for name in custom_presets.keys():
                 op = layout.operator("taremin_cloth.apply_preset", text=name)
                 op.category = 'simulation'
@@ -487,26 +493,39 @@ class TAREMIN_CLOTH_MT_collider_presets(Menu):
     """コライダープリセットメニュー"""
     bl_label = "Collider Presets"
     bl_idname = "TAREMIN_CLOTH_MT_collider_presets"
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Built-in Presets", icon='PHYSICS')
+        layout.label(text=i18n.trans("Built-in Presets"), icon='PHYSICS')
         for name in BUILTIN_COLLIDER_PRESETS.keys():
-            op = layout.operator("taremin_cloth.apply_preset", text=name)
+            op = layout.operator("taremin_cloth.apply_preset", text=i18n.trans(name))
             op.category = 'collider'
             op.preset_name = name
 
         custom_presets = get_custom_presets('collider')
         if custom_presets:
             layout.separator()
-            layout.label(text="Custom Presets", icon='PRESET')
+            layout.label(text=i18n.trans("Custom Presets"), icon='PRESET')
             for name in custom_presets.keys():
                 op = layout.operator("taremin_cloth.apply_preset", text=name)
                 op.category = 'collider'
                 op.preset_name = name
 
 
+PRIMARY_BUILTIN_CONFIG_PRESETS = [
+    "All Enabled",
+    "All Muted",
+    "Cloths Only",
+    "Colliders Only",
+]
+
 BUILTIN_CONFIG_PRESETS = {
+    "All Enabled": 'ALL_ON',
+    "All Muted": 'ALL_OFF',
+    "Cloths Only": 'CLOTHS_ONLY',
+    "Colliders Only": 'COLLIDERS_ONLY',
+    # 後方互換用エイリアス
     "All Enabled (全て有効)": 'ALL_ON',
     "All Muted (全て一時停止)": 'ALL_OFF',
     "Cloths Only (布のみ有効)": 'CLOTHS_ONLY',
@@ -532,18 +551,19 @@ class TAREMIN_CLOTH_OT_batch_simulation_state(Operator):
     """シーン内の布・コライダーのシミュレーション有効状態を一括操作します"""
     bl_idname = "taremin_cloth.batch_simulation_state"
     bl_label = "Batch Simulation State"
-    bl_description = "シーン内の布・コライダーのシミュレーション計算有効状態を一括操作します"
+    bl_description = "Batch control simulation active states of cloths and colliders"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     action: EnumProperty(
         name="Action",
         items=[
-            ('ALL_ON', "All On", "全ての布とコライダーを有効化"),
-            ('ALL_OFF', "All Off", "全ての布とコライダーを一時停止（ミュート）"),
-            ('SOLO', "Solo", "選択中のオブジェクトのみ有効化し、他を一時停止"),
-            ('CLOTHS_ONLY', "Cloths Only", "布のみ有効化し、コライダーを一時停止"),
-            ('COLLIDERS_ONLY', "Colliders Only", "コライダーのみ有効化し、布を一時停止"),
-            ('INVERT', "Invert", "有効/無効状態を反転"),
+            ('ALL_ON', "All On", "Enable all cloths and colliders"),
+            ('ALL_OFF', "All Off", "Pause/mute all cloths and colliders"),
+            ('SOLO', "Solo", "Enable selected object only, pause others"),
+            ('CLOTHS_ONLY', "Cloths Only", "Enable cloths only, pause colliders"),
+            ('COLLIDERS_ONLY', "Colliders Only", "Enable colliders only, pause cloths"),
+            ('INVERT', "Invert", "Invert enabled/disabled state"),
         ],
     )
 
@@ -604,12 +624,13 @@ class TAREMIN_CLOTH_OT_save_config_preset(Operator):
     """現在の布・コライダーのシミュレーション有効状態をプリセットとして保存します"""
     bl_idname = "taremin_cloth.save_config_preset"
     bl_label = "Save Config Preset"
-    bl_description = "現在の布・コライダーのシミュレーション有効状態をプリセットとして保存します"
+    bl_description = "Save current simulation active states as a preset"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     preset_name: StringProperty(
         name="Preset Name",
-        description="保存する構成プリセット名",
+        description="Name of the configuration preset to save",
         default="My Preset",
     )
 
@@ -658,7 +679,8 @@ class TAREMIN_CLOTH_OT_apply_config_preset(Operator):
     """指定した構成プリセットを適用します"""
     bl_idname = "taremin_cloth.apply_config_preset"
     bl_label = "Apply Config Preset"
-    bl_description = "指定した構成プリセットを適用します"
+    bl_description = "Apply specified simulation configuration preset"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     preset_name: StringProperty(name="Preset Name")
@@ -702,7 +724,8 @@ class TAREMIN_CLOTH_OT_delete_config_preset(Operator):
     """選択中の構成プリセットを削除します"""
     bl_idname = "taremin_cloth.delete_config_preset"
     bl_label = "Delete Config Preset"
-    bl_description = "選択中の構成プリセットを削除します"
+    bl_description = "Delete selected configuration preset"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     preset_name: StringProperty(name="Preset Name", default="")
@@ -734,12 +757,13 @@ class TAREMIN_CLOTH_OT_delete_config_preset(Operator):
 class TAREMIN_CLOTH_MT_config_presets(Menu):
     """シミュレーション構成プリセットのメニュー"""
     bl_label = "Config Presets"
+    bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Built-in Presets", icon='PHYSICS')
+        layout.label(text=i18n.trans("Built-in Presets"), icon='PHYSICS')
         for name in BUILTIN_CONFIG_PRESETS.keys():
-            op = layout.operator("taremin_cloth.apply_config_preset", text=name)
+            op = layout.operator("taremin_cloth.apply_config_preset", text=i18n.trans(name))
             op.preset_name = name
 
         scene = context.scene
@@ -747,7 +771,7 @@ class TAREMIN_CLOTH_MT_config_presets(Menu):
             custom_presets = get_scene_config_presets(scene)
             if custom_presets:
                 layout.separator()
-                layout.label(text="Custom Presets", icon='PRESET')
+                layout.label(text=i18n.trans("Custom Presets"), icon='PRESET')
                 for name in custom_presets.keys():
                     op = layout.operator("taremin_cloth.apply_config_preset", text=name)
                     op.preset_name = name

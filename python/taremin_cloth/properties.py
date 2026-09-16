@@ -1,46 +1,66 @@
+import functools
 import bpy
 from bpy.props import (
-    FloatProperty,
-    IntProperty,
-    BoolProperty,
-    EnumProperty,
+    FloatProperty as _FloatProperty,
+    IntProperty as _IntProperty,
+    BoolProperty as _BoolProperty,
+    EnumProperty as _EnumProperty,
     PointerProperty,
-    StringProperty,
+    StringProperty as _StringProperty,
     CollectionProperty,
-    FloatVectorProperty,
+    FloatVectorProperty as _FloatVectorProperty,
 )
 from bpy.types import PropertyGroup
+
+from . import i18n
+
+
+def _wrap_prop(prop_func):
+    @functools.wraps(prop_func)
+    def wrapper(*args, **kwargs):
+        if "translation_context" not in kwargs:
+            kwargs["translation_context"] = i18n.CONTEXT
+        return prop_func(*args, **kwargs)
+    return wrapper
+
+
+FloatProperty = _wrap_prop(_FloatProperty)
+IntProperty = _wrap_prop(_IntProperty)
+BoolProperty = _wrap_prop(_BoolProperty)
+EnumProperty = _wrap_prop(_EnumProperty)
+StringProperty = _wrap_prop(_StringProperty)
+FloatVectorProperty = _wrap_prop(_FloatVectorProperty)
 
 
 class TareminClothElasticGroup(PropertyGroup):
     """辺の自然長スケーリング・ゴム紐グループ設定"""
     name: StringProperty(
         name="Group Name",
-        description="グループ名",
+        description="Name of the elastic band group",
         default="Elastic Group",
     )
     scale: FloatProperty(
         name="Scale",
-        description="自然長の倍率 (1.0=等倍, 0.7=30%収縮, 1.3=30%伸長)",
+        description="Rest length scaling factor (1.0=normal, 0.7=30% contract, 1.3=30% extend)",
         default=1.0,
         min=0.05,
         max=5.0,
     )
     stiffness_multiplier: FloatProperty(
         name="Stiffness Multiplier",
-        description="剛性倍率 (強いゴム紐にする場合の硬さ倍率)",
+        description="Stiffness multiplier for stronger elastic effect",
         default=1.0,
         min=0.1,
         max=20.0,
     )
     edge_indices_str: StringProperty(
         name="Edge Indices",
-        description="登録されたエッジインデックス（カンマ区切り）",
+        description="Comma-separated registered edge indices",
         default="",
     )
     enabled: BoolProperty(
         name="Enabled",
-        description="この伸縮グループをシミュレーションに適用する",
+        description="Apply this elastic group to simulation",
         default=True,
     )
     color: FloatVectorProperty(
@@ -92,28 +112,28 @@ def _on_enable_self_collision_updated(self, context):
 class TareminClothObjectSettings(PropertyGroup):
     is_cloth: BoolProperty(
         name="Cloth Enabled",
-        description="このオブジェクトでClothシミュレーションを有効にする",
+        description="Enable cloth simulation for this object",
         default=False,
     )
     enabled: BoolProperty(
         name="Simulation Active",
-        description="この布オブジェクトのシミュレーション計算を有効にする（OFFで一時停止・計算除外）",
+        description="Enable simulation calculation for this cloth (OFF to pause/mute)",
         default=True,
     )
     last_fabric_preset: StringProperty(
         name="Fabric Preset",
-        description="直近に適用された布素材プリセット",
+        description="Last applied fabric material preset",
         default="",
     )
     last_simulation_preset: StringProperty(
         name="Simulation Preset",
-        description="直近に適用されたシミュレーション品質プリセット",
+        description="Last applied simulation quality preset",
         default="",
     )
     # 剛性 (Stiffness)
     tension_stiffness: FloatProperty(
         name="Tension",
-        description="伸びに対する抵抗力 (引張剛性)",
+        description="Resistance against stretching",
         default=1000.0,
         min=0.1,
         max=100000.0,
@@ -122,7 +142,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     compression_stiffness: FloatProperty(
         name="Compression",
-        description="縮み・シワに対する抵抗力 (圧縮剛性)",
+        description="Resistance against compression and wrinkles",
         default=100.0,
         min=0.1,
         max=100000.0,
@@ -131,7 +151,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     shear_stiffness: FloatProperty(
         name="Shear",
-        description="斜め歪みに対する抵抗力 (せん断剛性)",
+        description="Resistance against shear distortion",
         default=100.0,
         min=0.1,
         max=100000.0,
@@ -140,7 +160,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     bending_stiffness: FloatProperty(
         name="Bending",
-        description="面同士の折れ曲がりに対する抵抗力 (曲げ剛性)",
+        description="Resistance against face bending",
         default=10.0,
         min=0.0,
         max=1000.0,
@@ -150,7 +170,7 @@ class TareminClothObjectSettings(PropertyGroup):
     # 後方互換用エイリアス
     stiffness: FloatProperty(
         name="Tension",
-        description="伸縮剛性 (Stiffness) - tension_stiffness と連動",
+        description="Tensile stiffness linked with tension_stiffness",
         default=1000.0,
         min=0.1,
         max=100000.0,
@@ -161,7 +181,7 @@ class TareminClothObjectSettings(PropertyGroup):
     # 減衰 (Damping)
     tension_damping: FloatProperty(
         name="Tension",
-        description="伸び縮みの反発振動を吸収する減衰量",
+        description="Damping to absorb stretch vibrations",
         default=5.0,
         min=0.0,
         max=50.0,
@@ -169,7 +189,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     compression_damping: FloatProperty(
         name="Compression",
-        description="シワが寄る際の振動を吸収する減衰量",
+        description="Damping to absorb compression and wrinkle vibrations",
         default=5.0,
         min=0.0,
         max=50.0,
@@ -177,7 +197,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     shear_damping: FloatProperty(
         name="Shear",
-        description="斜めの歪み振動を吸収する減衰量",
+        description="Damping to absorb shear vibrations",
         default=5.0,
         min=0.0,
         max=50.0,
@@ -185,7 +205,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     bending_damping: FloatProperty(
         name="Bending",
-        description="折り曲がり・ヒラヒラ振動を吸収する減衰量",
+        description="Damping to absorb bending vibrations",
         default=0.5,
         min=0.0,
         max=50.0,
@@ -193,7 +213,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     air_damping: FloatProperty(
         name="Air",
-        description="空気抵抗・速度減衰 (値が大きいほど揺れが早く収まる)",
+        description="Air resistance and velocity damping",
         default=1.0,
         min=0.0,
         max=50.0,
@@ -203,7 +223,7 @@ class TareminClothObjectSettings(PropertyGroup):
     # シミュレーション設定 (Settings)
     gravity: FloatProperty(
         name="Gravity Scale",
-        description="重力倍率 (1.0=シーン重力準拠、0.0=無重力。Blenderのシーン重力 scene.gravity と連動)",
+        description="Gravity multiplier (1.0=scene gravity, 0.0=zero gravity)",
         default=1.0,
         min=-10.0,
         max=10.0,
@@ -212,33 +232,33 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     substeps: IntProperty(
         name="Quality Steps",
-        description="品質のステップ数 (1フレームあたりの細分化ステップ数)",
+        description="Subdivision steps per frame",
         default=20,
         min=1,
         max=100,
     )
     enable_adaptive_substep: BoolProperty(
         name="Adaptive Steps",
-        description="布の動きの大きさに応じてサブステップ数を自動調整し、静止時・微動時のFPSを向上させます",
+        description="Dynamically adjust substeps based on cloth velocity to improve FPS",
         default=False,
     )
     min_substeps: IntProperty(
         name="Min Steps",
-        description="適応型ステップにおける最小細分化ステップ数",
+        description="Minimum substeps for adaptive stepping",
         default=4,
         min=1,
         max=50,
     )
     max_substeps: IntProperty(
         name="Max Steps",
-        description="適応型ステップにおける最大細分化ステップ数（激突・高速移動時のCFL緊急上限）",
+        description="Maximum substeps for adaptive stepping (CFL emergency limit)",
         default=64,
         min=10,
         max=200,
     )
     solver_iterations: IntProperty(
         name="Solver Iterations",
-        description="1サブステップあたりの拘束反復回数。肩紐など細長いパーツの伸びを抑制します",
+        description="Constraint solve iterations per substep",
         default=2,
         min=1,
         max=10,
@@ -246,54 +266,54 @@ class TareminClothObjectSettings(PropertyGroup):
     # パフォーマンスチューニング設定
     workgroup_size: EnumProperty(
         name="Workgroup Size",
-        description="GPUコンピュートシェーダーのワークグループサイズ (AMD Wave32 / NVIDIA Warp32 最適値: 32)",
+        description="Compute shader workgroup size (AMD Wave32 / NVIDIA Warp32 optimal: 32)",
         items=[
-            ('32', "32 (Optimal)", "AMD RDNA Wave32 / NVIDIA Warp32 に最適化されたワークグループサイズ (推奨・標準)"),
-            ('64', "64 (Legacy)", "従来の64スレッドワークグループ"),
+            ('32', "32 (Optimal)", "AMD RDNA Wave32 / NVIDIA Warp32 optimized workgroup size (Recommended)"),
+            ('64', "64 (Legacy)", "Legacy 64 threads workgroup"),
         ],
         default='32',
     )
     solver_mode: EnumProperty(
         name="Solver Mode",
-        description="距離拘束のGPU並列解決方式",
+        description="GPU parallel solver algorithm for distance constraints",
         items=[
-            ('COLORING', "Coloring (Gauss-Seidel)", "グラフ彩色による高剛性・順次伝播ソルバー"),
-            ('ATOMIC', "Atomic Jacobi (Single-Pass)", "固定小数点アトミック加算による全拘束単一ディスパッチ高速ソルバー"),
+            ('COLORING', "Coloring (Gauss-Seidel)", "Graph coloring high-stiffness sequential solver"),
+            ('ATOMIC', "Atomic Jacobi (Single-Pass)", "Fixed-point atomic addition single-dispatch fast solver"),
         ],
         default='COLORING',
     )
     enable_async_readback: BoolProperty(
         name="Async Readback",
-        description="1フレーム遅延の非同期リードバック（ダブルバッファリング）によりGPU完了待機時間を隠蔽・短縮します",
+        description="1-frame delayed asynchronous readback to hide GPU wait time",
         default=False,
     )
     enable_compact_readback: BoolProperty(
         name="Compact Readback",
-        description="GPU上で座標データ(12B/頂点)のみを抽出転送し、PCIeバス帯域とCPU負荷を1/4に削減します",
+        description="Transfer only coordinate data (12B/vert) on GPU to reduce PCIe bandwidth",
         default=True,
     )
     enable_frame_buffering: BoolProperty(
         name="Frame Buffering",
-        description="GPU上で直近Nフレームの計算結果をバッファリングし、まとめて転送・キャッシュすることで描画負荷とGPU同期待機を大幅に削減します",
+        description="Buffer recent frames on GPU and batch transfer to reduce sync overhead",
         default=False,
     )
     frame_buffer_size: IntProperty(
         name="Buffer Size",
-        description="バッファリングするフレーム数 (2〜5)。このフレーム数ごとにまとめてBlenderに転送し、中間フレームも欠落なくキャッシュに保存します",
+        description="Number of frames to buffer (2-5)",
         default=2,
         min=2,
         max=5,
     )
     layer_id: IntProperty(
         name="Layer ID",
-        description="布のレイヤー番号 (0=最内層)",
+        description="Cloth layer number (0=innermost)",
         default=0,
         min=0,
         max=10,
     )
     thickness: FloatProperty(
         name="Thickness",
-        description="布の厚み (m)",
+        description="Cloth thickness in meters",
         default=0.005,
         min=0.0001,
         max=0.1,
@@ -301,25 +321,25 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     enable_self_collision: BoolProperty(
         name="Self Collision",
-        description="自己衝突およびレイヤー衝突を有効化する（GPU空間ハッシュを使用）",
+        description="Enable self and inter-layer collision using GPU spatial hash",
         default=False,
         update=_on_enable_self_collision_updated,
     )
     self_collision_purpose: EnumProperty(
         name="Purpose",
-        description="布の用途に応じた自己衝突パラメータの最適化プリセット",
+        description="Self-collision parameter preset for cloth usage",
         items=[
-            ('STANDARD', "Standard (一般衣服)", "シャツ、ズボン、ワンピース等の標準的な布地向け（負荷と安定性のバランス）"),
-            ('SKIRT', "Skirt / Folds (プリーツ・多重折り)", "スカート、フリル、リボン等、布が密集して重なり合う形状向け（高精度・伸び抑制）"),
-            ('THIN', "Thin / Delicate (薄手・シルク)", "スカーフ、シルク、極薄の布地向け（マイルドな反発で破裂防止）"),
-            ('CUSTOM', "Custom (手動設定)", "詳細モードで自由にパラメータを微調整するモード"),
+            ('STANDARD', "Standard (General Clothing)", "Standard settings for shirts, pants, dresses (balanced performance and stability)"),
+            ('SKIRT', "Skirt / Folds (Pleats & Layers)", "High accuracy for dense overlapping cloth like skirts, frills, ribbons"),
+            ('THIN', "Thin / Delicate (Silk & Light)", "Mild repulsion for thin fabrics, scarves, silk to avoid explosions"),
+            ('CUSTOM', "Custom (Manual)", "Manual tuning mode for fine parameter adjustments"),
         ],
         default='STANDARD',
         update=_on_self_collision_purpose_updated,
     )
     self_collision_relief_factor: FloatProperty(
         name="Relief Factor",
-        description="自己衝突・貫通時の緩和係数。1.0で即時反発、小さい値で数フレームかけて滑らかに解消し破裂を防止します",
+        description="Penetration relief factor (1.0 for instant response, smaller for smooth resolution)",
         default=0.2,
         min=0.01,
         max=1.0,
@@ -327,7 +347,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     self_collision_max_displacement_ratio: FloatProperty(
         name="Max Step Ratio",
-        description="1サブステップあたりの最大補正変位割合（周囲の辺の長さに対する割合）。急激な跳ね上がりや布の破裂を防止します",
+        description="Maximum correction displacement per substep as a ratio of edge length",
         default=0.2,
         min=0.01,
         max=1.0,
@@ -335,51 +355,51 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     self_collision_max_iterations: EnumProperty(
         name="Max Search Iterations",
-        description="GPU空間ハッシュでの1セルあたりの最大探索反復回数。密集時の貫通・すり抜けを防ぐには大きな値を指定します",
+        description="Maximum search iterations per cell in GPU spatial hash",
         items=[
-            ('128', "128 (Fast)", "高速プレビュー・軽量メッシュ向け (標準)"),
-            ('256', "256 (Balanced)", "バランス設定。衝突時のすり抜けを抑制"),
-            ('512', "512 (High Quality)", "高品質設定。折り畳みや高密度メッシュ向け"),
-            ('1024', "1024 (Ultra)", "超高密度・複雑なシワの貫通防止"),
-            ('4096', "4096 (No Limit)", "実質無制限。時間をかけて確実に貫通を防ぎます"),
+            ('128', "128 (Fast)", "For fast preview and lightweight meshes (standard)"),
+            ('256', "256 (Balanced)", "Balanced setting to suppress pass-through"),
+            ('512', "512 (High Quality)", "High quality for folding and dense meshes"),
+            ('1024', "1024 (Ultra)", "Ultra dense for complex wrinkle penetration prevention"),
+            ('4096', "4096 (No Limit)", "Virtually unlimited to thoroughly prevent penetration"),
         ],
         default='256',
     )
     self_collision_exclude_neighbors: BoolProperty(
         name="Exclude Neighbors",
-        description="メッシュのエッジで直接接続された隣接頂点を自己衝突から除外し、安静時の自縄自縛やシワ・縮みを防止します",
+        description="Exclude mesh edge-connected vertices from self-collision",
         default=True,
     )
     enable_normal_untangling: BoolProperty(
         name="Normal Untangling",
-        description="頂点法線を用いて裏抜けした頂点を表側へ押し戻し、自己交差からの自律的な脱出を可能にします",
+        description="Use vertex normals to push penetrated vertices outward",
         default=True,
     )
     coupled_self_collision_mode: EnumProperty(
         name="Coupled Mode",
-        description="自己衝突と距離拘束の協調収束モード。衝突によるエッジ過剰伸長（伸び）を抑制します",
+        description="Coupled convergence mode for self-collision and distance constraints",
         items=[
-            ('OFF', "Off (Legacy)", "従来の自己衝突（反復外実行・緩和なし）"),
-            ('RELAXATION', "Relaxation (Balanced)", "自己衝突直後に距離拘束を2回再適用。FPS低下ゼロで伸びを約5割抑制（推奨標準）"),
-            ('FULL_COUPLED', "Full Coupled (High Quality)", "反復ループ内で同調解決＋仕上げ緩和1回。100FPS超を保ちつつ伸びを約7割抑制"),
+            ('OFF', "Off (Legacy)", "Traditional self-collision (executed outside loop, no relaxation)"),
+            ('RELAXATION', "Relaxation (Balanced)", "Re-apply distance constraints twice right after collision"),
+            ('FULL_COUPLED', "Full Coupled (High Quality)", "Coupled solve inside loop with finishing relaxation"),
         ],
         default='RELAXATION',
     )
     post_collision_relaxation_iters: IntProperty(
         name="Relaxation Steps",
-        description="自己衝突後の距離拘束緩和ステップ数（0: モード自動値、1〜8: 手動指定）",
+        description="Distance relaxation steps after self-collision (0: auto, 1-8: manual)",
         default=2,
         min=0,
         max=8,
     )
     enable_edge_collision: BoolProperty(
         name="Edge-Collider Collision",
-        description="布のエッジ（線分）と外部コライダーの詳細接触判定を有効化し、尖ったコライダーの角抜け・線分貫通を防止します",
+        description="Enable detailed edge-collider contact detection",
         default=False,
     )
     edge_margin_scale: FloatProperty(
         name="Edge Margin Scale",
-        description="エッジ詳細接触判定時の安全マージン倍率。通常の厚みは小さいままで、エッジ・面の突き抜け補正に余裕を持たせます",
+        description="Safety margin factor for edge contact detection",
         default=1.0,
         min=1.0,
         max=3.0,
@@ -388,7 +408,7 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     edge_margin_offset: FloatProperty(
         name="Margin Offset",
-        description="エッジ詳細接触判定時の安全マージン固定加算値。薄い布でも確実にクリアランスを確保します",
+        description="Safety margin fixed offset for edge contact detection",
         default=0.0,
         min=0.0,
         max=0.1,
@@ -399,12 +419,12 @@ class TareminClothObjectSettings(PropertyGroup):
     # 縫合（Sewing）
     enable_sewing: BoolProperty(
         name="Enable Sewing",
-        description="縫合線（Sewing Constraints）を有効にする",
+        description="Enable sewing constraints",
         default=False,
     )
     sewing_shrink_speed: FloatProperty(
         name="Shrink Speed",
-        description="縫合収縮速度 (m/s)",
+        description="Sewing contraction speed (m/s)",
         default=1.0,
         min=0.01,
         max=50.0,
@@ -413,16 +433,16 @@ class TareminClothObjectSettings(PropertyGroup):
     pin_target_object: PointerProperty(
         name="Pin Target",
         type=bpy.types.Object,
-        description="ピン留め頂点を追従させるターゲットオブジェクト",
+        description="Target object to follow for pinned vertices",
     )
     pin_target_bone: bpy.props.StringProperty(
         name="Pin Target Bone",
-        description="ターゲットがアーマチュアの場合に追従させるボーン名",
+        description="Bone name to follow when target is an armature",
         default="",
     )
     pin_vertex_group: bpy.props.StringProperty(
         name="Pin Vertex Group",
-        description="ピン留め・追従に使用する頂点グループ名",
+        description="Vertex group name used for pinning and tracking",
         default="Pin",
     )
     pin_color: FloatVectorProperty(
@@ -432,49 +452,49 @@ class TareminClothObjectSettings(PropertyGroup):
         min=0.0,
         max=1.0,
         default=(1.0, 0.45, 0.0, 0.9),
-        description="ピン留め頂点のハイライト表示色",
+        description="Highlight display color for pinned vertices",
     )
     pin_overlay_interactive_only: BoolProperty(
         name="Pin Overlay Interactive Only",
-        description="ピン頂点のハイライトをインタラクティブモード中のみ表示する",
+        description="Show pin highlight overlay only during interactive mode",
         default=True,
     )
     overlay_depth_test: BoolProperty(
         name="Depth Test (Z)",
-        description="ハイライト表示（ピン留め・ドラッグ頂点・伸縮ライン等）に深度テストを適用し、メッシュや物陰に隠れるようにします",
+        description="Apply depth test to overlays so they are occluded by meshes",
         default=False,
     )
     interactive_realtime_sync: BoolProperty(
         name="Real-time Sync",
-        description="描画フレームレートが低下しても、経過時間に応じてシミュレーションステップをまとめて進め、布の動きを実時間通りの自然な速度に保ちます",
+        description="Advance multiple simulation steps based on elapsed time to maintain real-time speed",
         default=True,
     )
     interactive_max_steps: IntProperty(
         name="Max Steps / Frame",
-        description="1描画フレームあたりに進める最大シミュレーションステップ数 (1〜8)。急激な負荷スパイク時の無限ループを防止します",
+        description="Maximum simulation steps advanced per rendered frame (1-8)",
         default=4,
         min=1,
         max=8,
     )
     isolate_viewport_view: BoolProperty(
         name="Isolate View (Local)",
-        description="インタラクティブシミュレーション実行中、布とコライダーのみのローカルビューに一時隔離してビューポート描画を最大速度にします",
+        description="Isolate cloth and colliders to local view during simulation for maximum viewport FPS",
         default=True,
     )
     show_fps_overlay: BoolProperty(
         name="Show FPS Overlay",
-        description="インタラクティブシミュレーション実行中に3DビューポートにFPSとフレーム時間を表示します",
+        description="Display FPS and frame timing overlay in 3D viewport during simulation",
         default=True,
     )
     fps_overlay_position: EnumProperty(
         name="FPS Position",
-        description="3Dビューポート内のFPS表示位置",
+        description="Screen corner to display FPS overlay",
         items=[
-            ('TOP_CENTER', "Top Center", "画面中央上部"),
-            ('TOP_RIGHT', "Top Right", "画面右上"),
-            ('BOTTOM_RIGHT', "Bottom Right", "画面右下"),
-            ('BOTTOM_LEFT', "Bottom Left", "画面左下"),
-            ('TOP_LEFT', "Top Left", "画面左上"),
+            ('TOP_CENTER', "Top Center", "Top center of screen"),
+            ('TOP_RIGHT', "Top Right", "Top right of screen"),
+            ('BOTTOM_RIGHT', "Bottom Right", "Bottom right of screen"),
+            ('BOTTOM_LEFT', "Bottom Left", "Bottom left of screen"),
+            ('TOP_LEFT', "Top Left", "Top left of screen"),
         ],
         default='TOP_CENTER',
     )
@@ -488,41 +508,41 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     show_elastic_overlay: BoolProperty(
         name="Show Elastic Lines",
-        description="3Dビューポートに伸縮ラインのテンション色を表示する",
+        description="Show elastic line tension colors in 3D viewport",
         default=True,
     )
     elastic_overlay_interactive_only: BoolProperty(
         name="Elastic Overlay Interactive Only",
-        description="伸縮ラインのハイライトをインタラクティブモード中のみ表示する",
+        description="Show elastic band highlight only during interactive mode",
         default=True,
     )
     # トポロジー・分割モード (Triangulation & Topology)
     triangulation_mode: EnumProperty(
         name="Triangulation Mode",
-        description="四角面（Quad）メッシュの対角線バイアス対策と分割モード",
+        description="Quad diagonal bias prevention and split mode",
         items=[
-            ('DYNAMIC_DIAGONAL', "Dynamic Diagonal (Lightweight)", "【推奨】シミュレーション中は頂点数増加ゼロ。終了時に歪み（Strain）から最適な対角線で2分割"),
-            ('CROSS_SUBDIV', "Cross Subdivision (Poke)", "【高精度】中心頂点を追加して4分割。ドーム状の強い突起も表現可能だが負荷は高め"),
-            ('NONE', "None (Original)", "四角面のまま（Blenderの標準対角線で計算）"),
+            ('DYNAMIC_DIAGONAL', "Dynamic Diagonal (Lightweight)", "Zero vertex overhead during sim; split quads along strain on stop (Recommended)"),
+            ('CROSS_SUBDIV', "Cross Subdivision (Poke)", "Add center vertex to split quad into 4 triangles for isotropic wrinkling (High accuracy)"),
+            ('NONE', "None (Original)", "Keep quads as-is (computed with default Blender diagonal)"),
         ],
         default='DYNAMIC_DIAGONAL',
     )
     # 動的対角線分割オプション
     dynamic_preserve_flat: BoolProperty(
         name="Preserve Flat Quads",
-        description="平坦な四角面は2分割せず四角面のまま保持する",
+        description="Preserve flat quad faces without splitting into triangles",
         default=False,
     )
     dynamic_flatness_threshold: FloatProperty(
         name="Flatness Angle",
-        description="平坦と判定する最大角度（度）",
+        description="Maximum angle in degrees to consider a face flat",
         default=5.0,
         min=0.5,
         max=45.0,
     )
     auto_triangulate_on_stop: BoolProperty(
         name="Auto Triangulate on Stop",
-        description="シミュレーション停止時に自動で最適対角線分割を実行する",
+        description="Automatically perform optimal diagonal split when simulation stops",
         default=True,
     )
     # 十字分割用（互換性維持）
@@ -534,31 +554,31 @@ class TareminClothObjectSettings(PropertyGroup):
 
     enable_cross_subdivision: BoolProperty(
         name="Cross Subdivision",
-        description="四角面を中心点で4分割し、対角線バイアスを解消して等方的なシワを表現する",
+        description="Subdivide quads into 4 triangles to eliminate diagonal bias",
         default=False,
         update=_update_cross_subdiv,
     )
     post_process_mode: EnumProperty(
         name="Post-Process",
-        description="シミュレーション後のメッシュ後処理モード",
+        description="Mesh post-processing mode after simulation",
         items=[
-            ('OPTIMAL_TRI', "Optimal 2 Triangles", "シワの稜線に沿った最適な対角線で2分割"),
-            ('QUAD', "Restore Quad", "中心頂点を削除して元の四角面に戻す"),
-            ('ADAPTIVE', "Adaptive", "平坦部はQuad、シワ部は最適2三角面に自動判定"),
-            ('KEEP', "Keep Cross (4 Triangles)", "十字分割のまま保持"),
+            ('OPTIMAL_TRI', "Optimal 2 Triangles", "Split into 2 triangles along wrinkle ridge lines"),
+            ('QUAD', "Restore Quad", "Remove center vertex and restore original quad"),
+            ('ADAPTIVE', "Adaptive", "Automatically select quad for flat areas and 2 triangles for wrinkles"),
+            ('KEEP', "Keep Cross (4 Triangles)", "Keep cross subdivision mesh"),
         ],
         default='OPTIMAL_TRI',
     )
     adaptive_flatness_threshold: FloatProperty(
         name="Flatness Threshold",
-        description="アダプティブ判定時の平坦度閾値（度）",
+        description="Flatness threshold angle for adaptive post-processing",
         default=5.0,
         min=0.5,
         max=45.0,
     )
     auto_post_process: BoolProperty(
         name="Auto Post-Process on Stop",
-        description="シミュレーション停止時に自動で後処理を実行する",
+        description="Automatically execute post-processing on simulation stop",
         default=True,
     )
 
@@ -597,110 +617,110 @@ class TareminClothColliderAnimSettings(PropertyGroup):
     """コライダーアニメーション駆動設定"""
     enabled: BoolProperty(
         name="Animation Enabled",
-        description="コライダーのアニメーション変形駆動を有効にする",
+        description="Enable collider animation driving",
         default=False,
     )
     target_type: EnumProperty(
         name="Target Type",
-        description="アニメーション対象の種類",
+        description="Animation driver target type",
         items=[
-            ('SHAPE_KEY', "Shape Key", "メッシュのシェイプキー値アニメーション"),
-            ('POSE_BLEND', "Pose Blend", "2つのポーズスナップショット間のブレンド (0.0〜1.0)"),
-            ('ACTION', "Action", "既存アクションの指定フレーム区間再生"),
+            ('SHAPE_KEY', "Shape Key", "Mesh shape key value animation"),
+            ('POSE_BLEND', "Pose Blend", "Blend between two pose snapshots (0.0 - 1.0)"),
+            ('ACTION', "Action", "Play specified frame range of existing action"),
         ],
         default='POSE_BLEND',
     )
     # シェイプキー設定
     shape_key_name: StringProperty(
         name="Shape Key",
-        description="駆動するシェイプキーの名前",
+        description="Shape key name to drive",
         default="",
     )
     start_value: FloatProperty(
         name="Start Value",
-        description="アニメーション開始時のシェイプキー値",
+        description="Shape key value at start",
         default=0.0,
     )
     end_value: FloatProperty(
         name="End Value",
-        description="アニメーション終了時のシェイプキー値",
+        description="Shape key value at end",
         default=1.0,
     )
     # ポーズブレンド設定
     armature_obj: PointerProperty(
         name="Armature",
         type=bpy.types.Object,
-        description="ポーズを適用する対象アーマチュアオブジェクト（未指定時は自動探索）",
+        description="Target armature object for pose blend (auto-detected if empty)",
         poll=lambda s, o: o.type == 'ARMATURE',
     )
     start_pose_data: StringProperty(
         name="Start Pose (0.0)",
-        description="初期姿勢スナップショットデータ (JSON)",
+        description="Start pose snapshot data (JSON)",
         default="",
     )
     target_pose_data: StringProperty(
         name="Target Pose (1.0)",
-        description="目標姿勢スナップショットデータ (JSON)",
+        description="Target pose snapshot data (JSON)",
         default="",
     )
     # アクション設定
     action: PointerProperty(
         name="Action",
         type=bpy.types.Action,
-        description="再生するアニメーションアクション",
+        description="Animation action to play",
     )
     frame_start: IntProperty(
         name="Start Frame",
-        description="アクション再生開始フレーム",
+        description="Action playback start frame",
         default=1,
     )
     frame_end: IntProperty(
         name="End Frame",
-        description="アクション再生終了フレーム",
+        description="Action playback end frame",
         default=60,
     )
     # 再生・サイクル設定
     play_mode: EnumProperty(
         name="Play Mode",
-        description="アニメーション再生方式",
+        description="Animation playback mode",
         items=[
-            ('ONCE', "Once", "一度だけ再生して終了姿勢で停止"),
-            ('REPEAT', "Repeat", "再生後、先頭に戻って繰り返し"),
-            ('PINGPONG', "Ping-Pong", "再生後、逆再生して往復"),
+            ('ONCE', "Once", "Play once and hold last frame"),
+            ('REPEAT', "Repeat", "Loop playback from beginning"),
+            ('PINGPONG', "Ping-Pong", "Ping-pong forward and backward"),
         ],
         default='ONCE',
     )
     cycle_frames: IntProperty(
         name="Cycle Frames",
-        description="1サイクルにかけるフレーム数 (例: 60フレーム = 1秒)",
+        description="Frames per cycle (e.g. 60 frames = 1 second)",
         default=60,
         min=1,
         max=10000,
     )
     loop_count: IntProperty(
         name="Loop Count",
-        description="リピート / 往復の繰り返し回数",
+        description="Number of repeats or round-trips",
         default=1,
         min=1,
         max=1000,
     )
     infinite_loop: BoolProperty(
         name="Infinite",
-        description="無限にアニメーションを繰り返す",
+        description="Repeat animation indefinitely",
         default=False,
     )
     easing: EnumProperty(
         name="Easing",
-        description="補間加減速方式 (Smoothは始点・終点で滑らかに減速し布の暴れを防ぐ)",
+        description="Interpolation easing curve",
         items=[
-            ('SMOOTH', "Smooth (Ease In-Out)", "スムーズステップ加減速 (推奨: 衝撃を抑える)"),
-            ('LINEAR', "Linear", "等速直線補間"),
+            ('SMOOTH', "Smooth (Ease In-Out)", "Smoothstep easing (Recommended: suppresses shocks)"),
+            ('LINEAR', "Linear", "Linear constant speed interpolation"),
         ],
         default='SMOOTH',
     )
     progress: FloatProperty(
         name="Progress",
-        description="現在の進行度 (0.0〜1.0)。スライダー操作で手動スクラブ可能",
+        description="Current progress (0.0 to 1.0). Manually scrubbable with slider",
         default=0.0,
         min=0.0,
         max=1.0,
@@ -746,63 +766,63 @@ def _on_is_collider_updated(self, context):
 class TareminClothColliderSettings(PropertyGroup):
     is_collider: BoolProperty(
         name="Collider Enabled",
-        description="このオブジェクトを剛体コライダーとして登録する",
+        description="Enable GPU collider on this object",
         default=False,
         update=_on_is_collider_updated,
     )
     enabled: BoolProperty(
         name="Collider Active",
-        description="このコライダーの衝突判定を有効にする（OFFで一時的に無効化）",
+        description="Enable collision detection for this collider (OFF to temporarily disable)",
         default=True,
         update=_on_collider_prop_updated,
     )
     collider_purpose: EnumProperty(
         name="Collider Purpose",
-        description="コライダーの用途・目的（自動判別または目的別プリセット）",
+        description="Recommended collider setting preset",
         items=[
-            ('AUTO', "Auto Detect", "オブジェクト構造から自動推定・選択"),
-            ('CHARACTER', "Character Body", "素体・アバター (Bone SDF)"),
-            ('MANNEQUIN', "Mannequin / Prop", "マネキン・家具 (Mesh SDF)"),
-            ('FLOOR', "Floor / Ground", "床・地面 (Plane)"),
-            ('SPHERE', "Sphere", "球体 (Sphere)"),
-            ('CUSTOM', "Custom / Simple", "カスタムメッシュ (Mesh)"),
+            ('AUTO', "Auto Detect", "Auto-select best collider type from object structure"),
+            ('CHARACTER', "Character Body", "Humanoid character avatar (Bone SDF)"),
+            ('MANNEQUIN', "Mannequin / Prop", "Mannequin or rigid furniture (Mesh SDF)"),
+            ('FLOOR', "Floor / Ground", "Ground floor (Plane)"),
+            ('SPHERE', "Sphere", "Sphere collider"),
+            ('CUSTOM', "Custom / Simple", "Custom polygon mesh (Mesh)"),
         ],
         default='AUTO',
         update=_on_collider_purpose_updated,
     )
     last_collider_preset: StringProperty(
         name="Collider Preset",
-        description="直近に適用されたコライダープリセット",
+        description="Last applied collider preset",
         default="",
     )
     collider_type: EnumProperty(
         name="Collider Shape",
         items=[
-            ('SPHERE', "Sphere", "球コライダー"),
-            ('CAPSULE', "Capsule", "カプセルコライダー"),
-            ('PLANE', "Plane", "平面コライダー"),
-            ('MESH', "Mesh", "メッシュコライダー (カスタムポリゴンメッシュ)"),
-            ('BONE_SDF', "Bone SDF", "ボーン局所SDFコライダー (素体・キャラクタ向け)"),
-            ('MESH_SDF', "Mesh SDF", "単一メッシュ直方体SDFコライダー (素体・マネキン・剛体向け)"),
+            ('SPHERE', "Sphere", "Sphere collider"),
+            ('CAPSULE', "Capsule", "Capsule collider"),
+            ('PLANE', "Plane", "Plane collider"),
+            ('MESH', "Mesh", "Mesh collider (custom polygon mesh)"),
+            ('BONE_SDF', "Bone SDF", "Bone-local SDF collider (Character body)"),
+            ('MESH_SDF', "Mesh SDF", "Single mesh SDF collider (Mannequin / Rigid)"),
         ],
         default='MESH',
         update=_on_collider_prop_updated,
     )
     sdf_resolution: EnumProperty(
         name="SDF Resolution",
-        description="各ボーンローカルSDFのテクスチャ解像度",
+        description="Texture resolution for each bone-local SDF",
         items=[
-            ('32', "32 (Low)", "軽量・高速 (32x32x32, 約131KB/ボーン)"),
-            ('64', "64 (Standard)", "標準・推奨 (64x64x64, 約1MB/ボーン)"),
-            ('128', "128 (High)", "高精細 (128x128x128, 約8MB/ボーン)"),
-            ('CUSTOM', "Custom", "カスタム解像度指定"),
+            ('32', "32 (Low)", "Lightweight and fast (32x32x32, ~131KB/bone)"),
+            ('64', "64 (Standard)", "Standard recommended (64x64x64, ~1MB/bone)"),
+            ('128', "128 (High)", "High detail (128x128x128, ~8MB/bone)"),
+            ('CUSTOM', "Custom", "Custom resolution specification"),
         ],
         default='64',
         update=_on_collider_prop_updated,
     )
     sdf_resolution_custom: IntProperty(
         name="Custom Resolution",
-        description="カスタムSDF解像度 (16〜512)",
+        description="Custom SDF resolution (16 to 512)",
         default=128,
         min=16,
         max=512,
@@ -810,7 +830,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     sdf_margin: FloatProperty(
         name="SDF Margin",
-        description="ボーンローカルAABBのマージン比率",
+        description="Bone local AABB margin ratio",
         default=0.2,
         min=0.05,
         max=1.0,
@@ -818,7 +838,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     weight_threshold: FloatProperty(
         name="Weight Threshold",
-        description="ボーン影響度として認識する最小ウェイト閾値（ゴミウェイトの除外）",
+        description="Minimum vertex weight threshold recognized as bone influence",
         default=0.02,
         min=0.001,
         max=0.5,
@@ -826,7 +846,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     blend_k: FloatProperty(
         name="Blend Smoothness",
-        description="関節部での複数ボーンSDF合成の滑らかさ・ブレンド半径 (m)",
+        description="SDF blend smoothness radius across bone joints in meters",
         default=0.05,
         min=0.001,
         max=0.5,
@@ -835,17 +855,17 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     sdf_update_mode: EnumProperty(
         name="SDF Update Mode",
-        description="ボーンSDFの更新方式",
+        description="Bone SDF update mode",
         items=[
-            ('STATIC', "Static (Fastest)", "静止ポーズで事前ベイクした剛体SDFを使用（最高速・通常推奨）"),
-            ('DYNAMIC_GPU', "Dynamic Full GPU", "GPUスキニング(LBS)とGPU内SDF更新によりアニメーション変形に毎フレーム追従"),
+            ('STATIC', "Static (Fastest)", "Pre-baked rigid SDF in rest pose (Fastest, recommended)"),
+            ('DYNAMIC_GPU', "Dynamic Full GPU", "Per-frame GPU LBS deformation and SDF update"),
         ],
         default='STATIC',
         update=_on_collider_prop_updated,
     )
     sdf_dynamic_update_interval: IntProperty(
         name="Update Interval",
-        description="動的SDFの再計算間隔（フレーム数）。1で毎フレーム、2で2フレームごと（負荷軽減）",
+        description="Dynamic SDF recalculation interval in frames (1=every frame)",
         default=1,
         min=1,
         max=10,
@@ -853,18 +873,18 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     sdf_cache_enabled: BoolProperty(
         name="Cache SDF",
-        description="SDFベイク結果をディスクキャッシュし、次回以降即時ロードする",
+        description="Cache baked SDF to disk for instant reload",
         default=True,
     )
     enable_joint_mesh: BoolProperty(
         name="Joint Mesh Hybrid",
-        description="関節部（腰・背骨・首など）の複数ボーンブレンド領域のみ部分メッシュコライダーを併用し、剛体SDFの角ばり突出を解消する（激しい屈曲アニメーション時に推奨）",
+        description="Use hybrid partial mesh collider only at joint blend regions to eliminate sharp SDF corners",
         default=True,
         update=_on_collider_prop_updated,
     )
     joint_weight_threshold: FloatProperty(
         name="Joint Blend Threshold",
-        description="関節部と判定する最大ボーンウェイトの閾値（これ未満のブレンド頂点を含む面を部分メッシュ化）",
+        description="Bone weight threshold below which faces are converted to partial mesh",
         default=0.85,
         min=0.5,
         max=0.99,
@@ -873,7 +893,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     joint_rotation_threshold: FloatProperty(
         name="Activation Angle",
-        description="関節メッシュを動的同期する最小屈曲角（度）。0で常時全同期、2度程度で曲がった関節のみ同期し高速化",
+        description="Minimum joint bend angle in degrees to activate dynamic mesh sync",
         default=2.0,
         min=0.0,
         max=45.0,
@@ -882,7 +902,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     mesh_sdf_voxel_size: FloatProperty(
         name="Voxel Size",
-        description="メッシュSDFのボクセルサイズ (m)。小さいほど高精細 (例: 0.004 = 4mm)",
+        description="Mesh SDF voxel size in meters (smaller is higher detail, e.g. 0.004 = 4mm)",
         default=0.004,
         min=0.0005,
         max=0.05,
@@ -893,7 +913,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     mesh_sdf_margin: FloatProperty(
         name="SDF Margin",
-        description="メッシュ周囲のSDFマージン (m)",
+        description="SDF margin around mesh in meters",
         default=0.02,
         min=0.005,
         max=0.2,
@@ -904,7 +924,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     mesh_sdf_max_vram_mb: IntProperty(
         name="Max VRAM (MB)",
-        description="メッシュSDFテクスチャの最大VRAM消費予算 (MB)。VRAM不足やクラッシュを防ぐ上限値",
+        description="Maximum VRAM budget for mesh SDF texture (MB)",
         default=256,
         min=64,
         max=4096,
@@ -913,19 +933,19 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     mesh_sdf_auto_scale: BoolProperty(
         name="Auto Fit VRAM",
-        description="推定VRAMが上限を超える場合、上限内に収まるようボクセルサイズを自動調整してクラッシュを防止する",
+        description="Automatically adjust voxel size if estimated VRAM exceeds budget",
         default=True,
         update=_on_collider_prop_updated,
     )
     mesh_sdf_cache_enabled: BoolProperty(
         name="Cache SDF",
-        description="メッシュSDFベイク結果をディスクキャッシュし、次回以降即時ロードする",
+        description="Cache mesh SDF to disk for instant reload",
         default=True,
         update=_on_collider_prop_updated,
     )
     radius: FloatProperty(
         name="Radius",
-        description="コライダー半径 (m)",
+        description="Collider radius in meters",
         default=0.5,
         min=0.001,
         max=10.0,
@@ -934,7 +954,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     thickness: FloatProperty(
         name="Thickness",
-        description="メッシュコライダーの表面厚み (m)",
+        description="Mesh collider surface thickness in meters",
         default=0.005,
         min=0.0001,
         max=0.5,
@@ -943,25 +963,25 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     single_sided: BoolProperty(
         name="Single Sided",
-        description="片面衝突判定を有効化。メッシュ表面（法線方向）からの侵入を遮断し、裏側へめり込んだ場合も法線方向の表面へ押し戻して貫通を防止します",
+        description="Enable single-sided collision to prevent penetration from backside",
         default=True,
         update=_on_collider_prop_updated,
     )
     enable_single_sided_recovery: BoolProperty(
         name="Single-Sided Recovery",
-        description="片面メッシュコライダーの裏側に侵入した頂点を、安全ガード（面内部判定かつ直近表側接触なし）を満たす最近傍面から表側へ脱出させます",
+        description="Safely recover vertices that penetrated behind single-sided collider",
         default=True,
         update=_on_collider_prop_updated,
     )
     enable_cluster_culling: BoolProperty(
         name="Linear BVH Culling",
-        description="大量のメッシュコライダー面を16面クラスタ単位でGPU階層カリングし、大幅に高速化します（複雑な衣服・人体向け）",
+        description="Cluster BVH culling for fast collision against dense meshes",
         default=False,
         update=_on_collider_prop_updated,
     )
     sweep_margin_offset: FloatProperty(
         name="Sweep Margin Offset",
-        description="高速移動するコライダー判定時の追加安全マージン (m)",
+        description="Additional safety margin for fast moving colliders in meters",
         default=0.05,
         min=0.001,
         max=0.5,
@@ -970,7 +990,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     friction: FloatProperty(
         name="Friction",
-        description="摩擦係数",
+        description="Surface friction coefficient",
         default=0.5,
         min=0.0,
         max=1.0,
@@ -978,7 +998,7 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     restitution: FloatProperty(
         name="Restitution",
-        description="衝突時の反発係数 (0.0: 完全非弾性・跳ね返りなし, 1.0: 完全弾性)",
+        description="Collision restitution coefficient (0.0: inelastic, 1.0: fully elastic)",
         default=0.0,
         min=0.0,
         max=1.0,
@@ -997,25 +1017,25 @@ def register():
     bpy.types.Object.taremin_cloth_collider = PointerProperty(type=TareminClothColliderSettings)
     bpy.types.Scene.taremin_cloth_fast_playback = BoolProperty(
         name="Fast Playback",
-        description="タイムライン再生中にシミュレーション対象外オブジェクトのモディファイアを一時バイパスしてBlenderのDepsgraph負荷を軽減します",
+        description="Bypass modifiers of non-simulated objects during playback to reduce Depsgraph overhead",
         default=False,
     )
     bpy.types.Scene.taremin_cloth_config_presets_json = StringProperty(
         name="Config Presets JSON",
-        description="保存されたシミュレーション構成プリセット（JSON）",
+        description="Saved simulation configuration presets (JSON)",
         default="{}",
     )
     bpy.types.Scene.taremin_cloth_active_config_preset = StringProperty(
         name="Active Config Preset",
-        description="現在適用されている構成プリセット名",
+        description="Currently applied configuration preset name",
         default="",
     )
     bpy.types.Scene.taremin_cloth_ui_mode = EnumProperty(
         name="UI Mode",
-        description="Taremin Cloth のUI表示モード（簡単モード / 詳細モード）",
+        description="Taremin Cloth UI display mode (Simple / Advanced)",
         items=[
-            ('SIMPLE', "Simple", "初心者・日常作業向けの簡易UIモード（主要プリセットと基本設定のみ）", 'PLAY', 0),
-            ('ADVANCED', "Advanced", "全物理パラメータ・内部設定を編集可能な詳細UIモード", 'PREFERENCES', 1),
+            ('SIMPLE', "Simple", "Simplified UI for beginners with key presets and basic settings", 'PLAY', 0),
+            ('ADVANCED', "Advanced", "Detailed UI allowing full access to all physics and internal settings", 'PREFERENCES', 1),
         ],
         default='SIMPLE',
     )

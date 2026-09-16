@@ -5,19 +5,21 @@ taremin_cloth ポーズ管理オペレーター
 
 import bpy
 from ..utils import anim_driver
+from .. import i18n
 
 
 class TAREMIN_CLOTH_OT_record_pose(bpy.types.Operator):
     """アーマチュアの現在のポーズ姿勢をスナップショットとして記録する"""
     bl_idname = "taremin_cloth.record_pose"
     bl_label = "Record Pose Snapshot"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     slot: bpy.props.EnumProperty(
         name="Slot",
         items=[
-            ('START', "Start (0.0)", "開始姿勢として記録"),
-            ('TARGET', "Target (1.0)", "目標姿勢として記録"),
+            ('START', "Start (0.0)", "Record current pose as start pose snapshot"),
+            ('TARGET', "Target (1.0)", "Record current pose as target pose snapshot"),
         ],
         default='START',
     )
@@ -69,14 +71,15 @@ class TAREMIN_CLOTH_OT_apply_pose_preview(bpy.types.Operator):
     """記録されたポーズやレスト姿勢をアーマチュアに適用する"""
     bl_idname = "taremin_cloth.apply_pose_preview"
     bl_label = "Apply Pose Preview"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     slot: bpy.props.EnumProperty(
         name="Slot",
         items=[
-            ('START', "Start (0.0)", "開始姿勢を適用"),
-            ('TARGET', "Target (1.0)", "目標姿勢を適用"),
-            ('REST', "Rest", "ボーンTransformをクリアしてレスト姿勢に戻す"),
+            ('START', "Start (0.0)", "Apply recorded start pose to armature"),
+            ('TARGET', "Target (1.0)", "Apply recorded target pose to armature"),
+            ('REST', "Rest", "Clear bone transforms and restore rest pose"),
         ],
         default='START',
     )

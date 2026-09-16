@@ -26,6 +26,7 @@ from ..engine.params import sync_cloth_parameters
 from ..preferences import get_preferences
 from ..utils import drawing, topology, anim_driver
 from ..utils.logger import logger
+from .. import i18n
 
 _interactive_running = False
 _interactive_operator_instance = None
@@ -246,6 +247,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     """3Dビューポート上でリアルタイムに布を掴んで動かすモーダルオペレーター"""
     bl_idname = "taremin_cloth.interactive"
     bl_label = "Interactive Cloth Simulation"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     _timer = None
@@ -582,7 +584,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     # ドラッグ中でなければ物理ピンも解除
                     if self._grabbed_vert != target_v_idx:
                         sim.release_pin(target_v_idx)
-                    self.report({'INFO'}, f"頂点 #{target_v_idx} のピン留めを解除しました")
+                    self.report({'INFO'}, i18n.trans("Unpinned vertex #%d") % target_v_idx)
                 else:
                     # ピン留め (Pin)
                     vg.add([target_v_idx], 1.0, 'REPLACE')
@@ -594,7 +596,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         p = coords.reshape((-1, 3))[target_v_idx]
                         t_pos = mathutils.Vector((p[0], p[1], p[2]))
                     sim.set_pin(target_v_idx, [t_pos.x, t_pos.y, t_pos.z], 1.0)
-                    self.report({'INFO'}, f"頂点 #{target_v_idx} をピン留めしました")
+                    self.report({'INFO'}, i18n.trans("Pinned vertex #%d") % target_v_idx)
 
                 if context.area:
                     context.area.tag_redraw()
@@ -678,11 +680,12 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         drawing.set_interactive_active(True)
 
         if hasattr(context.workspace, "status_text_set"):
-            context.workspace.status_text_set(
-                "Taremin Cloth: [左ドラッグ] 頂点移動 | [P] ピン留め/解除 | [右クリック / ESC] 終了"
+            status_guide = i18n.trans(
+                "Taremin Cloth: [Left Drag] Move Vertex | [P] Toggle Pin | [Right Click / ESC] Exit"
             )
+            context.workspace.status_text_set(status_guide)
 
-        self.report({'INFO'}, "Interactive Simulation Started (Press ESC / RightClick or Click Stop to exit)")
+        self.report({'INFO'}, i18n.trans("Interactive Simulation Started (Press ESC / RightClick or Click Stop to exit)"))
         return {'RUNNING_MODAL'}
 
     def cancel(self, context):
@@ -735,7 +738,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         saved_path = sim.save_debug_recording(filepath)
                         file_size = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0
                         logger.info(f"[DebugRecorder] Successfully saved debug recording ({frame_count} frames, {file_size:,} bytes) to: {saved_path}")
-                        self.report({'INFO'}, f"Debug recording saved: {os.path.basename(saved_path)} ({frame_count} frames)")
+                        self.report({'INFO'}, i18n.trans("Debug recording saved: %s (%d frames)") % (os.path.basename(saved_path), frame_count))
                     except Exception as e:
                         logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
                 sim.stop_debug_recording()
@@ -802,14 +805,16 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         # インタラクティブモード停止時は、次回スムーズに停止位置から再開（Warm Resume）できるよう
         # シミュレータインスタンスおよびQuadトポロジーをそのまま保持する
-        self.report({'INFO'}, f"Interactive Simulation Stopped (Paused){summary_msg}")
+        stopped_msg = i18n.trans("Interactive Simulation Stopped (Paused)")
+        self.report({'INFO'}, f"{stopped_msg}{summary_msg}")
 
 
 class TAREMIN_CLOTH_OT_benchmark_fps(bpy.types.Operator):
-    """インタラクティブシミュレーションを約2秒間サンプリング計測し、詳細なFPS性能レポートを表示する"""
+    """Run interactive simulation for ~2 seconds to benchmark actual FPS and timing breakdown"""
     bl_idname = "taremin_cloth.benchmark_fps"
     bl_label = "Benchmark FPS"
-    bl_description = "インタラクティブシミュレーションを自動で約2秒間実行し、実際のFPSおよび各処理時間を計測・表示します"
+    bl_description = "Automatically run interactive simulation for ~2 seconds to benchmark actual FPS and timing breakdown"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     _frame_counter = 0
@@ -835,5 +840,5 @@ class TAREMIN_CLOTH_OT_benchmark_fps(bpy.types.Operator):
             return 0.02
 
         bpy.app.timers.register(check_auto_finish, first_interval=0.05)
-        self.report({'INFO'}, "Benchmarking FPS... (will complete in ~2 seconds)")
+        self.report({'INFO'}, i18n.trans("Benchmarking FPS... (will complete in ~2 seconds)"))
         return {'FINISHED'}

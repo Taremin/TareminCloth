@@ -13,6 +13,7 @@ import numpy as np
 from ..engine.gui_client import get_gui_client
 from ..engine.cache import cache_rest_positions
 from ..utils.logger import logger
+from .. import i18n
 
 _gui_process = None
 _gui_preview_running = False
@@ -49,10 +50,11 @@ def resolve_gui_binary_path() -> Optional[str]:
 
 
 class TAREMIN_CLOTH_OT_launch_gui(bpy.types.Operator):
-    """Taremin Cloth GUI を起動し、選択オブジェクトのメッシュを初期化して接続する"""
+    """Launch Taremin Cloth GUI, initialize selected object mesh and connect"""
     bl_idname = "taremin_cloth.launch_gui"
     bl_label = "Launch Taremin Cloth GUI"
-    bl_description = "独立した高速GUIプロセスを起動し、Blenderと非同期リアルタイム連携を開始します"
+    bl_description = "Launch an independent high-speed GUI process and start asynchronous real-time sync with Blender"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -115,6 +117,7 @@ class TAREMIN_CLOTH_OT_connect_gui(bpy.types.Operator):
     """起動済みの Taremin Cloth GUI に接続してメッシュを送信する"""
     bl_idname = "taremin_cloth.connect_gui"
     bl_label = "Connect to GUI"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -149,6 +152,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
     """Taremin Cloth GUI から最新フレームを非同期に受信してプレビュー表示するモーダルオペレーター"""
     bl_idname = "taremin_cloth.gui_preview"
     bl_label = "GUI Live Preview"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     _timer = None
@@ -264,6 +268,7 @@ class TAREMIN_CLOTH_OT_stop_gui_preview(bpy.types.Operator):
     """実行中の GUI Live Preview を停止する"""
     bl_idname = "taremin_cloth.stop_gui_preview"
     bl_label = "Stop Preview"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     def execute(self, context):
@@ -275,10 +280,11 @@ class TAREMIN_CLOTH_OT_stop_gui_preview(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_apply_gui_pose(bpy.types.Operator):
-    """Taremin Cloth GUI の現在の変形形状をBlenderメッシュの新しいレスト形状として確定する"""
+    """Bake current deformed shape from Taremin Cloth GUI as new rest shape for Blender mesh"""
     bl_idname = "taremin_cloth.apply_gui_pose"
     bl_label = "Apply GUI Pose"
-    bl_description = "Taremin Cloth GUI 上の現在の変形結果をBlenderメッシュに確定適用します"
+    bl_description = "Apply the current deformation from the Taremin Cloth GUI to the Blender mesh"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -314,10 +320,11 @@ class TAREMIN_CLOTH_OT_apply_gui_pose(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_sync_gui_colliders(bpy.types.Operator):
-    """Blenderシーン内のコライダー（球、カプセル、平面、メッシュ）を Taremin Cloth GUI に同期転送する"""
+    """Sync scene colliders (spheres, capsules, planes, meshes) to Taremin Cloth GUI"""
     bl_idname = "taremin_cloth.sync_gui_colliders"
     bl_label = "Sync Colliders"
-    bl_description = "Blenderシーン内のコライダー（球、カプセル、平面、メッシュ）を Taremin Cloth GUI に同期転送します"
+    bl_description = "Sync scene colliders (spheres, capsules, planes, meshes) to the Taremin Cloth GUI"
+    bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER'}
 
     def execute(self, context):

@@ -1,9 +1,31 @@
+import functools
 import json
 from pathlib import Path
 import bpy
-from bpy.props import EnumProperty, StringProperty, BoolProperty, IntProperty
+from bpy.props import (
+    EnumProperty as _EnumProperty,
+    StringProperty as _StringProperty,
+    BoolProperty as _BoolProperty,
+    IntProperty as _IntProperty,
+)
 
+from . import i18n
 from .utils.logger import logger, set_log_level
+
+
+def _wrap_prop(prop_func):
+    @functools.wraps(prop_func)
+    def wrapper(*args, **kwargs):
+        if "translation_context" not in kwargs:
+            kwargs["translation_context"] = i18n.CONTEXT
+        return prop_func(*args, **kwargs)
+    return wrapper
+
+
+EnumProperty = _wrap_prop(_EnumProperty)
+StringProperty = _wrap_prop(_StringProperty)
+BoolProperty = _wrap_prop(_BoolProperty)
+IntProperty = _wrap_prop(_IntProperty)
 
 # デバイス列挙キャッシュ（動的EnumPropertyのGC保護用）
 _device_items_cache = []
@@ -143,7 +165,7 @@ def _get_gpu_device_items(self, context):
     """選択中のBackendに対応する物理GPUデバイス一覧を動的生成する（案A: 純粋な物理GPU名のみ）"""
     global _device_items_cache
     items = [
-        ('AUTO', "Auto (High Performance)", "最適な高パフォーマンスGPUを自動選択", 'AUTO', 0),
+        ('AUTO', "Auto (High Performance)", "Automatically select optimal high performance GPU", 'AUTO', 0),
     ]
     try:
         import taremin_cloth_core
@@ -204,15 +226,16 @@ def refresh_active_gpu_info(prefs):
 class TareminClothPreferences(bpy.types.AddonPreferences):
     """Taremin Cloth アドオン設定"""
     bl_idname = __package__.split('.')[0] if __package__ else "taremin_cloth"
+    bl_translation_context = i18n.CONTEXT
 
     log_level: EnumProperty(
         name="Log Level",
-        description="システムコンソールに出力するログの詳細度",
+        description="Log verbosity output to system console",
         items=[
-            ('DEBUG', "DEBUG", "詳細なデバッグログ（頂点数、キャッシュ判定、ステップ情報など）"),
-            ('INFO', "INFO", "通常の情報ログ（シミュレーション開始・停止、プリセット適用など）"),
-            ('WARNING', "WARNING", "警告メッセージのみ"),
-            ('ERROR', "ERROR", "エラーメッセージのみ"),
+            ('DEBUG', "DEBUG", "Detailed debug logs (vertex count, cache, step info, etc.)"),
+            ('INFO', "INFO", "Standard info logs (sim start/stop, preset applied, etc.)"),
+            ('WARNING', "WARNING", "Warning messages only"),
+            ('ERROR', "ERROR", "Error messages only"),
         ],
         default='INFO',
         update=_on_log_level_update,
@@ -220,11 +243,11 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
     gpu_backend: EnumProperty(
         name="GPU Backend",
-        description="GPU計算バックエンドの選択",
+        description="GPU compute backend selection",
         items=[
-            ('AUTO', "Auto (推奨)", "OSに最適なバックエンドを自動選択（WindowsはDirectX 12優先）"),
-            ('DX12', "DirectX 12", "Windows標準のDirectX 12（Blenderとの競合が少なく最も安定）"),
-            ('VULKAN', "Vulkan", "クロスプラットフォーム対応の高速API Vulkan"),
+            ('AUTO', "Auto (Recommended)", "Auto-select best backend for OS (DirectX 12 preferred on Windows)"),
+            ('DX12', "DirectX 12", "Windows standard DirectX 12 (most stable with Blender)"),
+            ('VULKAN', "Vulkan", "Cross-platform high-performance Vulkan API"),
         ],
         default='AUTO',
         update=_on_gpu_backend_update,
@@ -232,7 +255,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
     gpu_device: EnumProperty(
         name="GPU Device",
-        description="シミュレーション計算に使用するGPUデバイス",
+        description="GPU device used for simulation",
         items=_get_gpu_device_items,
         update=_on_gpu_device_update,
     )
@@ -249,14 +272,14 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
     enable_debug_recording: BoolProperty(
         name="Record Simulation Debug States",
-        description="シミュレーション（インタラクティブモード）中の各フレーム状態をRust側で記録し、終了時にファイル出力する（※Console Log LevelがDEBUGの時に実行されます）",
+        description="Record per-frame state in Rust during interactive simulation and output to file upon stop",
         default=True,
         update=_on_debug_pref_update,
     )
 
     debug_output_dir: StringProperty(
         name="Output Directory",
-        description="デバッグ記録ファイルの保存先ディレクトリ（空欄時はアドオン内の frame_logs フォルダを使用）",
+        description="Directory to save debug recording files (uses frame_logs folder when empty)",
         default="",
         subtype='DIR_PATH',
         update=_on_debug_pref_update,
@@ -264,14 +287,14 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
     debug_filename_template: StringProperty(
         name="Filename Template",
-        description="デバッグファイル名テンプレート。利用可能な変数: {date}, {time}, {datetime}, {object}, {frames}, {ext}",
+        description="Debug filename template. Available variables: {date}, {time}, {datetime}, {object}, {frames}, {ext}",
         default="cloth_debug_{datetime}_{object}.{ext}",
         update=_on_debug_pref_update,
     )
 
     debug_max_frames: IntProperty(
         name="Max Recording Frames",
-        description="メモリ保護のための最大記録フレーム数（3600フレーム = 60FPSで約1分間）",
+        description="Maximum recorded frames for memory protection (3600 frames = ~1 min at 60 FPS)",
         default=3600,
         min=60,
         max=100000,
@@ -280,7 +303,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
     enable_standalone_gui: BoolProperty(
         name="Enable Standalone GUI Client",
-        description="外部プロセスの独立GPUシミュレーションGUIクライアントを有効化します（実験的機能）",
+        description="Enable external process standalone GPU simulation GUI client (Experimental)",
         default=False,
         update=_on_standalone_gui_update,
     )
@@ -295,43 +318,43 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
 
         # GPU Settings
         box_gpu = layout.box()
-        box_gpu.label(text="GPU & Hardware Settings", icon='PREFERENCES')
+        box_gpu.label(text=i18n.trans("GPU & Hardware Settings"), icon='PREFERENCES')
         col_gpu = box_gpu.column(align=True)
-        col_gpu.prop(self, "gpu_backend", text="Backend")
-        col_gpu.prop(self, "gpu_device", text="Device")
+        col_gpu.prop(self, "gpu_backend", text=i18n.trans("Backend"))
+        col_gpu.prop(self, "gpu_device", text=i18n.trans("Device"))
 
         row_act = box_gpu.row(align=True)
         row_act.label(
-            text=f"Active: {self.active_device_name} ({self.active_backend_name})",
+            text=f"{i18n.trans('Active:')} {self.active_device_name} ({self.active_backend_name})",
             icon='CHECKMARK' if self.active_device_name != "Unknown" else 'INFO',
         )
-        box_gpu.operator("taremin_cloth.apply_gpu_settings", text="Apply GPU Settings", icon='FILE_REFRESH')
+        box_gpu.operator("taremin_cloth.apply_gpu_settings", text=i18n.trans("Apply GPU Settings"), icon='FILE_REFRESH')
 
         # Logging & Diagnostics
         box_log = layout.box()
-        box_log.label(text="Logging & Diagnostics", icon='CONSOLE')
+        box_log.label(text=i18n.trans("Logging & Diagnostics"), icon='CONSOLE')
         row_log = box_log.row()
-        row_log.prop(self, "log_level", text="Console Log Level")
+        row_log.prop(self, "log_level", text=i18n.trans("Console Log Level"))
 
         # Simulation Debug State Recording
         box_debug = box_log.box()
-        box_debug.label(text="Simulation Frame Debug Recorder", icon='FILE_CACHE')
-        box_debug.prop(self, "enable_debug_recording", text="Enable Debug Recording (when DEBUG level)")
+        box_debug.label(text=i18n.trans("Simulation Frame Debug Recorder"), icon='FILE_CACHE')
+        box_debug.prop(self, "enable_debug_recording", text=i18n.trans("Enable Debug Recording (when DEBUG level)"))
 
         col_debug = box_debug.column()
         col_debug.enabled = self.enable_debug_recording
-        col_debug.prop(self, "debug_output_dir", text="Output Folder")
-        col_debug.prop(self, "debug_filename_template", text="Template")
-        col_debug.prop(self, "debug_max_frames", text="Max Frames")
+        col_debug.prop(self, "debug_output_dir", text=i18n.trans("Output Folder"))
+        col_debug.prop(self, "debug_filename_template", text=i18n.trans("Template"))
+        col_debug.prop(self, "debug_max_frames", text=i18n.trans("Max Frames"))
 
         row_prev = col_debug.row()
         row_prev.alignment = 'RIGHT'
-        row_prev.label(text="Format: gzip JSON Lines (.jsonl.gz)", icon='INFO')
+        row_prev.label(text=i18n.trans("Format: gzip JSON Lines (.jsonl.gz)"), icon='INFO')
 
         # Experimental Features
         box_exp = layout.box()
-        box_exp.label(text="Experimental Features", icon='EXPERIMENTAL')
-        box_exp.prop(self, "enable_standalone_gui", text="Enable Standalone GUI Client")
+        box_exp.label(text=i18n.trans("Experimental Features"), icon='EXPERIMENTAL')
+        box_exp.prop(self, "enable_standalone_gui", text=i18n.trans("Enable Standalone GUI Client"))
 
 
 
