@@ -721,6 +721,7 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
         row_fps.prop(settings, "show_fps_overlay", text=i18n.trans("Show FPS"))
         if settings.show_fps_overlay:
             row_fps.prop(settings, "fps_overlay_position", text="")
+        col.prop(settings, "show_hud_help", text=i18n.trans("Show Key Guide"))
         col.separator()
         col.operator("taremin_cloth.benchmark_fps", text=i18n.trans("Benchmark FPS (2 sec)"), icon='TIME')
 

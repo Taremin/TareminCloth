@@ -498,6 +498,11 @@ class TareminClothObjectSettings(PropertyGroup):
         ],
         default='TOP_CENTER',
     )
+    show_hud_help: BoolProperty(
+        name="Show HUD Help",
+        description="Display interactive shortcut key guide overlay in 3D viewport",
+        default=True,
+    )
     # 伸縮グループ (Elastic Bands / Edge Scaling)
     elastic_groups: CollectionProperty(
         type=TareminClothElasticGroup,

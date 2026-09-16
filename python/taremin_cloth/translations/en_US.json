@@ -608,5 +608,9 @@
   "Weight Threshold": "Weight Threshold",
   "Windows standard DirectX 12 (most stable with Blender)": "Windows standard DirectX 12 (most stable with Blender)",
   "Workgroup Size": "Workgroup Size",
-  "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "Zero vertex overhead during sim; split quads along strain on stop (Recommended)"
+  "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "Zero vertex overhead during sim; split quads along strain on stop (Recommended)",
+  "Show Key Guide": "Show Key Guide",
+  "Show HUD Help": "Show HUD Help",
+  "Display interactive shortcut key guide overlay in 3D viewport": "Display interactive shortcut key guide overlay in 3D viewport",
+  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit"
 }

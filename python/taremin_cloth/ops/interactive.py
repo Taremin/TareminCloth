@@ -379,7 +379,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             fps, frame_ms = self._fps_counter.tick()
             show_overlay = getattr(settings, "show_fps_overlay", True) if settings else True
             position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
-            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position)
+            show_help = getattr(settings, "show_hud_help", True) if settings else True
+            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help)
 
         # パフォーマンスサンプリング記録
         if delta_time > 0:

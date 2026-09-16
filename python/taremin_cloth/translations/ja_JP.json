@@ -608,5 +608,9 @@
   "Weight Threshold": "ウェイト閾値",
   "Windows standard DirectX 12 (most stable with Blender)": "Windows標準 DirectX 12 (Blenderとの組み合わせで最も安定)",
   "Workgroup Size": "ワークグループサイズ",
-  "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "シミュレーション中の頂点オーバーヘッドゼロ。停止時に歪みに沿ってQuadを分割 (推奨)"
+  "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "シミュレーション中の頂点オーバーヘッドゼロ。停止時に歪みに沿ってQuadを分割 (推奨)",
+  "Show Key Guide": "キー操作ガイドを表示",
+  "Show HUD Help": "HUD操作ガイドを表示",
+  "Display interactive shortcut key guide overlay in 3D viewport": "シミュレーション中に3Dビューポート上に操作キーのショートカットガイドを表示します",
+  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[左ドラッグ] 頂点移動  |  [P] ピン留め/解除  |  [Esc / 右クリック] 終了"
 }
