@@ -137,7 +137,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1000.0,
         min=0.1,
         max=100000.0,
-        soft_min=1.0,
+        soft_min=10.0,
         soft_max=10000.0,
     )
     compression_stiffness: FloatProperty(
@@ -146,7 +146,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=100.0,
         min=0.1,
         max=100000.0,
-        soft_min=1.0,
+        soft_min=10.0,
         soft_max=10000.0,
     )
     shear_stiffness: FloatProperty(
@@ -155,7 +155,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=100.0,
         min=0.1,
         max=100000.0,
-        soft_min=1.0,
+        soft_min=10.0,
         soft_max=5000.0,
     )
     bending_stiffness: FloatProperty(
@@ -174,7 +174,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1000.0,
         min=0.1,
         max=100000.0,
-        soft_min=1.0,
+        soft_min=10.0,
         soft_max=10000.0,
     )
 
@@ -185,6 +185,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=5.0,
         min=0.0,
         max=50.0,
+        soft_min=0.0,
         soft_max=25.0,
     )
     compression_damping: FloatProperty(
@@ -193,6 +194,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=5.0,
         min=0.0,
         max=50.0,
+        soft_min=0.0,
         soft_max=25.0,
     )
     shear_damping: FloatProperty(
@@ -201,6 +203,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=5.0,
         min=0.0,
         max=50.0,
+        soft_min=0.0,
         soft_max=25.0,
     )
     bending_damping: FloatProperty(
@@ -209,6 +212,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=0.5,
         min=0.0,
         max=50.0,
+        soft_min=0.0,
         soft_max=10.0,
     )
     air_damping: FloatProperty(
@@ -217,6 +221,7 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1.0,
         min=0.0,
         max=50.0,
+        soft_min=0.0,
         soft_max=10.0,
     )
 
