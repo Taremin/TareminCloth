@@ -43,12 +43,12 @@ class TestPanels(unittest.TestCase):
         # メインパネル
         layout_main = render_panel(TAREMIN_CLOTH_PT_main_panel)
         labels_main = layout_main.get_labels()
-        self.assertTrue(any("メッシュオブジェクトを選択してください" in lbl for lbl in labels_main))
+        self.assertTrue(any("メッシュオブジェクトを選択してください" in lbl or "Please select a mesh object" in lbl for lbl in labels_main))
 
         # コライダーパネル
         layout_col = render_panel(TAREMIN_CLOTH_PT_collider_panel)
         labels_col = layout_col.get_labels()
-        self.assertTrue(any("オブジェクトを選択してください" in lbl for lbl in labels_col))
+        self.assertTrue(any("オブジェクトを選択してください" in lbl or "Please select an object" in lbl for lbl in labels_col))
 
     def test_draw_with_non_mesh_object(self):
         """メッシュ以外のオブジェクト（カメラ等）選択時のパネル描画テスト"""
@@ -62,7 +62,7 @@ class TestPanels(unittest.TestCase):
         # メインパネルはメッシュ以外を拒否するラベルを表示
         layout_main = render_panel(TAREMIN_CLOTH_PT_main_panel)
         labels_main = layout_main.get_labels()
-        self.assertTrue(any("メッシュオブジェクトを選択してください" in lbl for lbl in labels_main))
+        self.assertTrue(any("メッシュオブジェクトを選択してください" in lbl or "Please select a mesh object" in lbl for lbl in labels_main))
 
     # -------------------------------------------------------------------------
     # GPU Cloth メインパネル (TAREMIN_CLOTH_PT_main_panel) のテスト
@@ -82,57 +82,74 @@ class TestPanels(unittest.TestCase):
         self.assertNotIn("taremin_cloth.save_preset", operators)
 
     def test_main_panel_cloth_enabled(self):
-        """Cloth が有効な状態でのメインパネル描画テスト（全セクション・プロパティ検証）"""
+        """Cloth が有効な状態でのメインパネルおよびサブパネル描画テスト（全セクション・プロパティ検証）"""
+        bpy.context.scene.taremin_cloth_ui_mode = 'ADVANCED'
         self.obj.taremin_cloth.is_cloth = True
         self.obj.taremin_cloth.enable_adaptive_substep = True
         self.obj.taremin_cloth.enable_sewing = True
 
         layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
         operators = layout.get_operators()
-        menus = layout.get_menus()
-        props = layout.get_props()
 
         # 主要オペレーターの存在確認
         self.assertIn("taremin_cloth.toggle_cloth", operators)
         self.assertIn("taremin_cloth.interactive", operators)
         self.assertIn("taremin_cloth.reset_selected", operators)
-        self.assertIn("taremin_cloth.reset_all", operators)
         self.assertIn("taremin_cloth.apply_rest_shape", operators)
-        self.assertIn("taremin_cloth.save_preset", operators)
-        self.assertIn("taremin_cloth.delete_preset", operators)
-        self.assertIn("taremin_cloth.create_seam", operators)
+        self.assertIn("taremin_cloth.save_as_shape_key", operators)
 
-        # プリセットメニューの確認
-        self.assertIn("TAREMIN_CLOTH_MT_fabric_presets", menus)
-        self.assertIn("TAREMIN_CLOTH_MT_simulation_presets", menus)
+        # reset_all は objects_panel に配置されていることを確認
+        layout_objs = render_panel(TAREMIN_CLOTH_PT_objects_panel)
+        self.assertIn("taremin_cloth.reset_all", layout_objs.get_operators())
 
-        # プリセットボタンのカテゴリ設定確認
-        all_save_items = [
-            item.details["properties"]
-            for item in layout.get_all_items()
-            if item.item_type == "operator" and item.details["operator"] == "taremin_cloth.save_preset"
-        ]
-        categories = [p.category for p in all_save_items]
-        self.assertIn("fabric", categories)
-        self.assertIn("simulation", categories)
+        # サブパネル (Fabric) のプリセットおよび物性プロパティ確認
+        from taremin_cloth.panels import (
+            TAREMIN_CLOTH_PT_fabric,
+            TAREMIN_CLOTH_PT_pattern,
+            TAREMIN_CLOTH_PT_quality,
+            TAREMIN_CLOTH_PT_collisions,
+            TAREMIN_CLOTH_PT_forces,
+        )
+        layout_fab = render_panel(TAREMIN_CLOTH_PT_fabric)
+        menus_fab = layout_fab.get_menus()
+        ops_fab = layout_fab.get_operators()
+        props_fab = [name for data, name in layout_fab.get_props()]
 
-        # プロパティが正しくレイアウトに組み込まれているか確認
-        prop_names = [name for data, name in props]
-        self.assertIn("tension_stiffness", prop_names)
-        self.assertIn("bending_stiffness", prop_names)
-        self.assertIn("air_damping", prop_names)
-        self.assertIn("gravity", prop_names)
-        self.assertIn("substeps", prop_names)
-        self.assertIn("min_substeps", prop_names)
-        self.assertIn("enable_adaptive_substep", prop_names)
-        self.assertIn("sewing_shrink_speed", prop_names)
+        self.assertIn("TAREMIN_CLOTH_MT_fabric_presets", menus_fab)
+        self.assertIn("taremin_cloth.save_preset", ops_fab)
+        self.assertIn("taremin_cloth.delete_preset", ops_fab)
+        self.assertIn("tension_stiffness", props_fab)
+        self.assertIn("bending_stiffness", props_fab)
+        self.assertIn("air_damping", props_fab)
+
+        # サブパネル (Forces) の重力
+        layout_forces = render_panel(TAREMIN_CLOTH_PT_forces)
+        props_forces = [name for data, name in layout_forces.get_props()]
+        self.assertIn("gravity", props_forces)
+
+        # サブパネル (Quality) の品質プリセットおよびサブステップ
+        layout_qual = render_panel(TAREMIN_CLOTH_PT_quality)
+        menus_qual = layout_qual.get_menus()
+        props_qual = [name for data, name in layout_qual.get_props()]
+        self.assertIn("TAREMIN_CLOTH_MT_simulation_presets", menus_qual)
+        self.assertIn("substeps", props_qual)
+        self.assertIn("min_substeps", props_qual)
+        self.assertIn("enable_adaptive_substep", props_qual)
+
+        # サブパネル (Pattern) の縫合
+        layout_pat = render_panel(TAREMIN_CLOTH_PT_pattern)
+        ops_pat = layout_pat.get_operators()
+        props_pat = [name for data, name in layout_pat.get_props()]
+        self.assertIn("taremin_cloth.create_seam", ops_pat)
+        self.assertIn("sewing_shrink_speed", props_pat)
+
+        # サブパネル (Collisions) のエッジ衝突
         self.obj.taremin_cloth.enable_edge_collision = True
-        layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
-        props = layout.get_props()
-        prop_names = [name for data, name in props]
-        self.assertIn("enable_edge_collision", prop_names)
-        self.assertIn("edge_margin_scale", prop_names)
-        self.assertIn("edge_margin_offset", prop_names)
+        layout_col = render_panel(TAREMIN_CLOTH_PT_collisions)
+        props_col = [name for data, name in layout_col.get_props()]
+        self.assertIn("enable_edge_collision", props_col)
+        self.assertIn("edge_margin_scale", props_col)
+        self.assertIn("edge_margin_offset", props_col)
 
     # -------------------------------------------------------------------------
     # GPU Collider パネル (TAREMIN_CLOTH_PT_collider_panel) のテスト
@@ -153,6 +170,7 @@ class TestPanels(unittest.TestCase):
 
     def test_collider_panel_enabled_sphere(self):
         """Collider (SPHERE) が有効な状態でのコライダーパネル描画テスト"""
+        bpy.context.scene.taremin_cloth_ui_mode = 'ADVANCED'
         self.obj.taremin_cloth_collider.is_collider = True
         self.obj.taremin_cloth_collider.collider_type = 'SPHERE'
 
@@ -185,6 +203,7 @@ class TestPanels(unittest.TestCase):
 
     def test_collider_panel_enabled_mesh(self):
         """Collider (MESH) が有効な状態でのコライダーパネル描画テスト"""
+        bpy.context.scene.taremin_cloth_ui_mode = 'ADVANCED'
         self.obj.taremin_cloth_collider.is_collider = True
         self.obj.taremin_cloth_collider.collider_type = 'MESH'
 
@@ -311,9 +330,9 @@ class TestPanels(unittest.TestCase):
 
         # ヘッダーに (0) と表示され、空メッセージが表示されていること
         self.assertTrue(any("Cloth Objects (0)" in lbl for lbl in labels))
-        self.assertTrue(any("Clothが設定されたオブジェクトはありません" in lbl for lbl in labels))
+        self.assertTrue(any("Clothが設定されたオブジェクトはありません" in lbl or "No cloth objects configured" in lbl for lbl in labels))
         self.assertTrue(any("Collider Objects (0)" in lbl for lbl in labels))
-        self.assertTrue(any("Colliderが設定されたオブジェクトはありません" in lbl for lbl in labels))
+        self.assertTrue(any("Colliderが設定されたオブジェクトはありません" in lbl or "No collider objects configured" in lbl for lbl in labels))
 
     def test_objects_panel_with_cloth_and_collider(self):
         """ClothおよびColliderが存在する状態でのオブジェクト一覧パネル描画テスト"""

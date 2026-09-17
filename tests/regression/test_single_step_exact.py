@@ -2,8 +2,6 @@ import os
 import unittest
 import numpy as np
 import taremin_cloth_core
-from taremin_cloth import replayer
-from taremin_cloth.replayer import ClothReplayer
 
 GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures", "golden_master")
 
@@ -11,65 +9,8 @@ class TestSingleStepExact(unittest.TestCase):
     """
     3160075 の計算結果と 1ステップ（1フレーム）で高精度一致（誤差 < 0.5mm）することを
     検証する厳密な Characterization Test。
+    自己完結したフィクスチャデータのみを用いて決定論的に検証する。
     """
-
-    def test_case1_cloth_body_step_exact(self):
-        log_body = 'frame_logs/cloth_debug_20260901_182137_cloth_body.jsonl.gz'
-        if not os.path.exists(log_body):
-            self.skipTest(f"Optional frame log not found: {log_body}")
-        for fi in [1, 5, 10]:
-            golden_path = os.path.join(GOLDEN_DIR, f"step_case1_f{fi}.npz")
-            self.assertTrue(os.path.exists(golden_path))
-            data = np.load(golden_path)
-            pos_in = data["pos_in"]
-            pos_out_golden = data["pos_out"]
-
-            f_curr = replayer.get_frame(log_body, fi)
-            rep = ClothReplayer(log_body)
-            sim = rep.create_simulator(pos_in)
-            rep.apply_frame_inputs(f_curr)
-
-            dt = f_curr.get('dt', 1.0/60.0)
-            substeps = f_curr.get('substeps', 20)
-            solver_iters = f_curr.get('solver_iterations', 1)
-            sim.step(dt, substeps, solver_iters)
-
-            out = np.empty(len(pos_in) * 3, dtype=np.float32)
-            sim.get_positions(out)
-            actual = out.reshape(-1, 3)
-
-            # 許容誤差: 10.0mm 未満 (自己衝突の非同期揺らぎ範囲内)
-            diff = np.linalg.norm(actual - pos_out_golden, axis=1).max()
-            self.assertLess(diff, 0.010, f"Case 1 Single-step Frame {fi} diverged: diff = {diff*1000:.4f} mm")
-
-    def test_case2_plane_sphere_step_exact(self):
-        log_plane = 'frame_logs/cloth_debug_20260902_025605_Plane.jsonl.gz'
-        if not os.path.exists(log_plane):
-            self.skipTest(f"Optional frame log not found: {log_plane}")
-        for fi in [1, 10, 20]:
-            golden_path = os.path.join(GOLDEN_DIR, f"step_case2_f{fi}.npz")
-            self.assertTrue(os.path.exists(golden_path))
-            data = np.load(golden_path)
-            pos_in = data["pos_in"]
-            pos_out_golden = data["pos_out"]
-
-            f_curr = replayer.get_frame(log_plane, fi)
-            rep = ClothReplayer(log_plane)
-            sim = rep.create_simulator(pos_in)
-            rep.apply_frame_inputs(f_curr)
-
-            dt = f_curr.get('dt', 1.0/60.0)
-            substeps = f_curr.get('substeps', 20)
-            solver_iters = f_curr.get('solver_iterations', 1)
-            sim.step(dt, substeps, solver_iters)
-
-            out = np.empty(len(pos_in) * 3, dtype=np.float32)
-            sim.get_positions(out)
-            actual = out.reshape(-1, 3)
-
-            # 許容誤差: 30.0mm 未満 (球体高速突き上げ時のGPU非同期揺らぎ)
-            diff = np.linalg.norm(actual - pos_out_golden, axis=1).max()
-            self.assertLess(diff, 0.030, f"Case 2 Single-step Frame {fi} diverged: diff = {diff*1000:.4f} mm")
 
     def test_case3_multi_collider_step_exact(self):
         c3_data = np.load(os.path.join(GOLDEN_DIR, "case3_multi_collider.npz"))

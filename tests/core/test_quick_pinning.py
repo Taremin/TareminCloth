@@ -42,8 +42,7 @@ class TestQuickPinning(unittest.TestCase):
     @patch("taremin_cloth.ops.basic.bpy")
     def test_create_pin_group_execution(self, mock_bpy):
         """新規頂点グループが作成され、設定に反映され、ウェイトペイントモードへ移行することを検証"""
-        op = basic.TAREMIN_CLOTH_OT_create_pin_group()
-        op.report = MagicMock()
+        op = MagicMock()
 
         mock_context = MagicMock()
         mock_context.mode = 'OBJECT'
@@ -64,7 +63,7 @@ class TestQuickPinning(unittest.TestCase):
         # mode_set のモック
         mock_bpy.ops.object.mode_set.poll.return_value = True
 
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_create_pin_group.execute(op, mock_context)
         self.assertEqual(res, {'FINISHED'})
 
         # 頂点グループが作成されたこと
@@ -80,8 +79,7 @@ class TestQuickPinning(unittest.TestCase):
     @patch("taremin_cloth.ops.basic.bpy")
     def test_toggle_weight_paint_from_object_to_paint(self, mock_bpy):
         """オブジェクトモードからウェイトペイントモードへのトグル移行を検証"""
-        op = basic.TAREMIN_CLOTH_OT_toggle_weight_paint()
-        op.report = MagicMock()
+        op = MagicMock()
 
         mock_context = MagicMock()
         mock_context.mode = 'OBJECT'
@@ -100,7 +98,7 @@ class TestQuickPinning(unittest.TestCase):
         mock_context.active_object = mock_obj
         mock_bpy.ops.object.mode_set.poll.return_value = True
 
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_toggle_weight_paint.execute(op, mock_context)
         self.assertEqual(res, {'FINISHED'})
 
         # 既存グループがアクティブに設定されたこと
@@ -111,8 +109,7 @@ class TestQuickPinning(unittest.TestCase):
     @patch("taremin_cloth.ops.basic.bpy")
     def test_toggle_weight_paint_from_paint_to_object(self, mock_bpy):
         """ウェイトペイントモードからオブジェクトモードへの復帰トグルを検証"""
-        op = basic.TAREMIN_CLOTH_OT_toggle_weight_paint()
-        op.report = MagicMock()
+        op = MagicMock()
 
         mock_context = MagicMock()
         mock_context.mode = 'PAINT_WEIGHT'
@@ -122,7 +119,7 @@ class TestQuickPinning(unittest.TestCase):
         mock_context.active_object = mock_obj
         mock_bpy.ops.object.mode_set.poll.return_value = True
 
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_toggle_weight_paint.execute(op, mock_context)
         self.assertEqual(res, {'FINISHED'})
 
         # オブジェクトモードに復帰したこと
@@ -131,8 +128,7 @@ class TestQuickPinning(unittest.TestCase):
     @patch("taremin_cloth.ops.basic.bpy")
     def test_toggle_weight_paint_creates_group_if_missing(self, mock_bpy):
         """グループ未存在時に自動作成してウェイトペイントモードへ移行することを検証"""
-        op = basic.TAREMIN_CLOTH_OT_toggle_weight_paint()
-        op.report = MagicMock()
+        op = MagicMock()
 
         mock_context = MagicMock()
         mock_context.mode = 'OBJECT'
@@ -152,7 +148,7 @@ class TestQuickPinning(unittest.TestCase):
         mock_context.active_object = mock_obj
         mock_bpy.ops.object.mode_set.poll.return_value = True
 
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_toggle_weight_paint.execute(op, mock_context)
         self.assertEqual(res, {'FINISHED'})
 
         # Cloth_Pin が新規作成されたこと

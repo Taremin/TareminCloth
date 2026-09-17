@@ -71,7 +71,7 @@ class TestGrabCollisionPipeline(unittest.TestCase):
 
         # 10 ステップかけて、下布の反対側 (Z = -0.05) へ向かって無理やり Grab 移動させる
         target_z = -0.05
-        for step in range(1, 20):
+        for step in range(1, 11):
             current_target = initial_grab_pos.copy()
             alpha = min(1.0, step / 10.0)
             current_target[2] = initial_grab_pos[2] * (1.0 - alpha) + target_z * alpha

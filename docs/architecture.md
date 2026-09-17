@@ -215,8 +215,11 @@ pub struct GpuMeshTriangle {
 // - bit 0 (0x1): is_single_sided (1=片面メッシュ, 0=両面メッシュ)
 // - bit 1 (0x2): recovery_disabled (1=片面裏抜け復帰無効, 0=復帰有効[デフォルト])
 
-// 自己衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write)
-// WGSL: struct AtomicAccum { dx: atomic<i32>, dy: atomic<i32>, dz: atomic<i32>, count: atomic<u32> }
+// 自己衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write, 32 bytes/vert)
+// WGSL: struct SelfCollisionAccum {
+//     dx: atomic<i32>, dy: atomic<i32>, dz: atomic<i32>, count: atomic<u32>,        // 近接反発ペナルティ変位
+//     ccd_dx: atomic<i32>, ccd_dy: atomic<i32>, ccd_dz: atomic<i32>, ccd_count: atomic<u32>, // CCDハード変位 (100%適用)
+// }
 // 固定小数点 10^6 スケール (1μm 分解能) により、データ競合なしに対称な作用・反作用を蓄積
 ```
 

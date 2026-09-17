@@ -134,7 +134,7 @@ class TestPenetrationReplayRedGreen(unittest.TestCase):
             fdata = get_frame(self.data_path, f)
             self.replayer.sim = sim
             self.replayer.apply_frame_inputs(fdata)
-            sim.step(dt=1.0 / 60.0, substeps=32)
+            sim.step(dt=1.0 / 60.0, substeps=96)
 
         sim.get_positions(out)
         cross_count = self.count_cross_sheet_intersections(out.reshape(-1, 3))

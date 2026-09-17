@@ -217,6 +217,7 @@
   "Discard simulation bake cache and restore mesh to initial rest shape": "シミュレーションのベイクキャッシュを破棄し、メッシュを初期レスト形状に復元します",
   "Discard simulation timeline cache and reset mesh to initial rest shape": "タイムラインのシミュレーションキャッシュを破棄し、メッシュを初期レスト形状にリセットします",
   "Display FPS and frame timing overlay in 3D viewport during simulation": "シミュレーション中に3Dビューポート上にFPSとフレームタイミングを表示",
+  "Display interactive shortcut key guide overlay in 3D viewport": "3Dビューポートに対話型ショートカットキーガイドのオーバーレイを表示",
   "Distance relaxation steps after self-collision (0: auto, 1-8: manual)": "自己衝突後の距離拘束緩和ステップ数 (0: 自動, 1〜8: 手動)",
   "Dynamic Diagonal (Lightweight)": "動的対角線 (軽量)",
   "Dynamic Full GPU": "動的フルGPU",

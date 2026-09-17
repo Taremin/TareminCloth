@@ -217,6 +217,7 @@
   "Discard simulation bake cache and restore mesh to initial rest shape": "Discard simulation bake cache and restore mesh to initial rest shape",
   "Discard simulation timeline cache and reset mesh to initial rest shape": "Discard simulation timeline cache and reset mesh to initial rest shape",
   "Display FPS and frame timing overlay in 3D viewport during simulation": "Display FPS and frame timing overlay in 3D viewport during simulation",
+  "Display interactive shortcut key guide overlay in 3D viewport": "Display interactive shortcut key guide overlay in 3D viewport",
   "Distance relaxation steps after self-collision (0: auto, 1-8: manual)": "Distance relaxation steps after self-collision (0: auto, 1-8: manual)",
   "Dynamic Diagonal (Lightweight)": "Dynamic Diagonal (Lightweight)",
   "Dynamic Full GPU": "Dynamic Full GPU",

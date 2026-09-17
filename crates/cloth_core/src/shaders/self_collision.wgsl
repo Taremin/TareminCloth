@@ -27,11 +27,15 @@ struct SelfCollisionParams {
     _pad3: u32,
 };
 
-struct AtomicAccum {
+struct SelfCollisionAccum {
     dx: atomic<i32>,
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
+    ccd_dx: atomic<i32>,
+    ccd_dy: atomic<i32>,
+    ccd_dz: atomic<i32>,
+    ccd_count: atomic<u32>,
 };
 
 struct ClosestBaryResult {
@@ -50,7 +54,7 @@ struct ClosestBaryResult {
 @group(0) @binding(8) var<storage, read> island_ids: array<u32>;
 @group(0) @binding(9) var<storage, read> star_offsets: array<u32>;
 @group(0) @binding(10) var<storage, read> star_indices: array<GpuStarPair>;
-@group(0) @binding(11) var<storage, read_write> accum: array<AtomicAccum>;
+@group(0) @binding(11) var<storage, read_write> accum: array<SelfCollisionAccum>;
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -64,6 +68,16 @@ fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     atomicAdd(&accum[v_idx].dy, iy);
     atomicAdd(&accum[v_idx].dz, iz);
     atomicAdd(&accum[v_idx].count, 1u);
+}
+
+fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    atomicAdd(&accum[v_idx].ccd_dx, ix);
+    atomicAdd(&accum[v_idx].ccd_dy, iy);
+    atomicAdd(&accum[v_idx].ccd_dz, iz);
+    atomicAdd(&accum[v_idx].ccd_count, 1u);
 }
 
 fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
@@ -146,13 +160,13 @@ fn intersect_segment_triangle(
     let inv_det = 1.0 / det;
     let tvec = p_old - a;
     let u = dot(tvec, pvec) * inv_det;
-    if (u < 0.0 || u > 1.0) {
+    if (u < -0.05 || u > 1.05) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
     let qvec = cross(tvec, e1);
     let v = dot(d, qvec) * inv_det;
-    if (v < 0.0 || u + v > 1.0) {
+    if (v < -0.05 || (u + v) > 1.05) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -241,7 +255,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var v_i = vertices[index];
-    if (v_i.inv_mass <= 0.0) {
+    let is_pinned_i = (v_i.inv_mass <= 0.0);
+    let move_len_i = length(v_i.prev_pos - v_i.position);
+    if (is_pinned_i && move_len_i < EPSILON) {
         return;
     }
 
@@ -251,12 +267,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let cell = vec3<i32>(floor(p_i / params.cell_size));
 
-    let thick_margin = vec3<f32>(thick_i * 1.5);
+    let thick_margin = vec3<f32>(thick_i * 2.5);
     let sweep_min = min(x_old_i, p_i) - thick_margin;
     let sweep_max = max(x_old_i, p_i) + thick_margin;
 
-    let target_min_cell = vec3<i32>(floor(sweep_min / params.cell_size));
-    let target_max_cell = vec3<i32>(floor(sweep_max / params.cell_size));
+    let target_min_cell = min(cell - vec3<i32>(1), vec3<i32>(floor(sweep_min / params.cell_size)));
+    let target_max_cell = max(cell + vec3<i32>(1), vec3<i32>(floor(sweep_max / params.cell_size)));
 
     // 移動量が過大でも計算爆発を防ぐため、基準セルから各軸最大 ±2 セル (最大 5x5x5) に制限
     let min_cell = max(cell - vec3<i32>(2), target_min_cell);
@@ -299,8 +315,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             // 相手がピン留め（v_j.inv_mass <= 0）の場合は相手スレッドが処理しないため、
                             // index < j の有無にかかわらず自スレッドが必ず処理して自頂点を退避させる。
                             let both_dynamic = (v_j.inv_mass > 0.0);
-                            if (!both_dynamic || index < j) {
-                                let delta_vv = p_i - p_j;
+                            let delta_vv = p_i - p_j;
+                            let n_j_raw = normals[j].xyz;
+                            let is_untangling_vv = (params.enable_normal_untangling != 0u)
+                                && (v_i.layer_id > v_j.layer_id)
+                                && (length(n_j_raw) > 0.5)
+                                && (dot(delta_vv, n_j_raw) < 0.0);
+
+                            if (!is_pinned_i && !is_untangling_vv && (!both_dynamic || index < j)) {
                                 let dist_vv = length(delta_vv);
 
                                 if (dist_vv < effective_thick && dist_vv > EPSILON) {
@@ -315,12 +337,36 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             // 相手がピン留め（相手スレッドは停止しているため、自頂点のみ退避）
                                             let v_j_move = p_j - p_j_old;
                                             let col_disp = n * pen + v_j_move * 0.5;
-                                            add_disp_atomic(index, col_disp);
+                                            add_ccd_atomic(index, col_disp);
                                         } else {
                                             // 動的頂点同士：index < j により1回のみ評価され、質量比に応じて対称分配
                                             let disp = n * (pen * 0.5);
                                             add_disp_atomic(index, disp * (w_i / w_sum));
                                             add_disp_atomic(j, -disp * (w_j / w_sum));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 多層布Untangling (外側レイヤー i が内側レイヤー j の裏側に潜り込んだ場合のみ法線脱出)
+                            if (params.enable_normal_untangling != 0u) {
+                                let layer_i = v_i.layer_id;
+                                let layer_j = v_j.layer_id;
+                                let n_j = normals[j].xyz;
+                                let n_j_len = length(n_j);
+                                if (layer_i > layer_j && n_j_len > 0.5) {
+                                    let n_j_unit = n_j / n_j_len;
+                                    let delta = p_i - p_j;
+                                    let h_j = dot(delta, n_j_unit); // 相手法線方向の高さ (< 0 なら裏側)
+                                    if (h_j < 0.0) {
+                                        let d_tangent = delta - h_j * n_j_unit;
+                                        let r_sq = dot(d_tangent, d_tangent);
+                                        let r_max = effective_thick * 2.5;
+                                        let h_max = effective_thick * 2.5;
+                                        if (r_sq < r_max * r_max && h_j > -h_max) {
+                                            let pen = min(effective_thick - h_j, effective_thick * 2.0);
+                                            // 相手の表側法線方向へ自頂点（外側レイヤー）を脱出させる
+                                            add_ccd_atomic(index, n_j_unit * pen);
                                         }
                                     }
                                 }
@@ -369,20 +415,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let p_safe = rel_old_i + t_safe * move_vec;
                                             
                                             let ccd_disp = (p_safe - p_i) + push_disp;
-                                            add_disp_atomic(index, ccd_disp);
+                                            add_ccd_atomic(index, ccd_disp);
                                         } else {
                                             // B) 最近傍点幾何反発（重心座標による作用反作用の対称分配）
                                             let res_vt = closest_point_on_triangle_bary(p_i, p_j, p_v0, p_v1);
                                             let delta_vt = p_i - res_vt.pt;
                                             let dist_vt = length(delta_vt);
 
-                                            if (dist_vt < effective_thick && dist_vt > EPSILON) {
+                                            let tri_cross = cross(p_v0 - p_j, p_v1 - p_j);
+                                            let tri_len = length(tri_cross);
+                                            let is_untangling_vt = (params.enable_normal_untangling != 0u)
+                                                && (v_i.layer_id > v_j.layer_id)
+                                                && (dot(delta_vt, tri_cross) < 0.0);
+
+                                            if (!is_pinned_i && !is_untangling_vt && dist_vt < effective_thick && dist_vt > EPSILON) {
                                                 let n_vt = delta_vt / dist_vt;
                                                 let pen_vt = effective_thick - dist_vt;
                                                 if (tri_has_pin) {
                                                     // 相手三角形がピン留め頂点を含む場合は自頂点のみコライダー押し出し
                                                     let col_disp = n_vt * pen_vt + tri_move * 0.5;
-                                                    add_disp_atomic(index, col_disp);
+                                                    add_ccd_atomic(index, col_disp);
                                                 } else {
                                                     let w_i = v_i.inv_mass;
                                                     let bary = res_vt.bary;
@@ -438,7 +490,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                             let edge_j_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
                                             // 相手エッジがピンの場合は自エッジ側が必ず処理。両方が動的エッジなら index < j で重複排除
-                                            if (edge_j_has_pin || index < j) {
+                                            if (!is_pinned_i && (edge_j_has_pin || index < j)) {
                                                 let st = closest_points_segments(p_i, p_ui, p_j, p_vj);
                                                 let pt1 = p_i + st.x * (p_ui - p_i);
                                                 let pt2 = p_j + st.y * (p_vj - p_j);
@@ -446,7 +498,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 let delta_ee = pt1 - pt2;
                                                 let dist_ee = length(delta_ee);
 
-                                                if (dist_ee < effective_thick && dist_ee > EPSILON) {
+                                                let is_untangling_ee = (params.enable_normal_untangling != 0u)
+                                                    && (v_i.layer_id > v_j.layer_id)
+                                                    && (dot(delta_ee, normals[j].xyz) < 0.0);
+
+                                                if (!is_untangling_ee && dist_ee < effective_thick && dist_ee > EPSILON) {
                                                     let n_ee = delta_ee / dist_ee;
                                                     let pen_ee = effective_thick - dist_ee;
                                                     let s = st.x;
@@ -457,18 +513,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                     if (edge_j_has_pin) {
                                                         let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
                                                         let col_disp = n_ee * (pen_ee * (1.0 - s)) + edge_move * (1.0 - s) * 0.5;
-                                                        add_disp_atomic(index, col_disp);
+                                                        add_ccd_atomic(index, col_disp);
                                                         if (v_ui.inv_mass > 0.0) {
                                                             let col_disp_ui = n_ee * (pen_ee * s) + edge_move * s * 0.5;
-                                                            add_disp_atomic(ui, col_disp_ui);
+                                                            add_ccd_atomic(ui, col_disp_ui);
                                                         }
                                                     } else if (edge_i_has_pin) {
                                                         let edge_move = ((p_i - x_old_i) + (p_ui - v_ui.position)) * 0.5;
                                                         let col_disp = -n_ee * (pen_ee * (1.0 - t)) + edge_move * (1.0 - t) * 0.5;
-                                                        add_disp_atomic(j, col_disp);
+                                                        add_ccd_atomic(j, col_disp);
                                                         if (v_vj.inv_mass > 0.0) {
                                                             let col_disp_vj = -n_ee * (pen_ee * t) + edge_move * t * 0.5;
-                                                            add_disp_atomic(vj, col_disp_vj);
+                                                            add_ccd_atomic(vj, col_disp_vj);
                                                         }
                                                     } else {
                                                         let w_i = v_i.inv_mass;

@@ -392,7 +392,7 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
-    let self_collision_accum_buffer_size = ((num_vertices as u64) * 16).max(64);
+    let self_collision_accum_buffer_size = ((num_vertices as u64) * 32).max(64);
     let self_collision_accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Self Collision Accum Buffer"),
         size: self_collision_accum_buffer_size,

@@ -14,7 +14,7 @@ if str(root_dir) not in sys.path:
 
 import taremin_cloth
 from taremin_cloth.utils import topology
-from taremin_cloth.panels import TAREMIN_CLOTH_PT_main_panel
+from taremin_cloth.panels import TAREMIN_CLOTH_PT_main_panel, TAREMIN_CLOTH_PT_topology
 from tests.fixtures.panel_test_utils import render_panel
 
 
@@ -108,6 +108,8 @@ class TestCrossSubdivision(unittest.TestCase):
         obj = bpy.context.active_object
         obj.taremin_cloth.is_cloth = True
         obj.taremin_cloth.enable_cross_subdivision = True
+        obj.taremin_cloth.triangulation_mode = 'CROSS_SUBDIV'
+        bpy.context.scene.taremin_cloth_ui_mode = 'ADVANCED'
 
         # オペレーターで十字分割を適用
         res = bpy.ops.taremin_cloth.apply_cross_subdivision()
@@ -115,10 +117,8 @@ class TestCrossSubdivision(unittest.TestCase):
         self.assertTrue(topology.is_cross_subdivided(obj))
 
         # パネルがエラーなく描画されること
-        layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
-        labels = layout.get_labels()
+        layout = render_panel(TAREMIN_CLOTH_PT_topology)
         operators = layout.get_operators()
-        self.assertTrue(any("Topology &" in lbl for lbl in labels))
         self.assertIn("taremin_cloth.apply_post_process", operators)
         self.assertIn("taremin_cloth.restore_quad_topology", operators)
 

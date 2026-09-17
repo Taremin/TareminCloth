@@ -125,6 +125,7 @@ class TestElasticGroups(unittest.TestCase):
 
     def test_panel_draw(self):
         """伸縮グループが存在する状態でのパネルUI描画がエラーなく実行されることを検証"""
+        bpy.context.scene.taremin_cloth_ui_mode = 'ADVANCED'
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2)
         obj = bpy.context.active_object
         obj.taremin_cloth.is_cloth = True
@@ -133,7 +134,7 @@ class TestElasticGroups(unittest.TestCase):
         grp.set_edge_indices([0])
 
         # render_panel ユーティリティを用いて描画を実行し、UI要素を検証
-        layout = render_panel(bpy.types.TAREMIN_CLOTH_PT_main_panel)
+        layout = render_panel(bpy.types.TAREMIN_CLOTH_PT_pattern)
         operators = layout.get_operators()
 
         # 伸縮グループ関連のオペレーターが描画されていることを確認

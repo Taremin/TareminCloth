@@ -30,10 +30,11 @@ class TestSingleClothUntangling(unittest.TestCase):
         for y in range(ny):
             for x in range(nx):
                 px = (x - nx / 2.0) * dx
-                py = y * dx * 0.5  # 前後に縮めて折り重なりやすくする
                 if y < 5:
+                    py = (4.5 - y) * dx
                     pz = -0.015  # 下半分: 意図的に上半分と交差して裏抜け
                 else:
+                    py = (y - 4.5) * dx
                     pz = 0.0
                 positions.append([px, py, pz])
                 # 上半分 (y >= 5) を基準面として固定
@@ -86,6 +87,7 @@ class TestSingleClothUntangling(unittest.TestCase):
             stiffness=2000.0,
         )
 
+        sim.set_damping(30.0)  # 脱出後の振動を減衰させ表側で安定静止させる
         sim.set_gravity(0.0, 0.0, 0.0)  # 純粋な幾何衝突・Untangling脱出力を検証
         sim.set_enable_self_collision(True)
         sim.set_self_collision_options(

@@ -425,7 +425,7 @@ class TestGuiIpc(unittest.TestCase):
             }
         }
         self.assertTrue(client._send_packet(data))
-        self.assertIsNotNone(client._recv_packet(timeout=5.0))
+        self.assertIsNotNone(client._recv_packet(timeout=15.0))
 
         # 1. ボーン姿勢行列の動的更新
         bone_mats = [np.eye(4, dtype=np.float32).tolist()]

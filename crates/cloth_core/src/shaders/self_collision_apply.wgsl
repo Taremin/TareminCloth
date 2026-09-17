@@ -7,11 +7,15 @@ struct GpuVertex {
     thickness: f32,
 };
 
-struct AtomicAccum {
+struct SelfCollisionAccum {
     dx: atomic<i32>,
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
+    ccd_dx: atomic<i32>,
+    ccd_dy: atomic<i32>,
+    ccd_dz: atomic<i32>,
+    ccd_count: atomic<u32>,
 };
 
 struct SelfCollisionParams {
@@ -30,7 +34,7 @@ struct SelfCollisionParams {
 };
 
 @group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;
-@group(0) @binding(1) var<storage, read_write> accum: array<AtomicAccum>;
+@group(0) @binding(1) var<storage, read_write> accum: array<SelfCollisionAccum>;
 @group(0) @binding(2) var<uniform> params: SelfCollisionParams;
 @group(0) @binding(3) var<storage, read> local_edge_lengths: array<f32>;
 
@@ -46,48 +50,70 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var v = vertices[index];
-    if (v.inv_mass <= 0.0) {
-        // ピン留め頂点は変位を適用しない（アキュムレータをゼロクリア）
-        atomicStore(&accum[index].dx, 0);
-        atomicStore(&accum[index].dy, 0);
-        atomicStore(&accum[index].dz, 0);
-        atomicStore(&accum[index].count, 0u);
-        return;
-    }
+    let is_pinned = (v.inv_mass <= 0.0);
 
+    var final_disp = vec3<f32>(0.0);
+
+    // 1. ペナルティ反発 (近接反発): 接触密度に応じた適切な剛性を維持し、緩和とステップクランプを適用 (非ピン頂点のみ)
     let count = atomicLoad(&accum[index].count);
     if (count > 0u) {
-        let raw_dx = atomicLoad(&accum[index].dx);
-        let raw_dy = atomicLoad(&accum[index].dy);
-        let raw_dz = atomicLoad(&accum[index].dz);
+        if (!is_pinned) {
+            let raw_dx = atomicLoad(&accum[index].dx);
+            let raw_dy = atomicLoad(&accum[index].dy);
+            let raw_dz = atomicLoad(&accum[index].dz);
 
-        var total_disp = vec3<f32>(
-            f32(raw_dx),
-            f32(raw_dy),
-            f32(raw_dz)
-        ) * INV_FIXED_SCALE;
+            let total_disp = vec3<f32>(
+                f32(raw_dx),
+                f32(raw_dy),
+                f32(raw_dz)
+            ) * INV_FIXED_SCALE;
 
-        // 接触密度に応じた適切な剛性を維持（sqrt(count)で除算）
-        var eff_disp = total_disp / max(1.0, sqrt(f32(count)));
+            var eff_disp = total_disp / max(1.0, sqrt(f32(count)));
 
-        if (params.enable_relief != 0u) {
-            eff_disp = eff_disp * params.relief_factor;
+            if (params.enable_relief != 0u) {
+                eff_disp = eff_disp * params.relief_factor;
+            }
+
+            let p_len = length(eff_disp);
+            let ratio = select(0.50, params.max_displacement_ratio, params.max_displacement_ratio > 0.0);
+            let max_step = min(local_edge_lengths[index] * ratio, 0.10);
+            if (p_len > max_step && p_len > EPSILON) {
+                eff_disp = (eff_disp / p_len) * max_step;
+            }
+
+            final_disp += eff_disp;
         }
 
-        let p_len = length(eff_disp);
-        let ratio = select(0.50, params.max_displacement_ratio, params.max_displacement_ratio > 0.0);
-        let max_step = min(local_edge_lengths[index] * ratio, 0.10);
-        if (p_len > max_step && p_len > EPSILON) {
-            eff_disp = (eff_disp / p_len) * max_step;
-        }
-
-        v.prev_pos += eff_disp;
-        vertices[index] = v;
-
-        // 次の反復・サブステップ用にゼロクリア
         atomicStore(&accum[index].dx, 0);
         atomicStore(&accum[index].dy, 0);
         atomicStore(&accum[index].dz, 0);
         atomicStore(&accum[index].count, 0u);
+    }
+
+    // 2. CCD (連続衝突判定 & 貫通阻止ハード制約): 減衰・クランプをかけずに100%確実に適用
+    let ccd_count = atomicLoad(&accum[index].ccd_count);
+    if (ccd_count > 0u) {
+        let raw_ccd_x = atomicLoad(&accum[index].ccd_dx);
+        let raw_ccd_y = atomicLoad(&accum[index].ccd_dy);
+        let raw_ccd_z = atomicLoad(&accum[index].ccd_dz);
+
+        let total_ccd = vec3<f32>(
+            f32(raw_ccd_x),
+            f32(raw_ccd_y),
+            f32(raw_ccd_z)
+        ) * INV_FIXED_SCALE;
+
+        let avg_ccd = total_ccd / f32(ccd_count);
+        final_disp += avg_ccd;
+
+        atomicStore(&accum[index].ccd_dx, 0);
+        atomicStore(&accum[index].ccd_dy, 0);
+        atomicStore(&accum[index].ccd_dz, 0);
+        atomicStore(&accum[index].ccd_count, 0u);
+    }
+
+    if (length(final_disp) > EPSILON) {
+        v.prev_pos += final_disp;
+        vertices[index] = v;
     }
 }

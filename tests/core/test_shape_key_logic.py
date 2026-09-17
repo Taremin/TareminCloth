@@ -50,15 +50,14 @@ class TestShapeKeyLogic(unittest.TestCase):
         """十字分割中のオブジェクトに対して警告を出して安全にキャンセルされることを検証"""
         mock_is_cross.return_value = True
 
-        op = basic.TAREMIN_CLOTH_OT_save_as_shape_key()
-        op.report = MagicMock()
+        op = MagicMock()
 
         mock_context = MagicMock()
         mock_obj = MagicMock()
         mock_obj.type = 'MESH'
         mock_context.active_object = mock_obj
 
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_save_as_shape_key.execute(op, mock_context)
         self.assertEqual(res, {'CANCELLED'})
         self.assertTrue(op.report.called)
         call_args = op.report.call_args[0]
@@ -72,10 +71,9 @@ class TestShapeKeyLogic(unittest.TestCase):
         """初回実行時にターゲットオブジェクトとBasisキーが作成され、新キーが追加されるロジックを検証"""
         mock_is_cross.return_value = False
 
-        op = basic.TAREMIN_CLOTH_OT_save_as_shape_key()
+        op = MagicMock()
         op.shape_key_name = "Custom_Pose"
         op.target_mode = 'AUTO_TARGET'
-        op.report = MagicMock()
 
         # ソースオブジェクト（布メッシュ）の設定 (4頂点)
         cloth_obj = MagicMock()
@@ -136,7 +134,7 @@ class TestShapeKeyLogic(unittest.TestCase):
         mock_context.scene = mock_scene
 
         # 実行
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_save_as_shape_key.execute(op, mock_context)
         self.assertEqual(res, {'FINISHED'})
 
         # Basis キーに初期座標が設定されたことの検証
@@ -157,10 +155,9 @@ class TestShapeKeyLogic(unittest.TestCase):
         """2回目実行時に既存のターゲットオブジェクトに新しいシェイプキーが追加されることを検証"""
         mock_is_cross.return_value = False
 
-        op = basic.TAREMIN_CLOTH_OT_save_as_shape_key()
+        op = MagicMock()
         op.shape_key_name = ""  # デフォルト名（Cloth_Shape）の検証
         op.target_mode = 'AUTO_TARGET'
-        op.report = MagicMock()
 
         cloth_obj = MagicMock()
         cloth_obj.name = "MyCloth"
@@ -211,7 +208,7 @@ class TestShapeKeyLogic(unittest.TestCase):
         mock_context.active_object = cloth_obj
         mock_context.scene = mock_scene
 
-        res = op.execute(mock_context)
+        res = basic.TAREMIN_CLOTH_OT_save_as_shape_key.execute(op, mock_context)
         self.assertEqual(res, {'FINISHED'})
 
         # 既存キーのウェイトが 0.0 にリセットされたこと

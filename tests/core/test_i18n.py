@@ -387,7 +387,7 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
                     all_terms.add(t)
 
         # 1. 全登録クラス (Panel, Operator, Menu) の bl_label, bl_description
-        for mod in [panels, presets, preferences, ops.basic, ops.gui, ops.interactive, ops.pose, ops.tools]:
+        for mod in [panels, presets, preferences, ops.basic, ops.bake, ops.gui, ops.interactive, ops.pose, ops.tools]:
             for name, cls in inspect.getmembers(mod, inspect.isclass):
                 if issubclass(cls, (bpy.types.Panel, bpy.types.Operator, bpy.types.Menu)):
                     lbl = getattr(cls, "bl_label", None)
@@ -689,6 +689,7 @@ class TestI18nDynamicUIDraw(unittest.TestCase):
             # 4. 収集された全テキストの翻訳解決を検証
             untranslated = []
             test_obj_name = self.obj.name
+            scene_obj_names = {o.name for o in bpy.data.objects}
             allowed_english = {
                 "Taremin Cloth", "GPU Cloth", "L0", "DirectX 12", "Vulkan", "AMD Radeon",
                 "0.0", "1.0", "Auto", "Auto (Auto)", "Bone SDF", "Mesh SDF",
@@ -696,7 +697,7 @@ class TestI18nDynamicUIDraw(unittest.TestCase):
 
             for ctxt, text in all_collected_texts:
                 clean = text.strip()
-                if not clean or clean == test_obj_name or clean in allowed_english:
+                if not clean or clean == test_obj_name or clean in scene_obj_names or clean in allowed_english:
                     continue
                 if any(clean.startswith(p) for p in dynamic_prefixes):
                     continue

@@ -2,98 +2,15 @@ import os
 import unittest
 import numpy as np
 import taremin_cloth_core
-from taremin_cloth import replayer
-from taremin_cloth.replayer import ClothReplayer
 
 GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures", "golden_master")
 
 class TestGoldenRegression(unittest.TestCase):
     """
-    3160075（自然な挙動が保証されているバージョン）の全フレーム物理状態と
-    完全一致・大域一致することを検証するゴールデンマスター・リグレッションテスト。
+    3160075（自然な挙動が保証されている安定版）の全フレーム物理状態と
+    完全一致・大域一致することを検証する自己完結型ゴールデンマスター・リグレッションテスト。
+    外部ログファイルに依存せず、同梱の golden_master/*.npz データのみで決定論的に実行される。
     """
-
-    def test_case1_cloth_body_regression(self):
-        """Case 1: 人体メッシュコライダー (10,518面) + 衣服メッシュ (3,024頂点)"""
-        golden_file = os.path.join(GOLDEN_DIR, "case1_cloth_body.npz")
-        self.assertTrue(os.path.exists(golden_file), f"Golden file not found: {golden_file}")
-        data = np.load(golden_file)
-        golden_pos = data["positions"]
-
-        log_body = 'frame_logs/cloth_debug_20260901_182137_cloth_body.jsonl.gz'
-        if not os.path.exists(log_body):
-            self.skipTest(f"Optional frame log not found: {log_body}")
-        rep = ClothReplayer(log_body)
-        f0 = replayer.get_frame(log_body, 0)
-        pos0 = np.array(f0['positions'])
-        sim = rep.create_simulator(pos0)
-        out = np.empty(len(pos0) * 3, dtype=np.float32)
-
-        for fi in range(1, len(golden_pos)):
-            ff = replayer.get_frame(log_body, fi)
-            rep.apply_frame_inputs(ff)
-            dt = ff.get('dt', 1.0/60.0)
-            substeps = ff.get('substeps', 20)
-            solver_iters = ff.get('solver_iterations', 1)
-            sim.step(dt, substeps, solver_iters)
-            sim.get_positions(out)
-            actual_pos = out.reshape(-1, 3)
-
-            # 1. NaN チェック & 最大速度チェック
-            self.assertFalse(np.isnan(actual_pos).any(), f"Case 1 contains NaN at Frame {fi}")
-            disp = np.linalg.norm(actual_pos - golden_pos[fi-1], axis=1).max()
-            vel = disp / dt
-            self.assertLess(vel, 25.0, f"Case 1 velocity explosion at Frame {fi}: {vel:.2f} m/s")
-
-            # 2. 短期厳密一致 (Frame 1..5: 100 substeps)
-            diff = np.linalg.norm(actual_pos - golden_pos[fi], axis=1).max()
-            if fi <= 5:
-                self.assertLess(diff, 0.010, f"Case 1 diverged in short term at Frame {fi}: {diff*1000:.4f} mm")
-
-            # 3. 中期大域統計 (重心位置の一致)
-            center_actual = actual_pos.mean(axis=0)
-            center_golden = golden_pos[fi].mean(axis=0)
-            center_diff = np.linalg.norm(center_actual - center_golden)
-            self.assertLess(center_diff, 0.010, f"Case 1 center of mass diverged at Frame {fi}: {center_diff*1000:.4f} mm")
-
-    def test_case2_plane_sphere_regression(self):
-        """Case 2: 高速突き上げ球体コライダー + 平面布 (2,178頂点)"""
-        golden_file = os.path.join(GOLDEN_DIR, "case2_plane_sphere.npz")
-        self.assertTrue(os.path.exists(golden_file), f"Golden file not found: {golden_file}")
-        data = np.load(golden_file)
-        golden_pos = data["positions"]
-
-        log_plane = 'frame_logs/cloth_debug_20260902_025605_Plane.jsonl.gz'
-        if not os.path.exists(log_plane):
-            self.skipTest(f"Optional frame log not found: {log_plane}")
-        rep = ClothReplayer(log_plane)
-        f0_p = replayer.get_frame(log_plane, 0)
-        pos0_p = np.array(f0_p['positions'])
-        sim = rep.create_simulator(pos0_p)
-        out = np.empty(len(pos0_p) * 3, dtype=np.float32)
-
-        for fi in range(1, len(golden_pos)):
-            ff = replayer.get_frame(log_plane, fi)
-            rep.apply_frame_inputs(ff)
-            dt = ff.get('dt', 1.0/60.0)
-            substeps = ff.get('substeps', 20)
-            solver_iters = ff.get('solver_iterations', 1)
-            sim.step(dt, substeps, solver_iters)
-            sim.get_positions(out)
-            actual_pos = out.reshape(-1, 3)
-
-            self.assertFalse(np.isnan(actual_pos).any(), f"Case 2 contains NaN at Frame {fi}")
-            
-            # 短期厳密一致 (Frame 1..10)
-            diff = np.linalg.norm(actual_pos - golden_pos[fi], axis=1).max()
-            if fi <= 10:
-                self.assertLess(diff, 0.001, f"Case 2 short-term diverged at Frame {fi}: {diff*1000:.4f} mm")
-
-            # 大域重心一致
-            center_actual = actual_pos.mean(axis=0)
-            center_golden = golden_pos[fi].mean(axis=0)
-            center_diff = np.linalg.norm(center_actual - center_golden)
-            self.assertLess(center_diff, 0.025, f"Case 2 center of mass diverged at Frame {fi}: {center_diff*1000:.4f} mm")
 
     def test_case3_multi_collider_regression(self):
         """Case 3: カプセル2本 + 球体 + 床面 同時干渉"""
