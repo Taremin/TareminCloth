@@ -165,6 +165,76 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     logger.debug(f"[Collider Sync] Frame {getattr(scene, 'frame_current', -1)}: state_changed={state_changed} (force={force}, has_active_anim={has_active_anim})")
     if state_changed:
         _collider_cache[sim_id] = state_key
+
+
+def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_indices=None):
+    """
+    メッシュおよびコライダー設定からワールド座標系三角形配列、属性ブロック、および辞書リストを抽出する。
+    戻り値: (tri_coords, attr_block, dict_list) または (None, None, None)
+    """
+    if not mesh:
+        return None, None, None
+
+    mesh.calc_loop_triangles()
+    n_verts = len(mesh.vertices)
+    n_tris = len(mesh.loop_triangles)
+
+    if n_verts == 0 or n_tris == 0:
+        return None, None, None
+
+    raw_coords = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", raw_coords)
+    v_local = raw_coords.reshape((n_verts, 3))
+
+    mat_np = np.array(target_obj.matrix_world, dtype=np.float32)
+    ones = np.ones((n_verts, 1), dtype=np.float32)
+    v_homo = np.hstack([v_local, ones])
+    v_world = (v_homo @ mat_np.T)[:, :3]
+
+    tri_indices = np.empty(n_tris * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("vertices", tri_indices)
+    tri_indices_2d = tri_indices.reshape((n_tris, 3))
+
+    if triangle_indices is not None:
+        valid_idx = triangle_indices[triangle_indices < n_tris]
+        if len(valid_idx) == 0:
+            return None, None, None
+        tri_coords = v_world[tri_indices_2d[valid_idx]]
+        selected_count = len(valid_idx)
+    else:
+        tri_coords = v_world[tri_indices_2d]
+        selected_count = n_tris
+
+    cur_friction = float(col_settings.friction)
+    cur_thickness = float(col_settings.thickness)
+    cur_restitution = float(getattr(col_settings, "restitution", 0.0))
+    is_single = bool(getattr(col_settings, "single_sided", True))
+    is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
+    cur_flags = 0.0
+    if is_single:
+        cur_flags += 1.0
+        if not is_recovery:
+            cur_flags += 2.0
+
+    attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
+    attr_block = np.tile(attr_row, (selected_count, 1))
+
+    dict_list = [
+        {
+            "p0": [float(tri[0][0]), float(tri[0][1]), float(tri[0][2])],
+            "p1": [float(tri[1][0]), float(tri[1][1]), float(tri[1][2])],
+            "p2": [float(tri[2][0]), float(tri[2][1]), float(tri[2][2])],
+            "friction": cur_friction,
+            "thickness": cur_thickness,
+            "restitution": cur_restitution,
+            "flags": int(cur_flags),
+        }
+        for tri in tri_coords
+    ]
+
+    return tri_coords, attr_block, dict_list
+
+
 def extract_all_scene_colliders(scene=None, depsgraph=None):
     """
     シーン内のすべてのコライダー（球、平面、カプセル、一般メッシュ、および BONE_SDF の関節メッシュ）を抽出する。
@@ -246,42 +316,12 @@ def extract_all_scene_colliders(scene=None, depsgraph=None):
 
             mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
             try:
-                if mesh:
-                    mesh.calc_loop_triangles()
-                    n_verts = len(mesh.vertices)
-                    n_tris = len(mesh.loop_triangles)
-
-                    if n_verts > 0 and n_tris > 0:
-                        raw_coords = np.empty(n_verts * 3, dtype=np.float32)
-                        mesh.vertices.foreach_get("co", raw_coords)
-                        v_local = raw_coords.reshape((n_verts, 3))
-
-                        target_obj = eval_obj if eval_obj else obj
-                        mat_np = np.array(target_obj.matrix_world, dtype=np.float32)
-                        ones = np.ones((n_verts, 1), dtype=np.float32)
-                        v_homo = np.hstack([v_local, ones])
-                        v_world = (v_homo @ mat_np.T)[:, :3]
-
-                        tri_indices = np.empty(n_tris * 3, dtype=np.int32)
-                        mesh.loop_triangles.foreach_get("vertices", tri_indices)
-                        tri_indices_2d = tri_indices.reshape((n_tris, 3))
-                        tri_coords = v_world[tri_indices_2d]
-
-                        all_mesh_triangles.append(tri_coords)
-                        attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
-                        attr_block = np.tile(attr_row, (n_tris, 1))
-                        all_mesh_attributes.append(attr_block)
-
-                        for tri in tri_coords:
-                            mesh_triangles_data.append({
-                                "p0": [float(tri[0][0]), float(tri[0][1]), float(tri[0][2])],
-                                "p1": [float(tri[1][0]), float(tri[1][1]), float(tri[1][2])],
-                                "p2": [float(tri[2][0]), float(tri[2][1]), float(tri[2][2])],
-                                "friction": cur_friction,
-                                "thickness": cur_thickness,
-                                "restitution": cur_restitution,
-                                "flags": int(cur_flags),
-                            })
+                target_obj = eval_obj if eval_obj else obj
+                tri_coords, attr_block, dict_list = _extract_mesh_collider_triangles(mesh, target_obj, col_settings)
+                if tri_coords is not None:
+                    all_mesh_triangles.append(tri_coords)
+                    all_mesh_attributes.append(attr_block)
+                    mesh_triangles_data.extend(dict_list)
             finally:
                 cleanup_collider_eval_mesh(eval_obj, disabled_mods)
 
@@ -337,55 +377,14 @@ def extract_all_scene_colliders(scene=None, depsgraph=None):
                 if active_indices is not None and len(active_indices) > 0:
                     mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
                     try:
-                        if mesh:
-                            mesh.calc_loop_triangles()
-                            n_verts = len(mesh.vertices)
-                            n_tris = len(mesh.loop_triangles)
-
-                            if n_verts > 0 and n_tris > 0:
-                                raw_coords = np.empty(n_verts * 3, dtype=np.float32)
-                                mesh.vertices.foreach_get("co", raw_coords)
-                                v_local = raw_coords.reshape((n_verts, 3))
-
-                                target_obj = eval_obj if eval_obj else obj
-                                mat_np = np.array(target_obj.matrix_world, dtype=np.float32)
-                                ones = np.ones((n_verts, 1), dtype=np.float32)
-                                v_homo = np.hstack([v_local, ones])
-                                v_world = (v_homo @ mat_np.T)[:, :3]
-
-                                tri_indices = np.empty(n_tris * 3, dtype=np.int32)
-                                mesh.loop_triangles.foreach_get("vertices", tri_indices)
-                                tri_indices_2d = tri_indices.reshape((n_tris, 3))
-
-                                valid_joint_idx = active_indices[active_indices < n_tris]
-                                if len(valid_joint_idx) > 0:
-                                    joint_tri_coords = v_world[tri_indices_2d[valid_joint_idx]]
-                                    cur_friction = float(col_settings.friction)
-                                    cur_thickness = float(col_settings.thickness)
-                                    cur_restitution = float(getattr(col_settings, "restitution", 0.0))
-                                    is_single = bool(getattr(col_settings, "single_sided", True))
-                                    is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
-                                    cur_flags = 0.0
-                                    if is_single:
-                                        cur_flags += 1.0
-                                        if not is_recovery:
-                                            cur_flags += 2.0
-
-                                    all_mesh_triangles.append(joint_tri_coords)
-                                    attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
-                                    attr_block = np.tile(attr_row, (len(valid_joint_idx), 1))
-                                    all_mesh_attributes.append(attr_block)
-
-                                    for tri in joint_tri_coords:
-                                        mesh_triangles_data.append({
-                                            "p0": [float(tri[0][0]), float(tri[0][1]), float(tri[0][2])],
-                                            "p1": [float(tri[1][0]), float(tri[1][1]), float(tri[1][2])],
-                                            "p2": [float(tri[2][0]), float(tri[2][1]), float(tri[2][2])],
-                                            "friction": cur_friction,
-                                            "thickness": cur_thickness,
-                                            "restitution": cur_restitution,
-                                            "flags": int(cur_flags),
-                                        })
+                        target_obj = eval_obj if eval_obj else obj
+                        tri_coords, attr_block, dict_list = _extract_mesh_collider_triangles(
+                            mesh, target_obj, col_settings, triangle_indices=active_indices
+                        )
+                        if tri_coords is not None:
+                            all_mesh_triangles.append(tri_coords)
+                            all_mesh_attributes.append(attr_block)
+                            mesh_triangles_data.extend(dict_list)
                     finally:
                         cleanup_collider_eval_mesh(eval_obj, disabled_mods)
 

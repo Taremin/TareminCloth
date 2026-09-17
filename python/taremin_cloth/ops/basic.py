@@ -14,6 +14,7 @@ from ..engine.cache import (
 )
 from ..utils import topology
 from ..utils.logger import logger
+from ..utils.view3d import tag_redraw_view3d, stop_animation
 from .. import i18n
 
 
@@ -73,17 +74,8 @@ class TAREMIN_CLOTH_OT_reset_selected(bpy.types.Operator):
         clear_simulator_for_object(obj.name, clear_timeline=True)
         obj.update_tag()
 
-        # アニメーション再生中であれば停止
-        if context.screen and getattr(context.screen, "is_animation_playing", False):
-            try:
-                bpy.ops.screen.animation_cancel(restore_frame=False)
-            except Exception:
-                pass
-
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
+        stop_animation(context)
+        tag_redraw_view3d(context)
         self.report({'INFO'}, f"Reset Cloth: {obj.name}")
         return {'FINISHED'}
 
@@ -111,21 +103,13 @@ class TAREMIN_CLOTH_OT_reset_all(bpy.types.Operator):
                     clear_timeline_cache(obj.name)
         clear_simulators()
 
-        # アニメーション再生中であれば停止
-        if context.screen and getattr(context.screen, "is_animation_playing", False):
-            try:
-                bpy.ops.screen.animation_cancel(restore_frame=False)
-            except Exception:
-                pass
+        stop_animation(context)
 
         # タイムラインを開始フレームに巻き戻す
         if scene:
             scene.frame_set(scene.frame_start)
 
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
+        tag_redraw_view3d(context)
         self.report({'INFO'}, "All Cloth Simulations Reset")
         return {'FINISHED'}
 
@@ -285,10 +269,7 @@ class TAREMIN_CLOTH_OT_apply_gpu_settings(bpy.types.Operator):
             self.report({'ERROR'}, err_msg)
             return {'CANCELLED'}
 
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
+        tag_redraw_view3d(context)
 
         return {'FINISHED'}
 

@@ -90,6 +90,7 @@ class TestDrawingHud(unittest.TestCase):
         self.assertIn(hud_key, raw_dict["ja_JP"])
         self.assertEqual(raw_dict["ja_JP"][hud_key], "HUD操作ガイドを表示")
 
+    @patch.dict("sys.modules", {"blf": MagicMock()})
     @patch("taremin_cloth.utils.drawing.batch_for_shader")
     @patch("taremin_cloth.utils.drawing.gpu")
     @patch("taremin_cloth.utils.drawing.bpy")
@@ -156,6 +157,7 @@ class TestDrawingHud(unittest.TestCase):
         self.assertFalse(drawing.is_bake_overlay_active())
         self.assertIsNone(drawing.get_bake_overlay_info())
 
+    @patch.dict("sys.modules", {"blf": MagicMock()})
     @patch("taremin_cloth.utils.drawing.batch_for_shader")
     @patch("taremin_cloth.utils.drawing.gpu")
     @patch("taremin_cloth.utils.drawing.bpy")

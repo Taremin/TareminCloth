@@ -24,6 +24,7 @@ from .collider import sync_colliders
 from .params import sync_cloth_parameters, sync_attachment_pins
 from ..utils import anim_driver
 from ..utils.logger import logger
+from ..utils.mesh_extract import extract_cloth_mesh_data
 
 _fast_playback_saved_mods = {}
 _is_baking = False
@@ -84,57 +85,15 @@ def get_or_create_simulator(obj):
     if obj.name in _simulators:
         return _simulators[obj.name]
 
-    mesh = obj.data
-    n_verts = len(mesh.vertices)
-    coords = np.empty(n_verts * 3, dtype=np.float32)
-    mesh.vertices.foreach_get("co", coords)
-    pos_2d = coords.reshape((n_verts, 3))
-
-    tri_list = []
-    mesh.calc_loop_triangles()
-    for tri in mesh.loop_triangles:
-        tri_list.append(tri.vertices)
-    faces_2d = np.array(tri_list, dtype=np.uint32) if tri_list else None
-
     settings = obj.taremin_cloth
-    n_edges = len(mesh.edges)
-    edge_indices = np.empty(n_edges * 2, dtype=np.uint32)
-    mesh.edges.foreach_get("vertices", edge_indices)
-    all_edges_2d = edge_indices.reshape((n_edges, 2))
-
-    face_edge_set = set()
-    if faces_2d is not None:
-        for f in faces_2d:
-            face_edge_set.add((min(f[0], f[1]), max(f[0], f[1])))
-            face_edge_set.add((min(f[1], f[2]), max(f[1], f[2])))
-            face_edge_set.add((min(f[2], f[0]), max(f[2], f[0])))
-
-    normal_edges = []
-    sewing_edges = []
-
-    for e in all_edges_2d:
-        pair = (min(e[0], e[1]), max(e[0], e[1]))
-        if pair in face_edge_set:
-            normal_edges.append(e)
-        else:
-            if settings.enable_sewing:
-                sewing_edges.append(e)
-            else:
-                normal_edges.append(e)
-
-    edges_2d = np.array(normal_edges, dtype=np.uint32) if normal_edges else np.empty((0, 2), dtype=np.uint32)
-    sew_2d = np.array(sewing_edges, dtype=np.uint32) if sewing_edges else None
-
-    inv_masses = np.ones(n_verts, dtype=np.float32)
-    vg_name = settings.pin_vertex_group if settings and settings.pin_vertex_group else "Pin"
-    pin_vg = obj.vertex_groups.get(vg_name) or obj.vertex_groups.get("Pin") or obj.vertex_groups.get("Cloth_Pin")
-    if pin_vg:
-        for i in range(n_verts):
-            try:
-                weight = pin_vg.weight(i)
-                inv_masses[i] = max(0.0, 1.0 - weight)
-            except RuntimeError:
-                inv_masses[i] = 1.0
+    cloth_data = extract_cloth_mesh_data(obj, settings)
+    pos_2d = cloth_data.positions
+    coords = pos_2d.flatten().copy()
+    edges_2d = cloth_data.normal_edges
+    faces_2d = cloth_data.faces
+    sew_2d = cloth_data.sewing_edges
+    inv_masses = cloth_data.inv_masses
+    n_verts = len(pos_2d)
 
     wg_size = int(getattr(settings, "workgroup_size", "32"))
     s_mode = 1 if getattr(settings, "solver_mode", "COLORING") == 'ATOMIC' else 0

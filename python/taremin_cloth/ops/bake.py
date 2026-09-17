@@ -13,6 +13,7 @@ from ..engine import (
 )
 from ..engine import runner
 from ..utils.drawing import set_bake_overlay_info, clear_bake_overlay_info
+from ..utils.view3d import tag_redraw_view3d
 from .. import i18n
 
 logger = logging.getLogger("taremin_cloth")
@@ -61,10 +62,7 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
         if hasattr(context, "workspace") and context.workspace:
             context.workspace.status_text_set(None)
 
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type in ('VIEW_3D', 'TIMELINE', 'DOPESHEET_EDITOR'):
-                    area.tag_redraw()
+        tag_redraw_view3d(context, extra_area_types=('TIMELINE', 'DOPESHEET_EDITOR'))
 
     def modal(self, context, event):
         if event.type in {'RIGHTMOUSE', 'ESC'}:
@@ -87,10 +85,7 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
                     if hasattr(context, "workspace") and context.workspace:
                         context.workspace.status_text_set(status_str)
 
-                    if context.screen:
-                        for area in context.screen.areas:
-                            if area.type in ('VIEW_3D', 'TIMELINE'):
-                                area.tag_redraw()
+                    tag_redraw_view3d(context, extra_area_types=('TIMELINE',))
 
                     self.current_frame += 1
                 except Exception as e:
@@ -167,10 +162,7 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
         finally:
             wm.progress_end()
 
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type in ('VIEW_3D', 'TIMELINE', 'DOPESHEET_EDITOR'):
-                    area.tag_redraw()
+        tag_redraw_view3d(context, extra_area_types=('TIMELINE', 'DOPESHEET_EDITOR'))
 
         return {'FINISHED'}
 
@@ -203,10 +195,7 @@ class TAREMIN_CLOTH_OT_free_bake(bpy.types.Operator):
         # タイムラインを開始フレームに巻き戻す
         scene.frame_set(scene.frame_start)
 
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type in ('VIEW_3D', 'TIMELINE', 'DOPESHEET_EDITOR'):
-                    area.tag_redraw()
+        tag_redraw_view3d(context, extra_area_types=('TIMELINE', 'DOPESHEET_EDITOR'))
 
         self.report({'INFO'}, "シミュレーションベイクを破棄し、初期形状に復元しました")
         return {'FINISHED'}

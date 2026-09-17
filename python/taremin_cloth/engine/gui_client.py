@@ -14,6 +14,7 @@ import numpy as np
 
 
 from ..utils.logger import logger
+from ..utils.mesh_extract import extract_cloth_mesh_data
 
 _global_client: Optional['ClothGuiClient'] = None
 
@@ -382,56 +383,13 @@ class ClothGuiClient:
         except Exception:
             scene = None
 
-        mesh = obj.data
-        n_verts = len(mesh.vertices)
-        coords = np.empty(n_verts * 3, dtype=np.float32)
-        mesh.vertices.foreach_get("co", coords)
-        positions = coords.reshape((n_verts, 3)).tolist()
-
-        mesh.calc_loop_triangles()
-        faces = [list(tri.vertices) for tri in mesh.loop_triangles]
-
-        n_edges = len(mesh.edges)
-        edge_indices = np.empty(n_edges * 2, dtype=np.uint32)
-        mesh.edges.foreach_get("vertices", edge_indices)
-        all_edges_2d = edge_indices.reshape((n_edges, 2))
-
         settings = getattr(obj, "taremin_cloth", None)
-
-        # 縫合エッジと通常エッジの分類
-        face_edge_set = set()
-        for f in faces:
-            face_edge_set.add((min(f[0], f[1]), max(f[0], f[1])))
-            face_edge_set.add((min(f[1], f[2]), max(f[1], f[2])))
-            face_edge_set.add((min(f[2], f[0]), max(f[2], f[0])))
-
-        normal_edges = []
-        sewing_edges = []
-        enable_sewing = getattr(settings, "enable_sewing", False) if settings else False
-
-        for e in all_edges_2d:
-            pair = (min(e[0], e[1]), max(e[0], e[1]))
-            if pair in face_edge_set:
-                normal_edges.append(e.tolist())
-            else:
-                if enable_sewing:
-                    sewing_edges.append(e.tolist())
-                else:
-                    normal_edges.append(e.tolist())
-
-        sewing_springs = sewing_edges if sewing_edges else None
-
-        # インバースマス（固定ピン）
-        inv_masses = [1.0] * n_verts
-        vg_name = getattr(settings, "pin_vertex_group", "Pin") if settings else "Pin"
-        pin_vg = obj.vertex_groups.get(vg_name) or obj.vertex_groups.get("Pin") or obj.vertex_groups.get("Cloth_Pin")
-        if pin_vg:
-            for i in range(n_verts):
-                try:
-                    w = pin_vg.weight(i)
-                    inv_masses[i] = max(0.0, 1.0 - w)
-                except RuntimeError:
-                    inv_masses[i] = 1.0
+        cloth_data = extract_cloth_mesh_data(obj, settings)
+        positions = cloth_data.positions.tolist()
+        faces = cloth_data.faces.tolist() if cloth_data.faces is not None else []
+        normal_edges = cloth_data.normal_edges.tolist()
+        sewing_springs = cloth_data.sewing_edges.tolist() if cloth_data.sewing_edges is not None else None
+        inv_masses = cloth_data.inv_masses.tolist()
 
         # 重力ベクトル & 重力倍率
         scale = float(getattr(settings, "gravity", 1.0)) if settings else 1.0

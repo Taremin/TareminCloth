@@ -171,3 +171,27 @@ Taremin Cloth の詳細な物理計算理論、接触・衝突判定（V-T, E-E,
 - [ ] **Coupled収束ループの調和**: 拘束解決ループの内外の配置（Coupled XPBD）において、エッジ過剰伸長や不自然な伸びを招く構造になっていないか？
 - [ ] **妥協点の明文化**: パフォーマンス制約等でやむを得ず理想と乖離した妥協実装を行う場合は、必ず [docs/algorithms.md](docs/algorithms.md) の「乖離分析」セクションに理由・トレードオフ・将来の改善策を記録すること。
 
+---
+
+## 9. 共通ユーティリティの利用義務と車輪の再発明禁止 (Code Reuse & Anti-Duplication)
+
+> [!IMPORTANT]
+> **「メッシュ抽出・評価メッシュ取得・ビュー制御をインラインで手動直書きしない」**
+> - Blender API (`foreach_get` や `calc_loop_triangles`、画面再描画ループ等) を使った定型処理を各オペレーターやエンジン内にインラインでコピペ実装することを禁止します。
+> - 必ず `taremin_cloth.utils` または共通モジュールに定義された関数を利用し、ロジックの一元性を保ってください。
+
+### 共通ユーティリティ利用基準
+
+| 用途 | ❌ 禁止アプローチ (直書き・重複) | ⭕ 必須アプローチ (共通ユーティリティ) |
+|---|---|---|
+| **布メッシュ全データ抽出** | 各所で `foreach_get("co")`、`calc_loop_triangles()`、エッジ分類、ピンウェイトを手動ループ | `from taremin_cloth.utils.mesh_extract import extract_cloth_mesh_data` |
+| **汎用メッシュ頂点・面抽出** | 各所で `foreach_get("co")` や `loop_triangles.foreach_get` を直書き | `from taremin_cloth.utils.mesh_extract import extract_mesh_vertices_and_triangles` |
+| **ピンウェイト・質量計算** | `vertex_groups.get()` と頂点ループでインバースマスを手動計算 | `from taremin_cloth.utils.mesh_extract import get_pin_inv_masses` |
+| **3Dビュー再描画** | `for area in context.screen.areas: area.tag_redraw()` を手動ループ | `from taremin_cloth.utils.view3d import tag_redraw_view3d` |
+| **アニメーション停止** | `bpy.ops.screen.animation_cancel()` を try-except で手動呼び出し | `from taremin_cloth.utils.view3d import stop_animation` |
+
+### 実装前チェックリスト (Pre-Implementation Check)
+コードを追加・修正する前に、すべてのAIエージェントおよび開発者は必ず以下の点検を行ってください：
+1. 「これから書こうとしている処理（メッシュデータ取得・幾何変換・Blender操作など）は、すでに `taremin_cloth.utils` や既存モジュールに存在しないか？」を `grep_search` 等で確認すること。
+2. 複数箇所で同一または類似の処理が必要になった場合、インラインで重複実装せず、必ず `utils/` に共通関数として定義・分離すること。
+

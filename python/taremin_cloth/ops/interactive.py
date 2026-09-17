@@ -26,6 +26,7 @@ from ..engine.runner import (
 from ..preferences import get_preferences
 from ..utils import drawing, topology, anim_driver
 from ..utils.logger import logger
+from ..utils.view3d import tag_redraw_view3d
 from .. import i18n
 
 _interactive_running = False
@@ -331,14 +332,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             t_step_total = (time.perf_counter() - t0) * 1000.0
 
             # 3Dビューポートの再描画要求
-            has_redrawn = False
-            if context.screen:
-                for a in context.screen.areas:
-                    if a.type == 'VIEW_3D':
-                        a.tag_redraw()
-                        has_redrawn = True
-            if not has_redrawn and context.area:
-                context.area.tag_redraw()
+            tag_redraw_view3d(context)
 
         # FPS計測とオーバーレイ更新
         if self._fps_counter is not None:
@@ -687,10 +681,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         if hasattr(context.workspace, "status_text_set"):
             context.workspace.status_text_set(None)
 
-        if context.screen:
-            for area in context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    area.tag_redraw()
+        tag_redraw_view3d(context)
 
         # デバッグ状態記録のファイル保存とクリーンアップ
         obj = context.active_object

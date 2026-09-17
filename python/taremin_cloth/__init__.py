@@ -20,6 +20,7 @@ subpackages = [
         [
             "logger",
             "mesh_extract",
+            "view3d",
             "drawing",
             "topology",
             "collider_detect",
