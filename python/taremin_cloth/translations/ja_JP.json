@@ -569,6 +569,8 @@
   "Subdivide Quads (Poke)": "四角面を分割 (Poke)",
   "Subdivide quads into 4 triangles to eliminate diagonal bias": "四角面を4つの三角形に細分化して対角線バイアスを解消",
   "Subdivision steps per frame": "品質のステップ数 (1フレームあたりの細分化ステップ数)",
+  "Substep Interval": "サブステップ間隔",
+  "Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)": "自己衝突判定を実行するサブステップ間隔（1: 毎サブステップ、2: 2サブステップ毎）",
   "Surface friction coefficient": "摩擦係数",
   "Sweep Margin Offset": "スイープマージン加算値",
   "Sync Colliders": "コライダーを同期",

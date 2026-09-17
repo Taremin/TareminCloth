@@ -874,6 +874,16 @@ impl ClothSimulator {
         self.simulator.set_coupled_self_collision_options(mode, relaxation_iters);
     }
 
+    /// 自己衝突判定を実行するサブステップ間隔を設定 (1: 毎サブステップ, 2: 2サブステップ毎)
+    fn set_self_collision_substep_interval(&mut self, interval: u32) {
+        self.simulator.set_self_collision_substep_interval(interval);
+    }
+
+    /// 現在の自己衝突サブステップ間隔を取得
+    fn get_self_collision_substep_interval(&self) -> u32 {
+        self.simulator.self_collision_substep_interval()
+    }
+
     /// コンパクトリードバックの有効/無効を設定 (true: 12B/頂点, false: 48B/頂点)
     fn set_enable_compact_readback(&mut self, enable: bool) {
         self.simulator.set_enable_compact_readback(enable);

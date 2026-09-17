@@ -208,6 +208,7 @@ def extract_self_collision_data(settings) -> Optional[Dict[str, Any]]:
         "max_displacement_ratio": float(getattr(settings, "self_collision_max_displacement_ratio", 0.2)),
         "exclude_neighbors": bool(getattr(settings, "self_collision_exclude_neighbors", True)),
         "enable_normal_untangling": bool(getattr(settings, "enable_normal_untangling", True)),
+        "substep_interval": int(getattr(settings, "self_collision_substep_interval", 1)),
         "enable_edge_collision": bool(getattr(settings, "enable_edge_collision", False)),
         "edge_margin_scale": float(getattr(settings, "edge_margin_scale", 1.0)),
         "edge_margin_offset": float(getattr(settings, "edge_margin_offset", 0.0)),

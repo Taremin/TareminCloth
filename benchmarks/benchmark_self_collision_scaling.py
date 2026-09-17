@@ -135,7 +135,41 @@ def run_benchmark():
         fps_on = n_frames / (t1 - t0)
 
         sc_overhead = ms_on - ms_off
-        print(f"{label:<25} | {'ON':<10} | {ms_on:7.2f} ms | {fps_on:6.1f} | {sc_overhead:+7.2f} ms")
+        print(f"{label:<25} | {'ON (int=1)':<10} | {ms_on:7.2f} ms | {fps_on:6.1f} | {sc_overhead:+7.2f} ms")
+
+        # 3. SC ON (Decoupled: Interval = 2)
+        sim_dec = taremin_cloth_core.ClothSimulator(
+            positions=pos,
+            edges=edges,
+            faces=faces,
+            inv_masses=inv_m,
+            thickness=0.005,
+            stiffness=1000.0,
+            workgroup_size=64,
+        )
+        sim_dec.set_enable_self_collision(True)
+        sim_dec.set_self_collision_options(
+            relief_factor=0.2,
+            max_displacement_ratio=0.2,
+            exclude_neighbors=True,
+            enable_normal_untangling=True,
+        )
+        sim_dec.set_coupled_self_collision_options(1, 2)
+        sim_dec.set_self_collision_substep_interval(2)
+
+        for _ in range(n_warmup):
+            sim_dec.step(dt=1.0 / 60.0, substeps=substeps)
+            sim_dec.get_positions(out_coords)
+        t0 = time.perf_counter()
+        for _ in range(n_frames):
+            sim_dec.step(dt=1.0 / 60.0, substeps=substeps)
+            sim_dec.get_positions(out_coords)
+        t1 = time.perf_counter()
+        ms_dec = ((t1 - t0) / n_frames) * 1000.0
+        fps_dec = n_frames / (t1 - t0)
+
+        dec_overhead = ms_dec - ms_off
+        print(f"{label:<25} | {'ON (int=2)':<10} | {ms_dec:7.2f} ms | {fps_dec:6.1f} | {dec_overhead:+7.2f} ms")
 
 
 if __name__ == "__main__":

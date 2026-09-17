@@ -397,6 +397,13 @@ class TareminClothObjectSettings(PropertyGroup):
         min=0,
         max=8,
     )
+    self_collision_substep_interval: IntProperty(
+        name="Substep Interval",
+        description="Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)",
+        default=1,
+        min=1,
+        max=4,
+    )
     enable_edge_collision: BoolProperty(
         name="Edge-Collider Collision",
         description="Enable detailed edge-collider contact detection",

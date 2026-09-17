@@ -569,6 +569,8 @@
   "Subdivide Quads (Poke)": "Subdivide Quads (Poke)",
   "Subdivide quads into 4 triangles to eliminate diagonal bias": "Subdivide quads into 4 triangles to eliminate diagonal bias",
   "Subdivision steps per frame": "Subdivision steps per frame",
+  "Substep Interval": "Substep Interval",
+  "Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)": "Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)",
   "Surface friction coefficient": "Surface friction coefficient",
   "Sweep Margin Offset": "Sweep Margin Offset",
   "Sync Colliders": "Sync Colliders",

@@ -62,7 +62,13 @@ impl GpuClothSimulator {
             );
         }
 
-        for _ in 0..substeps {
+        for sub_idx in 0..substeps {
+            let is_last_substep = sub_idx + 1 == substeps;
+            let should_solve_self_collision = self.enable_self_collision
+                && (self.self_collision_substep_interval <= 1
+                    || sub_idx % self.self_collision_substep_interval == 0
+                    || is_last_substep);
+
             // 1. Predict Pass
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -122,7 +128,7 @@ impl GpuClothSimulator {
                 drop(cpass);
 
                 // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
-                if self.enable_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
+                if should_solve_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
                     self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop");
                 }
             }
@@ -157,12 +163,12 @@ impl GpuClothSimulator {
         }
 
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
-        if self.enable_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
+        if should_solve_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
             self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer");
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
-        if self.enable_self_collision
+        if should_solve_self_collision
             && (self.coupled_self_collision_mode == 1 || self.coupled_self_collision_mode == 3)
             && self.post_collision_relaxation_iters > 0
         {

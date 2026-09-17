@@ -571,6 +571,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
             self_sub.prop(settings, "coupled_self_collision_mode", text=i18n.trans("Coupled Mode"))
             if settings.coupled_self_collision_mode != 'OFF':
                 self_sub.prop(settings, "post_collision_relaxation_iters", text=i18n.trans("Relax Steps"))
+            self_sub.prop(settings, "self_collision_substep_interval", text=i18n.trans("Substep Interval"))
         l_col.separator()
         l_col.prop(settings, "layer_id")
         row_thick = l_col.row(align=True)
