@@ -5,7 +5,12 @@ taremin_cloth 物理・拘束パラメータ同期モジュール
 
 import bpy
 import numpy as np
-from .cache import _prev_elastic_scales
+from .cache import (
+    _prev_elastic_scales,
+    _prev_stiffness_cache,
+    _attachment_pin_indices_cache,
+    _prev_attachment_pin_targets,
+)
 from ..utils.logger import logger
 
 
@@ -16,15 +21,23 @@ def sync_cloth_parameters(sim, obj, scene=None):
         return
 
     # 1. 剛性4種 (引張・圧縮・せん断・曲げ)
-    if hasattr(sim, "set_stiffness_all"):
-        sim.set_stiffness_all(
-            settings.tension_stiffness,
-            settings.compression_stiffness,
-            settings.shear_stiffness,
-            settings.bending_stiffness,
-        )
-    elif hasattr(sim, "set_stiffness"):
-        sim.set_stiffness(settings.tension_stiffness, settings.bending_stiffness)
+    curr_stiffness = (
+        float(settings.tension_stiffness),
+        float(settings.compression_stiffness),
+        float(settings.shear_stiffness),
+        float(settings.bending_stiffness),
+    )
+    if _prev_stiffness_cache.get(obj.name) != curr_stiffness:
+        if hasattr(sim, "set_stiffness_all"):
+            sim.set_stiffness_all(
+                curr_stiffness[0],
+                curr_stiffness[1],
+                curr_stiffness[2],
+                curr_stiffness[3],
+            )
+        elif hasattr(sim, "set_stiffness"):
+            sim.set_stiffness(curr_stiffness[0], curr_stiffness[3])
+        _prev_stiffness_cache[obj.name] = curr_stiffness
 
     # 2. 減衰 (空気抵抗・大域減衰 + 減衰4種)
     if hasattr(sim, "set_damping"):
@@ -158,17 +171,17 @@ def sync_elastic_groups(sim, obj):
         current_scales.append(curr_s)
         prev_map[idx] = curr_s
 
+    is_first_sync = not prev_map.get("_is_synced", False)
     _prev_elastic_scales[obj_name] = prev_map
-
-    if has_change or len(indices) > 0:
+    if has_change or is_first_sync:
         sim.set_edge_rest_length_scales(
             np.array(indices, dtype=np.uint32),
             np.array(current_scales, dtype=np.float32),
         )
+        prev_map["_is_synced"] = True
 
 
 def sync_attachment_pins(sim, obj, scene):
-    """外部オブジェクトやボーンに追従するアタッチメントピンを同期する"""
     settings = getattr(obj, "taremin_cloth", None)
     if not settings or not settings.pin_target_object:
         return
@@ -180,18 +193,36 @@ def sync_attachment_pins(sim, obj, scene):
         return
 
     target_mat = target_obj.matrix_world
-    if settings.pin_target_bone and target_obj.type == 'ARMATURE' and target_obj.pose:
+    if settings.pin_target_bone and target_obj.type == "ARMATURE" and target_obj.pose:
         bone = target_obj.pose.bones.get(settings.pin_target_bone)
         if bone:
             target_mat = target_mat @ bone.matrix
 
     inv_world = obj.matrix_world.inverted()
+    local_target = inv_world @ target_mat.translation
+    loc_tuple = (round(local_target.x, 5), round(local_target.y, 5), round(local_target.z, 5))
+
+    prev_loc = _prev_attachment_pin_targets.get(obj.name)
+    if prev_loc == loc_tuple:
+        return
+    _prev_attachment_pin_targets[obj.name] = loc_tuple
+
     mesh = obj.data
-    for v in mesh.vertices:
-        try:
-            w = vg.weight(v.index)
-        except RuntimeError:
-            continue
-        if w > 0.0:
-            local_target = inv_world @ target_mat.translation
-            sim.set_pin(v.index, [local_target.x, local_target.y, local_target.z], float(w))
+    cache_key = (obj.name, vg_name, len(mesh.vertices))
+    pinned_entries = _attachment_pin_indices_cache.get(cache_key)
+    if pinned_entries is None:
+        pinned_entries = []
+        vg_idx = vg.index
+        for v in mesh.vertices:
+            for g in v.groups:
+                if g.group == vg_idx and g.weight > 0.0:
+                    pinned_entries.append((v.index, float(g.weight)))
+                    break
+        _attachment_pin_indices_cache[cache_key] = pinned_entries
+
+    if not pinned_entries:
+        return
+
+    target_xyz = [local_target.x, local_target.y, local_target.z]
+    for v_idx, weight in pinned_entries:
+        sim.set_pin(v_idx, target_xyz, weight)

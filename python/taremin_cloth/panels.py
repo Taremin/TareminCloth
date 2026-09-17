@@ -419,7 +419,6 @@ class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
         col.prop(settings, "pin_color", text=i18n.trans("Pin Color"))
 
         row_pin_opts = col.row(align=True)
-        row_pin_opts.prop(settings, "pin_overlay_interactive_only", text=i18n.trans("Interactive Only"))
         row_pin_opts.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
         col.separator()
@@ -645,7 +644,6 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
         row_elastic_disp = box_elastic.row(align=True)
         row_elastic_disp.prop(settings, "show_elastic_overlay", text=i18n.trans("Show Overlay"))
         if settings.show_elastic_overlay:
-            row_elastic_disp.prop(settings, "elastic_overlay_interactive_only", text=i18n.trans("Interactive Only"))
             row_elastic_disp.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
 

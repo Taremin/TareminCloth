@@ -28,6 +28,12 @@ _timeline_frame_cache = {}
 _buffered_start_frames = {}
 # 布パラメータシグネチャキャッシュ (obj_name -> params_tuple)
 _cloth_param_signatures = {}
+# 剛性パラメータの前回同期値キャッシュ (obj_name -> (tension, compression, shear, bending))
+_prev_stiffness_cache = {}
+# アタッチメントピンの頂点インデックス・ウェイト一覧キャッシュ (cache_key -> list[(vert_idx, weight)])
+_attachment_pin_indices_cache = {}
+# アタッチメントピンの前回ローカルターゲット位置キャッシュ (obj_name -> (local_target_tuple, target_mat_tuple))
+_prev_attachment_pin_targets = {}
 
 
 def _get_mesh_topology_signature(mesh):
@@ -173,6 +179,11 @@ def clear_simulator_for_object(obj_name, clear_timeline=True):
     _effective_substeps_cache.pop(obj_name, None)
     _collider_prev_locs_cache.pop(obj_name, None)
     _prev_elastic_scales.pop(obj_name, None)
+    _prev_stiffness_cache.pop(obj_name, None)
+    _prev_attachment_pin_targets.pop(obj_name, None)
+    for k in list(_attachment_pin_indices_cache.keys()):
+        if isinstance(k, tuple) and k[0] == obj_name:
+            _attachment_pin_indices_cache.pop(k, None)
     if clear_timeline:
         _timeline_frame_cache.pop(obj_name, None)
         _buffered_start_frames.pop(obj_name, None)
@@ -188,6 +199,7 @@ def clear_simulators():
     global _simulators, _prev_coords_cache
     global _mesh_char_len_cache, _effective_substeps_cache, _collider_prev_locs_cache
     global _prev_elastic_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
+    global _prev_stiffness_cache, _attachment_pin_indices_cache, _prev_attachment_pin_targets
     restore_fast_playback()
     clear_collider_cache()
     count = len(_simulators)
@@ -200,6 +212,9 @@ def clear_simulators():
     _timeline_frame_cache.clear()
     _buffered_start_frames.clear()
     _cloth_param_signatures.clear()
+    _prev_stiffness_cache.clear()
+    _attachment_pin_indices_cache.clear()
+    _prev_attachment_pin_targets.clear()
     logger.debug(f"[Simulator] Cleared all {count} simulators and caches")
 
 

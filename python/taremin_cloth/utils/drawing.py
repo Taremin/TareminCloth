@@ -16,7 +16,13 @@ _interactive_active = False
 _active_grabbed_info = None  # {"obj_name": str, "vert_idx": int, "target_world_pos": Vector or None}
 _interactive_fps_info = None  # {"fps": float, "frame_ms": float, "show_overlay": bool, "position": str, "show_help": bool}
 _pin_indices_cache = {}  # {(obj_name, vg_name): (indices_list, vert_count)}
+_sewing_edge_indices_cache = {}  # {obj_name: (edge_pairs_list, vert_count, edge_count)}
 _bake_overlay_info = None  # {"current_frame": int, "end_frame": int, "pct": int}
+
+_cached_point_shader = None
+_cached_line_shader = None
+_cached_2d_shader = None
+_cached_smooth_line_shader = None
 
 
 def clear_pin_cache():
@@ -25,12 +31,24 @@ def clear_pin_cache():
     _pin_indices_cache.clear()
 
 
+def clear_sewing_cache():
+    """縫合エッジインデックスのキャッシュをクリアする"""
+    global _sewing_edge_indices_cache
+    _sewing_edge_indices_cache.clear()
+
+
+def clear_overlay_caches():
+    """すべてのオーバーレイ用キャッシュをクリアする"""
+    clear_pin_cache()
+    clear_sewing_cache()
+
+
 def set_interactive_active(active: bool):
     """インタラクティブモードの実行状態を設定する"""
     global _interactive_active
     _interactive_active = active
     if not active:
-        clear_pin_cache()
+        clear_overlay_caches()
 
 
 def is_interactive_active() -> bool:
@@ -115,7 +133,7 @@ def apply_view_depth_bias(coords, region_3d=None):
     描画座標をカメラ（視点）手前方向にわずかにオフセットする。
     物陰（裏面や他オブジェクト）にある頂点・エッジは引き続き確実に遮蔽される。
     """
-    if not coords or region_3d is None or not hasattr(region_3d, "view_matrix"):
+    if coords is None or len(coords) == 0 or region_3d is None or not hasattr(region_3d, "view_matrix"):
         return coords
 
     try:
@@ -140,42 +158,58 @@ def apply_view_depth_bias(coords, region_3d=None):
             bias_dir = np.array([-forward.x, -forward.y, -forward.z], dtype=np.float32)
             offset_coords = coords_arr + bias_dir * 0.002
 
-        return offset_coords.tolist()
+        return offset_coords
     except Exception:
         return coords
 
 
 def get_point_shader():
+    global _cached_point_shader
+    if _cached_point_shader is not None:
+        return _cached_point_shader
     for name in ('POINT_UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
         try:
-            return gpu.shader.from_builtin(name)
+            _cached_point_shader = gpu.shader.from_builtin(name)
+            return _cached_point_shader
         except Exception:
             pass
     return None
 
 
 def get_line_shader():
+    global _cached_line_shader
+    if _cached_line_shader is not None:
+        return _cached_line_shader
     for name in ('POLYLINE_UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
         try:
-            return gpu.shader.from_builtin(name)
+            _cached_line_shader = gpu.shader.from_builtin(name)
+            return _cached_line_shader
         except Exception:
             pass
     return None
 
 
 def get_2d_uniform_color_shader():
+    global _cached_2d_shader
+    if _cached_2d_shader is not None:
+        return _cached_2d_shader
     for name in ('2D_UNIFORM_COLOR', 'UNIFORM_COLOR'):
         try:
-            return gpu.shader.from_builtin(name)
+            _cached_2d_shader = gpu.shader.from_builtin(name)
+            return _cached_2d_shader
         except Exception:
             pass
     return None
 
 
 def get_smooth_color_line_shader():
+    global _cached_smooth_line_shader
+    if _cached_smooth_line_shader is not None:
+        return _cached_smooth_line_shader
     for name in ('POLYLINE_SMOOTH_COLOR', '3D_SMOOTH_COLOR'):
         try:
-            return gpu.shader.from_builtin(name)
+            _cached_smooth_line_shader = gpu.shader.from_builtin(name)
+            return _cached_smooth_line_shader
         except Exception:
             pass
     return None
@@ -195,7 +229,10 @@ def get_edge_initial_length(obj, v0_idx, v1_idx):
 
 
 def draw_callback_3d():
-    """3Dビューポートのオーバーレイ描画コールバック"""
+    """3Dビューポートのオーバーレイ描画コールバック (インタラクティブシミュレーション実行中のみ)"""
+    if not _interactive_active:
+        return
+
     context = bpy.context
     if not context or not context.scene:
         return
@@ -255,7 +292,15 @@ def draw_callback_3d():
                     _pin_indices_cache[cache_key] = (pin_indices, vert_count)
 
                 if pin_indices:
-                    pin_coords = [[*(world_mat @ mesh.vertices[i].co)] for i in pin_indices]
+                    if len(pin_indices) > 32:
+                        coords = np.empty((vert_count, 3), dtype=np.float32)
+                        mesh.vertices.foreach_get("co", coords.ravel())
+                        coords_sub = coords[pin_indices]
+                        mat_np = np.asarray(world_mat, dtype=np.float32)
+                        pin_coords = coords_sub @ mat_np[:3, :3].T + mat_np[:3, 3]
+                    else:
+                        verts = mesh.vertices
+                        pin_coords = [[*(world_mat @ verts[i].co)] for i in pin_indices]
                     draw_pin_coords = apply_view_depth_bias(pin_coords, region_3d) if use_depth_test else pin_coords
                     gpu.state.point_size_set(8.0)
                     gpu.state.blend_set('ALPHA')
@@ -308,31 +353,46 @@ def draw_callback_3d():
 
             # 3. 縫合エッジ（Loose Edge）の描画（水色ライン）
             if settings.enable_sewing and line_shader:
-                mesh.calc_loop_triangles()
-                face_edge_set = set()
-                for tri in mesh.loop_triangles:
-                    face_edge_set.add((min(tri.vertices[0], tri.vertices[1]), max(tri.vertices[0], tri.vertices[1])))
-                    face_edge_set.add((min(tri.vertices[1], tri.vertices[2]), max(tri.vertices[1], tri.vertices[2])))
-                    face_edge_set.add((min(tri.vertices[2], tri.vertices[0]), max(tri.vertices[2], tri.vertices[0])))
+                cache_key = obj.name
+                vert_count = len(mesh.vertices)
+                edge_count = len(mesh.edges)
+                cached = _sewing_edge_indices_cache.get(cache_key)
 
-                sew_lines = []
-                for e in mesh.edges:
-                    pair = (min(e.vertices[0], e.vertices[1]), max(e.vertices[0], e.vertices[1]))
-                    if pair not in face_edge_set:
-                        p0 = world_mat @ mesh.vertices[e.vertices[0]].co
-                        p1 = world_mat @ mesh.vertices[e.vertices[1]].co
+                if cached is not None and cached[1] == vert_count and cached[2] == edge_count:
+                    loose_edge_pairs = cached[0]
+                else:
+                    mesh.calc_loop_triangles()
+                    face_edge_set = set()
+                    for tri in mesh.loop_triangles:
+                        face_edge_set.add((min(tri.vertices[0], tri.vertices[1]), max(tri.vertices[0], tri.vertices[1])))
+                        face_edge_set.add((min(tri.vertices[1], tri.vertices[2]), max(tri.vertices[1], tri.vertices[2])))
+                        face_edge_set.add((min(tri.vertices[2], tri.vertices[0]), max(tri.vertices[2], tri.vertices[0])))
+
+                    loose_edge_pairs = []
+                    for e in mesh.edges:
+                        pair = (min(e.vertices[0], e.vertices[1]), max(e.vertices[0], e.vertices[1]))
+                        if pair not in face_edge_set:
+                            loose_edge_pairs.append((e.vertices[0], e.vertices[1]))
+                    _sewing_edge_indices_cache[cache_key] = (loose_edge_pairs, vert_count, edge_count)
+
+                if loose_edge_pairs:
+                    sew_lines = []
+                    verts = mesh.vertices
+                    for v0_idx, v1_idx in loose_edge_pairs:
+                        p0 = world_mat @ verts[v0_idx].co
+                        p1 = world_mat @ verts[v1_idx].co
                         sew_lines.append([p0.x, p0.y, p0.z])
                         sew_lines.append([p1.x, p1.y, p1.z])
 
-                if sew_lines:
-                    draw_sew_lines = apply_view_depth_bias(sew_lines, region_3d) if use_depth_test else sew_lines
-                    gpu.state.line_width_set(2.0)
-                    gpu.state.blend_set('ALPHA')
-                    batch = batch_for_shader(line_shader, 'LINES', {"pos": draw_sew_lines})
-                    line_shader.bind()
-                    line_shader.uniform_float("color", (0.0, 0.8, 1.0, 0.85))
-                    batch.draw(line_shader)
-                    gpu.state.blend_set('NONE')
+                    if sew_lines:
+                        draw_sew_lines = apply_view_depth_bias(sew_lines, region_3d) if use_depth_test else sew_lines
+                        gpu.state.line_width_set(2.0)
+                        gpu.state.blend_set('ALPHA')
+                        batch = batch_for_shader(line_shader, 'LINES', {"pos": draw_sew_lines})
+                        line_shader.bind()
+                        line_shader.uniform_float("color", (0.0, 0.8, 1.0, 0.85))
+                        batch.draw(line_shader)
+                        gpu.state.blend_set('NONE')
 
             # 4. 伸縮エッジ（Elastic Bands）の描画（収縮=青、伸長=赤、目標収束=フェード）
             show_elastic = getattr(settings, "show_elastic_overlay", True)

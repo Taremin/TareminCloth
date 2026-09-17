@@ -20,6 +20,8 @@ from .sdf_baker import (
 _collider_cache = {}
 _bone_sdf_cache = {}
 _bone_sdf_signatures = {}
+_scene_mesh_collider_cache = {}
+_bone_pose_signatures = {}
 
 COLLIDER_IGNORED_MODIFIER_TYPES = {'SUBSURF', 'SOLIDIFY', 'MULTIRES', 'BEVEL'}
 
@@ -67,104 +69,13 @@ def cleanup_collider_eval_mesh(eval_obj, disabled_mods):
 
 
 def clear_collider_cache():
-    """コライダーキャッシュをクリアする"""
+    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures, _scene_mesh_collider_cache, _bone_pose_signatures
     global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures
     _collider_cache.clear()
     _bone_sdf_cache.clear()
+    _scene_mesh_collider_cache.clear()
+    _bone_pose_signatures.clear()
     _bone_sdf_signatures.clear()
-
-
-def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
-    """シーン内のコライダーオブジェクトをシミュレータに同期する（差分キャッシュ・ブロードフェーズ・ボーンSDF対応）"""
-    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures
-
-    if depsgraph is None:
-        try:
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-        except Exception:
-            depsgraph = None
-
-    # シーン内のコライダーの状態シグネチャをチェック
-    collider_objs = []
-    col_state = []
-    has_active_anim = False
-    has_bone_sdf = False
-
-    for obj in scene.objects:
-        col_settings = getattr(obj, "taremin_cloth_collider", None)
-        if col_settings and col_settings.is_collider and getattr(col_settings, "enabled", True):
-            collider_objs.append((obj, col_settings))
-            anim_s = getattr(col_settings, "anim", None)
-            if anim_s and anim_s.enabled:
-                has_active_anim = True
-            if col_settings.collider_type == 'BONE_SDF':
-                has_bone_sdf = True
-                if getattr(col_settings, "enable_joint_mesh", True):
-                    if get_armature_modifier(obj) is not None:
-                        has_active_anim = True
-                    elif obj.animation_data and obj.animation_data.action:
-                        has_active_anim = True
-            elif col_settings.collider_type == 'MESH_SDF' and obj.type == 'MESH':
-                has_bone_sdf = True
-                if obj.animation_data and obj.animation_data.action:
-                    has_active_anim = True
-            elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
-                # Armature変形、オブジェクトアニメーション、シェイプキーアニメーションがある場合は毎フレーム更新
-                if get_armature_modifier(obj) is not None:
-                    has_active_anim = True
-                elif obj.animation_data and obj.animation_data.action:
-                    has_active_anim = True
-                elif getattr(obj.data, "shape_keys", None) and obj.data.shape_keys.animation_data:
-                    has_active_anim = True
-                else:
-                    for mod in getattr(obj, "modifiers", []):
-                        if mod.type == 'LATTICE' and getattr(mod, "object", None):
-                            lat_o = mod.object
-                            if (lat_o.animation_data and lat_o.animation_data.action) or (
-                                getattr(lat_o.data, "animation_data", None) and lat_o.data.animation_data.action
-                            ):
-                                has_active_anim = True
-                                break
-
-            mat = obj.matrix_world
-            mat_tuple = (
-                round(mat[0][0], 4), round(mat[0][1], 4), round(mat[0][2], 4), round(mat[0][3], 4),
-                round(mat[1][0], 4), round(mat[1][1], 4), round(mat[1][2], 4), round(mat[1][3], 4),
-                round(mat[2][0], 4), round(mat[2][1], 4), round(mat[2][2], 4), round(mat[2][3], 4),
-            )
-            v_len = len(obj.data.vertices) if obj.type == 'MESH' else 0
-            col_state.append((
-                obj.name,
-                col_settings.collider_type,
-                mat_tuple,
-                v_len,
-                round(col_settings.friction, 3),
-                round(col_settings.radius, 4),
-                round(col_settings.thickness, 4),
-                bool(getattr(col_settings, "single_sided", True)),
-                bool(getattr(col_settings, "enable_single_sided_recovery", True)),
-                bool(getattr(col_settings, "enable_cluster_culling", False)),
-                round(getattr(col_settings, "sweep_margin_offset", 0.05), 4),
-                bool(getattr(col_settings, "enabled", True)),
-                getattr(col_settings, "sdf_resolution", "64"),
-                round(getattr(col_settings, "sdf_margin", 0.2), 3),
-                round(getattr(col_settings, "weight_threshold", 0.02), 4),
-                round(getattr(col_settings, "blend_k", 0.05), 4),
-                bool(getattr(col_settings, "enable_joint_mesh", True)),
-                round(getattr(col_settings, "joint_weight_threshold", 0.85), 2),
-                round(getattr(col_settings, "mesh_sdf_voxel_size", 0.004), 4),
-                round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
-                int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256)),
-                bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
-            ))
-
-    sim_id = id(sim)
-    state_key = tuple(col_state)
-    state_changed = force or has_active_anim or (_collider_cache.get(sim_id) != state_key)
-
-    logger.debug(f"[Collider Sync] Frame {getattr(scene, 'frame_current', -1)}: state_changed={state_changed} (force={force}, has_active_anim={has_active_anim})")
-    if state_changed:
-        _collider_cache[sim_id] = state_key
 
 
 def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_indices=None):
@@ -420,8 +331,13 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 update_mode = getattr(col_settings, "sdf_update_mode", "STATIC")
                 # DYNAMIC_GPU の場合はGPU側で変形追従するため、CPU側で毎フレーム clear_colliders() や to_mesh() を回さない
                 if update_mode != 'DYNAMIC_GPU' and getattr(col_settings, "enable_joint_mesh", True):
-                    if get_armature_modifier(obj) is not None:
-                        has_active_anim = True
+                    arm_mod = get_armature_modifier(obj)
+                    if arm_mod is not None:
+                        arm_o = getattr(arm_mod, "object", None)
+                        if arm_o and ((arm_o.animation_data and arm_o.animation_data.action) or (getattr(arm_o, "data", None) and arm_o.data.animation_data and arm_o.data.animation_data.action)):
+                            has_active_anim = True
+                        elif not arm_o:
+                            has_active_anim = True
                     elif obj.animation_data and obj.animation_data.action:
                         has_active_anim = True
             elif col_settings.collider_type == 'MESH_SDF' and obj.type == 'MESH':
@@ -429,8 +345,13 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 if obj.animation_data and obj.animation_data.action:
                     has_active_anim = True
             elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
-                if get_armature_modifier(obj) is not None:
-                    has_active_anim = True
+                arm_mod = get_armature_modifier(obj)
+                if arm_mod is not None:
+                    arm_o = getattr(arm_mod, "object", None)
+                    if arm_o and ((arm_o.animation_data and arm_o.animation_data.action) or (getattr(arm_o, "data", None) and arm_o.data.animation_data and arm_o.data.animation_data.action)):
+                        has_active_anim = True
+                    elif not arm_o:
+                        has_active_anim = True
                 elif obj.animation_data and obj.animation_data.action:
                     has_active_anim = True
                 elif getattr(obj.data, "shape_keys", None) and obj.data.shape_keys.animation_data:
@@ -481,6 +402,11 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
     if state_changed:
         _collider_cache[sim_id] = state_key
         sim.clear_colliders()
+        scene_cache_key = (getattr(scene, "name", ""), getattr(scene, "frame_current", 0), state_key)
+        cached_mesh_data = _scene_mesh_collider_cache.get(scene_cache_key)
+        use_cached_mesh = cached_mesh_data is not None
+        if use_cached_mesh:
+            all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin = cached_mesh_data
         all_mesh_triangles = []
         all_mesh_attributes = []
         has_cluster_culling = False
@@ -507,6 +433,8 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 pt_b = [loc.x, loc.y, loc.z + col_settings.radius]
                 sim.add_capsule_collider(pt_a, pt_b, col_settings.radius, col_settings.friction, restitution)
             elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
+                if use_cached_mesh:
+                    continue
                 cur_friction = float(col_settings.friction)
                 cur_thickness = float(col_settings.thickness)
                 cur_restitution = float(restitution)
@@ -658,6 +586,8 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                         _bone_sdf_signatures.pop(sim_id, None)
                 continue
 
+        if not use_cached_mesh:
+            _scene_mesh_collider_cache[scene_cache_key] = (all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin)
         if all_mesh_triangles:
             tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]
             attr_array = np.vstack(all_mesh_attributes) if len(all_mesh_attributes) > 1 else all_mesh_attributes[0]

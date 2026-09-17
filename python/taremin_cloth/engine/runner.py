@@ -177,20 +177,28 @@ def get_effective_substeps(obj, coords, dt, scene=None):
     # 1. 布頂点の最大変位量 (NumPy L_inf ノルムで高速算出)
     cloth_max_disp = float(np.max(np.abs(coords - prev_coords)))
 
-    # 2. コライダーの最大変位量の算出
+    # 2. コライダーの最大変位量の算出 (フレーム単位での安全なキャッシュ管理)
     collider_max_disp = 0.0
     sc = scene or getattr(bpy.context, "scene", None)
+    cur_f = getattr(sc, "frame_current", 0) if sc else 0
     if sc:
         for c_obj in sc.objects:
             if hasattr(c_obj, "taremin_cloth_collider") and c_obj.taremin_cloth_collider.is_collider and getattr(c_obj.taremin_cloth_collider, "enabled", True):
                 curr_loc = np.array(c_obj.matrix_world.translation, dtype=np.float32)
-                prev_loc = _collider_prev_locs_cache.get(c_obj.name)
-                _collider_prev_locs_cache[c_obj.name] = curr_loc
-                if prev_loc is not None:
-                    disp = float(np.linalg.norm(curr_loc - prev_loc))
+                entry = _collider_prev_locs_cache.get(c_obj.name)
+                if entry is None:
+                    _collider_prev_locs_cache[c_obj.name] = (curr_loc, curr_loc, cur_f)
+                elif not isinstance(entry, tuple) or len(entry) != 3 or entry[2] != cur_f:
+                    prev_l = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else (entry if isinstance(entry, np.ndarray) else curr_loc)
+                    _collider_prev_locs_cache[c_obj.name] = (prev_l, curr_loc, cur_f)
+                    disp = float(np.linalg.norm(curr_loc - prev_l))
                     if disp > collider_max_disp:
                         collider_max_disp = disp
-
+                else:
+                    prev_l = entry[0]
+                    disp = float(np.linalg.norm(curr_loc - prev_l))
+                    if disp > collider_max_disp:
+                        collider_max_disp = disp
     max_disp = max(cloth_max_disp, collider_max_disp)
 
     # 3. メッシュ特性長および厚み (CFL条件) による目標ステップ数の決定
