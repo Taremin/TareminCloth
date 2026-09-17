@@ -44,8 +44,8 @@ struct ClosestBaryResult {
 };
 
 @group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;
-@group(0) @binding(1) var<storage, read> cell_heads: array<atomic<i32>>;
-@group(0) @binding(2) var<storage, read> vert_next: array<i32>;
+@group(0) @binding(1) var<storage, read> cell_starts: array<u32>;
+@group(0) @binding(2) var<storage, read> sorted_indices: array<u32>;
 @group(0) @binding(3) var<uniform> params: SelfCollisionParams;
 @group(0) @binding(4) var<storage, read> normals: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> local_edge_lengths: array<f32>;
@@ -271,12 +271,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let neighbor_cell = vec3<i32>(cx, cy, cz);
                 let h = hash_coords(neighbor_cell, params.table_size);
 
-                var other_idx = atomicLoad(&cell_heads[h]);
-                var iter_count = 0u;
+                let cell_start = cell_starts[h];
+                let cell_end = cell_starts[h + 1u];
 
-                let max_iters = select(128u, params.max_search_iterations, params.max_search_iterations > 0u);
-                while (other_idx >= 0 && iter_count < max_iters) {
-                    let j = u32(other_idx);
+                for (var k = cell_start; k < cell_end; k = k + 1u) {
+                    let j = sorted_indices[k];
                     let v_j = vertices[j];
                     let p_j = v_j.prev_pos;
 
@@ -568,8 +567,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             }
                         }
                     }
-                    other_idx = vert_next[j];
-                    iter_count = iter_count + 1u;
                 }
             }
 }

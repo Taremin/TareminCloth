@@ -1279,11 +1279,11 @@ pub fn build_simulation_resources(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: spatial_hash.cell_heads_buffer.as_entire_binding(),
+                resource: spatial_hash.cell_starts_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: spatial_hash.vert_next_buffer.as_entire_binding(),
+                resource: spatial_hash.sorted_indices_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,

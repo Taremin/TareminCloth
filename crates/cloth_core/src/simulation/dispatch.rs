@@ -651,7 +651,7 @@ impl GpuClothSimulator {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         vert_workgroups: u32,
-        wg_size: u32,
+        _wg_size: u32,
         prefix: &str,
     ) {
         // 1. Compute Normals Pass
@@ -665,28 +665,8 @@ impl GpuClothSimulator {
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }
 
-        // 2. SpatialHash Clear Pass
-        let hash_clear_workgroups = (self.spatial_hash.table_size + wg_size - 1) / wg_size;
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("{prefix} SpatialHash Clear Pass")),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.spatial_hash.clear_pipeline);
-            cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
-            cpass.dispatch_workgroups(hash_clear_workgroups, 1, 1);
-        }
-
-        // 3. SpatialHash Build Pass
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("{prefix} SpatialHash Build Pass")),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.spatial_hash.build_pipeline);
-            cpass.set_bind_group(0, &self.spatial_hash.build_bind_group, &[]);
-            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-        }
+        // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
+        self.spatial_hash.dispatch_build(encoder, self.num_vertices);
 
         // 4. Self Collision Pass (Solve)
         {
