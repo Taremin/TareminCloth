@@ -65,6 +65,19 @@ sequenceDiagram
 - **`step_cloth_scene(scene, dt, anim_frame, ...)`**:
   シーン内のコライダーアニメーションを一括更新し、指定（または全）布オブジェクトに対して `step_cloth_object` を実行。テストや検証スクリプトでもこの関数を呼ぶことで、UI実行時と100%同一の物理・パラメータ同期環境で検証が可能。
 
+### 1.3 タイムライン再生とポイントキャッシュ管理 (Timeline & Point Cache)
+
+タイムライン再生モード（`frame_change_post` ハンドラー）では、Blender標準のPoint Cache思想に準拠した効率的なキャッシュ管理と試行錯誤サイクルを実現しています。
+
+- **ハンドラー永続化 (`@_persistent`)**:
+  `.blend` ファイルのロード時やシーン再読み込み時にハンドラーがBlenderにより自動削除されるのを防ぐため、`bpy.app.handlers.persistent` で登録。
+- **通し再生とフレーム1保護**:
+  シミュレーション開始フレーム（`scene.frame_start`）にタイムラインを巻き戻した際、計算済みのタイムラインキャッシュを破棄せず保持。これにより、フレーム1から最終フレームまでのスムーズな通し再生およびタイムラインスクラブをサポート。
+- **パラメータ変更の自動検知 (Dirty Cache Invalidation)**:
+  毎フレームのハンドラー実行時に、剛性・減衰・重力・ピン・縫合等の主要物理パラメータのハッシュシグネチャ（`get_cloth_params_signature`）を照合。設定値の変更を検知した場合のみ、該当オブジェクトのキャッシュとGPUシミュレータを自動破棄し、新しいパラメータでの再計算を開始。
+- **UIステータス表示とメモリ可視化**:
+  3D ViewportのNパネル（Quick Controls / Quality & Solver）に、キャッシュ済みフレーム範囲（例: `1 - 30 (30f)`）および概算メモリ使用量をリアルタイム表示。手動キャッシュクリアおよび現在の変形状態のシェイプキー保存（`Save as Shape Key`）を提供。
+
 ---
 
 ## 2. 物理シミュレーション仕様 (XPBD)
@@ -533,6 +546,56 @@ graph TD
   - `i18n.register()` では、アドオンの再読み込み（F8やスクリプト再実行）時に `ValueError` が発生することを防ぐため、事前に `bpy.app.translations.unregister(__name__)` を例外安全に呼び出してから再登録を行います。
 - **CLI・スタンドアロン実行との透過性**:
   - `HAS_BPY` および `IS_REAL_BLENDER` チェックにより、Blender GUIが存在しないヘッドレス環境や単体テスト・CLIツール（`log_tools`）から呼び出された場合でも、未定義エラーを起こさず安全にフォールバック（原文英語をそのまま返却）します。
+
+---
+
+## 8. タイムラインキャッシュとシミュレーションベイク設計 (Simulation Bake & Read-only Playback)
+
+### 8.1 課題と設計思想：オンザフライ計算から完全ベイク制への移行
+
+XPBD物理シミュレーションは本質的に「直前フレーム（$t-1$）の状態から次フレーム（$t$）を積分する」時系列依存（マルコフ過程）を持ちます。
+一方、Blenderのタイムラインはマウスによるスクラブ（任意フレームへのドラッグ移動）、逆再生、キーフレームジャンプなどの非連続・非決定論的なフレーム移動を許容します。
+
+タイムライン再生中にオンザフライで1フレームずつ動的計算を行うアーキテクチャでは、飛び飛びのフレーム移動時に未計算フレームのスキップガードやGPU内部状態同期、穴あきキャッシュの検知など極めて複雑な例外処理が必要となり、不具合の温床となっていました。
+
+これを抜本的に解決するため、Taremin Cloth ではBlender標準の物理シミュレーション（Clothモディファイア、Mantaflow等）に準拠した **「一括ベイク（Bake）＆タイムライン参照専用（Read-only Playback）」** アーキテクチャを採用しています。
+
+```mermaid
+graph TD
+    subgraph "1. 試行錯誤フェーズ (Real-time Tuning)"
+        Interactive[インタラクティブモード<br>Grab / Drag / Live GUI] -->|リアルタイム確認| Params[物理パラメータ調整]
+    end
+
+    subgraph "2. ベイクフェーズ (Bake)"
+        Params -->|Bake Simulation 実行| EngineBake[一括計算ループ<br>bake_cloth_simulation]
+        EngineBake -->|全フレーム頂点座標保存| CacheMap[_timeline_frame_cache<br>Memory PointCache]
+    end
+
+    subgraph "3. 再生・確認フェーズ (Playback)"
+        CacheMap -->|タイムライン再生 / スクラブ| FrameHandler[cloth_frame_handler<br>O(1) 参照・メッシュ適用]
+        FrameHandler -->|Free Bake 実行| FreeBake[キャッシュ破棄・レスト復元]
+        FreeBake --> Params
+    end
+```
+
+### 8.2 コアコンポーネントと動作仕様
+
+1. **一括ベイク実行 (`bake_cloth_simulation` / `taremin_cloth.bake`)**:
+   - `scene.frame_start` から `scene.frame_end` までの全フレームをヘッドレスループで連続ステップ計算。
+   - 不要なビューポート再描画を抑止し、純粋なGPU物理ステップと頂点座標収集を高速に実行。
+   - 各フレームの座標を `_timeline_frame_cache[obj.name][frame]` に完全格納。
+   - ウィンドウマネージャーのプログレスバー（`progress_begin` / `progress_update` / `progress_end`）により進捗を表示。
+2. **タイムライン参照専用ハンドラー (`cloth_frame_handler`)**:
+   - `frame_change_post` ハンドラー内では、**GPUシミュレーション計算を一切実行しない**。
+   - `current_frame in obj_cache` の場合は、キャッシュされた頂点配列を $O(1)$ でメッシュに適用するのみ。
+   - 未ベイク時またはキャッシュ範囲外の場合は初期レスト形状を維持。
+   - これにより、高速スクラブ、逆再生、ジャンプを行ってもシミュレーション破綻や時系列崩壊が原理的に発生しない。
+3. **ベイク破棄 (`free_scene_bake` / `taremin_cloth.free_bake`)**:
+   - キャッシュを破棄し、メッシュを初期レストポーズ（`restore_rest_positions`）に復元し、タイムラインを開始フレームに巻き戻す。
+4. **ベイク中のパラメータ保護（ロック）**:
+   - ベイク完了後は、不用意なパラメータ変更による結果の齟齬を防ぐため、UIパネル上の物理設定を自動的にロック（`layout.active = False`）。
+   - パラメータを再調整したい場合は `Free Bake` ボタンを押してロックを解除するワークフローを徹底。
+
 
 
 

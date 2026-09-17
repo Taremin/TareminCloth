@@ -101,7 +101,33 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
         op_clr_all = row_glob.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply All"), icon='CHECKMARK')
         if op_clr_all:
             op_clr_all.all_objects = True
-        row_glob.operator("taremin_cloth.clear_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
+
+        # --- ベイク管理セクション ---
+        box_bake = layout.box()
+        from .engine.cache import is_scene_baked, get_timeline_cache_info
+        scene_baked = is_scene_baked(scene)
+
+        row_b_hdr = box_bake.row(align=True)
+        row_b_hdr.label(text=i18n.trans("Simulation Bake"), icon='TIME')
+
+        # フレーム範囲の直接入力
+        row_range = box_bake.row(align=True)
+        row_range.enabled = not scene_baked
+        row_range.prop(scene, "frame_start", text=i18n.trans("Start Frame"))
+        row_range.prop(scene, "frame_end", text=i18n.trans("End Frame"))
+
+        row_bake_btns = box_bake.row(align=True)
+        if scene_baked:
+            row_bake_btns.operator("taremin_cloth.free_bake", text=i18n.trans("Free Bake"), icon='TRASH')
+            c_infos = [get_timeline_cache_info(o.name) for o in cloth_objs if o.type == 'MESH']
+            max_cnt = max((c["count"] for c in c_infos), default=0)
+            range_s = next((c["range_str"] for c in c_infos if c["count"] > 0), "Empty")
+            total_kb = sum(c["size_kb"] for c in c_infos)
+            box_bake.label(text=f"{i18n.trans('Baked:')} {range_s} ({max_cnt}f, ~{total_kb:.1f} KB)", icon='CHECKMARK')
+        else:
+            bake_txt = f"{i18n.trans('Bake Simulation')} ({scene.frame_start} - {scene.frame_end})"
+            row_bake_btns.operator("taremin_cloth.bake", text=bake_txt, icon='PHYSICS')
+            box_bake.label(text=i18n.trans("Status: Not Baked (Timeline Playback Disabled)"), icon='INFO')
 
         # --- Cloth Objects セクション ---
         box_cloth = layout.box()
@@ -279,11 +305,16 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
             row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
-            row_sel.operator("taremin_cloth.clear_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
             col_sel.operator("taremin_cloth.save_as_shape_key", text=i18n.trans("Save as Shape Key"), icon='SHAPEKEY_DATA')
 
+            # パラメータ設定ブロック (ベイク中は誤操作防止のためロック)
+            from .engine.cache import is_scene_baked
+            layout_params = layout.column()
+            if is_scene_baked(context.scene):
+                layout_params.active = False
+
             # 1. 固定 (Attachment & Pinning)
-            box_pin = layout.box()
+            box_pin = layout_params.box()
             box_pin.label(text=i18n.trans("Attachment & Pinning"), icon='PINNED')
             col_pin = box_pin.column(align=True)
             row_pin = col_pin.row(align=True)
@@ -296,7 +327,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_pin.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text=i18n.trans("Bone"))
 
             # 2. 縫合 (Sewing)
-            box_sew = layout.box()
+            box_sew = layout_params.box()
             box_sew.label(text=i18n.trans("Sewing"), icon='MOD_CLOTH')
             col_sew = box_sew.column(align=True)
             col_sew.prop(settings, "enable_sewing", text=i18n.trans("Enable Sewing"))
@@ -307,7 +338,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sew.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam (Select 2 Verts)"), icon='EDGESEL')
 
             # 3. 素材プリセット (Fabric Material)
-            box_mat = layout.box()
+            box_mat = layout_params.box()
             box_mat.label(text=i18n.trans("Fabric Material"), icon='MATERIAL')
             row_preset = box_mat.row(align=True)
             preset_title = f"{i18n.trans('Material:')} {settings.last_fabric_preset}" if settings.last_fabric_preset else i18n.trans("Material Preset")
@@ -317,7 +348,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
 
             # 4. 自己衝突 (Self Collision)
-            box_sc = layout.box()
+            box_sc = layout_params.box()
             box_sc.label(text=i18n.trans("Self Collision"), icon='PHYSICS')
             col_sc = box_sc.column(align=True)
             col_sc.prop(settings, "enable_self_collision", text=i18n.trans("Enable Self Collision"))
@@ -328,13 +359,13 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sc.prop(settings, "thickness", text=i18n.trans("Thickness"))
 
             # 4. 重力 (Forces & Gravity)
-            box_grav = layout.box()
+            box_grav = layout_params.box()
             box_grav.label(text=i18n.trans("Forces & Gravity"), icon='FORCE_VORTEX')
             col_grav = box_grav.column(align=True)
             col_grav.prop(settings, "gravity", slider=True)
 
             # 5. シミュレーション品質プリセット (Simulation Quality)
-            box_qual = layout.box()
+            box_qual = layout_params.box()
             box_qual.label(text=i18n.trans("Simulation Quality"), icon='PREFERENCES')
             row_q = box_qual.row(align=True)
             sim_preset_title = f"{i18n.trans('Quality:')} {settings.last_simulation_preset}" if settings.last_simulation_preset else i18n.trans("Quality Preset")
@@ -351,7 +382,6 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
             row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
-            row_sel.operator("taremin_cloth.clear_cache", text=i18n.trans("Clear Cache"), icon='TRASH')
             op_clr = row_sel.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply Rest"), icon='CHECKMARK')
             if op_clr:
                 op_clr.all_objects = False
@@ -374,6 +404,9 @@ class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        from .engine.cache import is_scene_baked
+        if is_scene_baked(context.scene):
+            layout.active = False
         obj = context.active_object
         settings = obj.taremin_cloth
 
@@ -411,6 +444,9 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        from .engine.cache import is_scene_baked
+        if is_scene_baked(context.scene):
+            layout.active = False
         obj = context.active_object
         settings = obj.taremin_cloth
 
@@ -466,6 +502,9 @@ class TAREMIN_CLOTH_PT_forces(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        from .engine.cache import is_scene_baked
+        if is_scene_baked(context.scene):
+            layout.active = False
         obj = context.active_object
         settings = obj.taremin_cloth
         scene = context.scene
@@ -499,6 +538,9 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        from .engine.cache import is_scene_baked
+        if is_scene_baked(context.scene):
+            layout.active = False
         obj = context.active_object
         settings = obj.taremin_cloth
 
@@ -554,6 +596,9 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        from .engine.cache import is_scene_baked
+        if is_scene_baked(context.scene):
+            layout.active = False
         obj = context.active_object
         settings = obj.taremin_cloth
 
@@ -621,6 +666,9 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        from .engine.cache import is_scene_baked
+        if is_scene_baked(context.scene):
+            layout.active = False
         obj = context.active_object
         settings = obj.taremin_cloth
 
@@ -656,6 +704,8 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
             row_buf.prop(settings, "frame_buffer_size")
         if hasattr(context.scene, "taremin_cloth_fast_playback"):
             p_col.prop(context.scene, "taremin_cloth_fast_playback")
+
+
 
 
 class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):

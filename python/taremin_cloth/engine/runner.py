@@ -17,6 +17,8 @@ from .cache import (
     cache_rest_positions,
     restore_rest_positions,
     clear_simulators,
+    clear_timeline_cache,
+    check_and_update_params_signature,
 )
 from .collider import sync_colliders
 from .params import sync_cloth_parameters, sync_attachment_pins
@@ -24,6 +26,7 @@ from ..utils import anim_driver
 from ..utils.logger import logger
 
 _fast_playback_saved_mods = {}
+_is_baking = False
 
 
 def apply_fast_playback(scene, force=False, include_sim_objs=False):
@@ -390,29 +393,119 @@ def step_cloth_scene(
     return results
 
 
-def cloth_frame_handler(scene):
-    """Blenderタイムライン進行時のハンドラー"""
-    current_frame = scene.frame_current
+def _persistent(func):
+    """Blender環境では@persistentを適用し、スタンドアロンテスト環境では透過するデコレータ"""
+    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    persistent_fn = getattr(handlers, "persistent", None)
+    if callable(persistent_fn):
+        return persistent_fn(func)
+    return func
 
-    if current_frame == scene.frame_start:
-        restore_fast_playback(scene)
-        for obj in scene.objects:
-            if hasattr(obj, "taremin_cloth") and obj.taremin_cloth.is_cloth:
-                restore_rest_positions(obj)
-        clear_simulators()
+
+@_persistent
+def cloth_frame_handler(scene):
+    """Blenderタイムライン進行時のハンドラー（ベイクキャッシュ参照専用）"""
+    global _is_baking
+    if _is_baking:
         return
 
-    # 高速プレビューが有効ならDepsgraphバイパスを適用
-    apply_fast_playback(scene)
+    current_frame = scene.frame_current
 
-    # コライダーのアニメーション駆動ステップ (タイムライン再生時もコライダーアニメーションを連動)
+    # 各布オブジェクトのパラメータ変更チェック (ベイク済みの場合は変更があればキャッシュ無効化)
+    for obj in scene.objects:
+        if obj.type == 'MESH' and hasattr(obj, "taremin_cloth") and obj.taremin_cloth.is_cloth and getattr(obj.taremin_cloth, "enabled", True):
+            check_and_update_params_signature(obj)
+
+    # 各布オブジェクトのキャッシュ参照およびメッシュ適用
+    for obj in scene.objects:
+        if obj.type == 'MESH' and hasattr(obj, "taremin_cloth") and obj.taremin_cloth.is_cloth and getattr(obj.taremin_cloth, "enabled", True):
+            obj_cache = _timeline_frame_cache.get(obj.name, {})
+            n_v = len(obj.data.vertices)
+
+            # 1. キャッシュヒット判定 (ベイク済みフレームが存在する場合: O(1)でメッシュ反映)
+            if current_frame in obj_cache and len(obj_cache[current_frame]) == n_v * 3:
+                cached_coords = obj_cache[current_frame]
+                obj.data.vertices.foreach_set("co", cached_coords)
+                obj.data.update()
+                obj["_taremin_cloth_is_deformed"] = (current_frame != scene.frame_start)
+            else:
+                # 2. 未ベイク時またはキャッシュ範囲外:
+                # シミュレーション変形中であれば初期レスト形状へ安全に戻す
+                if obj.get("_taremin_cloth_is_deformed", False):
+                    restore_rest_positions(obj, clear_timeline=False)
+
+
+def bake_init_simulation(scene, start_frame=None, end_frame=None):
+    """ベイクの準備処理（初期化、シミュレータクリア、F1キャッシュ格納）を行い、コンテキスト辞書を返す"""
+    if not scene:
+        return None
+
+    start_f = int(start_frame if start_frame is not None else scene.frame_start)
+    end_f = int(end_frame if end_frame is not None else scene.frame_end)
+    if end_f < start_f:
+        end_f = start_f
+
+    cloth_objs = [
+        o for o in scene.objects
+        if o.type == 'MESH' and getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and getattr(o.taremin_cloth, "enabled", True)
+    ]
+    if not cloth_objs:
+        logger.warning("[Bake] No active cloth objects found in scene.")
+        return None
+
+    # 1. 準備: 全布の既存キャッシュ・シミュレータを破棄し、初期レストポーズを設定
+    clear_simulators()
+    for obj in cloth_objs:
+        if obj.get("_taremin_cloth_is_deformed", False):
+            restore_rest_positions(obj, clear=False, clear_timeline=True)
+        else:
+            cache_rest_positions(obj, force=True)
+        clear_timeline_cache(obj.name)
+        obj_cache = _timeline_frame_cache.setdefault(obj.name, {})
+        n_v = len(obj.data.vertices)
+        init_co = np.empty(n_v * 3, dtype=np.float32)
+        obj.data.vertices.foreach_get("co", init_co)
+        obj_cache[start_f] = init_co.copy()
+        obj["_taremin_cloth_is_deformed"] = False
+
+    fps = scene.render.fps
+    dt = 1.0 / fps if fps > 0 else 1.0 / 30.0
+    total_steps = end_f - start_f
+
+    # タイムラインを開始フレームに移動
+    scene.frame_set(start_f)
+
+    logger.info(f"[Bake] Starting simulation bake for {len(cloth_objs)} cloth objects: frames {start_f} to {end_f} (total {total_steps + 1}f)")
+
+    return {
+        "scene": scene,
+        "cloth_objs": cloth_objs,
+        "start_frame": start_f,
+        "end_frame": end_f,
+        "total_steps": total_steps,
+        "fps": fps,
+        "dt": dt,
+        "baked_count": 1,
+    }
+
+
+def bake_step_frame(bake_ctx, frame):
+    """指定フレームのシミュレーション計算を1ステップ実行し、キャッシュに保存する"""
+    scene = bake_ctx["scene"]
+    cloth_objs = bake_ctx["cloth_objs"]
+    start_f = bake_ctx["start_frame"]
+    dt = bake_ctx["dt"]
+
+    scene.frame_set(frame)
+
+    # コライダーのアニメーション駆動ステップ
     any_collider_deformed = False
     for col_o in scene.objects:
         c_set = getattr(col_o, "taremin_cloth_collider", None)
         if c_set and c_set.is_collider and getattr(c_set, "enabled", True):
             if getattr(c_set, "anim", None) and c_set.anim.enabled:
-                anim_frame = current_frame - scene.frame_start
-                _, deformed = anim_driver.step_collider_animation(col_o, anim_frame)
+                anim_f = frame - start_f
+                _, deformed = anim_driver.step_collider_animation(col_o, anim_f)
                 if deformed:
                     any_collider_deformed = True
             elif col_o.type == 'MESH' and (c_set.collider_type == 'MESH' or (c_set.collider_type == 'BONE_SDF' and getattr(c_set, "enable_joint_mesh", True))):
@@ -426,86 +519,73 @@ def cloth_frame_handler(scene):
     except Exception:
         depsgraph = None
 
-    for obj in scene.objects:
-        if obj.type == 'MESH' and hasattr(obj, "taremin_cloth") and obj.taremin_cloth.is_cloth and getattr(obj.taremin_cloth, "enabled", True):
-            sim, coords = get_or_create_simulator(obj)
-            settings = obj.taremin_cloth
-            dt = 1.0 / scene.render.fps
-            actual_substeps = get_effective_substeps(obj, coords, dt, scene=scene)
+    for obj in cloth_objs:
+        sim, coords = get_or_create_simulator(obj)
+        settings = obj.taremin_cloth
+        actual_substeps = get_effective_substeps(obj, coords, dt, scene=scene)
 
-            # 1. キャッシュヒット判定 (過去に計算済みのフレームならGPU計算不要で即座にメッシュ反映)
-            obj_cache = _timeline_frame_cache.setdefault(obj.name, {})
-            if current_frame in obj_cache:
-                cached_coords = obj_cache[current_frame]
-                coords[:] = cached_coords
-                obj.data.vertices.foreach_set("co", cached_coords)
-                obj.data.update()
-                obj["_taremin_cloth_is_deformed"] = True
-                continue
+        sim, coords = step_cloth_object(
+            obj,
+            scene,
+            dt=dt,
+            depsgraph=depsgraph,
+            force_sync_colliders=any_collider_deformed,
+            update_mesh=True,
+            substeps=actual_substeps,
+            solver_iterations=settings.solver_iterations,
+        )
+        _timeline_frame_cache[obj.name][frame] = coords.copy()
+        obj["_taremin_cloth_is_deformed"] = True
 
-            # 2. フレームバッファリング判定
-            buf_enabled = getattr(settings, "enable_frame_buffering", False) and hasattr(sim, "step_buffered")
-            buf_size = getattr(settings, "frame_buffer_size", 2) if buf_enabled else 1
-            is_last_frame = (current_frame == getattr(scene, "frame_end", 250))
+    bake_ctx["baked_count"] += 1
+    return bake_ctx["baked_count"]
 
-            if buf_enabled:
-                if obj.name not in _buffered_start_frames:
-                    _buffered_start_frames[obj.name] = current_frame
 
-                sync_colliders(sim, scene, depsgraph, force=any_collider_deformed, cloth_obj=obj)
-                sync_cloth_parameters(sim, obj, scene)
-                sync_attachment_pins(sim, obj, scene)
+def bake_finalize_simulation(bake_ctx):
+    """ベイクの完了・終了処理を行い、タイムラインを開始フレームに戻す"""
+    if not bake_ctx:
+        return
+    scene = bake_ctx["scene"]
+    start_f = bake_ctx["start_frame"]
+    cloth_objs = bake_ctx["cloth_objs"]
 
-                # GPU内部リングバッファに保存（同期待機・転送ゼロで即座に復帰）
-                count = sim.step_buffered(dt=dt, substeps=actual_substeps, solver_iterations=settings.solver_iterations)
+    scene.frame_set(start_f)
+    for obj in cloth_objs:
+        init_coords = _timeline_frame_cache.get(obj.name, {}).get(start_f)
+        if init_coords is not None:
+            obj.data.vertices.foreach_set("co", init_coords)
+            obj.data.update()
+            obj["_taremin_cloth_is_deformed"] = False
 
-                # バッファ満杯または最終フレーム時: まとめて一括取得
-                if count >= buf_size or is_last_frame:
-                    buf_coords = np.empty(count * len(coords), dtype=np.float32)
-                    fetched = sim.fetch_buffered_positions(buf_coords)
-                    start_f = _buffered_start_frames.pop(obj.name, current_frame - fetched + 1)
+    logger.info(f"[Bake] Completed simulation bake: {bake_ctx['baked_count']} frames cached.")
 
-                    # 各フレームの座標をキャッシュに埋め込む
-                    n_coords = len(coords)
-                    for i in range(fetched):
-                        f_num = start_f + i
-                        frame_data = buf_coords[i * n_coords : (i + 1) * n_coords]
-                        obj_cache[f_num] = frame_data.copy()
 
-                    # 最新フレームの座標を現在のメッシュに反映して描画
-                    latest_data = buf_coords[(fetched - 1) * n_coords : fetched * n_coords]
-                    coords[:] = latest_data
-                    obj.data.vertices.foreach_set("co", latest_data)
-                    obj.data.update()
-                    obj["_taremin_cloth_is_deformed"] = True
-                else:
-                    # バッファリング中: メッシュ更新・ビューポート描画をスキップ
-                    pass
+def bake_cloth_simulation(scene, start_frame=None, end_frame=None, progress_callback=None, cancel_check=None):
+    """シーン内の全Clothシミュレーションを指定フレーム範囲で一括計算してキャッシュ（ベイク）する（同期実行）"""
+    global _is_baking
+    bake_ctx = bake_init_simulation(scene, start_frame=start_frame, end_frame=end_frame)
+    if not bake_ctx:
+        return 0
 
-            elif getattr(settings, "enable_async_readback", False) and hasattr(sim, "step_async"):
-                # 非同期リードバック
-                if sim.fetch_positions(coords):
-                    obj.data.vertices.foreach_set("co", coords)
-                    obj.data.update()
-                    obj["_taremin_cloth_is_deformed"] = True
-                    if current_frame > 1:
-                        obj_cache[current_frame - 1] = coords.copy()
+    _is_baking = True
+    try:
+        start_f = bake_ctx["start_frame"]
+        end_f = bake_ctx["end_frame"]
+        total_steps = bake_ctx["total_steps"]
 
-                sync_colliders(sim, scene, depsgraph, force=any_collider_deformed, cloth_obj=obj)
-                sync_cloth_parameters(sim, obj, scene)
-                sync_attachment_pins(sim, obj, scene)
-                sim.step_async(dt=dt, substeps=actual_substeps, solver_iterations=settings.solver_iterations)
+        if progress_callback:
+            progress_callback(1, total_steps + 1)
 
-            else:
-                # 同期実行モード: 共通の step_cloth_object を呼び出して実行
-                sim, coords = step_cloth_object(
-                    obj,
-                    scene,
-                    dt=dt,
-                    depsgraph=depsgraph,
-                    force_sync_colliders=any_collider_deformed,
-                    update_mesh=True,
-                    substeps=actual_substeps,
-                    solver_iterations=settings.solver_iterations,
-                )
-                obj_cache[current_frame] = coords.copy()
+        for frame in range(start_f + 1, end_f + 1):
+            if cancel_check and cancel_check():
+                logger.info(f"[Bake] Cancelled by user at frame {frame}")
+                break
+            bake_step_frame(bake_ctx, frame)
+            if progress_callback:
+                progress_callback(bake_ctx["baked_count"], total_steps + 1)
+
+        bake_finalize_simulation(bake_ctx)
+        return bake_ctx["baked_count"]
+    finally:
+        _is_baking = False
+

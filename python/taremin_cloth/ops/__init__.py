@@ -55,6 +55,10 @@ from .gui import (
     is_gui_preview_running,
     get_gui_fps_stats,
 )
+from .bake import (
+    TAREMIN_CLOTH_OT_bake,
+    TAREMIN_CLOTH_OT_free_bake,
+)
 
 OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_toggle_cloth,
@@ -64,6 +68,8 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_apply_rest_shape,
     TAREMIN_CLOTH_OT_clear_cache,
     TAREMIN_CLOTH_OT_apply_gpu_settings,
+    TAREMIN_CLOTH_OT_bake,
+    TAREMIN_CLOTH_OT_free_bake,
     TAREMIN_CLOTH_OT_interactive,
     TAREMIN_CLOTH_OT_benchmark_fps,
     TAREMIN_CLOTH_OT_create_seam,
@@ -106,6 +112,8 @@ __all__ = [
     "TAREMIN_CLOTH_OT_toggle_weight_paint",
     "TAREMIN_CLOTH_OT_clear_cache",
     "TAREMIN_CLOTH_OT_apply_gpu_settings",
+    "TAREMIN_CLOTH_OT_bake",
+    "TAREMIN_CLOTH_OT_free_bake",
     "TAREMIN_CLOTH_OT_interactive",
     "TAREMIN_CLOTH_OT_benchmark_fps",
     "TAREMIN_CLOTH_OT_create_seam",

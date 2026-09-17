@@ -19,6 +19,12 @@ from .engine.cache import (
     restore_rest_positions,
     clear_simulator_for_object,
     clear_simulators,
+    get_timeline_cache_info,
+    clear_timeline_cache,
+    is_object_baked,
+    is_scene_baked,
+    free_object_bake,
+    free_scene_bake,
 )
 from .engine.collider import (
     _collider_cache,
@@ -39,6 +45,7 @@ from .engine.runner import (
     step_cloth_object,
     step_cloth_scene,
     cloth_frame_handler,
+    bake_cloth_simulation,
 )
 from .ops import (
     OPERATOR_CLASSES,
@@ -52,6 +59,8 @@ from .ops import (
     TAREMIN_CLOTH_OT_toggle_weight_paint,
     TAREMIN_CLOTH_OT_clear_cache,
     TAREMIN_CLOTH_OT_apply_gpu_settings,
+    TAREMIN_CLOTH_OT_bake,
+    TAREMIN_CLOTH_OT_free_bake,
     TAREMIN_CLOTH_OT_interactive,
     TAREMIN_CLOTH_OT_benchmark_fps,
     TAREMIN_CLOTH_OT_create_seam,

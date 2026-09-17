@@ -16,6 +16,7 @@ _interactive_active = False
 _active_grabbed_info = None  # {"obj_name": str, "vert_idx": int, "target_world_pos": Vector or None}
 _interactive_fps_info = None  # {"fps": float, "frame_ms": float, "show_overlay": bool, "position": str, "show_help": bool}
 _pin_indices_cache = {}  # {(obj_name, vg_name): (indices_list, vert_count)}
+_bake_overlay_info = None  # {"current_frame": int, "end_frame": int, "pct": int}
 
 
 def clear_pin_cache():
@@ -64,6 +65,32 @@ def clear_interactive_fps_info():
 def get_interactive_fps_info():
     """現在のFPS計測情報を取得する（テストまたはUI用）"""
     return _interactive_fps_info
+
+
+def set_bake_overlay_info(current_frame: int, end_frame: int, pct: int):
+    """ベイク中のオーバーレイ描画情報を更新する"""
+    global _bake_overlay_info
+    _bake_overlay_info = {
+        "current_frame": int(current_frame),
+        "end_frame": int(end_frame),
+        "pct": int(pct),
+    }
+
+
+def clear_bake_overlay_info():
+    """ベイク中のオーバーレイ描画情報をクリアする"""
+    global _bake_overlay_info
+    _bake_overlay_info = None
+
+
+def get_bake_overlay_info():
+    """現在のベイク中オーバーレイ描画情報を取得する（テストまたはUI用）"""
+    return _bake_overlay_info
+
+
+def is_bake_overlay_active() -> bool:
+    """ベイク中のオーバーレイ描画が有効かどうかを取得する"""
+    return _bake_overlay_info is not None
 
 
 def set_active_grabbed_vertex(obj_name: str, vert_idx: int, target_world_pos=None):
@@ -383,13 +410,7 @@ def draw_callback_3d():
 
 def draw_callback_2d():
     """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
-    if not _interactive_active or not _interactive_fps_info:
-        return
-
-    show_fps = _interactive_fps_info.get("show_overlay", True)
-    show_help = _interactive_fps_info.get("show_help", True)
-
-    if not show_fps and not show_help:
+    if not _interactive_active and not _bake_overlay_info:
         return
 
     context = bpy.context
@@ -399,68 +420,112 @@ def draw_callback_2d():
 
     shader_2d = get_2d_uniform_color_shader()
 
-    # 1. FPSバッジの描画
-    if show_fps:
-        fps = _interactive_fps_info.get("fps", 0.0)
-        frame_ms = _interactive_fps_info.get("frame_ms", 0.0)
-        position = _interactive_fps_info.get("position", 'TOP_CENTER')
+    # --- 1. インタラクティブモード中のHUD描画 ---
+    if _interactive_active and _interactive_fps_info:
+        show_fps = _interactive_fps_info.get("show_overlay", True)
+        show_help = _interactive_fps_info.get("show_help", True)
 
-        # バッジのサイズ設定
-        box_w = 175.0
-        box_h = 28.0
+        # 1. FPSバッジの描画
+        if show_fps:
+            fps = _interactive_fps_info.get("fps", 0.0)
+            frame_ms = _interactive_fps_info.get("frame_ms", 0.0)
+            position = _interactive_fps_info.get("position", 'TOP_CENTER')
 
-        # 配置座標の算出
-        if position == 'TOP_CENTER':
-            # 画面中央上部（ヘッダーと重ならないよう、上端から40px下げ、左右中央に配置）
-            margin_x = (region.width - box_w) / 2.0
-            y_top = region.height - 40.0
-        elif position == 'TOP_RIGHT':
-            # 画面右上（ナビゲーションギズモの左側を想定）
-            margin_x = region.width - box_w - 90.0
-            y_top = region.height - 40.0
-        elif position == 'BOTTOM_RIGHT':
-            # 画面右下
-            margin_x = region.width - box_w - 24.0
-            y_top = 24.0 + box_h
-        elif position == 'BOTTOM_LEFT':
-            # 画面左下（ツールバーの右下など）
-            margin_x = 80.0
-            y_top = 24.0 + box_h
-        else:  # TOP_LEFT
-            # 左上（ツールバー幅70pxの右側にオフセット）
-            margin_x = 80.0
-            y_top = region.height - 50.0
+            # バッジのサイズ設定
+            box_w = 175.0
+            box_h = 28.0
 
-        y_bottom = y_top - box_h
+            # 配置座標の算出
+            if position == 'TOP_CENTER':
+                # 画面中央上部（ヘッダーと重ならないよう、上端から40px下げ、左右中央に配置）
+                margin_x = (region.width - box_w) / 2.0
+                y_top = region.height - 40.0
+            elif position == 'TOP_RIGHT':
+                # 画面右上（ナビゲーションギズモの左側を想定）
+                margin_x = region.width - box_w - 90.0
+                y_top = region.height - 40.0
+            elif position == 'BOTTOM_RIGHT':
+                # 画面右下
+                margin_x = region.width - box_w - 24.0
+                y_top = 24.0 + box_h
+            elif position == 'BOTTOM_LEFT':
+                # 画面左下（ツールバーの右下など）
+                margin_x = 80.0
+                y_top = 24.0 + box_h
+            else:  # TOP_LEFT
+                # 左上（ツールバー幅70pxの右側にオフセット）
+                margin_x = 80.0
+                y_top = region.height - 50.0
 
-        # 半透明ダーク背景（クアッド）の描画
-        if shader_2d:
-            orig_blend = gpu.state.blend_get()
+            y_bottom = y_top - box_h
+
+            # 半透明ダーク背景（クアッド）の描画
+            if shader_2d:
+                orig_blend = gpu.state.blend_get()
+                try:
+                    gpu.state.blend_set('ALPHA')
+                    vertices = [
+                        (margin_x, y_bottom),
+                        (margin_x + box_w, y_bottom),
+                        (margin_x + box_w, y_top),
+                        (margin_x, y_bottom),
+                        (margin_x + box_w, y_top),
+                        (margin_x, y_top),
+                    ]
+                    batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
+                    if batch:
+                        shader_2d.bind()
+                        shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
+                        batch.draw(shader_2d)
+                finally:
+                    gpu.state.blend_set(orig_blend)
+
+            # テキスト描画 (blf)
             try:
-                gpu.state.blend_set('ALPHA')
-                vertices = [
-                    (margin_x, y_bottom),
-                    (margin_x + box_w, y_bottom),
-                    (margin_x + box_w, y_top),
-                    (margin_x, y_bottom),
-                    (margin_x + box_w, y_top),
-                    (margin_x, y_top),
-                ]
-                batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
-                if batch:
-                    shader_2d.bind()
-                    shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
-                    batch.draw(shader_2d)
-            finally:
-                gpu.state.blend_set(orig_blend)
+                import blf
+                font_id = 0
+                font_size = 13
 
-        # テキスト描画 (blf)
-        try:
+                # blf.size の互換性対応 (Blenderバージョン差対応)
+                try:
+                    blf.size(font_id, font_size)
+                except (TypeError, ValueError):
+                    try:
+                        blf.size(font_id, font_size, 72)
+                    except Exception:
+                        pass
+
+                # FPSステータスに応じた文字色判定
+                if fps >= 50.0:
+                    text_color = (0.3, 0.95, 0.4, 1.0)   # 鮮やかなグリーン
+                elif fps >= 30.0:
+                    text_color = (1.0, 0.85, 0.2, 1.0)   # イエロー
+                elif fps > 0.0:
+                    text_color = (1.0, 0.35, 0.25, 1.0)  # オレンジレッド
+                else:
+                    text_color = (0.7, 0.7, 0.7, 1.0)    # グレー（初期状態）
+
+                text_str = f"FPS: {fps:5.1f} ({frame_ms:4.1f} ms)"
+                text_x = margin_x + 12.0
+                text_y = y_bottom + 8.0
+
+                blf.position(font_id, text_x, text_y, 0.0)
+                blf.color(font_id, text_color[0], text_color[1], text_color[2], text_color[3])
+                blf.draw(font_id, text_str)
+            except Exception:
+                pass
+
+        # 2. キー操作ガイドバッジの描画 (画面下部中央)
+        if show_help:
+            guide_text = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
+            guide_h = 28.0
+            pad_x = 14.0
+            text_w = 340.0
+
             import blf
             font_id = 0
-            font_size = 13
+            font_size = 12
 
-            # blf.size の互換性対応 (Blenderバージョン差対応)
             try:
                 blf.size(font_id, font_size)
             except (TypeError, ValueError):
@@ -469,32 +534,62 @@ def draw_callback_2d():
                 except Exception:
                     pass
 
-            # FPSステータスに応じた文字色判定
-            if fps >= 50.0:
-                text_color = (0.3, 0.95, 0.4, 1.0)   # 鮮やかなグリーン
-            elif fps >= 30.0:
-                text_color = (1.0, 0.85, 0.2, 1.0)   # イエロー
-            elif fps > 0.0:
-                text_color = (1.0, 0.35, 0.25, 1.0)  # オレンジレッド
-            else:
-                text_color = (0.7, 0.7, 0.7, 1.0)    # グレー（初期状態）
+            try:
+                dims = blf.dimensions(font_id, guide_text)
+                if dims and dims[0] > 0:
+                    text_w = dims[0]
+            except Exception:
+                pass
 
-            text_str = f"FPS: {fps:5.1f} ({frame_ms:4.1f} ms)"
-            text_x = margin_x + 12.0
-            text_y = y_bottom + 8.0
+            guide_w = text_w + pad_x * 2.0
+            guide_margin_x = max(10.0, (region.width - guide_w) / 2.0)
+            guide_y_bottom = 20.0
+            guide_y_top = guide_y_bottom + guide_h
 
-            blf.position(font_id, text_x, text_y, 0.0)
-            blf.color(font_id, text_color[0], text_color[1], text_color[2], text_color[3])
-            blf.draw(font_id, text_str)
+            if shader_2d:
+                orig_blend = gpu.state.blend_get()
+                try:
+                    gpu.state.blend_set('ALPHA')
+                    vertices = [
+                        (guide_margin_x, guide_y_bottom),
+                        (guide_margin_x + guide_w, guide_y_bottom),
+                        (guide_margin_x + guide_w, guide_y_top),
+                        (guide_margin_x, guide_y_bottom),
+                        (guide_margin_x + guide_w, guide_y_top),
+                        (guide_margin_x, guide_y_top),
+                    ]
+                    batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
+                    if batch:
+                        shader_2d.bind()
+                        shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
+                        batch.draw(shader_2d)
+                finally:
+                    gpu.state.blend_set(orig_blend)
+
+            try:
+                text_x = guide_margin_x + pad_x
+                text_y = guide_y_bottom + 8.0
+                blf.position(font_id, text_x, text_y, 0.0)
+                blf.color(font_id, 0.92, 0.92, 0.95, 0.95)
+                blf.draw(font_id, guide_text)
+            except Exception:
+                pass
+
+    # --- 2. ベイク中オーバーレイバッジの描画 (画面下部中央) ---
+    if _bake_overlay_info:
+        cur_f = _bake_overlay_info.get("current_frame", 1)
+        end_f = _bake_overlay_info.get("end_frame", 250)
+        pct = max(0, min(100, _bake_overlay_info.get("pct", 0)))
+
+        msg = i18n.trans("Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel")
+        try:
+            bake_text = msg % (cur_f, end_f, pct)
         except Exception:
-            pass
+            bake_text = f"Baking Simulation: Frame {cur_f} / {end_f} ({pct}%)  |  [Esc] Cancel"
 
-    # 2. キー操作ガイドバッジの描画 (画面下部中央)
-    if show_help:
-        guide_text = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
-        guide_h = 28.0
-        pad_x = 14.0
-        text_w = 340.0
+        guide_h = 32.0
+        pad_x = 18.0
+        text_w = 400.0
 
         import blf
         font_id = 0
@@ -509,7 +604,7 @@ def draw_callback_2d():
                 pass
 
         try:
-            dims = blf.dimensions(font_id, guide_text)
+            dims = blf.dimensions(font_id, bake_text)
             if dims and dims[0] > 0:
                 text_w = dims[0]
         except Exception:
@@ -517,13 +612,14 @@ def draw_callback_2d():
 
         guide_w = text_w + pad_x * 2.0
         guide_margin_x = max(10.0, (region.width - guide_w) / 2.0)
-        guide_y_bottom = 20.0
+        guide_y_bottom = 24.0
         guide_y_top = guide_y_bottom + guide_h
 
         if shader_2d:
             orig_blend = gpu.state.blend_get()
             try:
                 gpu.state.blend_set('ALPHA')
+                # 1. メイン半透明背景ボックス
                 vertices = [
                     (guide_margin_x, guide_y_bottom),
                     (guide_margin_x + guide_w, guide_y_bottom),
@@ -535,17 +631,35 @@ def draw_callback_2d():
                 batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
                 if batch:
                     shader_2d.bind()
-                    shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
+                    shader_2d.uniform_float("color", (0.10, 0.10, 0.13, 0.85))
                     batch.draw(shader_2d)
+
+                # 2. 進捗プログレスバー（底辺3px）
+                bar_h = 3.0
+                bar_w = guide_w * (pct / 100.0)
+                if bar_w > 0.0:
+                    bar_verts = [
+                        (guide_margin_x, guide_y_bottom),
+                        (guide_margin_x + bar_w, guide_y_bottom),
+                        (guide_margin_x + bar_w, guide_y_bottom + bar_h),
+                        (guide_margin_x, guide_y_bottom),
+                        (guide_margin_x + bar_w, guide_y_bottom + bar_h),
+                        (guide_margin_x, guide_y_bottom + bar_h),
+                    ]
+                    bar_batch = batch_for_shader(shader_2d, 'TRIS', {"pos": bar_verts})
+                    if bar_batch:
+                        shader_2d.bind()
+                        shader_2d.uniform_float("color", (0.2, 0.7, 1.0, 0.9))
+                        bar_batch.draw(shader_2d)
             finally:
                 gpu.state.blend_set(orig_blend)
 
         try:
             text_x = guide_margin_x + pad_x
-            text_y = guide_y_bottom + 8.0
+            text_y = guide_y_bottom + 10.0
             blf.position(font_id, text_x, text_y, 0.0)
-            blf.color(font_id, 0.92, 0.92, 0.95, 0.95)
-            blf.draw(font_id, guide_text)
+            blf.color(font_id, 0.95, 0.95, 0.98, 1.0)
+            blf.draw(font_id, bake_text)
         except Exception:
             pass
 

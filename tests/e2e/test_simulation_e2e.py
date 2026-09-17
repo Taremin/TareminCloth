@@ -19,8 +19,22 @@ import taremin_cloth
 class TestSimulationE2E(unittest.TestCase):
     def setUp(self):
         taremin_cloth.register()
+        for obj in list(bpy.context.scene.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+        for mesh in list(bpy.data.meshes):
+            bpy.data.meshes.remove(mesh, do_unlink=True)
+        from taremin_cloth.engine.cache import _timeline_frame_cache, clear_simulators
+        clear_simulators()
+        _timeline_frame_cache.clear()
 
     def tearDown(self):
+        for obj in list(bpy.context.scene.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+        for mesh in list(bpy.data.meshes):
+            bpy.data.meshes.remove(mesh, do_unlink=True)
+        from taremin_cloth.engine.cache import _timeline_frame_cache, clear_simulators
+        clear_simulators()
+        _timeline_frame_cache.clear()
         taremin_cloth.unregister()
 
     def test_blender_cloth_simulation(self):
@@ -95,7 +109,7 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.data.meshes.remove(mesh, do_unlink=True)
 
     def test_timeline_frame_handler_with_pin_vertex_group(self):
-        """頂点グループ 'Pin' を持つ布メッシュがタイムライン再生で正しく固定・変形されるか検証"""
+        """頂点グループ 'Pin' を持つ布メッシュがタイムライン再生・ベイクで正しく固定・変形されるか検証"""
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0)
         obj = bpy.context.active_object
         obj.taremin_cloth.is_cloth = True
@@ -114,53 +128,137 @@ class TestSimulationE2E(unittest.TestCase):
         init_pos = init_coords.reshape((-1, 3))
 
         scene = bpy.context.scene
-        scene.frame_set(1)
-        for f in range(2, 20):
-            scene.frame_set(f)
+        scene.frame_start = 1
+        scene.frame_end = 30
 
+        # 1. 未ベイク時はタイムライン再生しても初期座標のまま（変形しない安全設計）
+        scene.frame_set(1)
+        for f in range(2, 10):
+            scene.frame_set(f)
         cur_coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
+        obj.data.vertices.foreach_get("co", cur_coords)
+        np.testing.assert_allclose(cur_coords, init_coords, atol=1e-5, err_msg="未ベイク時はタイムライン再生しても変形しないこと")
+
+        # 2. 一括ベイクを実行
+        res = bpy.ops.taremin_cloth.bake()
+        self.assertEqual(res, {'FINISHED'})
+
+        # 3. ベイク後はタイムライン再生でキャッシュが即座に反映され、固定頂点は維持され非固定頂点は下垂する
+        scene.frame_set(30)
         obj.data.vertices.foreach_get("co", cur_coords)
         cur_pos = cur_coords.reshape((-1, 3))
 
         for p_idx in pin_indices:
             np.testing.assert_allclose(cur_pos[p_idx], init_pos[p_idx], atol=1e-5)
 
-        self.assertLess(np.min(cur_pos[:, 2]), -0.01)
+        self.assertLess(np.min(cur_pos[:, 2]), -0.005, "非固定頂点が重力により下方に垂れ下がっていること")
+
+        # 4. フレーム1に戻すと初期レスト形状に戻る
+        scene.frame_set(1)
+        obj.data.vertices.foreach_get("co", cur_coords)
+        np.testing.assert_allclose(cur_coords, init_coords, atol=1e-5)
 
         bpy.data.objects.remove(obj, do_unlink=True)
 
     def test_frame_buffering_e2e(self):
-        """GPUフレームバッファリングにより中間フレームが欠落なくキャッシュされスクラブ復元できることを検証"""
+        """一括ベイクにより全フレームがキャッシュされ、タイムラインスクラブ・巻き戻しでO(1)復元されることを検証"""
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0)
         obj = bpy.context.active_object
         obj.name = "BufferingTestCloth"
         settings = obj.taremin_cloth
         settings.is_cloth = True
-        settings.enable_frame_buffering = True
-        settings.frame_buffer_size = 3
 
         scene = bpy.context.scene
         scene.frame_start = 1
         scene.frame_end = 10
 
-        # 1. タイムライン再生 (フレーム 1 -> 10)
-        scene.frame_set(1)
-        for f in range(2, 11):
-            scene.frame_set(f)
+        # 1. 一括ベイクを実行
+        res = bpy.ops.taremin_cloth.bake()
+        self.assertEqual(res, {'FINISHED'})
 
-        # 2. キャッシュ蓄積の確認
+        # 2. キャッシュ蓄積の確認 (フレーム1〜10)
         import taremin_cloth.operators as ops
         cache = ops._timeline_frame_cache.get(obj.name, {})
-        for f in range(2, 11):
+        for f in range(1, 11):
             self.assertIn(f, cache, f"フレーム {f} がタイムラインキャッシュに存在すること")
 
-        # 3. 巻き戻し・スクラブテスト (バッファリング中間だったフレーム 3, 6 へ手動移動)
+        # 3. 巻き戻し・スクラブテスト (フレーム 3, 6, 2, 7 へジャンプ移動)
         for f in [3, 6, 2, 7]:
             scene.frame_set(f)
             mesh_co = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
             obj.data.vertices.foreach_get("co", mesh_co)
             cached_co = cache[f]
             np.testing.assert_allclose(mesh_co, cached_co, atol=1e-5, err_msg=f"フレーム {f} のメッシュ座標がキャッシュと完全一致すること")
+
+        # 4. フレーム 1 に戻してもキャッシュが維持されること (通し再生可能)
+        scene.frame_set(1)
+        self.assertIn(10, cache, "フレーム1に戻ってもフレーム10のキャッシュが保持されていること")
+
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+    def test_timeline_cache_preserve_and_invalidation_e2e(self):
+        """ベイク済みキャッシュの保持、Free Bake による破棄、およびパラメータ変更検知による無効化のE2Eテスト"""
+        mesh = bpy.data.meshes.new(name="CacheTestMesh")
+        verts = [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0]]
+        faces = [[0, 1, 3, 2]]
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+
+        obj = bpy.data.objects.new("CacheTestCloth", mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+
+        settings = obj.taremin_cloth
+        settings.is_cloth = True
+        settings.enabled = True
+        settings.tension_stiffness = 1000.0
+
+        scene = bpy.context.scene
+        scene.frame_start = 1
+        scene.frame_end = 5
+
+        # 1. 一括ベイクを実行
+        res = bpy.ops.taremin_cloth.bake()
+        self.assertEqual(res, {'FINISHED'})
+
+        import taremin_cloth.operators as ops
+        cache = ops._timeline_frame_cache.get(obj.name, {})
+        self.assertIn(2, cache)
+        self.assertIn(3, cache)
+        self.assertIn(5, cache)
+        self.assertTrue(ops.is_scene_baked(scene))
+
+        # 2. フレーム1に戻してもキャッシュが維持されること
+        scene.frame_set(1)
+        self.assertIn(3, cache, "フレーム1に戻ってもフレーム3のキャッシュが保持されていること")
+
+        # 3. パラメータ変更（剛性変更）によるキャッシュ無効化
+        settings.tension_stiffness = 5000.0
+        # タイムラインをスクラブすると変更検知が走りキャッシュが無効化される
+        scene.frame_set(2)
+        new_cache = ops._timeline_frame_cache.get(obj.name, {})
+        self.assertEqual(len(new_cache), 0, "パラメータ変更によりキャッシュが無効化されていること")
+        self.assertFalse(ops.is_scene_baked(scene), "シーンが未ベイク状態に戻っていること")
+
+        # 4. 未ベイク状態で未計算フレームへ移動しても、不正なシミュレーション計算は走らないこと
+        scene.frame_set(10)
+        self.assertNotIn(10, ops._timeline_frame_cache.get(obj.name, {}))
+
+        # 5. 再ベイクと Free Bake (free_bake operator) のテスト
+        settings.tension_stiffness = 1000.0
+        bpy.ops.taremin_cloth.bake()
+        self.assertTrue(ops.is_scene_baked(scene))
+        scene.frame_set(3)
+        deformed_z = obj.data.vertices[0].co.z
+        self.assertNotAlmostEqual(deformed_z, verts[0][2], places=3, msg="ベイク後はフレーム3で変形していること")
+
+        # Free Bake 実行
+        bpy.ops.taremin_cloth.free_bake()
+        self.assertFalse(ops.is_scene_baked(scene), "Free Bake後に未ベイク状態に戻ること")
+        self.assertEqual(len(ops._timeline_frame_cache.get(obj.name, {})), 0, "Free Bakeでキャッシュが空になること")
+        restored_z = obj.data.vertices[0].co.z
+        self.assertAlmostEqual(restored_z, verts[0][2], places=5, msg="Free Bakeにより初期レスト形状に正しく復元されること")
 
         bpy.data.objects.remove(obj, do_unlink=True)
 
@@ -436,13 +534,14 @@ class TestSimulationE2E(unittest.TestCase):
         initial_coords = np.empty(n_verts * 3, dtype=np.float32)
         mesh.vertices.foreach_get("co", initial_coords)
 
-        # タイムラインを数フレーム進めて変形させる
+        # ベイクして変形させる
         scene = bpy.context.scene
-        scene.frame_set(1)
-        scene.frame_set(2)
-        scene.frame_set(10)
+        scene.frame_start = 1
+        scene.frame_end = 10
+        bpy.ops.taremin_cloth.bake()
 
-        # 変形していることを確認
+        # フレーム10に移動して変形していることを確認
+        scene.frame_set(10)
         deformed_coords = np.empty(n_verts * 3, dtype=np.float32)
         mesh.vertices.foreach_get("co", deformed_coords)
         self.assertFalse(np.allclose(initial_coords, deformed_coords, atol=1e-4), "シミュレーションで変形していること")
@@ -455,8 +554,8 @@ class TestSimulationE2E(unittest.TestCase):
         np.testing.assert_allclose(reset_coords, initial_coords, atol=1e-5, err_msg="Reset Simulation後に初期形状へ復元されること")
 
         # 2. 変形後に Disable Cloth で復元されるか
-        scene.frame_set(11)
-        scene.frame_set(15)
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(10)
         res = bpy.ops.taremin_cloth.toggle_cloth()
         self.assertEqual(res, {'FINISHED'})
         self.assertFalse(obj.taremin_cloth.is_cloth)
@@ -464,11 +563,11 @@ class TestSimulationE2E(unittest.TestCase):
         mesh.vertices.foreach_get("co", disabled_coords)
         np.testing.assert_allclose(disabled_coords, initial_coords, atol=1e-5, err_msg="Disable Cloth後に初期形状へ復元されること")
 
-        # 3. 再度有効化して進め、Frame 1 (frame_start) に戻った際に復元されるか
+        # 3. 再度有効化・ベイクして進め、Frame 1 (frame_start) に戻った際に復元されるか
         bpy.ops.taremin_cloth.toggle_cloth()
         self.assertTrue(obj.taremin_cloth.is_cloth)
-        scene.frame_set(16)
-        scene.frame_set(20)
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(10)
         scene.frame_set(scene.frame_start)
         rewound_coords = np.empty(n_verts * 3, dtype=np.float32)
         mesh.vertices.foreach_get("co", rewound_coords)
@@ -495,14 +594,24 @@ class TestSimulationE2E(unittest.TestCase):
         vg = cloth_obj.vertex_groups.new(name="Pin")
         vg.add([0], 1.0, 'REPLACE')
 
+        # ターゲットオブジェクトのアニメーション（キーフレーム設定）
         scene = bpy.context.scene
+        scene.frame_start = 1
+        scene.frame_end = 10
         scene.frame_set(1)
-        scene.frame_set(2)
+        target_obj.location = (0.0, 0.0, 1.0)
+        target_obj.keyframe_insert(data_path="location", frame=1)
 
-        # ターゲットオブジェクトを移動
         target_obj.location = (0.5, 0.0, 1.5)
-        for f in range(3, 10):
-            scene.frame_set(f)
+        target_obj.keyframe_insert(data_path="location", frame=2)
+        target_obj.keyframe_insert(data_path="location", frame=10)
+
+        # ベイク実行
+        res = bpy.ops.taremin_cloth.bake()
+        self.assertEqual(res, {'FINISHED'})
+
+        # フレーム10に移動
+        scene.frame_set(10)
 
         mesh = cloth_obj.data
         coords = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
@@ -536,10 +645,10 @@ class TestSimulationE2E(unittest.TestCase):
         cloth_obj.taremin_cloth.solver_iterations = 2
 
         scene = bpy.context.scene
-        scene.frame_set(1)
-        # 1秒間（60フレーム）落下シミュレーション
-        for f in range(2, 65):
-            scene.frame_set(f)
+        scene.frame_start = 1
+        scene.frame_end = 65
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(65)
 
         mesh = cloth_obj.data
         coords = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
@@ -563,8 +672,9 @@ class TestSimulationE2E(unittest.TestCase):
 
         # 初期4頂点でシミュレーションを動かしてキャッシュを作成
         scene = bpy.context.scene
-        scene.frame_set(1)
-        scene.frame_set(5)
+        scene.frame_start = 1
+        scene.frame_end = 5
+        bpy.ops.taremin_cloth.bake()
         bpy.ops.taremin_cloth.reset_simulation()
         scene.frame_set(1)
 
@@ -583,9 +693,11 @@ class TestSimulationE2E(unittest.TestCase):
         expected_coords = np.empty(n_new_verts * 3, dtype=np.float32)
         cloth_obj.data.vertices.foreach_get("co", expected_coords)
 
-        # 再びシミュレーションで変形させる
-        for f in range(2, 10):
-            scene.frame_set(f)
+        # 再びシミュレーションで変形させる（ベイク実行）
+        scene.frame_start = 1
+        scene.frame_end = 10
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(10)
 
         # 変形していることを確認
         deformed_coords = np.empty(n_new_verts * 3, dtype=np.float32)
@@ -611,8 +723,9 @@ class TestSimulationE2E(unittest.TestCase):
         cloth_obj.taremin_cloth.is_cloth = True
 
         scene = bpy.context.scene
-        scene.frame_set(1)
-        scene.frame_set(3)
+        scene.frame_start = 1
+        scene.frame_end = 3
+        bpy.ops.taremin_cloth.bake()
         bpy.ops.taremin_cloth.reset_simulation()
         scene.frame_set(1)
 
@@ -623,9 +736,11 @@ class TestSimulationE2E(unittest.TestCase):
         expected_coords = np.empty(len(cloth_obj.data.vertices) * 3, dtype=np.float32)
         cloth_obj.data.vertices.foreach_get("co", expected_coords)
 
-        # シミュレーション実行
-        for f in range(2, 10):
-            scene.frame_set(f)
+        # シミュレーション実行（ベイク）
+        scene.frame_start = 1
+        scene.frame_end = 10
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(10)
 
         # Reset Simulation 実行
         bpy.ops.taremin_cloth.reset_simulation()
@@ -647,9 +762,11 @@ class TestSimulationE2E(unittest.TestCase):
         init_coords = np.empty(len(cloth_obj.data.vertices) * 3, dtype=np.float32)
         cloth_obj.data.vertices.foreach_get("co", init_coords)
 
-        # シミュレーションで変形
+        # シミュレーションで変形（ベイク実行）
         scene = bpy.context.scene
-        scene.frame_set(1)
+        scene.frame_start = 1
+        scene.frame_end = 5
+        bpy.ops.taremin_cloth.bake()
         scene.frame_set(5)
 
         # 別の立方体オブジェクトを作成してアクティブにする（Clothではない）
@@ -690,10 +807,10 @@ class TestSimulationE2E(unittest.TestCase):
         cloth_b.data.vertices.foreach_get("co", coords_b_init)
 
         scene = bpy.context.scene
-        scene.frame_set(1)
-        # 5フレームシミュレーション実行して両方変形させる
-        for f in range(2, 6):
-            scene.frame_set(f)
+        scene.frame_start = 1
+        scene.frame_end = 5
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(5)
 
         coords_a_def = np.empty(len(cloth_a.data.vertices) * 3, dtype=np.float32)
         cloth_a.data.vertices.foreach_get("co", coords_a_def)
@@ -758,9 +875,14 @@ class TestSimulationE2E(unittest.TestCase):
         cloth_b.data.vertices.foreach_get("co", coords_b_init)
 
         scene = bpy.context.scene
-        scene.frame_set(1)
-        for f in range(2, 6):
-            scene.frame_set(f)
+        scene.frame_start = 1
+        scene.frame_end = 5
+        bpy.ops.taremin_cloth.bake()
+        scene.frame_set(5)
+
+        coords_a_def = np.empty(len(cloth_a.data.vertices) * 3, dtype=np.float32)
+        cloth_a.data.vertices.foreach_get("co", coords_a_def)
+        self.assertFalse(np.allclose(coords_a_def, coords_a_init, atol=1e-3), "Cloth A が変形していること")
 
         # 非Clothのカメラを作成してアクティブにする
         cam_data = bpy.data.cameras.new(name="DummyCam")
@@ -785,6 +907,60 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.data.objects.remove(cloth_a, do_unlink=True)
         bpy.data.objects.remove(cloth_b, do_unlink=True)
         bpy.data.objects.remove(cam_obj, do_unlink=True)
+
+    def test_bake_and_free_bake_e2e(self):
+        """TAREMIN_CLOTH_OT_bake および TAREMIN_CLOTH_OT_free_bake の包括的E2Eテスト"""
+        from taremin_cloth.operators import is_scene_baked, is_object_baked, _timeline_frame_cache
+
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0, location=(0.0, 0.0, 1.0))
+        cloth_obj = bpy.context.active_object
+        cloth_obj.name = "BakeE2ECloth"
+        cloth_obj.taremin_cloth.is_cloth = True
+
+        init_coords = np.empty(len(cloth_obj.data.vertices) * 3, dtype=np.float32)
+        cloth_obj.data.vertices.foreach_get("co", init_coords)
+
+        scene = bpy.context.scene
+        scene.frame_start = 1
+        scene.frame_end = 8
+
+        # 1. 未ベイク状態の検証
+        self.assertFalse(is_scene_baked(scene), "初期状態は未ベイクであること")
+        self.assertFalse(is_object_baked(cloth_obj), "初期状態は未ベイクであること")
+
+        # 2. 一括ベイク実行
+        res = bpy.ops.taremin_cloth.bake()
+        self.assertEqual(res, {'FINISHED'})
+
+        # 3. ベイク完了状態の検証
+        self.assertTrue(is_scene_baked(scene), "ベイク後は is_scene_baked が True であること")
+        self.assertTrue(is_object_baked(cloth_obj), "ベイク後は is_object_baked が True であること")
+        cache = _timeline_frame_cache.get(cloth_obj.name, {})
+        self.assertEqual(len(cache), 8, "フレーム1〜8の全8フレームがキャッシュされていること")
+
+        # 4. タイムライン移動によるメッシュ座標反映
+        scene.frame_set(8)
+        cur_coords = np.empty(len(cloth_obj.data.vertices) * 3, dtype=np.float32)
+        cloth_obj.data.vertices.foreach_get("co", cur_coords)
+        self.assertFalse(np.allclose(cur_coords, init_coords, atol=1e-3), "フレーム8で布が変形していること")
+        np.testing.assert_allclose(cur_coords, cache[8], atol=1e-5, err_msg="メッシュ座標がベイクキャッシュと完全一致すること")
+
+        # 5. Free Bake 実行
+        res_free = bpy.ops.taremin_cloth.free_bake()
+        self.assertEqual(res_free, {'FINISHED'})
+
+        # 6. Free Bake 後の状態検証
+        self.assertFalse(is_scene_baked(scene), "Free Bake 後は未ベイク状態に戻ること")
+        self.assertFalse(is_object_baked(cloth_obj), "Free Bake 後は未ベイク状態に戻ること")
+        self.assertEqual(len(_timeline_frame_cache.get(cloth_obj.name, {})), 0, "キャッシュが完全に消去されていること")
+
+        # メッシュ座標が初期レスト形状に復元されていること
+        restored_coords = np.empty(len(cloth_obj.data.vertices) * 3, dtype=np.float32)
+        cloth_obj.data.vertices.foreach_get("co", restored_coords)
+        np.testing.assert_allclose(restored_coords, init_coords, atol=1e-5, err_msg="Free Bake後に初期レスト形状に復元されること")
+
+        scene.frame_set(1)
+        bpy.data.objects.remove(cloth_obj, do_unlink=True)
 
     def test_edge_collision_mesh_collider_e2e(self):
         """エッジ詳細接触判定 (Edge Collision) により、メッシュコライダーの突起突き抜けが抑制されるE2Eテスト"""

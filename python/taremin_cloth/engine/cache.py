@@ -26,6 +26,8 @@ _prev_elastic_scales = {}
 _timeline_frame_cache = {}
 # バッファリング開始フレーム番号 (obj_name -> start_frame)
 _buffered_start_frames = {}
+# 布パラメータシグネチャキャッシュ (obj_name -> params_tuple)
+_cloth_param_signatures = {}
 
 
 def _get_mesh_topology_signature(mesh):
@@ -90,13 +92,13 @@ def cache_rest_positions(obj, force=False):
         logger.debug(f"[Cache] Rest positions update skipped for '{obj.name}'")
 
 
-def restore_rest_positions(obj, clear=False):
+def restore_rest_positions(obj, clear=False, clear_timeline=True):
     """メッシュの頂点座標・トポロジーをレストポーズ（シミュレーション前の初期状態）に安全に復元する"""
     if not obj or obj.type != 'MESH':
         return
 
-    logger.info(f"[Reset] restore_rest_positions called: obj='{obj.name}', clear={clear}")
-    clear_simulator_for_object(obj.name)
+    logger.info(f"[Reset] restore_rest_positions called: obj='{obj.name}', clear={clear}, clear_timeline={clear_timeline}")
+    clear_simulator_for_object(obj.name, clear_timeline=clear_timeline)
 
     # 1. 十字分割オブジェクトであり、メッシュが編集されていない場合はバックアップからQuad復元
     restore_fn = getattr(topology, "restore_pre_subdivision_mesh", None)
@@ -160,7 +162,7 @@ def restore_rest_positions(obj, clear=False):
         obj.update_tag()
 
 
-def clear_simulator_for_object(obj_name):
+def clear_simulator_for_object(obj_name, clear_timeline=True):
     """特定オブジェクトに対応するシミュレータおよび関連キャッシュを破棄する"""
     global _simulators, _prev_coords_cache, _mesh_char_len_cache
     global _effective_substeps_cache, _prev_elastic_scales
@@ -171,8 +173,10 @@ def clear_simulator_for_object(obj_name):
     _effective_substeps_cache.pop(obj_name, None)
     _collider_prev_locs_cache.pop(obj_name, None)
     _prev_elastic_scales.pop(obj_name, None)
-    _timeline_frame_cache.pop(obj_name, None)
-    _buffered_start_frames.pop(obj_name, None)
+    if clear_timeline:
+        _timeline_frame_cache.pop(obj_name, None)
+        _buffered_start_frames.pop(obj_name, None)
+        _cloth_param_signatures.pop(obj_name, None)
     if had_sim:
         logger.debug(f"[Simulator] Cleared simulator and caches for '{obj_name}'")
 
@@ -183,7 +187,7 @@ def clear_simulators():
     from .runner import restore_fast_playback
     global _simulators, _prev_coords_cache
     global _mesh_char_len_cache, _effective_substeps_cache, _collider_prev_locs_cache
-    global _prev_elastic_scales, _timeline_frame_cache, _buffered_start_frames
+    global _prev_elastic_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
     restore_fast_playback()
     clear_collider_cache()
     count = len(_simulators)
@@ -195,4 +199,143 @@ def clear_simulators():
     _prev_elastic_scales.clear()
     _timeline_frame_cache.clear()
     _buffered_start_frames.clear()
+    _cloth_param_signatures.clear()
     logger.debug(f"[Simulator] Cleared all {count} simulators and caches")
+
+
+def get_cloth_params_signature(obj):
+    """布オブジェクトのシミュレーション物理パラメータシグネチャを生成する"""
+    settings = getattr(obj, "taremin_cloth", None)
+    if not settings or not getattr(settings, "is_cloth", False):
+        return None
+
+    elastic_tuples = ()
+    if hasattr(settings, "elastic_groups"):
+        elastic_tuples = tuple(
+            (g.name, g.enabled, round(float(g.scale), 4), round(float(g.stiffness_multiplier), 4), str(g.edge_indices_str))
+            for g in settings.elastic_groups
+        )
+
+    pin_obj_name = settings.pin_target_object.name if getattr(settings, "pin_target_object", None) else ""
+    return (
+        round(float(getattr(settings, "tension_stiffness", 1000.0)), 2),
+        round(float(getattr(settings, "compression_stiffness", 1000.0)), 2),
+        round(float(getattr(settings, "shear_stiffness", 1000.0)), 2),
+        round(float(getattr(settings, "bending_stiffness", 10.0)), 2),
+        round(float(getattr(settings, "air_damping", 0.05)), 4),
+        round(float(getattr(settings, "tension_damping", 0.1)), 4),
+        round(float(getattr(settings, "compression_damping", 0.1)), 4),
+        round(float(getattr(settings, "shear_damping", 0.1)), 4),
+        round(float(getattr(settings, "bending_damping", 0.1)), 4),
+        round(float(getattr(settings, "gravity", 1.0)), 4),
+        str(getattr(settings, "pin_vertex_group", "")),
+        pin_obj_name,
+        str(getattr(settings, "pin_target_bone", "")),
+        bool(getattr(settings, "enable_sewing", False)),
+        round(float(getattr(settings, "sewing_shrink_speed", 1.0)), 4),
+        round(float(getattr(settings, "sewing_stiffness", 10000.0)), 2),
+        bool(getattr(settings, "enable_sewing_lock", True)),
+        round(float(getattr(settings, "thickness", 0.005)), 5),
+        bool(getattr(settings, "enable_self_collision", False)),
+        str(getattr(settings, "self_collision_purpose", "STANDARD")),
+        int(getattr(settings, "substeps", 10)),
+        int(getattr(settings, "solver_iterations", 2)),
+        str(getattr(settings, "solver_mode", "COLORING")),
+        elastic_tuples,
+    )
+
+
+def check_and_update_params_signature(obj):
+    """パラメータが変更されていればキャッシュを自動破棄し、Trueを返す"""
+    if not obj:
+        return False
+    new_sig = get_cloth_params_signature(obj)
+    if new_sig is None:
+        return False
+
+    old_sig = _cloth_param_signatures.get(obj.name)
+    if old_sig is not None and old_sig != new_sig:
+        logger.info(f"[Cache] Cloth parameters changed for '{obj.name}'. Invaliding timeline cache & simulator.")
+        _cloth_param_signatures[obj.name] = new_sig
+        clear_simulator_for_object(obj.name)
+        return True
+
+    _cloth_param_signatures[obj.name] = new_sig
+    return False
+
+
+def get_timeline_cache_info(obj_name):
+    """指定オブジェクトのタイムラインキャッシュ情報を取得する"""
+    cache = _timeline_frame_cache.get(obj_name, {})
+    count = len(cache)
+    if count == 0:
+        return {
+            "count": 0,
+            "range_str": "Empty",
+            "size_kb": 0.0,
+            "min_frame": 0,
+            "max_frame": 0,
+        }
+
+    frames = sorted(cache.keys())
+    min_f, max_f = frames[0], frames[-1]
+    range_str = f"{min_f} - {max_f}" if count > 1 else str(min_f)
+    sample = next(iter(cache.values()))
+    size_kb = (len(sample) * 4 * count) / 1024.0
+    return {
+        "count": count,
+        "range_str": range_str,
+        "size_kb": size_kb,
+        "min_frame": min_f,
+        "max_frame": max_f,
+    }
+
+
+def clear_timeline_cache(obj_name=None):
+    """タイムラインフレームキャッシュを破棄する"""
+    if obj_name:
+        _timeline_frame_cache.pop(obj_name, None)
+    else:
+        _timeline_frame_cache.clear()
+
+
+def is_object_baked(obj):
+    """指定Clothオブジェクトがベイク済み（2フレーム以上のキャッシュが存在する）かを返す"""
+    if not obj:
+        return False
+    cache = _timeline_frame_cache.get(obj.name, {})
+    return len(cache) >= 2
+
+
+def is_scene_baked(scene):
+    """シーン内のいずれかのClothオブジェクトがベイク済みかを返す"""
+    if not scene:
+        return False
+    for obj in scene.objects:
+        if getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth and getattr(obj.taremin_cloth, "enabled", True):
+            if is_object_baked(obj):
+                return True
+    return False
+
+
+def free_object_bake(obj):
+    """指定Clothオブジェクトのベイクデータを破棄し、初期レストポーズに復元する"""
+    if not obj or obj.type != 'MESH':
+        return
+    clear_timeline_cache(obj.name)
+    clear_simulator_for_object(obj.name, clear_timeline=True)
+    restore_rest_positions(obj, clear=False, clear_timeline=True)
+    obj.update_tag()
+    logger.info(f"[Bake] Freed bake cache and restored rest shape for '{obj.name}'")
+
+
+def free_scene_bake(scene):
+    """シーン内すべてのClothオブジェクトのベイクデータを破棄し、初期レストポーズに復元する"""
+    if not scene:
+        return
+    for obj in scene.objects:
+        if getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
+            free_object_bake(obj)
+    clear_simulators()
+    logger.info(f"[Bake] Freed all bake caches for scene '{scene.name}'")
+

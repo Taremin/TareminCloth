@@ -10,6 +10,7 @@ from ..engine.cache import (
     restore_rest_positions,
     clear_simulator_for_object,
     clear_simulators,
+    clear_timeline_cache,
 )
 from ..utils import topology
 from ..utils.logger import logger
@@ -49,15 +50,36 @@ class TAREMIN_CLOTH_OT_reset_selected(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        if not context.scene:
+            return False
         obj = context.active_object
         return bool(obj and obj.type == 'MESH' and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth)
 
     def execute(self, context):
         obj = context.active_object
+        if not (obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth and obj.type == 'MESH'):
+            cloth_objs = [o for o in getattr(context, "selected_objects", []) if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
+            if not cloth_objs and context.scene:
+                cloth_objs = [o for o in context.scene.objects if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
+            obj = cloth_objs[0] if cloth_objs else None
+
+        if not obj:
+            self.report({'WARNING'}, "対象となるClothオブジェクトが見つかりません")
+            return {'CANCELLED'}
+
         logger.info(f"[Reset] TAREMIN_CLOTH_OT_reset_selected executed for '{obj.name}'")
-        restore_rest_positions(obj)
-        clear_simulator_for_object(obj.name)
+        restore_rest_positions(obj, clear=False, clear_timeline=True)
+        clear_timeline_cache(obj.name)
+        clear_simulator_for_object(obj.name, clear_timeline=True)
         obj.update_tag()
+
+        # アニメーション再生中であれば停止
+        if context.screen and getattr(context.screen, "is_animation_playing", False):
+            try:
+                bpy.ops.screen.animation_cancel(restore_frame=False)
+            except Exception:
+                pass
+
         if context.screen:
             for area in context.screen.areas:
                 if area.type == 'VIEW_3D':
@@ -85,8 +107,21 @@ class TAREMIN_CLOTH_OT_reset_all(bpy.types.Operator):
         if scene:
             for obj in scene.objects:
                 if getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
-                    restore_rest_positions(obj)
+                    restore_rest_positions(obj, clear=False, clear_timeline=True)
+                    clear_timeline_cache(obj.name)
         clear_simulators()
+
+        # アニメーション再生中であれば停止
+        if context.screen and getattr(context.screen, "is_animation_playing", False):
+            try:
+                bpy.ops.screen.animation_cancel(restore_frame=False)
+            except Exception:
+                pass
+
+        # タイムラインを開始フレームに巻き戻す
+        if scene:
+            scene.frame_set(scene.frame_start)
+
         if context.screen:
             for area in context.screen.areas:
                 if area.type == 'VIEW_3D':
@@ -162,10 +197,10 @@ class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
 
 
 class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
-    """[Compatibility] Discard old cache and backups, and re-capture current mesh shape as initial state"""
+    """Discard simulation timeline frame cache and restore mesh to rest shape"""
     bl_idname = "taremin_cloth.clear_cache"
     bl_label = "Clear Cache"
-    bl_description = "Discard old cache and backups, and re-capture the current mesh shape as initial state (same as Apply Rest Shape)"
+    bl_description = "Discard simulation timeline cache and reset mesh to initial rest shape"
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -177,10 +212,43 @@ class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return TAREMIN_CLOTH_OT_apply_rest_shape.poll(context)
+        if not context.scene:
+            return False
+        obj = context.active_object
+        has_sel = bool(obj and obj.type == 'MESH' and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth)
+        has_any = any(getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth for o in context.scene.objects)
+        return has_sel or has_any
 
     def execute(self, context):
-        return bpy.ops.taremin_cloth.apply_rest_shape(all_objects=self.all_objects)
+        if self.all_objects:
+            targets = [o for o in context.scene.objects if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
+        else:
+            obj = context.active_object
+            if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth and obj.type == 'MESH':
+                targets = [obj]
+            else:
+                cloth_objs = [o for o in getattr(context, "selected_objects", []) if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
+                if not cloth_objs and context.scene:
+                    cloth_objs = [o for o in context.scene.objects if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
+                targets = cloth_objs[:1] if cloth_objs else []
+
+        if not targets:
+            self.report({'WARNING'}, "対象となるClothオブジェクトが見つかりません")
+            return {'CANCELLED'}
+
+        for o in targets:
+            restore_rest_positions(o, clear=False, clear_timeline=True)
+            clear_timeline_cache(o.name)
+            clear_simulator_for_object(o.name, clear_timeline=True)
+            o.update_tag()
+
+        # タイムラインを開始フレームに戻す
+        if context.scene:
+            context.scene.frame_set(context.scene.frame_start)
+
+        msg = f"全 {len(targets)} 個のClothキャッシュをクリアし、初期形状に復元しました" if self.all_objects else f"'{targets[0].name}' のシミュレーションキャッシュをクリアしました"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
 
 
 class TAREMIN_CLOTH_OT_apply_gpu_settings(bpy.types.Operator):

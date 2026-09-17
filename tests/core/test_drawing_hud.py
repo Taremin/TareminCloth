@@ -22,10 +22,12 @@ class TestDrawingHud(unittest.TestCase):
 
     def setUp(self):
         drawing.clear_interactive_fps_info()
+        drawing.clear_bake_overlay_info()
         drawing.set_interactive_active(False)
 
     def tearDown(self):
         drawing.clear_interactive_fps_info()
+        drawing.clear_bake_overlay_info()
         drawing.set_interactive_active(False)
 
     def test_set_and_get_interactive_fps_info_with_help(self):
@@ -136,6 +138,51 @@ class TestDrawingHud(unittest.TestCase):
         except Exception as e:
             self.fail(f"draw_callback_2d with both disabled raised exception: {e}")
         self.assertFalse(mock_batch.draw.called)
+
+    def test_bake_overlay_info_state(self):
+        """ベイクオーバーレイ情報の更新・取得・クリアの動作確認"""
+        self.assertFalse(drawing.is_bake_overlay_active())
+        self.assertIsNone(drawing.get_bake_overlay_info())
+
+        drawing.set_bake_overlay_info(current_frame=15, end_frame=250, pct=6)
+        self.assertTrue(drawing.is_bake_overlay_active())
+        info = drawing.get_bake_overlay_info()
+        self.assertIsNotNone(info)
+        self.assertEqual(info["current_frame"], 15)
+        self.assertEqual(info["end_frame"], 250)
+        self.assertEqual(info["pct"], 6)
+
+        drawing.clear_bake_overlay_info()
+        self.assertFalse(drawing.is_bake_overlay_active())
+        self.assertIsNone(drawing.get_bake_overlay_info())
+
+    @patch("taremin_cloth.utils.drawing.batch_for_shader")
+    @patch("taremin_cloth.utils.drawing.gpu")
+    @patch("taremin_cloth.utils.drawing.bpy")
+    def test_draw_callback_2d_bake_overlay(self, mock_bpy, mock_gpu, mock_batch_for_shader):
+        """ベイク中の2Dオーバーレイ描画が正常に実行されるか確認"""
+        mock_region = MagicMock()
+        mock_region.width = 1920
+        mock_region.height = 1080
+        mock_bpy.context.region = mock_region
+
+        mock_batch = MagicMock()
+        mock_batch_for_shader.return_value = mock_batch
+
+        mock_shader = MagicMock()
+        mock_gpu.shader.from_builtin.return_value = mock_shader
+
+        # インタラクティブは非アクティブ、ベイク中のみ有効
+        drawing.set_interactive_active(False)
+        drawing.set_bake_overlay_info(current_frame=50, end_frame=100, pct=50)
+
+        try:
+            drawing.draw_callback_2d()
+        except Exception as e:
+            self.fail(f"draw_callback_2d for bake overlay raised exception: {e}")
+
+        # 背景ボックスと進捗バーの描画が行われたことを確認
+        self.assertTrue(mock_batch.draw.called)
 
 
 if __name__ == "__main__":
