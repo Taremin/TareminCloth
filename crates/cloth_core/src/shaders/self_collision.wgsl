@@ -55,6 +55,8 @@ struct ClosestBaryResult {
 @group(0) @binding(9) var<storage, read> star_offsets: array<u32>;
 @group(0) @binding(10) var<storage, read> star_indices: array<GpuStarPair>;
 @group(0) @binding(11) var<storage, read_write> accum: array<SelfCollisionAccum>;
+@group(0) @binding(12) var<storage, read> two_hop_offsets: array<u32>;
+@group(0) @binding(13) var<storage, read> two_hop_indices: array<u32>;
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -211,37 +213,25 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     return vec2<f32>(s, t);
 }
 
-// トポロジー1ホップ直接隣接判定
-fn is_adjacent_vert(vert_a: u32, vert_b: u32) -> bool {
-    let start_a = adj_offsets[vert_a];
-    let end_a = adj_offsets[vert_a + 1u];
-    for (var k = start_a; k < end_a; k = k + 1u) {
-        if (adj_indices[k] == vert_b) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// トポロジー2ホップ近傍判定
+// トポロジー2ホップ近傍判定（CPU事前計算済みCSRテーブルに対する二分探索）
 fn is_topologically_near(vert_a: u32, vert_b: u32) -> bool {
     if (vert_a == vert_b) {
         return true;
     }
-    let start_a = adj_offsets[vert_a];
-    let end_a = adj_offsets[vert_a + 1u];
+    let start = two_hop_offsets[vert_a];
+    let end = two_hop_offsets[vert_a + 1u];
 
-    for (var k = start_a; k < end_a; k = k + 1u) {
-        let u = adj_indices[k];
-        if (u == vert_b) {
+    var low = start;
+    var high = end;
+    while (low < high) {
+        let mid = low + (high - low) / 2u;
+        let val = two_hop_indices[mid];
+        if (val == vert_b) {
             return true;
-        }
-        let start_u = adj_offsets[u];
-        let end_u = adj_offsets[u + 1u];
-        for (var ku = start_u; ku < end_u; ku = ku + 1u) {
-            if (adj_indices[ku] == vert_b) {
-                return true;
-            }
+        } else if (val < vert_b) {
+            low = mid + 1u;
+        } else {
+            high = mid;
         }
     }
     return false;

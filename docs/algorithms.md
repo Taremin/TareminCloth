@@ -166,6 +166,24 @@ graph TD
   - 80.0k Verts（158.4k Tris / 約16万ポリゴン）: **86.60 ms (11.5 FPS) → 44.25 ms (22.6 FPS)**（約 1.96 倍高速化、所要時間半減）。
   - 100.4k Verts（198.9k Tris / 約20万ポリゴン）: **51.41 ms (19.5 FPS)** を達成。目標（10万ポリゴンで 10 FPS）を大きく上回り、約20万ポリゴン環境でも約20 FPSを維持。
 
+### 3.8 静的2ホップトポロジーのCPU事前計算化とGPU二分探索 (Precomputed 2-Hop CSR & GPU Binary Search)
+- **物理・メモリアクセス上の背景と課題**:
+  - メッシュの接続関係（トポロジー）および縫合エッジ統合グラフは初期化時に静的に確定しているにもかかわらず、従来の自己衝突シェーダーは毎フレーム・毎サブステップ・全頂点スレッドにおいてGPUグローバルメモリ上の隣接ポインタを2段階辿る動的グラフ探索（`adj_offsets` → `adj_indices` → `adj_offsets` → `adj_indices`）を実行していました。
+  - 頂点の平均次数が6の場合、1回の判定で最大 $1 + 6 \times 6 = 37$ 回のランダムメモリアクセス（ポインタチェイス）が発生し、GPUのメモリ帯域を圧迫しワープダイバージェンスの原因となっていました。
+- **実装された設計 (Taremin Cloth)**:
+  1. **CPU側での2ホップ近傍CSR事前構築 (`ClothMesh::from_raw`)**:
+     - 縫合ペア統合済みの隣接グラフから、各頂点の2ホップ以内の近傍頂点集合 $S_i = \{i\} \cup \text{Adj}(i) \cup \bigcup_{u \in \text{Adj}(i)} \text{Adj}(u)$ をCPUで一括計算。
+     - 各頂点ごとに重複排除（`dedup`）および昇順ソート（`sort_unstable`）を施し、フラットなCSR配列（`two_hop_offsets: Vec<u32>`、`two_hop_indices: Vec<u32>`）としてGPUバッファに転送。
+     - 10万頂点の場合でもメモリフットプリントは約 8.4 MB（各頂点平均 20 頂点）と極めてコンパクト。
+  2. **シェーダー内二分探索化 (`self_collision.wgsl`)**:
+     - `is_topologically_near(vert_a, vert_b)` を、昇順ソート済み連続メモリ `two_hop_indices` 配列に対する**二分探索（Binary Search: 最大 $\lceil \log_2 25 \rceil = 5$ 回の比較）**へ置き換え。
+     - 局所連続配列へのアクセスとなったことでGPUのL1/L2キャッシュヒット率が劇的に向上。
+- **実証データ (`benchmarks/benchmark_self_collision_scaling.py`, AMD RX 9070 XT)**:
+  - 80.0k Verts（158.4k Tris / 約16万ポリゴン）: 44.25 ms (22.6 FPS) → **34.25 ms (29.2 FPS)**。
+  - 100.4k Verts（198.9k Tris / 約20万ポリゴン）: 51.41 ms (19.5 FPS) → **37.26 ms (26.8 FPS)**（1フレーム 37ms を達成）。
+  - 実機モデル (`tmp/heavy_test.blend`, substeps=20): 70.14 ms (14.3 FPS) → **56.86 ms (17.6 FPS)**。
+
+
 
 ---
 

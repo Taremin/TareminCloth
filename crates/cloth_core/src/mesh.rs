@@ -151,6 +151,8 @@ pub struct ClothMesh {
 
     pub adj_offsets: Vec<u32>,
     pub adj_indices: Vec<u32>,
+    pub two_hop_offsets: Vec<u32>,
+    pub two_hop_indices: Vec<u32>,
     pub local_edge_lengths: Vec<f32>,
     pub star_offsets: Vec<u32>,
     pub star_indices: Vec<GpuStarPair>,
@@ -521,6 +523,36 @@ impl ClothMesh {
         }
         adj_offsets.push(current_offset);
 
+        // 4b. トポロジー2ホップ近傍リスト (Two-Hop Neighbor CSR for Self-Collision)
+        let mut two_hop_offsets = Vec::with_capacity(n_verts + 1);
+        let mut two_hop_indices = Vec::new();
+        let mut current_two_hop_offset = 0u32;
+        for i in 0..n_verts {
+            let mut neighbors = Vec::new();
+            neighbors.push(i as u32); // 0ホップ（自己参照）
+
+            let start_i = adj_offsets[i] as usize;
+            let end_i = adj_offsets[i + 1] as usize;
+            for k in start_i..end_i {
+                let u = adj_indices[k];
+                neighbors.push(u); // 1ホップ
+
+                let start_u = adj_offsets[u as usize] as usize;
+                let end_u = adj_offsets[u as usize + 1] as usize;
+                for ku in start_u..end_u {
+                    neighbors.push(adj_indices[ku]); // 2ホップ
+                }
+            }
+
+            neighbors.sort_unstable();
+            neighbors.dedup();
+
+            two_hop_offsets.push(current_two_hop_offset);
+            two_hop_indices.extend_from_slice(&neighbors);
+            current_two_hop_offset += neighbors.len() as u32;
+        }
+        two_hop_offsets.push(current_two_hop_offset);
+
         // 5. 頂点法線計算用スター情報 (Star Pairs for Vertex Normals)
         let mut star_lists = vec![Vec::new(); n_verts];
         if let Some(triangles) = faces {
@@ -593,6 +625,8 @@ impl ClothMesh {
             sew_color_counts,
             adj_offsets,
             adj_indices,
+            two_hop_offsets,
+            two_hop_indices,
             local_edge_lengths,
             star_offsets,
             star_indices,
@@ -738,4 +772,51 @@ mod tests {
         assert!(v2_adjs.contains(&3));
     }
 
+    #[test]
+    fn test_two_hop_topology_csr() {
+        // 直線メッシュ: 0 -- 1 -- 2 -- 3 -- 4
+        let positions = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0], [4.0, 0.0, 0.0],
+        ];
+        let edges = [[0, 1], [1, 2], [2, 3], [3, 4]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 1000.0, 10.0, 1.0,
+            None, None,
+        );
+
+        assert_eq!(mesh.two_hop_offsets.len(), 6);
+
+        // 各頂点の2ホップ近傍を取得
+        let get_two_hop = |v: usize| -> &[u32] {
+            let start = mesh.two_hop_offsets[v] as usize;
+            let end = mesh.two_hop_offsets[v + 1] as usize;
+            &mesh.two_hop_indices[start..end]
+        };
+
+        // 頂点0の2ホップ: 0自身, 1(1ホップ), 2(2ホップ)
+        assert_eq!(get_two_hop(0), &[0, 1, 2]);
+
+        // 頂点1の2ホップ: 1自身, 0,2(1ホップ), 3(2ホップ)
+        assert_eq!(get_two_hop(1), &[0, 1, 2, 3]);
+
+        // 頂点2の2ホップ: 全頂点 [0, 1, 2, 3, 4]
+        assert_eq!(get_two_hop(2), &[0, 1, 2, 3, 4]);
+
+        // 頂点3の2ホップ: 1, 2, 3, 4
+        assert_eq!(get_two_hop(3), &[1, 2, 3, 4]);
+
+        // 頂点4の2ホップ: 2, 3, 4
+        assert_eq!(get_two_hop(4), &[2, 3, 4]);
+
+        // 全頂点で昇順ソート & 重複なしを確認
+        for v in 0..5 {
+            let list = get_two_hop(v);
+            for w in list.windows(2) {
+                assert!(w[0] < w[1], "頂点 {} の2ホップリストが厳密昇順であること", v);
+            }
+        }
+    }
 }

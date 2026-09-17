@@ -71,6 +71,8 @@ pub struct SimulationResources {
     pub local_edge_lengths_buffer: wgpu::Buffer,
     pub adj_offsets_buffer: wgpu::Buffer,
     pub adj_indices_buffer: wgpu::Buffer,
+    pub two_hop_offsets_buffer: wgpu::Buffer,
+    pub two_hop_indices_buffer: wgpu::Buffer,
     pub island_ids_buffer: wgpu::Buffer,
     pub compute_normals_pipeline: wgpu::ComputePipeline,
     pub compute_normals_bind_group: wgpu::BindGroup,
@@ -1187,6 +1189,28 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
+    let two_hop_off_contents: &[u8] = if mesh.two_hop_offsets.is_empty() {
+        bytemuck::cast_slice(&dummy_u32)
+    } else {
+        bytemuck::cast_slice(&mesh.two_hop_offsets)
+    };
+    let two_hop_offsets_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Two Hop Offsets Buffer"),
+        contents: two_hop_off_contents,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let two_hop_idx_contents: &[u8] = if mesh.two_hop_indices.is_empty() {
+        bytemuck::cast_slice(&dummy_u32)
+    } else {
+        bytemuck::cast_slice(&mesh.two_hop_indices)
+    };
+    let two_hop_indices_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Two Hop Indices Buffer"),
+        contents: two_hop_idx_contents,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
     let dummy_star_pair = [GpuStarPair { v0: 0, v1: 0 }];
     let star_indices_contents: &[u8] = if mesh.star_indices.is_empty() {
         bytemuck::cast_slice(&dummy_star_pair)
@@ -1225,6 +1249,8 @@ pub fn build_simulation_resources(
             storage_ro(9),
             storage_ro(10),
             storage_rw_at(11),
+            storage_ro(12),
+            storage_ro(13),
         ],
     });
 
@@ -1294,6 +1320,14 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 11,
                 resource: self_collision_accum_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: two_hop_offsets_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: two_hop_indices_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1458,6 +1492,8 @@ pub fn build_simulation_resources(
         local_edge_lengths_buffer,
         adj_offsets_buffer,
         adj_indices_buffer,
+        two_hop_offsets_buffer,
+        two_hop_indices_buffer,
         island_ids_buffer,
         compute_normals_pipeline,
         compute_normals_bind_group,
