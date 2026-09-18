@@ -127,6 +127,7 @@ def get_or_create_simulator(obj):
         workgroup_size=wg_size,
         solver_mode=s_mode,
         enable_compact_readback=compact_rb,
+        enable_pair_cache=getattr(settings, "enable_pair_cache", False),
     )
 
     # Cold Resume: レスト座標で自然長を初期化した後、現在の変形頂点座標をGPUにセットして停止位置から再開

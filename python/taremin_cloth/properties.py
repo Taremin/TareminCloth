@@ -370,6 +370,11 @@ class TareminClothObjectSettings(PropertyGroup):
         ],
         default='256',
     )
+    enable_pair_cache: BoolProperty(
+        name="Active Pair Cache",
+        description="Enable contact pair caching for accelerated self-collision (I-Cloth 2018)",
+        default=False,
+    )
     self_collision_exclude_neighbors: BoolProperty(
         name="Exclude Neighbors",
         description="Exclude mesh edge-connected vertices from self-collision",

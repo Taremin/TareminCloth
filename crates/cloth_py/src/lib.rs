@@ -640,7 +640,7 @@ pub struct ClothSimulator {
 #[pymethods]
 impl ClothSimulator {
     #[new]
-    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None))]
+    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None))]
     fn new(
         positions: PyReadonlyArray2<f32>,
         edges: PyReadonlyArray2<u32>,
@@ -661,7 +661,9 @@ impl ClothSimulator {
         workgroup_size: u32,
         solver_mode: u32,
         enable_compact_readback: Option<bool>,
+        enable_pair_cache: Option<bool>,
     ) -> PyResult<Self> {
+
         let pos_view = positions.as_array();
         let edge_view = edges.as_array();
 
@@ -753,8 +755,12 @@ impl ClothSimulator {
         if let Some(compact) = enable_compact_readback {
             simulator.set_enable_compact_readback(compact);
         }
+        if let Some(pair_cache) = enable_pair_cache {
+            simulator.set_enable_pair_cache(pair_cache);
+        }
 
         Ok(Self { simulator })
+
     }
 
     /// シミュレーションを 1 フレーム進める（同期）
@@ -893,6 +899,17 @@ impl ClothSimulator {
     fn get_enable_compact_readback(&self) -> bool {
         self.simulator.enable_compact_readback
     }
+
+    /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を設定
+    fn set_enable_pair_cache(&mut self, enable: bool) {
+        self.simulator.set_enable_pair_cache(enable);
+    }
+
+    /// 現在の接触候補ペアキャッシュ設定を取得
+    fn get_enable_pair_cache(&self) -> bool {
+        self.simulator.enable_pair_cache()
+    }
+
 
     /// 頂点位置を NumPy フラット配列 (len = num_vertices * 3) に同期的に書き戻す
     fn get_positions<'py>(&self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<()> {

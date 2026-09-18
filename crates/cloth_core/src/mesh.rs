@@ -125,6 +125,56 @@ pub struct SelfCollisionParams {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuVtPair {
+    pub vert_i: u32,
+    pub vert_j: u32,
+    pub v0: u32,
+    pub v1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuEePair {
+    pub v_i: u32,
+    pub v_ui: u32,
+    pub v_j: u32,
+    pub v_vj: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PairCollectParams {
+    pub cell_size: f32,
+    pub table_size: u32,
+    pub num_vertices: u32,
+    pub max_vt_pairs: u32,
+    pub max_ee_pairs: u32,
+    pub safety_margin: f32,
+    pub exclude_neighbors: u32,
+    pub _pad0: u32,
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PairCounters {
+    pub vt_count: u32,
+    pub ee_count: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PairSolveParams {
+    pub num_vertices: u32,
+    pub max_vt_pairs: u32,
+    pub max_ee_pairs: u32,
+    pub enable_normal_untangling: u32,
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTriangle {
     pub v0: u32,

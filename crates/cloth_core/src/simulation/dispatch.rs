@@ -129,7 +129,8 @@ impl GpuClothSimulator {
 
                 // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
                 if should_solve_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
-                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop");
+                    let need_rebuild = sub_idx == 0;
+                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild);
                 }
             }
 
@@ -164,7 +165,8 @@ impl GpuClothSimulator {
 
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
         if should_solve_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
-            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer");
+            let need_rebuild = sub_idx == 0;
+            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild);
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
@@ -659,6 +661,7 @@ impl GpuClothSimulator {
         vert_workgroups: u32,
         _wg_size: u32,
         prefix: &str,
+        need_rebuild: bool,
     ) {
         // 1. Compute Normals Pass
         {
@@ -671,29 +674,90 @@ impl GpuClothSimulator {
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }
 
-        // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
-        self.spatial_hash.dispatch_build(encoder, self.num_vertices);
-
-        // 4. Self Collision Pass (Solve)
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("{prefix} Self Collision Pass")),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.self_collision_pipeline);
-            cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
-            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        if !self.enable_pair_cache || need_rebuild {
+            // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
+            self.spatial_hash.dispatch_build(encoder, self.num_vertices);
         }
 
-        // 5. Self Collision Apply Pass
-        {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(&format!("{prefix} Self Collision Apply Pass")),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.self_collision_apply_pipeline);
-            cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
-            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+        if self.enable_pair_cache {
+            // =========================================================================
+            // 接触候補ペアキャッシュ方式 (Active Pair Caching / I-Cloth 方式)
+            // =========================================================================
+            if need_rebuild {
+                // Step A: カウンターバッファのクリア (vt_count = 0, ee_count = 0)
+                encoder.clear_buffer(&self.pair_counters_buffer, 0, None);
+
+                // Step B: ブロードフェーズ (接近ペアの検出・収集)
+                {
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some(&format!("{prefix} Pair Collect Pass")),
+                        timestamp_writes: None,
+                    });
+                    cpass.set_pipeline(&self.pair_collect_pipeline);
+                    cpass.set_bind_group(0, &self.pair_collect_bind_group, &[]);
+                    cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                }
+            }
+
+            // Step C: ナローフェーズ (収集されたペアのみピンポイント解決)
+            // シェーダー内で `pair_idx >= total_pairs` により早期リターンするため、
+            // 不安定で TDR のリスクがある間接ディスパッチ（DispatchIndirect）を避け、
+            // 頂点数に応じた安全な上限ワークグループ数で直接ディスパッチする。
+            let max_possible_pairs = (self.num_vertices * 16).clamp(64, 32768);
+            let vt_workgroups = ((max_possible_pairs + 63) / 64).min(512);
+            let ee_workgroups = ((max_possible_pairs + 63) / 64).min(512);
+
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Pair Solve Narrowphase Pass")),
+                    timestamp_writes: None,
+                });
+
+                // V-T ペア解決
+                cpass.set_pipeline(&self.pair_solve_vt_pipeline);
+                cpass.set_bind_group(0, &self.pair_solve_vt_bind_group, &[]);
+                cpass.dispatch_workgroups(vt_workgroups, 1, 1);
+
+                // E-E ペア解決
+                cpass.set_pipeline(&self.pair_solve_ee_pipeline);
+                cpass.set_bind_group(0, &self.pair_solve_ee_bind_group, &[]);
+                cpass.dispatch_workgroups(ee_workgroups, 1, 1);
+            }
+
+            // Step D: 変位の適用 (既存の self_collision_apply_pipeline を共用)
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Pair Self Collision Apply Pass")),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.self_collision_apply_pipeline);
+                cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+        } else {
+            // 従来のダイレクト走査方式
+            // 4. Self Collision Pass (Solve)
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Self Collision Pass")),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.self_collision_pipeline);
+                cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+
+            // 5. Self Collision Apply Pass
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Self Collision Apply Pass")),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.self_collision_apply_pipeline);
+                cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
         }
     }
 }
+

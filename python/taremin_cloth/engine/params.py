@@ -97,6 +97,8 @@ def sync_cloth_parameters(sim, obj, scene=None):
     if hasattr(sim, "set_self_collision_substep_interval"):
         interval = int(getattr(settings, "self_collision_substep_interval", 1))
         sim.set_self_collision_substep_interval(interval)
+    if hasattr(sim, "set_enable_pair_cache"):
+        sim.set_enable_pair_cache(getattr(settings, "enable_pair_cache", False))
 
     # 5.5. エッジ詳細接触判定
     if hasattr(sim, "set_enable_edge_collision"):

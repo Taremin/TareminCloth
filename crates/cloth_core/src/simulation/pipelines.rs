@@ -5,6 +5,7 @@ use crate::context::GpuContext;
 use crate::mesh::{
     ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle,
     GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
+    GpuVtPair, GpuEePair, PairCollectParams, PairCounters, PairSolveParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
 use super::types::{
@@ -67,6 +68,17 @@ pub struct SimulationResources {
     pub self_collision_accum_buffer: wgpu::Buffer,
     pub self_collision_apply_pipeline: wgpu::ComputePipeline,
     pub self_collision_apply_bind_group: wgpu::BindGroup,
+    pub active_vt_pairs_buffer: wgpu::Buffer,
+    pub active_ee_pairs_buffer: wgpu::Buffer,
+    pub pair_counters_buffer: wgpu::Buffer,
+    pub pair_collect_params_buffer: wgpu::Buffer,
+    pub pair_solve_params_buffer: wgpu::Buffer,
+    pub pair_collect_pipeline: wgpu::ComputePipeline,
+    pub pair_collect_bind_group: wgpu::BindGroup,
+    pub pair_solve_vt_pipeline: wgpu::ComputePipeline,
+    pub pair_solve_vt_bind_group: wgpu::BindGroup,
+    pub pair_solve_ee_pipeline: wgpu::ComputePipeline,
+    pub pair_solve_ee_bind_group: wgpu::BindGroup,
     pub normals_buffer: wgpu::Buffer,
     pub local_edge_lengths_buffer: wgpu::Buffer,
     pub adj_offsets_buffer: wgpu::Buffer,
@@ -488,6 +500,29 @@ pub fn build_simulation_resources(
         include_str!("../shaders/self_collision_apply.wgsl"),
         workgroup_size,
     );
+
+    let pair_collect_shader = create_shader_with_wg_size(
+        device,
+        "Pair Collect Shader",
+        include_str!("../shaders/self_collision_collect_pairs.wgsl"),
+        workgroup_size,
+    );
+
+
+    let pair_solve_vt_shader = create_shader_with_wg_size(
+        device,
+        "Pair Solve VT Shader",
+        include_str!("../shaders/self_collision_solve_vt.wgsl"),
+        workgroup_size,
+    );
+
+    let pair_solve_ee_shader = create_shader_with_wg_size(
+        device,
+        "Pair Solve EE Shader",
+        include_str!("../shaders/self_collision_solve_ee.wgsl"),
+        workgroup_size,
+    );
+
 
     let edge_collision_shader = create_shader_with_wg_size(
         device,
@@ -1445,6 +1480,200 @@ pub fn build_simulation_resources(
         ],
     });
 
+    // 接触候補ペアキャッシュ用バッファ & リソース (Active Pair Caching)
+    let max_vt_pairs = 32768u32;
+    let max_ee_pairs = 32768u32;
+    let vt_buffer_size = ((max_vt_pairs as usize) * std::mem::size_of::<GpuVtPair>()).max(64) as u64;
+    let ee_buffer_size = ((max_ee_pairs as usize) * std::mem::size_of::<GpuEePair>()).max(64) as u64;
+
+    let active_vt_pairs_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Active VT Pairs Buffer"),
+        size: vt_buffer_size,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let active_ee_pairs_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Active EE Pairs Buffer"),
+        size: ee_buffer_size,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let initial_counters = PairCounters {
+        vt_count: 0,
+        ee_count: 0,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let pair_counters_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Pair Counters Buffer"),
+        contents: bytemuck::bytes_of(&initial_counters),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let pair_collect_params = PairCollectParams {
+        cell_size,
+        table_size,
+        num_vertices,
+        max_vt_pairs,
+        max_ee_pairs,
+        safety_margin: 0.005,
+        exclude_neighbors: if self_collision_exclude_neighbors { 1 } else { 0 },
+        _pad0: 0,
+    };
+    let pair_collect_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Pair Collect Params Buffer"),
+        contents: bytemuck::bytes_of(&pair_collect_params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let pair_solve_params = PairSolveParams {
+        num_vertices,
+        max_vt_pairs,
+        max_ee_pairs,
+        enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
+    };
+    let pair_solve_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Pair Solve Params Buffer"),
+        contents: bytemuck::bytes_of(&pair_solve_params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    // 1. Pair Collect BGL & Pipeline & BindGroup
+    let pair_collect_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Pair Collect Bind Group Layout"),
+        entries: &[
+            storage_ro(0),
+            storage_ro(1),
+            storage_ro(2),
+            uniform_entry(3),
+            storage_ro(4),
+            storage_ro(5),
+            storage_ro(6),
+            storage_ro(7),
+            storage_ro(8),
+            storage_ro(9),
+            storage_ro(10),
+            storage_ro(11),
+            storage_rw_at(12),
+            storage_rw_at(13),
+            storage_rw_at(14),
+        ],
+    });
+    let pair_collect_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Pair Collect Pipeline Layout"),
+        bind_group_layouts: &[&pair_collect_bgl],
+        push_constant_ranges: &[],
+    });
+    let pair_collect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Pair Collect Pipeline"),
+        layout: Some(&pair_collect_pl),
+        module: &pair_collect_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let pair_collect_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Pair Collect Bind Group"),
+        layout: &pair_collect_bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: vertex_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: spatial_hash.cell_starts_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: spatial_hash.sorted_indices_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: pair_collect_params_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: local_edge_lengths_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: adj_offsets_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 6, resource: adj_indices_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 7, resource: island_ids_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 8, resource: star_offsets_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 9, resource: star_indices_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 10, resource: two_hop_offsets_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 11, resource: two_hop_indices_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 12, resource: pair_counters_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 13, resource: active_vt_pairs_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 14, resource: active_ee_pairs_buffer.as_entire_binding() },
+        ],
+    });
+
+
+
+    // 3. Pair Solve VT BGL & Pipeline & BindGroup
+    let pair_solve_vt_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Pair Solve VT Bind Group Layout"),
+        entries: &[
+            storage_ro(0),
+            storage_ro(1),
+            storage_ro(2),
+            storage_rw_at(3),
+            uniform_entry(4),
+            storage_ro(5),
+        ],
+    });
+    let pair_solve_vt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Pair Solve VT Pipeline Layout"),
+        bind_group_layouts: &[&pair_solve_vt_bgl],
+        push_constant_ranges: &[],
+    });
+    let pair_solve_vt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Pair Solve VT Pipeline"),
+        layout: Some(&pair_solve_vt_pl),
+        module: &pair_solve_vt_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let pair_solve_vt_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Pair Solve VT Bind Group"),
+        layout: &pair_solve_vt_bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: vertex_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: active_vt_pairs_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: pair_counters_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: self_collision_accum_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: pair_solve_params_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: normals_buffer.as_entire_binding() },
+        ],
+    });
+
+    // 4. Pair Solve EE BGL & Pipeline & BindGroup
+    let pair_solve_ee_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Pair Solve EE Bind Group Layout"),
+        entries: &[
+            storage_ro(0),
+            storage_ro(1),
+            storage_ro(2),
+            storage_rw_at(3),
+            uniform_entry(4),
+            storage_ro(5),
+        ],
+    });
+    let pair_solve_ee_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Pair Solve EE Pipeline Layout"),
+        bind_group_layouts: &[&pair_solve_ee_bgl],
+        push_constant_ranges: &[],
+    });
+    let pair_solve_ee_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Pair Solve EE Pipeline"),
+        layout: Some(&pair_solve_ee_pl),
+        module: &pair_solve_ee_shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let pair_solve_ee_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Pair Solve EE Bind Group"),
+        layout: &pair_solve_ee_bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: vertex_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: active_ee_pairs_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: pair_counters_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: self_collision_accum_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: pair_solve_params_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: normals_buffer.as_entire_binding() },
+        ],
+    });
+
     SimulationResources {
         vertex_buffer,
         dist_buffer,
@@ -1488,7 +1717,19 @@ pub fn build_simulation_resources(
         self_collision_accum_buffer,
         self_collision_apply_pipeline,
         self_collision_apply_bind_group,
+        active_vt_pairs_buffer,
+        active_ee_pairs_buffer,
+        pair_counters_buffer,
+        pair_collect_params_buffer,
+        pair_solve_params_buffer,
+        pair_collect_pipeline,
+        pair_collect_bind_group,
+        pair_solve_vt_pipeline,
+        pair_solve_vt_bind_group,
+        pair_solve_ee_pipeline,
+        pair_solve_ee_bind_group,
         normals_buffer,
+
         local_edge_lengths_buffer,
         adj_offsets_buffer,
         adj_indices_buffer,

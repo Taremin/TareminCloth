@@ -224,6 +224,25 @@ graph TD
   - `interval = 1`: 39.87 ms (25.1 FPS)
   - `interval = 2`: **31.01 ms (32.2 FPS)**（Blender実機上で **30 FPS超** を達成）
 
+### 3.11 接触候補ペアキャッシュ（Active Pair Caching）と時間的再利用（Amortization）
+- **背景と動機**:
+  - 自己衝突における最大の計算負荷は、空間ハッシュの構築および全頂点・全隣接セルに対する三角形・エッジの幾何学的網羅探索（Broadphase）です。
+  - 通常、布の自己接触候補は急激には変化せず、サブステップ微小時間（$\Delta t / N_{sub}$）内では空間的・トポロジー的に高いコヒーレンス（連続性）を保ちます。
+  - そこで、[Tang et al. 2018 (I-Cloth)](https://gamma.cs.unc.edu/I-CLOTH/) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
+- **実装された設計**:
+  1. **フェーズ分離**:
+     - **Broadphase (`self_collision_collect_pairs.wgsl`)**: 空間ハッシュを探索し、接近している V-T（頂点-面）ペアおよび E-E（辺-辺）ペアを抽出し、専用のGPUストレージバッファにアトミック追加で記録。
+     - **Narrowphase (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされたペアのみをピンポイントで並列ディスパッチし、V-T/E-E幾何接触とCCD遮断変位を蓄積。
+  2. **時間的再利用（Amortization）**:
+     - フレームの先頭サブステップ（`sub_idx == 0`）でのみ空間ハッシュ構築と候補ペア抽出を実行。
+     - サブステップ 1〜N では探索を完全スキップし、キャッシュされたペアのナローフェーズのみを実行。
+  3. **直接ディスパッチと安全クランプ**:
+     - GPUペア数に応じた直接ディスパッチ（`dispatch_workgroups`）を採用し、D3D12/Vulkan環境におけるゼロワークグループTDR（画面暗転）を防止。
+- **実測性能 (AMD Radeon RX 9070 XT, DirectX 12, substeps=10)**:
+  - 3,200 頂点: 3.98 ms (251 FPS) → **2.23 ms (448.2 FPS)** [**1.79倍高速化**]
+  - 9,800 頂点: 7.41 ms (135 FPS) → **3.41 ms (292.9 FPS)** [**2.17倍高速化**]
+  - 20,000 頂点: 11.65 ms (85.8 FPS) → **5.61 ms (178.2 FPS)** [**2.08倍高速化**]
+
 ---
 
 ## 4. 却下された判断・アンチパターン一覧 (Rejected Approaches & Anti-Patterns)
@@ -236,7 +255,8 @@ graph TD
 ├── 2. V-T / E-E での相手頂点への強制無同期書き込み --> GPU競合でメッシュがくしゃくしゃに自壊
 ├── 3. コライダー貫通時の法線方向直立リカバリー   --> 球状に風船のように膨らむエンバグ
 ├── 4. CCD変位の安易な間引き (relief_factor)     --> 貫通解消が中途半端になり脱出不能
-└── 5. 形状変形モディファイアの無差別バイパス    --> ラティス等とコリジョン形状の乖離
+├── 5. 形状変形モディファイアの無差別バイパス    --> ラティス等とコリジョン形状の乖離
+└── 6. 空ワークグループ間接ディスパッチ (0 count) --> D3D12/Vulkan GPUドライバTDR画面暗転
 ```
 
 ### 4.1 ❌ 面法線（表側）方向への一律押し戻し
@@ -263,6 +283,11 @@ graph TD
 - **提案された経緯**: シミュレーション高速化のため、コライダーのモディファイアスタックをすべてバイパスして元メッシュを取得しようとした。
 - **却下理由**: ラティス（Lattice）やカーブ（Curve）など、コライダーの最終形状を決定づけるモディファイアまで無視されてしまい、見た目のコライダー形状と物理判定の形状が大きく食い違った。
 - **現在の設計**: サブディビジョン等の頂点増殖系のみを整合成約で制限し、形状変形モディファイアは評価済みメッシュとして正しく取得する。
+
+### 4.6 ❌ 空ワークグループ（0 count）間接ディスパッチ（DispatchIndirect によるTDR暗転）
+- **提案された経緯**: 接触候補ペア数がゼロまたは極小のときにGPU処理をスキップ・最適化するため、GPU側でワークグループ数を計算して `dispatch_workgroups_indirect` を呼び出そうとした。
+- **却下理由**: 接触がない（`count == 0`）場合に、D3D12/Vulkan環境のGPUドライバに `ThreadGroupCountX = 0` が渡されると、ドライバ側で不正引数またはタイムアウト例外と判定され、Device Removed / TDR（ディスプレイドライバ再起動による画面暗転・フリーズ）を引き起こした。
+- **現在の設計**: 間接ディスパッチバッファを廃止し、CPU側から頂点数に応じた安全な上限クランプ付きの直接ディスパッチ（`dispatch_workgroups`）を発行。シェーダー先頭で `pair_idx >= total_pairs` の早期リターン（Early Return）を行うことで、TDRを構造的に100%防止しつつ高速性を両立。
 
 ---
 
@@ -302,8 +327,8 @@ graph TD
   高速衝突や強い挟み込み時に一時的なめり込みが発生するリスクは残りますが、サブステップ数を増やす（10〜20）ことで、貫通の発生頻度を低減できる実用的なパラメータ構成としています。
 
 ### 5.2 今後のアルゴリズム改善ロードマップ（将来の研究課題）
-1. **Persistent Contacts キャッシュによるNarrowphase軽量化**:
-   高解像度メッシュにおいて、サブステップ開始時に接近ペアのみをGPU動的バッファに抽出し、反復ループ内での空間ハッシュ探索コストを削減する最適化の検討。
+1. **接触候補ペアキャッシュ（Active Pair Caching）によるNarrowphase軽量化【実装完了】**:
+   フレーム先頭サブステップでのみ空間探索を行い、サブステップ内でのペア時間的再利用（Amortization）により高ポリゴン下で2倍以上の高速化を達成（詳細は [3.11節](#311-接触候補ペアキャッシュactive-pair-cachingと時間的再利用amortization) を参照）。
 2. **適応型SDF解像度**:
    VRAM使用量に応じてスパースグリッドまたは階層型SDFを動的割り当てし、256MBバッファ制限を回避しつつ局所的に高解像度化する手法の検討。
 
@@ -348,3 +373,9 @@ graph TD
    - 発表: The Computer Journal, 1967
    - 解説資料: [Wikipedia: Greedy coloring](https://en.wikipedia.org/wiki/Greedy_coloring)
    - DOI: [10.1093/comjnl/10.1.85](https://doi.org/10.1093/comjnl/10.1.85)
+
+7. **I-Cloth: Incremental Collision Handling for GPU-Based Interactive Cloth Simulation (Active Pair Caching)**
+   - 著者: Min Tang, Tongtong Wang, Zhongyuan Liu, Ruofei Du, Dinesh Manocha
+   - 発表: ACM Transactions on Graphics (SIGGRAPH Asia 2018)
+   - プロジェクトページ: [https://gamma.cs.unc.edu/I-CLOTH/](https://gamma.cs.unc.edu/I-CLOTH/)
+   - DOI: [10.1145/3272127.3275037](https://doi.org/10.1145/3272127.3275037)

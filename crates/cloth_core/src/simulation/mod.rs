@@ -169,7 +169,25 @@ pub struct GpuClothSimulator {
     pub(crate) compute_normals_pipeline: wgpu::ComputePipeline,
     pub(crate) compute_normals_bind_group: wgpu::BindGroup,
 
+    // 接触候補ペアキャッシュ (Active Pair Caching) 用
+    pub enable_pair_cache: bool,
+    #[allow(dead_code)]
+    pub(crate) active_vt_pairs_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    pub(crate) active_ee_pairs_buffer: wgpu::Buffer,
+    pub(crate) pair_counters_buffer: wgpu::Buffer,
+    pub(crate) pair_collect_params_buffer: wgpu::Buffer,
+    pub(crate) pair_solve_params_buffer: wgpu::Buffer,
+    pub(crate) pair_collect_pipeline: wgpu::ComputePipeline,
+    pub(crate) pair_collect_bind_group: wgpu::BindGroup,
+    pub(crate) pair_solve_vt_pipeline: wgpu::ComputePipeline,
+    pub(crate) pair_solve_vt_bind_group: wgpu::BindGroup,
+    pub(crate) pair_solve_ee_pipeline: wgpu::ComputePipeline,
+    pub(crate) pair_solve_ee_bind_group: wgpu::BindGroup,
+
+
     pub(crate) predict_pipeline: wgpu::ComputePipeline,
+
     pub(crate) distance_pipeline: wgpu::ComputePipeline,
     pub(crate) bending_pipeline: wgpu::ComputePipeline,
     pub(crate) sewing_pipeline: wgpu::ComputePipeline,
@@ -349,6 +367,20 @@ impl GpuClothSimulator {
             bending_bind_groups: res.bending_bind_groups,
             sewing_bind_groups: res.sewing_bind_groups,
             update_vel_bind_group: res.update_vel_bind_group,
+
+            enable_pair_cache: false,
+            active_vt_pairs_buffer: res.active_vt_pairs_buffer,
+            active_ee_pairs_buffer: res.active_ee_pairs_buffer,
+            pair_counters_buffer: res.pair_counters_buffer,
+            pair_collect_params_buffer: res.pair_collect_params_buffer,
+            pair_solve_params_buffer: res.pair_solve_params_buffer,
+            pair_collect_pipeline: res.pair_collect_pipeline,
+            pair_collect_bind_group: res.pair_collect_bind_group,
+            pair_solve_vt_pipeline: res.pair_solve_vt_pipeline,
+            pair_solve_vt_bind_group: res.pair_solve_vt_bind_group,
+            pair_solve_ee_pipeline: res.pair_solve_ee_pipeline,
+            pair_solve_ee_bind_group: res.pair_solve_ee_bind_group,
+
             solver_iterations: 2,
             gravity: [0.0, 0.0, -9.81],
             damping: 1.0,
@@ -377,6 +409,21 @@ impl GpuClothSimulator {
             debug_recorder: SimulationDebugRecorder::default(),
             original_inv_masses: mesh.vertices.iter().map(|v| v.inv_mass).collect(),
         }
+    }
+
+    /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を切り替える
+    pub fn set_pair_cache_enabled(&mut self, enabled: bool) {
+        self.enable_pair_cache = enabled;
+    }
+
+    /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を設定する
+    pub fn set_enable_pair_cache(&mut self, enable: bool) {
+        self.enable_pair_cache = enable;
+    }
+
+    /// 接触候補ペアキャッシュの有効/無効を取得する
+    pub fn enable_pair_cache(&self) -> bool {
+        self.enable_pair_cache
     }
 
     /// GPU頂点バッファへの参照を取得する（レンダーパイプラインへのバインド用）
@@ -424,7 +471,36 @@ impl GpuClothSimulator {
             0,
             bytemuck::bytes_of(&params),
         );
+
+        let collect_params = crate::mesh::PairCollectParams {
+            cell_size: self.spatial_hash.cell_size,
+            table_size: self.spatial_hash.table_size,
+            num_vertices: self.num_vertices,
+            max_vt_pairs: 32768,
+            max_ee_pairs: 32768,
+            safety_margin: 0.005,
+            exclude_neighbors: if exclude_neighbors { 1 } else { 0 },
+            _pad0: 0,
+        };
+        self.context.queue.write_buffer(
+            &self.pair_collect_params_buffer,
+            0,
+            bytemuck::bytes_of(&collect_params),
+        );
+
+        let solve_params = crate::mesh::PairSolveParams {
+            num_vertices: self.num_vertices,
+            max_vt_pairs: 32768,
+            max_ee_pairs: 32768,
+            enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
+        };
+        self.context.queue.write_buffer(
+            &self.pair_solve_params_buffer,
+            0,
+            bytemuck::bytes_of(&solve_params),
+        );
     }
+
 
     /// エッジ詳細接触マージン倍率を設定する (1.0 = 標準, 1.2〜1.5 = 安全マージン付き)
     pub fn set_edge_margin_scale(&mut self, scale: f32) {
