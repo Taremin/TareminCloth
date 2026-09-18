@@ -156,9 +156,9 @@ graph TD
 - **実装された設計 (Taremin Cloth)**:
   1. **広域外接球による階層枝切り (Broad Bounding Sphere Early Exit)**:
      - 頂点 $i$ と相手頂点 $j$ の距離二乗 $d^2 = \|\mathbf{p}_i - \mathbf{p}_j\|^2$ を内積 `dot` 1回で評価。
-     - 接触可能上界半径 $R_{\text{bound}} = \text{effective\_thick} + (L_i + L_j) \times 1.3$（布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全処理を即座にスキップ。
+      - 接触可能上界半径 $R_{\text{bound}} = d_{\text{eff}} + (L_i + L_j) \times 1.3$（実効厚み $d_{\text{eff}}$ = `effective_thick`、布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全処理を即座にスキップ。
   2. **V-T 局所外接球および不要トポロジー走査の排除**:
-     - 点 $i$ から相手三角形への接触可能半径 $R_{VT} = \text{effective\_thick} + L_j \times 1.3 + \Delta \text{sweep}$ により、遠い三角形判定を遮断。
+     - 点 $i$ から相手三角形への接触可能半径 $R_{VT} = d_{\text{eff}} + L_j \times 1.3 + \Delta \text{sweep}$ により、遠い三角形判定を遮断。
      - 頂点 $j$ がすでに2ホップ除外を通過している（$\ge 3$ ホップ離れている）場合、その隣接頂点 $v_0, v_1$ が頂点 $i$ の直接隣接頂点になることはグラフ理論的にあり得ないため、V-Tループ内の不要な多重 `is_topologically_near` 走査を排除。
   3. **セル走査範囲の27セル適正化**:
      - サブステップ内の頂点移動量に基づき、通常移動時は周囲 $3 \times 3 \times 3 = 27$ セルに走査を抑制。
@@ -228,7 +228,7 @@ graph TD
 - **背景と動機**:
   - 自己衝突における最大の計算負荷は、空間ハッシュの構築および全頂点・全隣接セルに対する三角形・エッジの幾何学的網羅探索（Broadphase）です。
   - 通常、布の自己接触候補は急激には変化せず、サブステップ微小時間（$\Delta t / N_{sub}$）内では空間的・トポロジー的に高いコヒーレンス（連続性）を保ちます。
-  - そこで、[Tang et al. 2018 (I-Cloth)](https://gamma.cs.unc.edu/I-CLOTH/) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
+  - そこで、[Tang et al. 2018 (I-Cloth)](https://doi.org/10.1145/3272127.3275037) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
 - **実装された設計**:
   1. **フェーズ分離**:
      - **Broadphase (`self_collision_collect_pairs.wgsl`)**: 空間ハッシュを探索し、接近している V-T（頂点-面）ペアおよび E-E（辺-辺）ペアを抽出し、専用のGPUストレージバッファにアトミック追加で記録。
@@ -377,5 +377,5 @@ graph TD
 7. **I-Cloth: Incremental Collision Handling for GPU-Based Interactive Cloth Simulation (Active Pair Caching)**
    - 著者: Min Tang, Tongtong Wang, Zhongyuan Liu, Ruofei Du, Dinesh Manocha
    - 発表: ACM Transactions on Graphics (SIGGRAPH Asia 2018)
-   - プロジェクトページ: [https://gamma.cs.unc.edu/I-CLOTH/](https://gamma.cs.unc.edu/I-CLOTH/)
+   - 論文リンク: [ACM Digital Library](https://doi.org/10.1145/3272127.3275037)
    - DOI: [10.1145/3272127.3275037](https://doi.org/10.1145/3272127.3275037)

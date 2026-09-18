@@ -286,9 +286,9 @@ graph LR
     G_Server -->|GPUコンテキスト初期化| G_Core
     G_Core -->|VRAM内ゼロコピー描画| G_Render
     G_Core -->|最新座標コミット| G_State
-    B_Timer -.->|2. GetLatestCoords (非同期PULL)| G_State
+    B_Timer -.->|"2. GetLatestCoords (非同期PULL)"| G_State
     G_State -.->|最新座標ストリーム| B_Mesh
-    B_UI -->|3. Apply Pose (確定ポーズ反映)| G_Server
+    B_UI -->|"3. Apply Pose (確定ポーズ反映)"| G_Server
 ```
 
 ### 6.1 アーキテクチャの特長
@@ -536,7 +536,7 @@ graph TD
     Panel -->|pgettext_iface msg, TareminCloth| AppTrans
     Prop -->|pgettext_iface msg, TareminCloth| AppTrans
     DynStr -->|trans msg, TareminCloth| AppTrans
-    OpBtn -->|trans msg, TareminCloth (事前翻訳)| AppTrans
+    OpBtn -->|"trans msg, TareminCloth (事前翻訳)"| AppTrans
     Dict -->|TareminCloth 単一コンテキスト登録| AppTrans
     AppTrans -->|ja_JP: 日本語UI表示| Panel
     AppTrans -->|ja_JP: 日本語プロパティ・説明文| Prop
@@ -599,7 +599,7 @@ graph TD
     end
 
     subgraph "3. 再生・確認フェーズ (Playback)"
-        CacheMap -->|タイムライン再生 / スクラブ| FrameHandler[cloth_frame_handler<br>O(1) 参照・メッシュ適用]
+        CacheMap -->|タイムライン再生 / スクラブ| FrameHandler["cloth_frame_handler<br>O(1) 参照・メッシュ適用"]
         FrameHandler -->|Free Bake 実行| FreeBake[キャッシュ破棄・レスト復元]
         FreeBake --> Params
     end

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "taremin_cloth_core"
-version = "0.1.0"
+version = "0.0.1"
 description = "GPU-accelerated XPBD Cloth Simulation core for Blender"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (例: v0.0.1, v0.1.0-beta.1). 空欄時は __init__.py より自動検出'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -52,7 +57,16 @@ jobs:
       - name: Package Blender Addon
         shell: bash
         run: |
-          VERSION=${GITHUB_REF_NAME:-v0.1.0}
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            VERSION="${{ github.event.inputs.tag_name }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="v$(python -c "from tools.package_addon import extract_bl_info_version; from pathlib import Path; print(extract_bl_info_version(Path('__init__.py')))")"
+          fi
+          if [[ ! "$VERSION" =~ ^v ]]; then
+            VERSION="v${VERSION}"
+          fi
           OUTPUT_ZIP="dist/taremin_cloth-${VERSION}-${{ matrix.platform }}.zip"
           python tools/package_addon.py --wheel dist --output "$OUTPUT_ZIP" --version "${VERSION#v}"
           echo "ZIP_FILE=$OUTPUT_ZIP" >> $GITHUB_ENV
@@ -70,6 +84,45 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Determine Release Tag
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            VERSION="${{ github.event.inputs.tag_name }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="v$(python -c "from tools.package_addon import extract_bl_info_version; from pathlib import Path; print(extract_bl_info_version(Path('__init__.py')))")"
+          fi
+          if [[ ! "$VERSION" =~ ^v ]]; then
+            VERSION="v${VERSION}"
+          fi
+          echo "tag_name=$VERSION" >> $GITHUB_OUTPUT
+
+          LOWER=$(echo "$VERSION" | tr '[:upper:]' '[:lower:]')
+          if [[ "$LOWER" =~ (alpha|beta|rc) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Changelog
+        shell: bash
+        run: |
+          python tools/generate_changelog.py --tag "${{ steps.tag.outputs.tag_name }}" --output changelog.md
+          cat changelog.md
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -79,7 +132,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: Release ${{ steps.tag.outputs.tag_name }}
+          body_path: changelog.md
           files: release_assets/*.zip
-          generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.tag.outputs.is_prerelease == 'true' }}

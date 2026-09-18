@@ -69,7 +69,7 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
 
 ### 1. 配布用 zip からインストールする場合（推奨・一般ユーザー向け）
 
-1. GitHub の [Releases](https://github.com/taremin/taremin_cloth/releases) ページから、お使いの環境に合った最新の zip ファイルをダウンロードします：
+1. GitHub の [Releases](https://github.com/Taremin/TareminCloth/releases) ページから、お使いの環境に合った最新の zip ファイルをダウンロードします：
    - **Windows**: `taremin_cloth-vX.Y.Z-windows-x64.zip`
    - **Linux**: `taremin_cloth-vX.Y.Z-linux-x64.zip`
    - **macOS**: `taremin_cloth-vX.Y.Z-macos-universal.zip` (Apple Silicon / Intel 両対応)

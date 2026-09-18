@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "cloth_core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "cloth_gui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "bytemuck",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "taremin_cloth_core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "cloth_core",
  "env_logger",

@@ -195,3 +195,56 @@ Taremin Cloth の詳細な物理計算理論、接触・衝突判定（V-T, E-E,
 1. 「これから書こうとしている処理（メッシュデータ取得・幾何変換・Blender操作など）は、すでに `taremin_cloth.utils` や既存モジュールに存在しないか？」を `grep_search` 等で確認すること。
 2. 複数箇所で同一または類似の処理が必要になった場合、インラインで重複実装せず、必ず `utils/` に共通関数として定義・分離すること。
 
+---
+
+## 10. リリース運用ガイドライン (`tools/release.py`)
+
+本プロジェクトでは、バージョン更新・事前テスト・Gitコミット・タグ付け・GitHub Actions自動リリース連携をワンストップで行うCLIツール `tools/release.py` を配備しています。
+
+### 基本コマンド例
+
+```bash
+# 対話型メニューで次のバージョンを選択して実行
+python tools/release.py
+
+# パッチリリース (例: 0.0.1 -> 0.0.2)
+python tools/release.py patch
+
+# マイナーリリース (例: 0.0.1 -> 0.1.0)
+python tools/release.py minor
+
+# メジャーリリース (例: 0.0.1 -> 1.0.0)
+python tools/release.py major
+
+# メジャーのベータ / RC (例: 0.0.1 -> 1.0.0-beta.1 / 1.0.0-rc.1)
+python tools/release.py major-beta
+python tools/release.py major-rc
+
+# マイナーのベータ / RC (例: 0.0.1 -> 0.1.0-beta.1 / 0.1.0-rc.1)
+python tools/release.py minor-beta
+python tools/release.py minor-rc
+
+# プレリリース番号のインクリメント (例: 1.0.0-beta.1 -> 1.0.0-beta.2)
+python tools/release.py next
+
+# プレリリースから本番版への昇格 (例: 1.0.0-rc.1 -> 1.0.0)
+python tools/release.py release
+
+# 任意バージョン直接指定
+python tools/release.py 0.0.1
+```
+
+### 主要オプション
+
+| オプション | 説明 |
+|---|---|
+| `--dry-run` | ファイル変更やGit操作を行わず、動作内容をシミュレーション表示 |
+| `--check` | 各ファイル（`__init__.py`, `pyproject.toml`, 各 `Cargo.toml`）のバージョン整合性チェックのみ実行 |
+| `--skip-tests` | 時間短縮のため品質検証テスト（Rust/Python/Links）をスキップ |
+| `--no-push` | Gitリモートプッシュを行わず、ローカルのコミット・タグ作成のみで終了 |
+| `-y`, `--yes` | 確認プロンプトをすべて自動承認（CI/自動化向け） |
+
+### リリース自動化の仕組み
+1. `tools/release.py` により `__init__.py`、`pyproject.toml`、`Cargo.toml`（3クレート）、`Cargo.lock` が同期更新され、テスト通過後に `chore(release): vX.Y.Z` コミットと `vX.Y.Z` アノテーションタグが作成されます。
+2. リモートへタグがプッシュされると、GitHub Actions の `release.yml` が自動起動し、Windows (x64)、Linux (x64)、macOS (Universal) のバイナリが並列ビルドされ、GitHub Releases に各プラットフォーム向けアドオンzipが自動添付・公開されます（`beta` や `rc` が含まれるタグは自動的に Pre-release として公開されます）。
+

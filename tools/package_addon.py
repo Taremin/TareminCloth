@@ -17,17 +17,23 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+# Windows cp932 環境対策
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def extract_bl_info_version(init_file: Path) -> str:
-    """__init__.py から bl_info の version タプルを抽出して文字列化する (例: '0.1.0')"""
+    """__init__.py から bl_info の version タプルを抽出して文字列化する (例: '0.0.1')"""
     if not init_file.exists():
-        return "0.1.0"
+        return "0.0.1"
     content = init_file.read_text(encoding="utf-8")
     match = re.search(r'"version"\s*:\s*\(([0-9,\s]+)\)', content)
     if match:
         parts = [p.strip() for p in match.group(1).split(",") if p.strip()]
         return ".".join(parts)
-    return "0.1.0"
+    return "0.0.1"
 
 
 def find_binary_in_wheel(wheel_path: Path, temp_dir: Path) -> Path:

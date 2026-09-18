@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Taremin Cloth",
     "author": "Taremin",
-    "version": (0, 1, 0),
+    "version": (0, 0, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Sidebar > Taremin Cloth",
     "description": "GPU-accelerated XPBD Cloth Simulator for Blender",

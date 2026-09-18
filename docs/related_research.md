@@ -31,8 +31,8 @@
 ### 1.2 Two-Level Bounding Sphere 階層的早期枝切り 【実装済み】
 * **幾何学的理論**:
   * 頂点 $i$ と相手頂点 $j$ の距離二乗 $d^2 = \|\mathbf{p}_i - \mathbf{p}_j\|^2$ を内積（`dot` 1回）で評価。
-  * 接触可能上界半径 $R_{\text{bound}} = \text{effective\_thick} + (L_i + L_j) \times 1.3$（布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全判定を即座にスキップ。
-  * 相手三角形に対しても局所外接球 $R_{VT} = \text{effective\_thick} + L_j \times 1.3 + \Delta \text{sweep}$ により不要判定を早期遮断。
+  * 接触可能上界半径 $R_{\text{bound}} = d_{\text{eff}} + (L_i + L_j) \times 1.3$（実効厚み $d_{\text{eff}}$ = `effective_thick`、布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全判定を即座にスキップ。
+  * 相手三角形に対しても局所外接球 $R_{VT} = d_{\text{eff}} + L_j \times 1.3 + \Delta \text{sweep}$ により不要判定を早期遮断。
 * **Taremin Cloth での実装効果**:
   * 80k頂点（約16万ポリゴン）において 86.60 ms (11.5 FPS) $\to$ 44.25 ms (22.6 FPS) と、所要時間を半減（約 1.96 倍高速化）しました。
 
