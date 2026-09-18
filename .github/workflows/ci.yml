@@ -25,6 +25,12 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Vulkan and Mesa drivers (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 mesa-vulkan-drivers libgl1-mesa-dri
+
       - name: Run Cargo Tests
         shell: bash
         run: cargo test

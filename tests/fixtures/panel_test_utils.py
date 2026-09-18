@@ -4,8 +4,13 @@ Blenderのバックグラウンド実行（headless）環境でも、安全にPa
 テストし、レイアウト構築・プロパティ参照・オペレーター参照の妥当性を検証します。
 """
 
+import unittest
 from typing import Any, Dict, List, Optional, Tuple
-import bpy
+
+try:
+    import bpy
+except ImportError:
+    bpy = None
 
 
 class MockOperatorProperties:
@@ -429,6 +434,9 @@ def render_panel(
     Returns:
         描画結果が記録された MockLayout
     """
+    if bpy is None:
+        raise unittest.SkipTest("[panel_test_utils] Blender (bpy) が利用できない環境のためスキップします")
+
     if context is None:
         context = bpy.context
 

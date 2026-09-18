@@ -5,9 +5,23 @@ mod tests {
     use crate::mesh::{ClothMesh, GpuMeshTriangle};
     use crate::simulation::GpuClothSimulator;
 
+    fn get_test_context() -> Option<Arc<GpuContext>> {
+        match GpuContext::new() {
+            Ok(c) => Some(Arc::new(c)),
+            Err(crate::context::GpuContextError::AdapterNotFound) => {
+                eprintln!("警告: GPU アダプタが検出されなかったため、テストをスキップします (CI環境の可能性があります)");
+                None
+            }
+            Err(e) => panic!("GPU Context 作成エラー: {:?}", e),
+        }
+    }
+
     #[test]
     fn test_mesh_triangle_collision() {
-        let ctx = Arc::new(GpuContext::new().expect("GPU Context creation"));
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
 
         // 頂点 (0, 0, 0.5) を自由落下させる
         let positions = vec![[0.0, 0.0, 0.5]];
@@ -60,7 +74,10 @@ mod tests {
 
     #[test]
     fn test_mesh_triangle_single_sided_recovery() {
-        let ctx = Arc::new(GpuContext::new().expect("GPU Context creation"));
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
 
         // 頂点を意図的に三角形の裏側（内側 z = -0.1m）にめり込んだ状態で初期化
         let positions = vec![[0.0, 0.0, -0.1]];
@@ -118,7 +135,10 @@ mod tests {
 
     #[test]
     fn test_edge_rest_length_scaling() {
-        let ctx = Arc::new(GpuContext::new().expect("GPU Context creation"));
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
 
         // 2頂点 (0, 0, 0) と (1.0, 0, 0) を結ぶエッジ（初期長 1.0）
         let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
@@ -171,7 +191,10 @@ mod tests {
 
     #[test]
     fn test_self_collision_options_and_untangling() {
-        let ctx = Arc::new(GpuContext::new().expect("GPU Context creation"));
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
 
         // 4頂点のクアッド
         let positions = vec![
@@ -241,7 +264,10 @@ mod tests {
         use half::f16;
         use crate::simulation::types::{GpuBoneInfo, GpuBoneTransform};
 
-        let ctx = Arc::new(GpuContext::new().expect("GPU Context creation"));
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
 
         // z=0.4 から自由落下する頂点
         let positions = vec![[0.0, 0.0, 0.4]];

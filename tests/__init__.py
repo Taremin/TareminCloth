@@ -10,7 +10,10 @@ if str(_python_dir) not in sys.path:
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from .fixtures import panel_test_utils
-
-# 後方互換用モジュールエイリアス
-sys.modules['tests.panel_test_utils'] = panel_test_utils
+try:
+    from .fixtures import panel_test_utils
+    # 後方互換用モジュールエイリアス
+    sys.modules['tests.panel_test_utils'] = panel_test_utils
+except ImportError:
+    # bpy が利用できない環境（スタンドアロンPythonテスト実行時）
+    panel_test_utils = None
