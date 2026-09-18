@@ -119,6 +119,7 @@ def trans(msgid: str, context: str = CONTEXT) -> str:
     if HAS_BPY and hasattr(bpy, "app") and hasattr(bpy.app, "translations"):
         pget = getattr(bpy.app.translations, "pgettext_iface", bpy.app.translations.pgettext)
         res = pget(msgid, context)
-        if res is not None:
+        if isinstance(res, str):
             return res
     return msgid
+

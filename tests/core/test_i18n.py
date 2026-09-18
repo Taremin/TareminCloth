@@ -24,15 +24,28 @@ from taremin_cloth import i18n, panels, properties, preferences, ops, presets
 try:
     import bpy
     HAS_BPY = True
+    _is_mock = (
+        getattr(bpy, "__class__", None) is not None
+        and bpy.__class__.__name__ == "MagicMock"
+        or not hasattr(bpy, "app")
+        or (getattr(bpy.app, "__class__", None) is not None and bpy.app.__class__.__name__ == "MagicMock")
+    )
     IS_REAL_BLENDER = (
-        hasattr(bpy, "context")
+        not _is_mock
+        and hasattr(bpy, "app")
+        and hasattr(bpy.app, "version")
+        and isinstance(bpy.app.version, tuple)
+        and hasattr(bpy, "context")
         and bpy.context is not None
         and hasattr(bpy.context, "preferences")
         and bpy.context.preferences is not None
+        and getattr(bpy.context.preferences, "__class__", None) is not None
+        and bpy.context.preferences.__class__.__name__ != "MagicMock"
     )
 except ImportError:
     HAS_BPY = False
     IS_REAL_BLENDER = False
+
 
 
 class MockOperatorProps:

@@ -128,8 +128,11 @@ class TestDebugRecorder(unittest.TestCase):
             debug_filename_template = "dump_{date}_{time}_{object}_{frames}f.{ext}"
 
         filepath = resolve_debug_filepath(DummyPrefs(), "Cloth:Special/1", frame_count=120, ext="jsonl.gz")
-        self.assertTrue(filepath.startswith(self.temp_dir))
+        norm_filepath = os.path.normcase(os.path.normpath(filepath))
+        norm_temp_dir = os.path.normcase(os.path.normpath(self.temp_dir))
+        self.assertTrue(norm_filepath.startswith(norm_temp_dir))
         filename = os.path.basename(filepath)
+
 
         # 特殊文字 (:) や (/) がサニタイズされていること
         self.assertIn("Cloth_Special_1", filename)

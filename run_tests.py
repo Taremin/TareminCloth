@@ -20,6 +20,8 @@ from tools.blender_manager import (
     get_cache_dir,
     get_latest_lts_version,
 )
+from tools.ci_runner import run_ci_tests, clean_ci_venv
+
 
 
 def main():
@@ -41,6 +43,11 @@ def main():
         help="実行するテストのファイル名パターン（例: test_e2e_pipeline.py, test_*.py）。",
     )
     parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="GitHub Actions CI と同一の最小クリーン環境（.venv_ci）でスタンドアロンテスト（tests/core）を実行します（Blender不要）。",
+    )
+    parser.add_argument(
         "--download-only",
         action="store_true",
         help="指定したバージョンのダウンロードのみを行い、テストは実行しません。",
@@ -55,16 +62,28 @@ def main():
         nargs="?",
         const="all",
         default=None,
-        metavar="VERSION",
-        help="ダウンロードされたBlenderのキャッシュを削除します（例: --clean で全削除、--clean 4.2 で特定バージョンのみ削除）。",
+        metavar="TARGET",
+        help="キャッシュを削除します（例: --clean でBlender全削除、--clean 4.2 で特定バージョン削除、--clean ci でCI仮想環境削除）。",
     )
 
     args = parser.parse_args()
 
     # キャッシュ削除オプション
     if args.clean is not None:
+        if args.clean.lower() == "ci":
+            clean_ci_venv(Path(__file__).parent)
+            return 0
         clean_cached_blender(args.clean)
         return 0
+
+    # CI再現モード実行
+    if args.ci:
+        return run_ci_tests(
+            repo_root=Path(__file__).parent,
+            test_pattern=args.test,
+            clean=False,
+        )
+
 
     if args.list_blenders:
         blenders = find_installed_blenders()

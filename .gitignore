@@ -28,7 +28,10 @@ build/
 # Temporary & workspace scratch directories
 /tmp/
 /scratch/
+/.venv*/
+/.cache/
 /frame_logs/
+
 memo.md
 *.tmp
 *.log

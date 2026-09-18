@@ -86,11 +86,14 @@ def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "j
     dir_path = None
     if out_dir:
         try:
-            dir_path = bpy.path.abspath(out_dir)
+            res = bpy.path.abspath(out_dir)
+            if isinstance(res, str) and not res.startswith("<MagicMock"):
+                dir_path = res
         except Exception:
             pass
         if not dir_path:
             dir_path = os.path.abspath(out_dir)
+
     if not dir_path:
         # デフォルト(空欄)時はアドオンルート直下の frame_logs ディレクトリを使用
         current_dir = os.path.dirname(os.path.abspath(__file__))

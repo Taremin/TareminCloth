@@ -39,6 +39,12 @@ Copy-Item "target/release/taremin_cloth_core.dll" "taremin_cloth_core.pyd" -Forc
 Copy-Item "target/release/taremin_cloth_core.dll" "python/taremin_cloth/taremin_cloth_core.pyd" -Force
 
 # 3. Python側の主要単体・統合テストの実行（高速スタンドアロン・Blender不要）
+# 【推奨】GitHub Actions CIと同一の最小隔離環境（.venv_ci）で自動実行
+python run_tests.py --ci
+# 特定のテストモジュールだけをピンポイントで試行錯誤
+python run_tests.py --ci -t test_quick_pinning.py
+
+# または現在の環境上で直接実行
 python -m unittest tests/core/test_mesh_analysis.py
 python -m unittest tests/core/test_mesh_renderer.py
 python -m unittest tests/core/test_replayer_standalone.py
@@ -50,6 +56,7 @@ python -m unittest discover -s tests/core -t .
 # 4. Blenderアドオン結合・E2Eテストの実行（tools/blender_manager による自動解決）
 python run_tests.py --test test_simulation_e2e.py
 ```
+
 
 ---
 
