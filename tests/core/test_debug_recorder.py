@@ -145,8 +145,10 @@ class TestDebugRecorder(unittest.TestCase):
             debug_filename_template = "cloth_debug_{datetime}_{object}.{ext}"
 
         default_filepath = resolve_debug_filepath(EmptyPrefs(), "Cloth", frame_count=10, ext="jsonl.gz")
-        self.assertIn(os.path.join("taremin_cloth", "frame_logs"), default_filepath)
+        self.assertIn("frame_logs", default_filepath)
+        self.assertEqual(os.path.basename(os.path.dirname(default_filepath)), "frame_logs")
         self.assertTrue(default_filepath.endswith(".jsonl.gz"))
+
 
     def test_max_frames_protection(self):
         """最大記録フレーム数（メモリ保護上限）の動作検証"""

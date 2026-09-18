@@ -149,8 +149,15 @@ class TestSdfBakerGpu(unittest.TestCase):
         self.assertGreater(len(result.texture_bytes), 0)
 
         print(f"[性能テスト成功] 10ボーン x 64^3 GPU並列ベイク所要時間: {elapsed:.3f} 秒 (約 {elapsed*1000:.1f} ms)")
-        # 1秒未満で完了すること
-        self.assertLess(elapsed, 2.0, "10ボーンの64^3ベイクが2秒未満で完了すること")
+        
+        # ソフトウェアアダプタ（WARP/Basic Render Driver/llvmpipe等）やCI環境ではCPUエミュレーション実行のため閾値を緩和
+        dev_name = taremin_cloth_core.get_gpu_device_name().lower()
+        is_software = any(name in dev_name for name in ["basic render", "warp", "llvmpipe", "lavapipe", "software", "cpu"])
+        is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+        max_allowed = 60.0 if (is_software or is_ci) else 2.0
+
+        self.assertLess(elapsed, max_allowed, f"10ボーンの64^3ベイクが{max_allowed}秒未満で完了すること (デバイス: {dev_name})")
+
 
 
 if __name__ == "__main__":
