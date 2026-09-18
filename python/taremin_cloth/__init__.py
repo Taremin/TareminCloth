@@ -41,15 +41,20 @@ subpackages = [
 ]
 
 # モジュール読み込み & リロード
+# 初回インポート時は既存モジュールを破壊的に再ロードせず、アドオン明示再読み込み時のみ reload を実行
+_is_reloading = "modules" in locals() and bool(modules)
 modules = []
 pkg_prefix = f"{__package__}." if __package__ else ""
 for subpkg, mod_names in subpackages:
     for name in mod_names:
         fullname = f"{pkg_prefix}{subpkg}.{name}" if subpkg else f"{pkg_prefix}{name}"
         if fullname in sys.modules:
-            try:
-                mod = importlib.reload(sys.modules[fullname])
-            except Exception:
+            if _is_reloading:
+                try:
+                    mod = importlib.reload(sys.modules[fullname])
+                except Exception:
+                    mod = sys.modules[fullname]
+            else:
                 mod = sys.modules[fullname]
         else:
             mod = importlib.import_module(fullname)

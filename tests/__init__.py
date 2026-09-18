@@ -9,21 +9,26 @@ if str(_python_dir) not in sys.path:
     sys.path.insert(0, str(_python_dir))
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
-# bpy がインストールされていない環境（CIやスタンドアロン環境）の場合、
-# taremin_cloth のモジュールインポートが失敗しないようにモック bpy を登録
-if "bpy" not in sys.modules:
-    try:
-        import bpy
-    except ImportError:
-        from unittest.mock import MagicMock
-        bpy = MagicMock()
-        bpy.__name__ = "bpy"
-        sys.modules["bpy"] = bpy
-        sys.modules["bpy.types"] = bpy.types
-        sys.modules["bpy.props"] = bpy.props
-        sys.modules["bpy.ops"] = bpy.ops
-        sys.modules["bpy.utils"] = bpy.utils
-        sys.modules["bpy.context"] = bpy.context
+# Blender 固有モジュールがインストールされていない環境（CIやスタンドアロン環境）の場合、
+# taremin_cloth の各モジュールインポートが失敗しないよう一括モック登録
+_BLENDER_MODULES = [
+    "bpy", "bpy.types", "bpy.props", "bpy.ops", "bpy.utils", "bpy.context", "bpy.path", "bpy.app",
+    "bpy_extras", "bpy_extras.view3d_utils", "bpy_extras.batch",
+    "gpu", "gpu.types", "gpu.shader", "gpu.matrix",
+    "gpu_extras", "gpu_extras.batch",
+    "blf",
+    "bmesh", "bmesh.types", "bmesh.ops",
+    "mathutils", "mathutils.kdtree", "mathutils.bvhtree", "mathutils.geometry",
+]
+for mod_name in _BLENDER_MODULES:
+    if mod_name not in sys.modules:
+        try:
+            __import__(mod_name)
+        except ImportError:
+            from unittest.mock import MagicMock
+            m = MagicMock()
+            m.__name__ = mod_name
+            sys.modules[mod_name] = m
 
 try:
     from .fixtures import panel_test_utils
