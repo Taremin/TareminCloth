@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install numpy
+          pip install numpy fake-bpy-module-latest
 
       - name: Build PyO3 Core Extension
         shell: bash
