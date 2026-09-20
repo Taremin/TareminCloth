@@ -9,10 +9,10 @@
 
 ### 1.1 離散曲率解析による事前カリング (Discrete Curvature Culling / Laplace-Beltrami)
 * **代表文献**:
-  * **Provot 1997**: *"Collision Support in Cloth Simulation"* (Eurographics 1997)
-  * **Volino & Magnenat-Thalmann 2000**: *"Efficient Self-collision Detection on Smoothly Discretized Surface Animations using Geometrical Shape Properties"* (Computer Graphics Forum / Eurographics 2000)
-    * [DOI: 10.1111/1467-8659.00403](https://doi.org/10.1111/1467-8659.00403)
-  * **Tang, Curtis, Yoon, Manocha 2009 / 2012**: *"ICCD: Fast Continuous Collision Detection between Deforming Objects using Continuous Normal Cones"* (IEEE TVCG 2009)
+  * **Provot 1997**: *"Collision and self-collision handling in cloth model dedicated to design garments"* (Graphics Interface 1997 / Eurographics Workshop on Computer Animation and Simulation 1997)
+  * **Volino & Magnenat-Thalmann 1994**: *"Efficient Self-collision Detection on Smoothly Discretized Surface Animations using Geometrical Shape Properties"* (Computer Graphics Forum, Vol. 13, No. 3, pp. 155–166)
+    * [DOI: 10.1111/1467-8659.1330155](https://doi.org/10.1111/1467-8659.1330155)
+  * **Tang, Curtis, Yoon, Manocha 2008 / 2009**: *"ICCD: Interactive Continuous Collision Detection between Deformable Models using Connectivity-Based Culling"* (ACM SPM 2008 / IEEE TVCG 2009, Vol. 15, No. 4)
   * **近年の動向 (2024–2026)**: 離散外微分（Discrete Differential Geometry）に基づく **Laplace-Beltrami 平均曲率法線（$\Delta \mathbf{x}_i \approx H \mathbf{n}$）** を用いて、衣服の平坦領域をリアルタイムに事前判定する手法。
 * **幾何学的理論**:
   * メッシュ上の連結領域 $S$ において、領域内の面法線ベクトルが単位球上で半頂角 $\theta < \pi/2$（90度未満）の法線コーン（Normal Cone）内に収まり、かつ領域の境界輪郭が正射影で自己交差しない場合、**幾何学的に領域 $S$ の内部で局所的な自己交差・自己衝突は発生し得ない**という定理。
@@ -63,8 +63,8 @@
 
 ### 3.1 接触候補ペアキャッシュ (I-Cloth 2018: Active Pair Caching)
 * **代表文献**:
-  * **Tang, Wang, Tang, Manocha 2018**: *"I-Cloth: Incremental Collision Handling for GPU-Based Interactive Cloth Simulation"* (ACM Transactions on Graphics / SIGGRAPH Asia 2018)
-    * [DOI: 10.1145/3272127.3275038](https://doi.org/10.1145/3272127.3275038)
+  * **Tang, Wang, Liu, Tong, Manocha 2018**: *"I-Cloth: Incremental Collision Handling for GPU-Based Interactive Cloth Simulation"* (ACM Transactions on Graphics / SIGGRAPH Asia 2018)
+    * [DOI: 10.1145/3272127.3275005](https://doi.org/10.1145/3272127.3275005)
 * **手法の概要**:
   * 広域探索（ブロードフェーズ: 空間ハッシュやBVH走査）と、厳密解決（ナローフェーズ: V-T, E-E, CCD交差判定）を時間軸上でデカップリング。
   * ブロードフェーズで発見された「実際に近接しているペア（Active Collision Pairs）」のみを GPU 上のコンパクトな配列（接触ペアバッファ）にアトミック追加・キャッシュ化。
@@ -86,8 +86,8 @@
 
 ### 4.1 Chebyshev Acceleration (過大緩和による反復収束加速)
 * **代表文献**:
-  * **Wang 2015**: *"A Chebyshev semi-iterative approach for accelerating projective dynamics"* (ACM TOG / SIGGRAPH Asia 2015)
-    * [DOI: 10.1145/2816795.2818073](https://doi.org/10.1145/2816795.2818073)
+  * **Wang 2015**: *"A Chebyshev semi-iterative approach for accelerating projective and position-based dynamics"* (ACM TOG / SIGGRAPH Asia 2015)
+    * [DOI: 10.1145/2816795.2818063](https://doi.org/10.1145/2816795.2818063)
   * **Macklin et al. 2020**: *"Primal/Dual Descent Methods for Dynamics"* (Computer Graphics Forum 2020)
 * **特徴と適用性**:
   * ガウス・ザイデル／ヤコビ型の拘束投影ループにおいて、前イテレーションの変位 $\Delta \mathbf{x}_{k-1}$ に対し、Chebyshev多項式の根に基づく過大緩和係数 $\omega_k \in [1.0, 2.0)$ を適用する半反復法。
@@ -97,7 +97,7 @@
 * **代表文献**:
   * **Kim et al. 2012**: *"Long range attachments - a method to simulate inextensible clothing in computer games"* (ACM SIGGRAPH / Eurographics SCA 2012)
     * [DOI: 10.2312/SCA/SCA12/305-310](https://doi.org/10.2312/SCA/SCA12/305-310)
-  * **Müller et al. 2014**: *"Strain limiting for position based cloth simulation"*
+  * **Müller et al. 2014**: *"Strain Based Dynamics"* (ACM SIGGRAPH / Eurographics SCA 2014)
 * **特徴と適用性**:
   * ピン留め頂点から各布頂点までの測地線距離（布表面に沿った最大許容距離 $D_{\text{geo}}$）を初期化時に事前計算し、サブステップ終端で球体不等式拘束として投影。
   * 高密度メッシュで重力や激しい運動加速度が加わった際、布がゴムのように伸びて垂れ下がる現象を、たった1回のディスパッチで100%確実に防止。
@@ -105,8 +105,7 @@
 ### 4.3 Barrier Potential Contact (平滑バリア接触ポテンシャル)
 * **代表文献**:
   * **Li et al. 2020**: *"Incremental Potential Contact (IPC)"* (ACM TOG / SIGGRAPH 2020)
-    * [DOI: 10.1145/3386569.3392437](https://doi.org/10.1145/3386569.3392437)
-  * **Bailly et al. 2023**: *"Barrier-augmented Position Based Dynamics"* (ACM SIGGRAPH 2023 Posters)
+    * [DOI: 10.1145/3386569.3392425](https://doi.org/10.1145/3386569.3392425)
 * **特徴と適用性**:
   * 離散ステップでの急峻な押し出し変位に代わり、接触境界へ近づくにつれて対数的に反発力が高まる平滑バリア関数をXPBDのコンプライアンス拘束として定式化。
   * 接触面でのビリつき（ジッター）を低減し、シワの折り畳み部分が滑らかに滑り合う接触挙動を実現。
@@ -120,9 +119,9 @@
 | **収束加速** | **Chebyshev過大緩和** | 検討中 (Wang 2015, Macklin 2020) | 反復数を増やさずに布の伸びを約2〜3倍抑制 | ほぼゼロ | ★☆☆☆☆ | **第1位 (即効性・コストゼロ・高剛性)** |
 | **伸び防止** | **Long Range Attachments** | 検討中 (Kim 2012, Müller 2014) | 重力・激しい動きによる垂れ下がりを100%阻止 | 極小（~0.1ms） | ★★☆☆☆ | **第2位 (衣装のシルエット完全維持)** |
 | **接触キャッシュ** | **接触候補ペアキャッシュ** | 検討中 (I-Cloth 2018) | 接近ペアのみをGPUバッファに収集して解く | 極小（ペア数依存） | ★★★☆☆ | **第3位 (自己衝突の更なる高速化)** |
-| **接触平滑** | **Barrier Contact (IPC風)** | 検討中 (Li 2020, Bailly 2023) | 接触ジッター防止・滑らかなシワ滑り | ほぼゼロ | ★★★☆☆ | **第4位 (挟み込みの品質重視)** |
+| **接触平滑** | **Barrier Contact (IPC風)** | 検討中 (Li 2020) | 接触ジッター防止・滑らかなシワ滑り | ほぼゼロ | ★★★☆☆ | **第4位 (挟み込みの品質重視)** |
 | **空間構造** | **GPU Linear BVH (LBVH)** | 検討中 (Karras 2012) | Morton Code階層化・不均一メッシュ対応 | 中（構築数ms） | ★★★★☆ | **第5位 (将来の多重衣装レイヤー時)** |
-| **衝突枝切り** | **離散曲率事前カリング** | **不採用・非推奨** (Provot 1997, Volino 2000) | 平坦領域の衝突探索スキップ | 極小 | ★★☆☆☆ | **❌ 不採用 (スカート等のすり抜け破綻)** |
+| **衝突枝切り** | **離散曲率事前カリング** | **不採用・非推奨** (Provot 1997, Volino 1994) | 平坦領域の衝突探索スキップ | 極小 | ★★☆☆☆ | **❌ 不採用 (スカート等のすり抜け破綻)** |
 | **幾何枝切り** | **Two-Level Bounding Sphere** | **実装済み (フェーズ1)** | 広域外接球による非接触ペア早期枝切り | 内積1回 | ★☆☆☆☆ | **稼働中（精度100%維持・所要時間半減）** |
 | **空間構造** | **Sorted Uniform Grid** | **実装済み (フェーズ2)** | GPU Counting Sortによる完全コアレッシング | 極小（Blelloch Scan） | ★★★☆☆ | **稼働中（精度100%維持・30 FPS達成）** |
 | **時間刻み** | **サブステップ・デカップリング** | **実装済み (フェーズ3)** | 自己衝突ディスパッチ間引きと最終保証 | 削減（~33%短縮） | ★☆☆☆☆ | **稼働中（精度100%維持・41.6 FPS達成）** |

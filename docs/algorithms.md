@@ -32,7 +32,7 @@ $$\Delta \mathbf{x} = M^{-1} \nabla C(\mathbf{x}) \Delta \lambda$$
 
 ### 1.3 並列化手法: 制約グラフ彩色 (Constraint Graph Coloring)
 GPU上で複数スレッドが同一頂点の座標を同時に更新すると、データ競合（Race Condition）により未定義動作や挙動の非決定性が発生します。
-Taremin Cloth では、**Welsh-Powell法（次数降順貪欲彩色: [Welsh & Powell 1967](https://en.wikipedia.org/wiki/Greedy_coloring)）** により拘束グラフを彩色グループ化しています。
+Taremin Cloth では、**Welsh-Powell法（次数降順貪欲彩色: [Welsh & Powell 1967](https://doi.org/10.1093/comjnl/10.1.85)）** により拘束グラフを彩色グループ化しています。
 - 同一色グループに属する拘束同士は頂点を一切共有しないため、GPUアトミック操作なしに**完全並列ディスパッチ**が可能です。
 - 別モードとして、全エッジを一斉評価して頂点ごとに変位平均をアトミック適用する **Atomic Jacobi モード** も実装されており、グラフ彩色ステップ数のオーバーヘッドを回避するオプションを提供しています。
 
@@ -49,7 +49,7 @@ Taremin Cloth では、**Welsh-Powell法（次数降順貪欲彩色: [Welsh & Po
 4. 結果として、重力下でコライダーに接触した布がゴムのようにどこまでも伸びて垂れ下がる（重力下でのコライダー接触検証時に顕著に確認）。
 
 ### 2.2 解決策: 拘束解消反復ループ内への衝突組み込み
-この問題を解決するため、[Macklin et al. 2020 (Primal/Dual Descent Methods for Dynamics)](http://mmacklin.com/primaldual.pdf) の思想に基づき、**拘束解消反復ループの内部で距離拘束とコライダー衝突拘束を交互に同調解決する「Coupled XPBD」** へ刷新しました。
+この問題を解決するため、[Macklin et al. 2020 (Primal/Dual Descent Methods for Dynamics)](https://mmacklin.com/primaldual.pdf) の思想に基づき、**拘束解消反復ループの内部で距離拘束とコライダー衝突拘束を交互に同調解決する「Coupled XPBD」** へ刷新しました。
 
 ```mermaid
 graph TD
@@ -109,7 +109,7 @@ graph TD
   頂点対面（V-T）の判定だけでは、三角形のエッジ同士が交差する「すり抜け（Edge-Edgeトンネリング）」を幾何学的に検知できません。特に薄い布同士やすり抜け角、コライダーの鋭利な角において布が突き抜ける現象を防ぐためにE-E判定が不可欠です。
 
 ### 3.3 連続衝突判定 (CCD: Continuous Collision Detection)
-- **アルゴリズム**: Möller–Trumbore光線交差法（[Möller & Trumbore 1997](https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm)）を拡張した、動的線分・三角形交差判定（`intersect_segment_triangle`）。
+- **アルゴリズム**: Möller–Trumbore光線交差法（[Möller & Trumbore 1997](https://doi.org/10.1080/10867651.1997.10487468)）を拡張した、動的線分・三角形交差判定（`intersect_segment_triangle`）。
 - **選定理由**: 高速に移動する布頂点 $\mathbf{x}_{old} \to \mathbf{p}_{new}$ の軌道線分が三角形を貫通した瞬間（衝突時刻 $t \in [0, 1]$）を検知し、貫通する手前の安全位置 $\mathbf{p}_{safe}$ へ押し戻すことで、離散判定での飛び越え（トンネリング）を検知・抑制します。
 
 ### 3.4 SDF (Signed Distance Field) コライダーの設計
@@ -228,7 +228,7 @@ graph TD
 - **背景と動機**:
   - 自己衝突における最大の計算負荷は、空間ハッシュの構築および全頂点・全隣接セルに対する三角形・エッジの幾何学的網羅探索（Broadphase）です。
   - 通常、布の自己接触候補は急激には変化せず、サブステップ微小時間（$\Delta t / N_{sub}$）内では空間的・トポロジー的に高いコヒーレンス（連続性）を保ちます。
-  - そこで、[Tang et al. 2018 (I-Cloth)](https://doi.org/10.1145/3272127.3275037) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
+  - そこで、[Tang et al. 2018 (I-Cloth)](https://doi.org/10.1145/3272127.3275005) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
 - **実装された設計**:
   1. **フェーズ分離**:
      - **Broadphase (`self_collision_collect_pairs.wgsl`)**: 空間ハッシュを探索し、接近している V-T（頂点-面）ペアおよび E-E（辺-辺）ペアを抽出し、専用のGPUストレージバッファにアトミック追加で記録。
@@ -339,8 +339,8 @@ graph TD
 本プロジェクトの物理計算コアおよび接触アルゴリズムの基礎となっている学術文献です（全URLの実在性を検証済み）：
 
 1. **XPBD (Extended Position Based Dynamics)**
-   - 著者: Miles Macklin, Matthias Müller, Nuttapong Chentanez, Stefan Jeschke
-   - 発表: ACM SIGGRAPH / Eurographics Symposium on Computer Animation (MIG 2016)
+   - 著者: Miles Macklin, Matthias Müller, Nuttapong Chentanez
+   - 発表: International Conference on Motion in Games (MIG 2016)
    - 論文PDF: [https://matthias-research.github.io/pages/publications/XPBD.pdf](https://matthias-research.github.io/pages/publications/XPBD.pdf)
    - DOI: [10.1145/2994258.2994272](https://doi.org/10.1145/2994258.2994272)
 
@@ -353,7 +353,7 @@ graph TD
 3. **Primal/Dual Descent Methods for Dynamics (Coupled XPBDの理論的基礎)**
    - 著者: Miles Macklin, Kenny Erleben, Matthias Müller, Nuttapong Chentanez, Stefan Jeschke, Tae-Yong Kim
    - 発表: Computer Graphics Forum (Eurographics / ACM SIGGRAPH SCA 2020)
-   - 論文PDF: [http://mmacklin.com/primaldual.pdf](http://mmacklin.com/primaldual.pdf)
+   - 論文PDF: [https://mmacklin.com/primaldual.pdf](https://mmacklin.com/primaldual.pdf)
    - DOI: [10.1111/cgf.14104](https://doi.org/10.1111/cgf.14104)
 
 4. **Robust Treatment of Collisions, Contact and Friction for Cloth Animation (V-T / E-E / 接触応答の古典的名著)**
@@ -369,13 +369,14 @@ graph TD
    - DOI: [10.1080/10867651.1997.10487468](https://doi.org/10.1080/10867651.1997.10487468)
 
 6. **Welsh-Powell Greedy Graph Coloring (制約並列彩色)**
+   - 論文名: An upper bound for the chromatic number of a graph and its application to timetabling problems
    - 著者: Dominic J. A. Welsh, Martin B. Powell
    - 発表: The Computer Journal, 1967
    - 解説資料: [Wikipedia: Greedy coloring](https://en.wikipedia.org/wiki/Greedy_coloring)
    - DOI: [10.1093/comjnl/10.1.85](https://doi.org/10.1093/comjnl/10.1.85)
 
 7. **I-Cloth: Incremental Collision Handling for GPU-Based Interactive Cloth Simulation (Active Pair Caching)**
-   - 著者: Min Tang, Tongtong Wang, Zhongyuan Liu, Ruofei Du, Dinesh Manocha
+   - 著者: Min Tang, Tongtong Wang, Zhongyuan Liu, Ruofeng Tong, Dinesh Manocha
    - 発表: ACM Transactions on Graphics (SIGGRAPH Asia 2018)
-   - 論文リンク: [ACM Digital Library](https://doi.org/10.1145/3272127.3275037)
-   - DOI: [10.1145/3272127.3275037](https://doi.org/10.1145/3272127.3275037)
+   - 論文リンク: [ACM Digital Library](https://doi.org/10.1145/3272127.3275005)
+   - DOI: [10.1145/3272127.3275005](https://doi.org/10.1145/3272127.3275005)
