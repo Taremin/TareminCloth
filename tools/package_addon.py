@@ -55,11 +55,78 @@ def find_binary_in_wheel(wheel_path: Path, temp_dir: Path) -> Path:
     raise FileNotFoundError(f"Wheel ({actual_wheel}) 内に taremin_cloth_core のバイナリ (.pyd/.so) が見つかりませんでした。")
 
 
+def find_gui_binary(repo_root: Path, explicit_path: Path | None = None) -> Path | None:
+    """Standalone GUI バイナリ (taremin_cloth_gui[.exe]) を探索する。
+
+    優先順位: 明示指定 > bin/ > target/release/ > target/<triple>/release/ > target/debug/
+    拡張子はプラットフォームに応じて .exe 付き・無しの両方を探す。
+    """
+    if explicit_path is not None:
+        if explicit_path.is_file():
+            return explicit_path
+        raise FileNotFoundError(f"指定された GUI バイナリが見つかりません: {explicit_path}")
+
+    exe_names = ["taremin_cloth_gui.exe", "taremin_cloth_gui"]
+    search_dirs = [repo_root / "bin", repo_root / "target" / "release", repo_root / "target" / "debug"]
+    # cargo build --target <triple> でビルドした場合の出力先も探索
+    target_dir = repo_root / "target"
+    if target_dir.is_dir():
+        for child in sorted(target_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            release_dir = child / "release"
+            if (release_dir / exe_names[0]).is_file() or (release_dir / exe_names[1]).is_file():
+                search_dirs.append(release_dir)
+
+    for d in search_dirs:
+        for name in exe_names:
+            candidate = d / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _write_staged_tree_to_zip(staging_addon_dir: Path, final_zip: Path) -> None:
+    """ステージング内容を zip 化する。bin/ 配下の実行ファイルに Unix 実行権限を付与する。
+
+    shutil.make_archive では zip 内の実行ビットが失われるため、zipfile で
+    直接書き出して bin/* の外部属性に 0o755 を設定する。
+    """
+    addon_top = staging_addon_dir.name
+    with zipfile.ZipFile(final_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for root, dirs, files in os.walk(staging_addon_dir):
+            dirs.sort()
+            root_path = Path(root)
+            rel_root = root_path.relative_to(staging_addon_dir.parent)
+            # ディレクトリエントリ (空ディレクトリ保持のため)
+            dir_info = zipfile.ZipInfo(str(rel_root).replace(os.sep, "/") + "/")
+            dir_info.external_attr = (0o755 << 16) | 0x10
+            z.writestr(dir_info, b"")
+            for fname in sorted(files):
+                fpath = root_path / fname
+                arcname = (rel_root / fname).as_posix()
+                zi = zipfile.ZipInfo.from_file(fpath, arcname=arcname)
+                # bin/ 配下 (GUIバイナリ) は実行可能として記録
+                try:
+                    is_gui_bin = fpath.relative_to(staging_addon_dir).parts[0] == "bin"
+                except (ValueError, IndexError):
+                    is_gui_bin = False
+                if is_gui_bin:
+                    zi.external_attr = (0o755 << 16) | (zi.external_attr & 0xFFFF)
+                # top-level dir prefix check (念のため)
+                if not arcname.startswith(addon_top + "/"):
+                    raise ValueError(f"想定外のアーカイブパスです: {arcname}")
+                with open(fpath, "rb") as f:
+                    z.writestr(zi, f.read())
+
+
 def package_addon(
     repo_root: Path,
     output_zip: Path,
     binary_path: Path | None = None,
     wheel_path: Path | None = None,
+    gui_binary_path: Path | None = None,
+    require_gui: bool = False,
     version: str | None = None,
 ) -> Path:
     """アドオンの zip アーカイブをビルドする"""
@@ -118,20 +185,28 @@ def package_addon(
             if meta_path.exists():
                 shutil.copy2(meta_path, staging_addon_dir / meta_file)
 
-        # 5. 出力先ディレクトリの準備
+        # 5. Standalone GUI バイナリ (taremin_cloth_gui[.exe]) の配置
+        gui_source = find_gui_binary(repo_root, gui_binary_path)
+        if gui_source is not None:
+            gui_dest_dir = staging_addon_dir / "bin"
+            gui_dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(gui_source, gui_dest_dir / gui_source.name)
+            print(f"[*] GUIバイナリ配置: {gui_source} -> bin/{gui_source.name}")
+        elif require_gui:
+            raise FileNotFoundError(
+                "Standalone GUI バイナリが見つかりません (--require-gui)。"
+                "cargo build --release -p cloth_gui を実行してください。"
+            )
+        else:
+            print("[!] 警告: Standalone GUI バイナリが見つかりませんでした。GUI無しでパッケージングします。")
+
+        # 6. 出力先ディレクトリの準備
         output_zip.parent.mkdir(parents=True, exist_ok=True)
 
-        # 6. zip アーカイブの生成
-        base_name = str(output_zip.with_suffix(""))
-        archive_format = "zip"
-        shutil.make_archive(
-            base_name=base_name,
-            format=archive_format,
-            root_dir=tmp_dir,
-            base_dir="taremin_cloth",
-        )
-
+        # 7. zip アーカイブの生成 (bin/ の実行権限を保持するため専用ライターを使用)
         final_zip = output_zip.with_suffix(".zip")
+        _write_staged_tree_to_zip(staging_addon_dir, final_zip)
+
         print(f"[+] アドオンパッケージ作成完了: {final_zip} ({final_zip.stat().st_size:,} bytes)")
         return final_zip
 
@@ -160,6 +235,18 @@ def main():
         help="バイナリ抽出元の Wheel (.whl) ファイルパス",
     )
     parser.add_argument(
+        "--gui-binary",
+        "-g",
+        type=Path,
+        default=None,
+        help="同梱する Standalone GUI バイナリ (taremin_cloth_gui[.exe]) のパス。未指定時は bin/・target/ から自動探索",
+    )
+    parser.add_argument(
+        "--require-gui",
+        action="store_true",
+        help="GUIバイナリが見つからない場合にエラー終了する (リリースCI用)",
+    )
+    parser.add_argument(
         "--version",
         "-v",
         type=str,
@@ -181,6 +268,8 @@ def main():
             output_zip=output_path,
             binary_path=args.binary,
             wheel_path=args.wheel,
+            gui_binary_path=args.gui_binary,
+            require_gui=args.require_gui,
             version=args.version,
         )
     except Exception as e:

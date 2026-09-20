@@ -1,6 +1,6 @@
 """
 taremin_cloth GUI クライアントモジュール
-Taremin Cloth GUI (taremin_cloth_gui.exe) とローカルTCPソケット経由で通信し、
+Taremin Cloth GUI (taremin_cloth_gui[.exe]) とローカルTCPソケット経由で通信し、
 シーン初期化、パラメータ同期、およびノンブロッキングな最新変形座標の取得を行う。
 """
 

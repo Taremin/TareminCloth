@@ -27,13 +27,33 @@ class TestGuiIpc(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # taremin_cloth_gui.exe のパスを解決
-        exe_path = os.path.join(addon_root, "target", "release", "taremin_cloth_gui.exe")
-        if not os.path.isfile(exe_path):
-            exe_path = os.path.join(addon_root, "target", "debug", "taremin_cloth_gui.exe")
+        # Standalone GUI バイナリのパスを解決 (配布レイアウト bin/ → 開発レイアウト target/)
+        import sys
+        exe_suffix = ".exe" if sys.platform == "win32" else ""
+        exe_names = [f"taremin_cloth_gui{exe_suffix}", "taremin_cloth_gui.exe", "taremin_cloth_gui"]
+        search_dirs = [
+            os.path.join(addon_root, "bin"),
+            os.path.join(addon_root, "target", "release"),
+            os.path.join(addon_root, "target", "debug"),
+        ]
+        target_dir = os.path.join(addon_root, "target")
+        if os.path.isdir(target_dir):
+            for child in sorted(os.listdir(target_dir)):
+                search_dirs.append(os.path.join(target_dir, child, "release"))
+        exe_path = None
+        for d in search_dirs:
+            for name in exe_names:
+                candidate = os.path.join(d, name)
+                if os.path.isfile(candidate):
+                    exe_path = candidate
+                    break
+            if exe_path:
+                break
 
-        if not os.path.isfile(exe_path):
-            raise unittest.SkipTest(f"taremin_cloth_gui.exe not found at {exe_path}")
+        if not exe_path:
+            raise unittest.SkipTest(
+                "taremin_cloth_gui binary not found (cargo build --release -p cloth_gui)"
+            )
 
         # ヘッドレスモードでサーバーを起動
         cls.server_process = subprocess.Popen(

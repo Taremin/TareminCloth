@@ -31,16 +31,33 @@ def get_gui_fps_stats():
 
 
 def resolve_gui_binary_path() -> Optional[str]:
-    """taremin_cloth_gui.exe のパスを解決する"""
+    """Standalone GUI バイナリ (taremin_cloth_gui[.exe]) のパスを解決する"""
+    import sys
+
     current_dir = os.path.dirname(os.path.abspath(__file__))
     # ops -> taremin_cloth -> python -> addon_root
     addon_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
 
+    exe_suffix = ".exe" if sys.platform == "win32" else ""
+    exe_name = f"taremin_cloth_gui{exe_suffix}"
+    alt_name = "taremin_cloth_gui.exe" if exe_suffix == "" else "taremin_cloth_gui"
+
     candidates = [
-        os.path.join(addon_root, "target", "release", "taremin_cloth_gui.exe"),
-        os.path.join(addon_root, "target", "debug", "taremin_cloth_gui.exe"),
-        os.path.join(addon_root, "bin", "taremin_cloth_gui.exe"),
+        # 配布zip同梱レイアウト (addon_root/bin/) を最優先
+        os.path.join(addon_root, "bin", exe_name),
+        os.path.join(addon_root, "bin", alt_name),
+        # 開発レイアウト (cargo build 成果物)
+        os.path.join(addon_root, "target", "release", exe_name),
+        os.path.join(addon_root, "target", "release", alt_name),
+        os.path.join(addon_root, "target", "debug", exe_name),
+        os.path.join(addon_root, "target", "debug", alt_name),
     ]
+    # cargo build --target <triple> の出力先も探索
+    target_dir = os.path.join(addon_root, "target")
+    if os.path.isdir(target_dir):
+        for child in sorted(os.listdir(target_dir)):
+            for name in (exe_name, alt_name):
+                candidates.append(os.path.join(target_dir, child, "release", name))
 
     for path in candidates:
         if os.path.isfile(path):
@@ -75,7 +92,7 @@ class TAREMIN_CLOTH_OT_launch_gui(bpy.types.Operator):
 
         exe_path = resolve_gui_binary_path()
         if not exe_path:
-            self.report({'ERROR'}, "taremin_cloth_gui.exe が見つかりません。cargo build --release -p cloth_gui を実行してください。")
+            self.report({'ERROR'}, "Standalone GUIバイナリ (taremin_cloth_gui) が見つかりません。cargo build --release -p cloth_gui を実行してください。")
             return {'CANCELLED'}
 
         client = get_gui_client()

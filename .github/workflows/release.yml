@@ -25,16 +25,19 @@ jobs:
           - os: windows-latest
             platform: windows-x64
             target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
             maturin_args: ""
             manylinux: "off"
           - os: ubuntu-latest
             platform: linux-x64
             target: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
             maturin_args: "--compatibility manylinux2014"
             manylinux: "auto"
           - os: macos-latest
             platform: macos-universal
             target: universal2-apple-darwin
+            rust_targets: x86_64-apple-darwin,aarch64-apple-darwin
             maturin_args: ""
             manylinux: "off"
 
@@ -47,12 +50,38 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
       - name: Build wheel using maturin-action
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist ${{ matrix.maturin_args }}
           manylinux: ${{ matrix.manylinux }}
+
+      - name: Build standalone GUI (cloth_gui)
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "macos-universal" ]; then
+            cargo build --release -p cloth_gui --target x86_64-apple-darwin
+            cargo build --release -p cloth_gui --target aarch64-apple-darwin
+            mkdir -p target/release
+            lipo -create \
+              target/x86_64-apple-darwin/release/taremin_cloth_gui \
+              target/aarch64-apple-darwin/release/taremin_cloth_gui \
+              -output target/release/taremin_cloth_gui
+            echo "GUI_BIN=target/release/taremin_cloth_gui" >> $GITHUB_ENV
+          else
+            cargo build --release -p cloth_gui --target ${{ matrix.target }}
+            GUI_BIN="target/${{ matrix.target }}/release/taremin_cloth_gui"
+            if [ "${{ matrix.platform }}" = "windows-x64" ]; then
+              GUI_BIN="${GUI_BIN}.exe"
+            fi
+            echo "GUI_BIN=$GUI_BIN" >> $GITHUB_ENV
+          fi
 
       - name: Package Blender Addon
         shell: bash
@@ -68,7 +97,7 @@ jobs:
             VERSION="v${VERSION}"
           fi
           OUTPUT_ZIP="dist/taremin_cloth-${VERSION}-${{ matrix.platform }}.zip"
-          python tools/package_addon.py --wheel dist --output "$OUTPUT_ZIP" --version "${VERSION#v}"
+          python tools/package_addon.py --wheel dist --gui-binary "$GUI_BIN" --require-gui --output "$OUTPUT_ZIP" --version "${VERSION#v}"
           echo "ZIP_FILE=$OUTPUT_ZIP" >> $GITHUB_ENV
 
       - name: Upload artifact

@@ -513,6 +513,15 @@ Taremin Cloth GUI は、GPUの計算余力を活かしつつ、目標フレー�
 #### 3. Mailbox プレゼンテーションモード
 - Surface の `present_mode` においてトリプルバッファリング（`Mailbox`）を優先選択し、DWM 垂直同期とアプリ内タイマーの干渉（ビート現象によるフレーム落ち）を防止。
 
+### 6.7 配布パッケージへの同梱 (Release Bundling)
+
+Taremin Cloth GUI 実行バイナリはプラットフォーム別にビルドされ、Blenderアドオン配布zip内に `bin/` として同梱されます（`tools/package_addon.py`、`.github/workflows/release.yml` の `Build standalone GUI` ステップ）。
+
+- **同梱レイアウト**: `taremin_cloth/bin/taremin_cloth_gui[.exe]`（Windowsのみ `.exe`）。Linux/macOS用バイナリは zip 内で Unix 実行権限（`0o755`）付きで記録されます。
+- **解決順序** (`ops/gui.py: resolve_gui_binary_path`): 配布レイアウト `bin/` を最優先し、開発レイアウト（`target/release/`、`target/<triple>/release/`、`target/debug/`）にフォールバックします。拡張子は実行プラットフォームに応じて `.exe` 付き・無しの両方を探索します。
+- **macOS**: `x86_64` + `aarch64` を `lipo` で結合したUniversalバイナリを同梱します。
+- **リリースCI**: パッケージング時に `--require-gui` を付与し、GUIバイナリ欠落をエラーとして検出します（ローカル開発時は警告のみでGUI無しパッケージも許容）。
+
 ---
 
 ## 7. 国際化 (i18n: Internationalization) 設計
