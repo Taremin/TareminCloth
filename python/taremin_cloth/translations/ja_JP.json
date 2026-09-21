@@ -366,7 +366,7 @@
   "Maximum search iterations per cell in GPU spatial hash": "GPU空間ハッシュでの1セルあたりの最大探索反復回数。密集時の貫通・すり抜けを防ぐには大きな値を指定します",
   "Maximum simulation steps advanced per rendered frame (1-8)": "1描画フレームあたりに進める最大シミュレーションステップ数 (1〜8)",
   "Maximum substeps for adaptive stepping (CFL emergency limit)": "適応型ステップにおける最大細分化ステップ数（激突・高速移動時のCFL緊急上限）",
-  "Maximum VRAM budget for mesh SDF texture (MB)": "Mesh SDFテクスチャ用の最大VRAM予算 (MB)",
+  "Maximum VRAM budget for mesh SDF texture (MB). Effective budget is min(user value, device buffer limit)": "Mesh SDFテクスチャ用の最大VRAM予算 (MB)。実効予算は指定値とデバイス上限の小さい方",
   "Measure average edge length and automatically calculate and apply recommended thickness to prevent penetration": "メッシュの平均エッジ長を測定し、貫通を防ぐ推奨の厚みを自動算出・適用します",
   "Mesh": "メッシュ",
   "Mesh (Simple)": "メッシュ (簡易)",

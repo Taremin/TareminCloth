@@ -21,6 +21,18 @@ pub struct GpuDeviceInfo {
     pub driver: String,
 }
 
+/// デバイスのバッファ関連上限値（SDFベイク可否判定・VRAM予算解決用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBufferLimits {
+    /// 単一バッファの最大サイズ (bytes)。`device.limits().max_buffer_size`
+    pub max_buffer_size: u64,
+    /// ストレージバッファ binding の最大サイズ (bytes)。
+    /// `device.limits().max_storage_buffer_binding_size`
+    pub max_storage_buffer_binding_size: u64,
+    /// 3Dテクスチャの最大一辺 (texel)。`device.limits().max_texture_dimension_3d`
+    pub max_texture_dimension_3d: u32,
+}
+
 pub struct GpuContext {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -253,6 +265,21 @@ impl GpuContext {
             backend: format_backend(info.backend),
             device_type: format_device_type(info.device_type),
             driver: info.driver,
+        })
+    }
+
+    /// 現在のデバイスのバッファ関連上限値を取得する。
+    ///
+    /// wgpu のデフォルト下限（`max_buffer_size = 256MiB`）ではなく、
+    /// 初期化済みデバイスの実効値（アダプタ上限まで引き上げ済み）を返す。
+    /// SDFベイク前の事前検証および Python 側の VRAM 予算解決に使用する。
+    pub fn get_device_buffer_limits() -> Result<GpuBufferLimits, GpuContextError> {
+        let ctx = Self::get_or_init()?;
+        let limits = ctx.device.limits();
+        Ok(GpuBufferLimits {
+            max_buffer_size: limits.max_buffer_size,
+            max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size as u64,
+            max_texture_dimension_3d: limits.max_texture_dimension_3d,
         })
     }
 

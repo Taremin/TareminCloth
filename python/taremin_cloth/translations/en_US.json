@@ -366,7 +366,7 @@
   "Maximum search iterations per cell in GPU spatial hash": "Maximum search iterations per cell in GPU spatial hash",
   "Maximum simulation steps advanced per rendered frame (1-8)": "Maximum simulation steps advanced per rendered frame (1-8)",
   "Maximum substeps for adaptive stepping (CFL emergency limit)": "Maximum substeps for adaptive stepping (CFL emergency limit)",
-  "Maximum VRAM budget for mesh SDF texture (MB)": "Maximum VRAM budget for mesh SDF texture (MB)",
+  "Maximum VRAM budget for mesh SDF texture (MB). Effective budget is min(user value, device buffer limit)": "Maximum VRAM budget for mesh SDF texture (MB). Effective budget is min(user value, device buffer limit)",
   "Measure average edge length and automatically calculate and apply recommended thickness to prevent penetration": "Measure average edge length and automatically calculate and apply recommended thickness to prevent penetration",
   "Mesh": "Mesh",
   "Mesh (Simple)": "Mesh (Simple)",

@@ -25,6 +25,73 @@ except ImportError:
     HAS_MATHUTILS_BVH = False
 
 
+# Mesh SDF 用の既定VRAM予算 (MB)。
+# 旧既定値 256 は wgpu のデフォルト下限（最小保証値）に由来する保守値であり、
+# 実デバイス上限（dGPU で 1〜2GB 等、取得可能ならデバイス実効値を使用）ではない。
+# 新規作成時の既定は 1024MB とし、実効予算はデバイス上限との min で解決する。
+DEFAULT_MESH_SDF_MAX_VRAM_MB = 1024
+LEGACY_MESH_SDF_DEFAULT_VRAM_MB = 256
+MIN_MESH_SDF_VRAM_MB = 64
+MAX_MESH_SDF_VRAM_MB = 4096
+# method="auto" が階層ベイクへ切り替える推定反復回数（ボクセル数 x 三角形数）の下限
+MESH_SDF_HIER_AUTO_MIN_ITERS = 2_000_000_000
+
+
+def estimate_mesh_sdf_voxel_dims(
+    mesh_verts: np.ndarray,
+    voxel_size: float,
+    margin: float = 0.02,
+    thickness: float = 0.005,
+) -> Tuple[int, int, int]:
+    """Rust側 mesh_sdf_domain と同一式で直方体解像度 (w, h, d) を推定する。
+    用途はベイク方式の自動選択のみ。float32/float64の丸め差でRust実効値と
+    ±1ボクセルずれる場合があるが、閾値判定には影響しない。
+    """
+    v = np.asarray(mesh_verts, dtype=np.float64)
+    min_pt = v.min(axis=0)
+    max_pt = v.max(axis=0)
+    size = np.maximum(max_pt - min_pt, 0.05)
+    for k in range(3):
+        pad = max(float(size[k]) * float(margin), 0.04) + max(float(thickness), 0.0) + 0.02
+        size[k] = size[k] + pad * 2.0
+    v_size = max(float(voxel_size), 0.001)
+    w = int(np.clip(np.ceil(size[0] / v_size), 8, 2048))
+    h = int(np.clip(np.ceil(size[1] / v_size), 8, 2048))
+    d = int(np.clip(np.ceil(size[2] / v_size), 8, 2048))
+    return w, h, d
+
+
+def get_device_vram_limit_mb() -> Optional[int]:
+    """現在のGPUデバイスにおける単一SDFバッファ上限をMB単位で返す。取得不可時は None。"""
+    try:
+        import taremin_cloth_core
+        fn = getattr(taremin_cloth_core, "get_device_buffer_limits", None)
+        if fn is None:
+            return None
+        limits = fn()
+        max_mb = int(limits.get("max_sdf_mb", 0)) if isinstance(limits, dict) else 0
+        if max_mb >= MIN_MESH_SDF_VRAM_MB:
+            return max_mb
+        return None
+    except Exception:
+        return None
+
+
+def resolve_effective_vram_budget(requested_mb: Optional[int] = None) -> int:
+    """ユーザ要求予算とデバイス実効上限の min を返す。デバイス取得不可時は要求値をそのまま正規化。"""
+    if requested_mb is None:
+        requested_mb = DEFAULT_MESH_SDF_MAX_VRAM_MB
+    try:
+        req = int(requested_mb)
+    except (TypeError, ValueError):
+        req = DEFAULT_MESH_SDF_MAX_VRAM_MB
+    req = max(MIN_MESH_SDF_VRAM_MB, min(MAX_MESH_SDF_VRAM_MB, req))
+    device_mb = get_device_vram_limit_mb()
+    if device_mb is not None:
+        return min(req, max(MIN_MESH_SDF_VRAM_MB, device_mb))
+    return req
+
+
 class MeshSdfBakeResult:
     """単一メッシュ直方体SDFベイク結果のコンテナ"""
     def __init__(
@@ -741,34 +808,95 @@ def get_cache_dir() -> str:
     return cache_dir
 
 
+# 健全性検査のサンプル数（ゼロコピーstrided参照のため高速）
+SDF_INTEGRITY_SAMPLES = 8192
+
+
+def check_sdf_texture_integrity(
+    texture_bytes: Optional[bytes], width: int, height: int, depth: int
+) -> Tuple[bool, str]:
+    """SDFテクスチャバイト列の健全性を検証する。
+
+    TDR等でGPUデバイスが死亡した際にゼロ埋めバッファが正常として返り、
+    全零テクスチャが「正常ベイク」としてキャッシュ汚染される事故を検出する。
+    戻り値: (ok, reason)
+    """
+    expected = int(width) * int(height) * int(depth) * 4
+    actual = len(texture_bytes) if texture_bytes is not None else 0
+    if actual != expected or expected == 0:
+        return False, f"size mismatch ({actual} != {expected})"
+    try:
+        u32 = np.frombuffer(texture_bytes, dtype=np.uint32)
+    except Exception as e:
+        return False, f"buffer view failed: {e}"
+    n_vox = len(u32)
+    step = max(1, n_vox // SDF_INTEGRITY_SAMPLES)
+    sample = u32[::step]
+    dist_half = (sample & 0xFFFF).astype(np.uint32)
+    if len(np.unique(dist_half)) <= 1:
+        return False, f"uniform texture (all dist=0x{int(dist_half[0]):04x})"
+    exp = (dist_half >> 10) & 0x1F
+    mant = dist_half & 0x3FF
+    n_nan = int(np.count_nonzero((exp == 31) & (mant != 0)))
+    if n_nan > 0:
+        return False, f"NaN values detected ({n_nan} samples)"
+    n_inf = int(np.count_nonzero((exp == 31) & (mant == 0)))
+    if n_inf > 0:
+        return False, f"Inf values detected ({n_inf} samples)"
+    return True, "ok"
+
+
 def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
-    """ディスクキャッシュからSDFベイク結果をロードする"""
+    """ディスクキャッシュからSDFベイク結果をロードする。
+    健全性検査に失敗したファイル（全零テクスチャ等の毒キャッシュ）は
+    自己治癒のため削除し、Noneを返す（再ベイクが走る）。
+    """
     cache_path = os.path.join(get_cache_dir(), f"{cache_key}.npz")
     if not os.path.exists(cache_path):
         return None
     try:
-        data = np.load(cache_path, allow_pickle=True)
-        joint_face_indices = data["joint_face_indices"] if "joint_face_indices" in data else np.empty(0, dtype=np.int32)
-        joint_faces_by_pair: Dict[Tuple[str, str], np.ndarray] = {}
-        if "pair_keys" in data and "pair_lens" in data and "pair_data" in data:
-            p_keys = data["pair_keys"]
-            p_lens = data["pair_lens"]
-            p_data = data["pair_data"]
-            offset = 0
-            for k_str, l in zip(p_keys, p_lens):
-                parts = str(k_str).split(":::")
-                if len(parts) == 2:
-                    joint_faces_by_pair[(parts[0], parts[1])] = p_data[offset : offset + l]
-                offset += l
+        # Windowsではnpzハンドルを開いたまま削除できないため、先に全量コピーして閉じる
+        with np.load(cache_path, allow_pickle=True) as data:
+            tex_bytes = data["texture_bytes"].tobytes()
+            w, h, d = int(data["width"]), int(data["height"]), int(data["depth"])
+            bone_infos = np.array(data["bone_infos"])
+            bone_names = list(data["bone_names"])
+            bind_matrices = np.array(data["bind_matrices"])
+            joint_face_indices = (
+                np.array(data["joint_face_indices"])
+                if "joint_face_indices" in data
+                else np.empty(0, dtype=np.int32)
+            )
+            joint_faces_by_pair: Dict[Tuple[str, str], np.ndarray] = {}
+            if "pair_keys" in data and "pair_lens" in data and "pair_data" in data:
+                p_keys = np.array(data["pair_keys"])
+                p_lens = np.array(data["pair_lens"])
+                p_data = np.array(data["pair_data"])
+                offset = 0
+                for k_str, l in zip(p_keys, p_lens):
+                    parts = str(k_str).split(":::")
+                    if len(parts) == 2:
+                        joint_faces_by_pair[(parts[0], parts[1])] = p_data[offset : offset + int(l)].copy()
+                    offset += int(l)
+        ok, reason = check_sdf_texture_integrity(tex_bytes, w, h, d)
+        if not ok:
+            logger.error(
+                f"[SDF Baker] 不正キャッシュを検出・削除します: {cache_path} ({reason})"
+            )
+            try:
+                os.remove(cache_path)
+            except Exception as e:
+                logger.warning(f"[SDF Baker] 不正キャッシュの削除に失敗しました: {e}")
+            return None
 
         return BoneSdfBakeResult(
-            texture_bytes=data["texture_bytes"].tobytes(),
-            width=int(data["width"]),
-            height=int(data["height"]),
-            depth=int(data["depth"]),
-            bone_infos=data["bone_infos"],
-            bone_names=list(data["bone_names"]),
-            bind_matrices=data["bind_matrices"],
+            texture_bytes=tex_bytes,
+            width=w,
+            height=h,
+            depth=d,
+            bone_infos=bone_infos,
+            bone_names=bone_names,
+            bind_matrices=bind_matrices,
             joint_face_indices=joint_face_indices,
             joint_faces_by_pair=joint_faces_by_pair,
         )
@@ -778,7 +906,18 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
 
 
 def save_cached_sdf(cache_key: str, result: BoneSdfBakeResult):
-    """SDFベイク結果をディスクキャッシュに保存する"""
+    """SDFベイク結果をディスクキャッシュに保存する。
+    健全性検査に失敗した結果（全零テクスチャ等）は保存せずERRORログを出す。
+    """
+    ok, reason = check_sdf_texture_integrity(
+        result.texture_bytes, result.width, result.height, result.depth
+    )
+    if not ok:
+        logger.error(
+            f"[SDF Baker] 不正ベイク結果のためキャッシュ保存を拒否します "
+            f"(key={cache_key}, {reason})"
+        )
+        return
     cache_path = os.path.join(get_cache_dir(), f"{cache_key}.npz")
     try:
         pairs = list(result.joint_faces_by_pair.keys())
@@ -1047,7 +1186,18 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         bone_parent_map=bone_parent_map,
     )
 
-    if cache_enabled and result.depth > 0:
+    if result is not None and result.depth > 0:
+        ok, reason = check_sdf_texture_integrity(
+            result.texture_bytes, result.width, result.height, result.depth
+        )
+        if not ok:
+            logger.error(
+                f"[SDF Baker] 不正ベイク結果のため破棄します ({reason})。"
+                "コライダーは未登録のまま続行します"
+            )
+            return None
+
+    if cache_enabled and result is not None and result.depth > 0:
         save_cached_sdf(cache_key, result)
 
     return result
@@ -1061,14 +1211,33 @@ def bake_mesh_sdf_from_data(
     friction: float = 0.5,
     thickness: float = 0.005,
     restitution: float = 0.0,
+    method: str = "auto",
 ) -> Optional[MeshSdfBakeResult]:
     """
-    メッシュ頂点・三角形データからGPUコンピュートシェーダーを用いて単一メッシュSDFをベイクする
+    メッシュ頂点・三角形データからGPUコンピュートシェーダーを用いて単一メッシュSDFをベイクする。
+    method: "auto"（推定反復回数でlegacy/hierarchicalを自動選択）、"legacy"（単一pass総当たり）、
+        "hierarchical"（2パス階層ベイク＋分割dispatch）。
     """
+    if method not in ("auto", "legacy", "hierarchical"):
+        raise ValueError(f"未知のベイク方式: {method!r}")
+    use_hier = method == "hierarchical"
+    if method == "auto":
+        try:
+            w, h, d = estimate_mesh_sdf_voxel_dims(
+                mesh_verts, voxel_size, margin, thickness
+            )
+            est_iters = int(w) * int(h) * int(d) * max(int(np.asarray(mesh_tris).shape[0]), 1)
+            use_hier = est_iters >= MESH_SDF_HIER_AUTO_MIN_ITERS
+        except Exception:
+            use_hier = False
     try:
         import taremin_cloth_core
-        if hasattr(taremin_cloth_core, "bake_mesh_sdf_gpu"):
-            gpu_res = taremin_cloth_core.bake_mesh_sdf_gpu(
+        fn_name = "bake_mesh_sdf_hierarchical_gpu" if use_hier else "bake_mesh_sdf_gpu"
+        fn = getattr(taremin_cloth_core, fn_name, None)
+        if fn is None and use_hier:
+            fn = getattr(taremin_cloth_core, "bake_mesh_sdf_gpu", None)
+        if fn is not None:
+            gpu_res = fn(
                 mesh_verts=mesh_verts.astype(np.float32),
                 mesh_tris=mesh_tris.astype(np.int32),
                 voxel_size=float(voxel_size),
@@ -1102,7 +1271,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     friction = float(getattr(col_settings, "friction", 0.5))
     thickness = float(getattr(col_settings, "thickness", 0.005))
     restitution = float(getattr(col_settings, "restitution", 0.0))
-    max_vram_mb = int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256))
+    max_vram_mb = int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB))
     auto_scale = bool(getattr(col_settings, "mesh_sdf_auto_scale", True))
     cache_enabled = bool(getattr(col_settings, "mesh_sdf_cache_enabled", True))
 
@@ -1187,6 +1356,15 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     elapsed = time.time() - t0
 
     if res:
+        ok, reason = check_sdf_texture_integrity(
+            res.texture_bytes, res.width, res.height, res.depth
+        )
+        if not ok:
+            logger.error(
+                f"[Mesh SDF Baker] 不正ベイク結果のため破棄します: '{obj.name}' "
+                f"({reason})。コライダーは未登録のまま続行します"
+            )
+            return None
         logger.info(
             f"[Mesh SDF Baker] GPUベイク完了: '{obj.name}' "
             f"寸法={res.width}x{res.height}x{res.depth} ({elapsed*1000:.1f}ms)"
@@ -1200,12 +1378,13 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
 def compute_effective_voxel_size(
     size_xyz: np.ndarray,
     requested_voxel_size: float,
-    max_vram_mb: int = 256,
+    max_vram_mb: int = DEFAULT_MESH_SDF_MAX_VRAM_MB,
     auto_scale: bool = True,
 ) -> Tuple[float, bool, float]:
     """
     指定のバウンディングボックスサイズと要求ボクセルサイズに対し、
     最大VRAM予算(MB)を超えない実効ボクセルサイズを計算する。
+    予算はデバイス実効上限（取得可能な場合）との min で解決される。
     戻り値: (effective_voxel_size, is_clamped, raw_vram_mb)
     """
     v_req = max(float(requested_voxel_size), 0.0005)
@@ -1214,7 +1393,7 @@ def compute_effective_voxel_size(
     d = int(np.clip(np.ceil(size_xyz[2] / v_req), 8, 2048))
     raw_vram_mb = (w * h * d * 4) / (1024 * 1024)
 
-    max_mb = max(int(max_vram_mb), 64)
+    max_mb = resolve_effective_vram_budget(max_vram_mb)
     if not auto_scale or raw_vram_mb <= max_mb:
         return v_req, False, raw_vram_mb
 
@@ -1241,7 +1420,7 @@ def estimate_mesh_sdf_info(
     voxel_size: float = 0.004,
     margin: float = 0.02,
     thickness: float = 0.005,
-    max_vram_mb: int = 256,
+    max_vram_mb: int = DEFAULT_MESH_SDF_MAX_VRAM_MB,
     auto_scale: bool = True,
 ) -> Tuple[int, int, int, float, float, bool, float]:
     """

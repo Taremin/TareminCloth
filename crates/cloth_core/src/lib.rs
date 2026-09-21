@@ -7,7 +7,7 @@ pub mod debug_recorder;
 pub mod renderer;
 pub mod sdf_baker;
 
-pub use context::{GpuContext, GpuContextError, GpuDeviceInfo};
+pub use context::{GpuBufferLimits, GpuContext, GpuContextError, GpuDeviceInfo};
 pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams};
 pub use simulation::{DynamicBoneSdfSetup, GpuClothSimulator};
 pub use simulation::types::{GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex};
@@ -17,7 +17,9 @@ pub use renderer::{
     render_scene_to_png_file, RenderOptions, RenderResult, SceneData,
 };
 pub use sdf_baker::{
-    bake_bone_sdf_gpu, bake_mesh_sdf_gpu, BoneInput, GpuBakeMeshParams, GpuBakeMeshTriangle,
-    GpuBakeParams, GpuBakeTriangle, GpuBoneSdfBakeResult, GpuMeshSdfBakeResult,
+    bake_bone_sdf_gpu, bake_mesh_sdf_coarse, bake_mesh_sdf_gpu, bake_mesh_sdf_hierarchical,
+    BoneInput, GpuBakeMeshParams, GpuBakeMeshTriangle, GpuHierFineParams, GpuMeshSdfBakeResult,
+    GpuMeshSdfCoarseResult, GpuBakeParams, GpuBakeTriangle, GpuBoneSdfBakeResult,
+    MESH_SDF_HIER_RATIO, MESH_SDF_HIER_SLAB_LAYERS,
 };
 

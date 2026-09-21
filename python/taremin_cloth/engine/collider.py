@@ -15,6 +15,7 @@ from .sdf_baker import (
     BoneSdfBakeResult,
     MeshSdfBakeResult,
     extract_dynamic_sdf_setup_data,
+    DEFAULT_MESH_SDF_MAX_VRAM_MB,
 )
 
 _collider_cache = {}
@@ -390,7 +391,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 round(getattr(col_settings, "joint_weight_threshold", 0.85), 2),
                 round(getattr(col_settings, "mesh_sdf_voxel_size", 0.004), 4),
                 round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
-                int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256)),
+                int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                 bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
             ))
 
@@ -564,7 +565,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     round(float(getattr(col_settings, "thickness", 0.005)), 5),
                     round(float(getattr(col_settings, "friction", 0.5)), 3),
                     round(float(getattr(col_settings, "restitution", 0.0)), 3),
-                    int(getattr(col_settings, "mesh_sdf_max_vram_mb", 256)),
+                    int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                     bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
                 )
                 needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_mesh_sig)

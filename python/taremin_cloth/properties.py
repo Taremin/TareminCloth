@@ -959,8 +959,8 @@ class TareminClothColliderSettings(PropertyGroup):
     )
     mesh_sdf_max_vram_mb: IntProperty(
         name="Max VRAM (MB)",
-        description="Maximum VRAM budget for mesh SDF texture (MB)",
-        default=256,
+        description="Maximum VRAM budget for mesh SDF texture (MB). Effective budget is min(user value, device buffer limit)",
+        default=1024,
         min=64,
         max=4096,
         step=64,

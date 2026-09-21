@@ -85,6 +85,41 @@ pub struct GpuMeshSdfBakeResult {
     pub bone_info: [f32; 20],
 }
 
+/// 階層ベイクの粗密比 (H = RATIO * h)。整数比固定で親対応を一意にする。
+/// 実メッシュ検証で粗セルより小さい突起（指先等）がtop-Kから脱落したため 8 -> 4。
+pub const MESH_SDF_HIER_RATIO: u32 = 4;
+/// 階層ベイク Pass2 の1回あたり最大レイヤー数 (Windows TDR回避用にsubmitを分割)
+pub const MESH_SDF_HIER_SLAB_LAYERS: u32 = 64;
+
+/// 階層ベイク Pass2 用パラメータ（アライメント: 16バイト境界、サイズ: 32バイト）
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct GpuHierFineParams {
+    pub coarse_w: u32,
+    pub coarse_h: u32,
+    pub coarse_d: u32,
+    pub band: f32,
+    pub z_offset: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+}
+
+/// 階層ベイク Pass1 (粗グリッド) の結果
+pub struct GpuMeshSdfCoarseResult {
+    /// 粗セル毎の符号付き距離 (Rg16Floatパック u32、Z -> Y -> X)
+    pub dist_packed: Vec<u32>,
+    /// 粗セル毎の上位8近傍三角形インデックス (ストライド配置 [flat * 8 + k])
+    pub nearest_tri: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    /// 粗セル幅 (= 要求ボクセル幅 x MESH_SDF_HIER_RATIO)
+    pub coarse_voxel: f32,
+    /// 20要素パラメータ (Pass2のドメイン共有用、legacyと同一式)
+    pub bone_info: [f32; 20],
+}
+
 /// ベイク結果
 pub struct GpuBoneSdfBakeResult {
     /// Rg16Float (Z -> Y -> X -> [dist, alpha]) の生バイト列
@@ -546,20 +581,14 @@ pub fn bake_bone_sdf_gpu(
 }
 
 /// GPUコンピュートシェーダーを用いた単一メッシュ直方体SDFベイクの実行
-pub fn bake_mesh_sdf_gpu(
+/// メッシュSDF用ドメイン（パディング付きAABBと直方体解像度）の算出。
+/// legacy単一passと階層passで共有する。戻り値: (min_pt, max_pt, size, w, h, d)
+fn mesh_sdf_domain(
     mesh_verts: &[[f32; 3]],
-    mesh_tris: &[[i32; 3]],
     voxel_size: f32,
     margin: f32,
-    friction: f32,
     thickness: f32,
-    restitution: f32,
-) -> Result<GpuMeshSdfBakeResult, String> {
-    if mesh_verts.is_empty() {
-        return Err("メッシュ頂点が空です".to_string());
-    }
-
-    // 1. メッシュ全体のローカルAABB算出
+) -> ([f32; 3], [f32; 3], [f32; 3], u32, u32, u32) {
     let mut min_pt = [f32::INFINITY; 3];
     let mut max_pt = [f32::NEG_INFINITY; 3];
 
@@ -584,7 +613,7 @@ pub fn bake_mesh_sdf_gpu(
         size[k] = max_pt[k] - min_pt[k];
     }
 
-    // 2. 直方体解像度 (width, height, depth) の算出 (8〜2048クランプ)
+    // 直方体解像度 (width, height, depth) の算出 (8〜2048クランプ)
     let v_size = voxel_size.max(0.001);
     let raw_w = (size[0] / v_size).ceil() as usize;
     let raw_h = (size[1] / v_size).ceil() as usize;
@@ -594,6 +623,20 @@ pub fn bake_mesh_sdf_gpu(
     let height = raw_h.clamp(8, 2048) as u32;
     let depth = raw_d.clamp(8, 2048) as u32;
 
+    (min_pt, max_pt, size, width, height, depth)
+}
+
+/// メッシュSDF用20要素ボーンパラメータの構築 (legacyと同一式)
+#[allow(clippy::too_many_arguments)]
+fn mesh_sdf_bone_info(
+    min_pt: [f32; 3],
+    max_pt: [f32; 3],
+    size: [f32; 3],
+    width: u32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> [f32; 20] {
     // UVW スケール & オフセット
     let uvw_scale = [1.0 / size[0], 1.0 / size[1], 1.0 / size[2], 0.0];
     let uvw_offset = [
@@ -615,8 +658,14 @@ pub fn bake_mesh_sdf_gpu(
     bone_info[17] = thickness;
     bone_info[18] = restitution;
     bone_info[19] = 0.0;
+    bone_info
+}
 
-    // 3. 三角形データの収集
+/// メッシュSDF用ベイク三角形列の収集 (空時はダミー1件。legacyと同一)
+fn collect_mesh_bake_triangles(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+) -> Vec<GpuBakeMeshTriangle> {
     let mut bake_triangles = Vec::with_capacity(mesh_tris.len());
     for tri in mesh_tris {
         let i0 = tri[0] as usize;
@@ -658,6 +707,56 @@ pub fn bake_mesh_sdf_gpu(
             _pad3: 0.0,
         });
     }
+    bake_triangles
+}
+
+/// ステージングバッファ (MAP_READ) の全内容をホストへ読み出す
+fn read_staging_to_vec(
+    device: &wgpu::Device,
+    staging: &wgpu::Buffer,
+) -> Result<Vec<u8>, String> {
+    let buffer_slice = staging.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+
+    device.poll(wgpu::Maintain::Wait);
+
+    receiver
+        .recv()
+        .map_err(|e| format!("マップ通知受信エラー: {e}"))?
+        .map_err(|e| format!("ステージングバッファのマップ失敗: {e}"))?;
+
+    let out = {
+        let view = buffer_slice.get_mapped_range();
+        view.to_vec()
+    };
+    staging.unmap();
+    Ok(out)
+}
+
+pub fn bake_mesh_sdf_gpu(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> Result<GpuMeshSdfBakeResult, String> {
+    if mesh_verts.is_empty() {
+        return Err("メッシュ頂点が空です".to_string());
+    }
+
+    // 1-2. ドメイン算出と20要素パラメータ構築 (共有ヘルパー。式は従来通り)
+    let (min_pt, max_pt, size, width, height, depth) =
+        mesh_sdf_domain(mesh_verts, voxel_size, margin, thickness);
+    let bone_info =
+        mesh_sdf_bone_info(min_pt, max_pt, size, width, friction, thickness, restitution);
+
+    // 3. 三角形データの収集 (共有ヘルパー。式は従来通り)
+    let bake_triangles = collect_mesh_bake_triangles(mesh_verts, mesh_tris);
 
     let bake_params = GpuBakeMeshParams {
         local_min: min_pt,
@@ -823,24 +922,488 @@ pub fn bake_mesh_sdf_gpu(
     encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_bytes);
     queue.submit(Some(encoder.finish()));
 
-    let buffer_slice = staging_buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
+    let texture_bytes = read_staging_to_vec(device, &staging_buffer)?;
+
+    Ok(GpuMeshSdfBakeResult {
+        texture_bytes,
+        width,
+        height,
+        depth,
+        bone_info,
+    })
+}
+
+/// 階層ベイク Pass1: 粗グリッドベイク。
+/// 粗セル幅 H = 要求ボクセル幅 x MESH_SDF_HIER_RATIO（整数比固定）。
+/// 各粗セルに符号付き距離と最近傍三角形インデックスを格納する。
+pub fn bake_mesh_sdf_coarse(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> Result<GpuMeshSdfCoarseResult, String> {
+    if mesh_verts.is_empty() {
+        return Err("メッシュ頂点が空です".to_string());
+    }
+
+    let coarse_voxel = (voxel_size * MESH_SDF_HIER_RATIO as f32).max(0.001);
+    let (min_pt, max_pt, size, width, height, depth) =
+        mesh_sdf_domain(mesh_verts, coarse_voxel, margin, thickness);
+    let bone_info =
+        mesh_sdf_bone_info(min_pt, max_pt, size, width, friction, thickness, restitution);
+    let bake_triangles = collect_mesh_bake_triangles(mesh_verts, mesh_tris);
+
+    let bake_params = GpuBakeMeshParams {
+        local_min: min_pt,
+        tri_count: bake_triangles.len() as u32,
+        local_max: max_pt,
+        row_pitch: 0,
+        width,
+        height,
+        depth,
+        _pad0: 0,
+    };
+
+    // GPUパイプラインの構築と実行
+    let ctx = GpuContext::get_or_init().map_err(|e| format!("GPU初期化失敗: {e}"))?;
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+
+    let source = format!(
+        "{}\n{}",
+        include_str!("shaders/bake_mesh_sdf_hier_common.wgsl"),
+        include_str!("shaders/bake_mesh_sdf_hier_coarse_main.wgsl"),
+    );
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("TareminCloth Mesh SDF Hierarchical Coarse Shader"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
     });
 
-    device.poll(wgpu::Maintain::Wait);
-
-    receiver
-        .recv()
-        .map_err(|e| format!("マップ通知受信エラー: {e}"))?
-        .map_err(|e| format!("ステージングバッファのマップ失敗: {e}"))?;
-
-    let texture_bytes = {
-        let view = buffer_slice.get_mapped_range();
-        view.to_vec()
+    let storage_rw = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: false },
+        has_dynamic_offset: false,
+        min_binding_size: None,
     };
-    staging_buffer.unmap();
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Mesh SDF Coarse BGL"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: storage_rw,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: storage_rw,
+                count: None,
+            },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Mesh SDF Coarse Pipeline Layout"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+
+    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Mesh SDF Coarse Compute Pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF Coarse Params Buffer"),
+        size: std::mem::size_of::<GpuBakeMeshParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&params_buffer, 0, bytemuck::bytes_of(&bake_params));
+
+    let triangles_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF Coarse Triangles Buffer"),
+        size: (std::mem::size_of::<GpuBakeMeshTriangle>() * bake_triangles.len()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&triangles_buffer, 0, bytemuck::cast_slice(&bake_triangles));
+
+    let total_voxels = width * height * depth;
+    let output_bytes = (total_voxels * 4) as u64;
+
+    // GPU制限チェック (legacyと同一式。tri出力は8倍)
+    let max_buf_size = device.limits().max_buffer_size;
+    let max_storage_size = device.limits().max_storage_buffer_binding_size as u64;
+    if output_bytes * 8 > max_buf_size || output_bytes * 8 > max_storage_size {
+        let req_mb = (output_bytes * 8) / (1024 * 1024);
+        let max_mb = max_buf_size.min(max_storage_size) / (1024 * 1024);
+        return Err(format!(
+            "Mesh SDF粗グリッド ({}x{}x{}, 必要容量: 約{}MB) がGPUのバッファ上限 ({}MB) を超えています。ボクセルサイズを大きくしてください。",
+            width, height, depth, req_mb, max_mb
+        ));
+    }
+
+    let max_3d_dim = device.limits().max_texture_dimension_3d;
+    if width > max_3d_dim || height > max_3d_dim || depth > max_3d_dim {
+        return Err(format!(
+            "Mesh SDF粗グリッド寸法 ({}x{}x{}) がGPUの3Dテクスチャ最大解像度 ({}) を超えています。ボクセルサイズを大きくしてください。",
+            width, height, depth, max_3d_dim
+        ));
+    }
+
+    let dist_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF Coarse Dist Buffer"),
+        size: output_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let tri_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF Coarse TriIdx Buffer"),
+        size: output_bytes * 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let dist_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF Coarse Dist Staging"),
+        size: output_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let tri_staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF Coarse TriIdx Staging"),
+        size: output_bytes * 8,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Mesh SDF Coarse BindGroup"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: triangles_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: dist_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: tri_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Mesh SDF Coarse Encoder"),
+    });
+
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Mesh SDF Coarse Pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&compute_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups((width + 3) / 4, (height + 3) / 4, (depth + 3) / 4);
+    }
+
+    encoder.copy_buffer_to_buffer(&dist_buffer, 0, &dist_staging, 0, output_bytes);
+    encoder.copy_buffer_to_buffer(&tri_buffer, 0, &tri_staging, 0, output_bytes * 8);
+    queue.submit(Some(encoder.finish()));
+
+    let dist_bytes = read_staging_to_vec(device, &dist_staging)?;
+    let tri_bytes = read_staging_to_vec(device, &tri_staging)?;
+
+    let dist_packed: Vec<u32> = dist_bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let nearest_tri: Vec<u32> = tri_bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    Ok(GpuMeshSdfCoarseResult {
+        dist_packed,
+        nearest_tri,
+        width,
+        height,
+        depth,
+        coarse_voxel,
+        bone_info,
+    })
+}
+
+/// 階層ベイク Pass1+Pass2 一括実行。戻り値形式はlegacyと同一のため差し替え可能。
+/// - Pass1: 粗グリッド総当たり（距離＋最近傍三角形index）
+/// - Pass2: 遠方セルは粗値転写、近傍セルのみ27→125候補exact計算＋AABB早期棄却
+/// - Pass2のdispatchはZスラブ毎にsubmit＋pollし、Windows TDRを回避する
+pub fn bake_mesh_sdf_hierarchical(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> Result<GpuMeshSdfBakeResult, String> {
+    if mesh_verts.is_empty() {
+        return Err("メッシュ頂点が空です".to_string());
+    }
+
+    // 密ドメイン (legacyと同一式 → 同一dims・同一ドメイン)
+    let (min_pt, max_pt, size, width, height, depth) =
+        mesh_sdf_domain(mesh_verts, voxel_size, margin, thickness);
+    let bone_info =
+        mesh_sdf_bone_info(min_pt, max_pt, size, width, friction, thickness, restitution);
+    let bake_triangles = collect_mesh_bake_triangles(mesh_verts, mesh_tris);
+
+    // Pass1: 粗グリッド
+    let coarse =
+        bake_mesh_sdf_coarse(mesh_verts, mesh_tris, voxel_size, margin, friction, thickness, restitution)?;
+
+    // 近傍band = 4 x 密ボクセル幅（最大軸）。ステンシル半径r=1ではband<=H_effが条件だが、
+    // Pass2はr=2（125セル）のため余裕を持つ。粗実効幅の下限検証のみ行う。
+    let h_fine = (size[0] / width as f32)
+        .max(size[1] / height as f32)
+        .max(size[2] / depth as f32);
+    let band = 4.0 * h_fine;
+    let h_coarse_min = (size[0] / coarse.width as f32)
+        .min(size[1] / coarse.height as f32)
+        .min(size[2] / coarse.depth as f32);
+    if band > 2.0 * h_coarse_min {
+        return Err(format!(
+            "階層ベイクのband幅 ({:.4}m) が粗セル幅 ({:.4}m) に対して大きすぎます",
+            band, h_coarse_min
+        ));
+    }
+
+    let ctx = GpuContext::get_or_init().map_err(|e| format!("GPU初期化失敗: {e}"))?;
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+
+    let source = format!(
+        "{}\n{}",
+        include_str!("shaders/bake_mesh_sdf_hier_common.wgsl"),
+        include_str!("shaders/bake_mesh_sdf_hier_fine_main.wgsl"),
+    );
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("TareminCloth Mesh SDF Hierarchical Fine Shader"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+
+    let uniform_ty = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let ro_ty = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let rw_ty = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: false },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Mesh SDF HierFine BGL"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: uniform_ty, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: ro_ty, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: ro_ty, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: ro_ty, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: uniform_ty, count: None },
+            wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: rw_ty, count: None },
+        ],
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Mesh SDF HierFine Pipeline Layout"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+
+    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Mesh SDF HierFine Compute Pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    let bake_params = GpuBakeMeshParams {
+        local_min: min_pt,
+        tri_count: bake_triangles.len() as u32,
+        local_max: max_pt,
+        row_pitch: 0,
+        width,
+        height,
+        depth,
+        _pad0: 0,
+    };
+    let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine Params Buffer"),
+        size: std::mem::size_of::<GpuBakeMeshParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&params_buffer, 0, bytemuck::bytes_of(&bake_params));
+
+    let triangles_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine Triangles Buffer"),
+        size: (std::mem::size_of::<GpuBakeMeshTriangle>() * bake_triangles.len()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&triangles_buffer, 0, bytemuck::cast_slice(&bake_triangles));
+
+    let coarse_dist_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine CoarseDist Buffer"),
+        size: (coarse.dist_packed.len() * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&coarse_dist_buffer, 0, bytemuck::cast_slice(&coarse.dist_packed));
+    let coarse_tri_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine CoarseTri Buffer"),
+        size: (coarse.nearest_tri.len() * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&coarse_tri_buffer, 0, bytemuck::cast_slice(&coarse.nearest_tri));
+
+    let hier_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine HierParams Buffer"),
+        size: std::mem::size_of::<GpuHierFineParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let total_voxels = width * height * depth;
+    let output_bytes = (total_voxels * 4) as u64;
+
+    // GPU制限チェック (legacyと同一式)
+    let max_buf_size = device.limits().max_buffer_size;
+    let max_storage_size = device.limits().max_storage_buffer_binding_size as u64;
+    if output_bytes > max_buf_size || output_bytes > max_storage_size {
+        let req_mb = output_bytes / (1024 * 1024);
+        let max_mb = max_buf_size.min(max_storage_size) / (1024 * 1024);
+        return Err(format!(
+            "Mesh SDF解像度 ({}x{}x{}, 必要容量: 約{}MB) がGPUのバッファ上限 ({}MB) を超えています。ボクセルサイズを大きくしてください。",
+            width, height, depth, req_mb, max_mb
+        ));
+    }
+    let max_3d_dim = device.limits().max_texture_dimension_3d;
+    if width > max_3d_dim || height > max_3d_dim || depth > max_3d_dim {
+        return Err(format!(
+            "Mesh SDF寸法 ({}x{}x{}) がGPUの3Dテクスチャ最大解像度 ({}) を超えています。ボクセルサイズを大きくしてください。",
+            width, height, depth, max_3d_dim
+        ));
+    }
+
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine Output Buffer"),
+        size: output_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Mesh SDF HierFine Staging Buffer"),
+        size: output_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Mesh SDF HierFine BindGroup"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: triangles_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: coarse_dist_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: coarse_tri_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: hier_params_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: output_buffer.as_entire_binding() },
+        ],
+    });
+
+    // Zスラブ毎にsubmit＋pollし、長時間単一dispatchによるTDRを回避する
+    let mut z0 = 0u32;
+    while z0 < depth {
+        let slab = (depth - z0).min(MESH_SDF_HIER_SLAB_LAYERS);
+        let hp = GpuHierFineParams {
+            coarse_w: coarse.width,
+            coarse_h: coarse.height,
+            coarse_d: coarse.depth,
+            band,
+            z_offset: z0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        queue.write_buffer(&hier_params_buffer, 0, bytemuck::bytes_of(&hp));
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Mesh SDF HierFine Encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Mesh SDF HierFine Pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&compute_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups((width + 3) / 4, (height + 3) / 4, (slab + 3) / 4);
+        }
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+        z0 += slab;
+    }
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Mesh SDF HierFine Readback Encoder"),
+    });
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_bytes);
+    queue.submit(Some(encoder.finish()));
+
+    let texture_bytes = read_staging_to_vec(device, &staging_buffer)?;
 
     Ok(GpuMeshSdfBakeResult {
         texture_bytes,
@@ -964,5 +1527,143 @@ mod tests {
         assert_eq!(result.bone_info[3], 0.0);
         assert_eq!(result.bone_info[16], 0.5); // friction
         assert_eq!(result.bone_info[17], 0.01); // thickness
+    }
+
+    #[test]
+    fn test_gpu_mesh_sdf_coarse_cube() {
+        if GpuContext::get_or_init().is_err() {
+            println!("GPUが利用できない環境のためスキップします");
+            return;
+        }
+
+        // 単位立方体メッシュ (8頂点, 12三角形)
+        let verts = vec![
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+        ];
+
+        let tris = vec![
+            [0, 2, 1], [0, 3, 2], // -Z
+            [4, 5, 6], [4, 6, 7], // +Z
+            [0, 1, 5], [0, 5, 4], // -Y
+            [2, 3, 7], [2, 7, 6], // +Y
+            [0, 4, 7], [0, 7, 3], // -X
+            [1, 2, 6], [1, 6, 5], // +X
+        ];
+
+        let res = bake_mesh_sdf_coarse(
+            &verts,
+            &tris,
+            0.05, // voxel_size (5cm) -> 粗セル幅 0.4m
+            0.2,  // margin (20%)
+            0.5,  // friction
+            0.01, // thickness
+            0.0,  // restitution
+        );
+
+        assert!(res.is_ok(), "粗グリッドベイクが成功すること: {:?}", res.err());
+        let result = res.unwrap();
+        // ドメイン 1.46m / 0.4m -> ceil 4 -> 最小クランプ 8
+        assert_eq!((result.width, result.height, result.depth), (8, 8, 8));
+        assert!((result.coarse_voxel - 0.2).abs() < 1e-6);
+        assert_eq!(result.dist_packed.len(), 512);
+        assert_eq!(result.nearest_tri.len(), 512 * 8);
+
+        // 全インデックスが三角形数未満であること
+        assert!(result.nearest_tri.iter().all(|&i| i < 12));
+        // top-1列はソート済み（各セル先頭が最小距離の三角形）であること:
+        // 各セル先頭4件のうち先頭が他3件以下の距離であることはシェーダ不変条件。
+        // ここでは件数と範囲のみ検証し、距離順は階層等価テストで検証する。
+
+        // 符号チェック (pack2x16float下位halfの符号ビット = u32 bit15)
+        let flat = |x: u32, y: u32, z: u32| ((z * 8 + y) * 8 + x) as usize;
+        let is_neg = |v: u32| (v & 0x8000) != 0;
+        // 角セル (0,0,0): 立方体外 -> 正
+        assert!(!is_neg(result.dist_packed[flat(0, 0, 0)]));
+        // 中央セル (4,4,4): 立方体内 -> 負
+        assert!(is_neg(result.dist_packed[flat(4, 4, 4)]));
+    }
+
+    #[test]
+    fn test_gpu_mesh_sdf_hierarchical_matches_legacy() {
+        if GpuContext::get_or_init().is_err() {
+            println!("GPUが利用できない環境のためスキップします");
+            return;
+        }
+
+        // 単位立方体メッシュ (8頂点, 12三角形)
+        let verts = vec![
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+        ];
+
+        let tris = vec![
+            [0, 2, 1], [0, 3, 2], // -Z
+            [4, 5, 6], [4, 6, 7], // +Z
+            [0, 1, 5], [0, 5, 4], // -Y
+            [2, 3, 7], [2, 7, 6], // +Y
+            [0, 4, 7], [0, 7, 3], // -X
+            [1, 2, 6], [1, 6, 5], // +X
+        ];
+
+        let legacy = bake_mesh_sdf_gpu(&verts, &tris, 0.05, 0.2, 0.5, 0.01, 0.0)
+            .expect("legacyベイクが成功すること");
+        let hier = bake_mesh_sdf_hierarchical(&verts, &tris, 0.05, 0.2, 0.5, 0.01, 0.0)
+            .expect("階層ベイクが成功すること");
+
+        assert_eq!((hier.width, hier.height, hier.depth), (legacy.width, legacy.height, legacy.depth));
+        assert_eq!(hier.texture_bytes.len(), legacy.texture_bytes.len());
+
+        let decode = |b: &[u8]| -> Vec<f32> {
+            b.chunks_exact(4)
+                .map(|c| {
+                    let packed = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    half::f16::from_bits((packed & 0xFFFF) as u16).to_f32()
+                })
+                .collect()
+        };
+        let legacy_packed: Vec<u32> = legacy.texture_bytes.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let hier_packed: Vec<u32> = hier.texture_bytes.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let legacy_d = decode(&legacy.texture_bytes);
+        let hier_d = decode(&hier.texture_bytes);
+
+        // 近傍 (|d| <= band約0.20: 4 x 密ボクセル幅0.049＋余裕) はbit等価を要求
+        // 遠方は符号一致＋差分上限（粗半対角約0.16＋f16量子化）を要求
+        let mut near_mismatch = 0;
+        let mut far_sign_mismatch = 0;
+        let mut far_max_diff: f32 = 0.0;
+        for i in 0..legacy_d.len() {
+            if legacy_d[i].abs() <= 0.21 {
+                if legacy_packed[i] != hier_packed[i] {
+                    near_mismatch += 1;
+                }
+            } else {
+                if (legacy_d[i] < 0.0) != (hier_d[i] < 0.0) {
+                    far_sign_mismatch += 1;
+                }
+                far_max_diff = far_max_diff.max((legacy_d[i] - hier_d[i]).abs());
+            }
+        }
+        println!(
+            "hier-vs-legacy: voxels={} near_mismatch={} far_sign_mismatch={} far_max_diff={:.4}",
+            legacy_d.len(), near_mismatch, far_sign_mismatch, far_max_diff
+        );
+        assert_eq!(near_mismatch, 0, "近傍場はbit等価であること");
+        assert_eq!(far_sign_mismatch, 0, "遠方場の符号は一致すること");
+        assert!(far_max_diff <= 0.18, "遠方場の差分は粗半対角以下であること");
     }
 }

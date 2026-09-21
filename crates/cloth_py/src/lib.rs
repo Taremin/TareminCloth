@@ -4,6 +4,7 @@ use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
     bake_bone_sdf_gpu as core_bake_bone_sdf_gpu,
     bake_mesh_sdf_gpu as core_bake_mesh_sdf_gpu,
+    bake_mesh_sdf_hierarchical as core_bake_mesh_sdf_hierarchical,
     BoneInput, ClothMesh, DynamicBoneSdfSetup,
     GpuBakeParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuClothSimulator,
     GpuContext, GpuMeshTriangle, GpuSkinningVertex,
@@ -74,6 +75,28 @@ fn get_current_gpu_device<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> 
     dict.set_item("backend", dev.backend)?;
     dict.set_item("device_type", dev.device_type)?;
     dict.set_item("driver", dev.driver)?;
+    Ok(dict)
+}
+
+/// 現在のデバイスのバッファ関連上限値を取得する。
+/// wgpu デフォルト下限（256MiB）ではなく実効値（アダプタ上限）を返す。
+/// 戻り値: {"max_buffer_size": int (bytes), "max_storage_buffer_binding_size": int (bytes),
+///          "max_texture_dimension_3d": int, "max_sdf_bytes": int (bytes), "max_sdf_mb": int (MB)}
+#[pyfunction]
+fn get_device_buffer_limits<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    let lim = GpuContext::get_device_buffer_limits().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("GPUバッファ上限の取得に失敗しました: {e}"))
+    })?;
+    let max_sdf_bytes = lim.max_buffer_size.min(lim.max_storage_buffer_binding_size);
+    let dict = PyDict::new(py);
+    dict.set_item("max_buffer_size", lim.max_buffer_size)?;
+    dict.set_item(
+        "max_storage_buffer_binding_size",
+        lim.max_storage_buffer_binding_size,
+    )?;
+    dict.set_item("max_texture_dimension_3d", lim.max_texture_dimension_3d)?;
+    dict.set_item("max_sdf_bytes", max_sdf_bytes)?;
+    dict.set_item("max_sdf_mb", max_sdf_bytes / (1024 * 1024))?;
     Ok(dict)
 }
 
@@ -627,6 +650,130 @@ fn bake_mesh_sdf_gpu<'py>(
 
     let py_bone_info = PyArray1::from_slice(py, &res.bone_info);
     dict.set_item("bone_info", py_bone_info)?;
+
+    Ok(dict)
+}
+
+/// 階層メッシュSDFベイク (Pass1粗グリッド + Pass2密グリッド)。
+/// 戻り形式は bake_mesh_sdf_gpu と同一。大規模グリッド向け。
+#[pyfunction]
+#[pyo3(signature = (
+    mesh_verts,
+    mesh_tris,
+    voxel_size=0.004,
+    margin=0.02,
+    friction=0.5,
+    thickness=0.005,
+    restitution=0.0
+))]
+fn bake_mesh_sdf_hierarchical_gpu<'py>(
+    py: Python<'py>,
+    mesh_verts: PyReadonlyArray2<f32>,
+    mesh_tris: PyReadonlyArray2<i32>,
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let verts_view = mesh_verts.as_array();
+    let n_verts = verts_view.shape()[0];
+    let mut verts_vec = Vec::with_capacity(n_verts);
+    for row in verts_view.outer_iter() {
+        if row.len() >= 3 {
+            verts_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let tris_view = mesh_tris.as_array();
+    let n_tris = tris_view.shape()[0];
+    let mut tris_vec = Vec::with_capacity(n_tris);
+    for row in tris_view.outer_iter() {
+        if row.len() >= 3 {
+            tris_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let res = core_bake_mesh_sdf_hierarchical(
+        &verts_vec,
+        &tris_vec,
+        voxel_size,
+        margin,
+        friction,
+        thickness,
+        restitution,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU階層Mesh SDFベイク失敗: {e}")))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("texture_bytes", PyBytes::new(py, &res.texture_bytes))?;
+    dict.set_item("width", res.width)?;
+    dict.set_item("height", res.height)?;
+    dict.set_item("depth", res.depth)?;
+
+    let py_bone_info = PyArray1::from_slice(py, &res.bone_info);
+    dict.set_item("bone_info", py_bone_info)?;
+
+    Ok(dict)
+}
+
+/// 階層ベイク Pass1 (粗グリッド) の診断用公開。距離パック列と最近傍三角形列を返す。
+#[pyfunction]
+#[pyo3(signature = (
+    mesh_verts,
+    mesh_tris,
+    voxel_size=0.004,
+    margin=0.02,
+    friction=0.5,
+    thickness=0.005,
+    restitution=0.0
+))]
+fn bake_mesh_sdf_coarse_gpu<'py>(
+    py: Python<'py>,
+    mesh_verts: PyReadonlyArray2<f32>,
+    mesh_tris: PyReadonlyArray2<i32>,
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let verts_view = mesh_verts.as_array();
+    let n_verts = verts_view.shape()[0];
+    let mut verts_vec = Vec::with_capacity(n_verts);
+    for row in verts_view.outer_iter() {
+        if row.len() >= 3 {
+            verts_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let tris_view = mesh_tris.as_array();
+    let n_tris = tris_view.shape()[0];
+    let mut tris_vec = Vec::with_capacity(n_tris);
+    for row in tris_view.outer_iter() {
+        if row.len() >= 3 {
+            tris_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+
+    let res = cloth_core::bake_mesh_sdf_coarse(
+        &verts_vec,
+        &tris_vec,
+        voxel_size,
+        margin,
+        friction,
+        thickness,
+        restitution,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU粗グリッドベイク失敗: {e}")))?;
+
+    let dict = PyDict::new(py);
+    let dist_arr = PyArray1::from_slice(py, &res.dist_packed);
+    let tri_arr = PyArray1::from_slice(py, &res.nearest_tri);
+    dict.set_item("dist_packed", dist_arr)?;
+    dict.set_item("nearest_tri", tri_arr)?;
+    dict.set_item("width", res.width)?;
+    dict.set_item("height", res.height)?;
+    dict.set_item("depth", res.depth)?;
+    dict.set_item("coarse_voxel", res.coarse_voxel)?;
 
     Ok(dict)
 }
@@ -1533,11 +1680,14 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_available_gpu_devices, m)?)?;
     m.add_function(wrap_pyfunction!(set_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(get_current_gpu_device, m)?)?;
+    m.add_function(wrap_pyfunction!(get_device_buffer_limits, m)?)?;
     m.add_function(wrap_pyfunction!(render_mesh_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(render_scene_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(render_scene_to_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(bake_bone_sdf_gpu, m)?)?;
     m.add_function(wrap_pyfunction!(bake_mesh_sdf_gpu, m)?)?;
+    m.add_function(wrap_pyfunction!(bake_mesh_sdf_hierarchical_gpu, m)?)?;
+    m.add_function(wrap_pyfunction!(bake_mesh_sdf_coarse_gpu, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }
