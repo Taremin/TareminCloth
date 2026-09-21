@@ -13,13 +13,13 @@
   * **Volino & Magnenat-Thalmann 1994**: *"Efficient Self-collision Detection on Smoothly Discretized Surface Animations using Geometrical Shape Properties"* (Computer Graphics Forum, Vol. 13, No. 3, pp. 155–166)
     * [DOI: 10.1111/1467-8659.1330155](https://doi.org/10.1111/1467-8659.1330155)
   * **Tang, Curtis, Yoon, Manocha 2008 / 2009**: *"ICCD: Interactive Continuous Collision Detection between Deformable Models using Connectivity-Based Culling"* (ACM SPM 2008 / IEEE TVCG 2009, Vol. 15, No. 4)
-  * **近年の動向 (2024–2026)**: 離散外微分（Discrete Differential Geometry）に基づく **Laplace-Beltrami 平均曲率法線（$\Delta \mathbf{x}_i \approx H \mathbf{n}$）** を用いて、衣服の平坦領域をリアルタイムに事前判定する手法。
+  * **近年の動向 (2024–2026)**: 離散外微分（Discrete Differential Geometry）に基づく **Laplace-Beltrami 平均曲率法線（$`\Delta \mathbf{x}_i \approx H \mathbf{n}`$）** を用いて、衣服の平坦領域をリアルタイムに事前判定する手法。
 * **幾何学的理論**:
-  * メッシュ上の連結領域 $S$ において、領域内の面法線ベクトルが単位球上で半頂角 $\theta < \pi/2$（90度未満）の法線コーン（Normal Cone）内に収まり、かつ領域の境界輪郭が正射影で自己交差しない場合、**幾何学的に領域 $S$ の内部で局所的な自己交差・自己衝突は発生し得ない**という定理。
+  * メッシュ上の連結領域 $S$ において、領域内の面法線ベクトルが単位球上で半頂角 $`\theta < \pi/2`$（90度未満）の法線コーン（Normal Cone）内に収まり、かつ領域の境界輪郭が正射影で自己交差しない場合、**幾何学的に領域 $S$ の内部で局所的な自己交差・自己衝突は発生し得ない**という定理。
   * 衣服メッシュにおいて、シワの挟み込みが物理的に起こり得るのは**曲率が極めて高い（法線が急激に反転している）領域のみ**です。
 * **Taremin Cloth への適用設計案**:
   1. **Laplace-Beltrami / 局所二面角による平坦度判定**:
-     - 法線計算パス（`compute_normals.wgsl`）において、自頂点とその1ホップ隣接頂点の離散ラプラシアン $\|\Delta \mathbf{x}_i\| = \|\sum_j w_{ij} (\mathbf{x}_j - \mathbf{x}_i)\|$ を評価（余接重みまたは一様重み）。
+     - 法線計算パス（`compute_normals.wgsl`）において、自頂点とその1ホップ隣接頂点の離散ラプラシアン $`\|\Delta \mathbf{x}_i\| = \|\sum_j w_{ij} (\mathbf{x}_j - \mathbf{x}_i)\|`$ を評価（余接重みまたは一様重み）。
      - 曲率が閾値未満（ほぼ平坦）である頂点スレッドは、`self_collision.wgsl` の能動的なセル探索ループを先頭でスキップ（Early Exit）。
   2. **期待される効果**:
      - 高密度メッシュにおいて、シワの寄っていない平坦領域（メッシュ全体の 60%〜80%）の探索・Möller–Trumbore交差判定が完全にバイパスされ、**自己衝突の計算量を 7〜8 割削減**できる可能性があります。
@@ -30,11 +30,11 @@
 
 ### 1.2 Two-Level Bounding Sphere 階層的早期枝切り 【実装済み】
 * **幾何学的理論**:
-  * 頂点 $i$ と相手頂点 $j$ の距離二乗 $d^2 = \|\mathbf{p}_i - \mathbf{p}_j\|^2$ を内積（`dot` 1回）で評価。
-  * 接触可能上界半径 $R_{\text{bound}} = d_{\text{eff}} + (L_i + L_j) \times 1.3$（実効厚み $d_{\text{eff}}$ = `effective_thick`、布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全判定を即座にスキップ。
-  * 相手三角形に対しても局所外接球 $R_{VT} = d_{\text{eff}} + L_j \times 1.3 + \Delta \text{sweep}$ により不要判定を早期遮断。
+  * 頂点 $i$ と相手頂点 $j$ の距離二乗 $`d^2 = \|\mathbf{p}_i - \mathbf{p}_j\|^2`$ を内積（`dot` 1回）で評価。
+  * 接触可能上界半径 $`R_{\text{bound}} = d_{\text{eff}} + (L_i + L_j) \times 1.3`$（実効厚み $`d_{\text{eff}}`$ = `effective_thick`、布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全判定を即座にスキップ。
+  * 相手三角形に対しても局所外接球 $`R_{VT} = d_{\text{eff}} + L_j \times 1.3 + \Delta \text{sweep}`$ により不要判定を早期遮断。
 * **Taremin Cloth での実装効果**:
-  * 80k頂点（約16万ポリゴン）において 86.60 ms (11.5 FPS) $\to$ 44.25 ms (22.6 FPS) と、所要時間を半減（約 1.96 倍高速化）しました。
+  * 80k頂点（約16万ポリゴン）において 86.60 ms (11.5 FPS) $`\to`$ 44.25 ms (22.6 FPS) と、所要時間を半減（約 1.96 倍高速化）しました。
 
 ---
 
@@ -78,7 +78,7 @@
 * **理論背景**:
   * 高周波の弾性振動（距離・曲げ）に対し、接触境界の変化は数ミリ秒スケールでは準静的である性質を利用。
   * 自己衝突のディスパッチ頻度を間引き（隔サブステップ実行等）、最終サブステップでのみ100%確実に自己衝突とPost-Relaxationを実行してフレーム出力時の貫通を完全に防止。
-  * 実測において、100k頂点で 30.8 FPS $\to$ **41.6 FPS**（自己衝突オーバーヘッド -33% 削減）を達成。
+  * 実測において、100k頂点で 30.8 FPS $`\to`$ **41.6 FPS**（自己衝突オーバーヘッド -33% 削減）を達成。
 
 ---
 
@@ -90,7 +90,7 @@
     * [DOI: 10.1145/2816795.2818063](https://doi.org/10.1145/2816795.2818063)
   * **Macklin et al. 2020**: *"Primal/Dual Descent Methods for Dynamics"* (Computer Graphics Forum 2020)
 * **特徴と適用性**:
-  * ガウス・ザイデル／ヤコビ型の拘束投影ループにおいて、前イテレーションの変位 $\Delta \mathbf{x}_{k-1}$ に対し、Chebyshev多項式の根に基づく過大緩和係数 $\omega_k \in [1.0, 2.0)$ を適用する半反復法。
+  * ガウス・ザイデル／ヤコビ型の拘束投影ループにおいて、前イテレーションの変位 $`\Delta \mathbf{x}_{k-1}`$ に対し、Chebyshev多項式の根に基づく過大緩和係数 $`\omega_k \in [1.0, 2.0)`$ を適用する半反復法。
   * 反復回数（`solver_iterations`）を増やすことなく、拘束の伝播速度を上げ、布の異常な伸びを約2〜3倍抑制。追加計算コストは実質ゼロ。
 
 ### 4.2 Long Range Attachments (LRA: 長距離付着拘束による伸び完全防止)
@@ -99,7 +99,7 @@
     * [DOI: 10.2312/SCA/SCA12/305-310](https://doi.org/10.2312/SCA/SCA12/305-310)
   * **Müller et al. 2014**: *"Strain Based Dynamics"* (ACM SIGGRAPH / Eurographics SCA 2014)
 * **特徴と適用性**:
-  * ピン留め頂点から各布頂点までの測地線距離（布表面に沿った最大許容距離 $D_{\text{geo}}$）を初期化時に事前計算し、サブステップ終端で球体不等式拘束として投影。
+  * ピン留め頂点から各布頂点までの測地線距離（布表面に沿った最大許容距離 $`D_{\text{geo}}`$）を初期化時に事前計算し、サブステップ終端で球体不等式拘束として投影。
   * 高密度メッシュで重力や激しい運動加速度が加わった際、布がゴムのように伸びて垂れ下がる現象を、たった1回のディスパッチで100%確実に防止。
 
 ### 4.3 Barrier Potential Contact (平滑バリア接触ポテンシャル)

@@ -100,14 +100,14 @@ sequenceDiagram
 > [!TIP]
 > 各アルゴリズムの詳細な選定理由、Coupled XPBDの協調収束設計、V-T/E-E/CCD接触判定、却下されたアンチパターン、および理想アルゴリズムとの乖離分析については、[docs/algorithms.md](algorithms.md) を参照してください。
 
-本システムは、**XPBD (Extended Position Based Dynamics)** に基づく時間積分および拘束解消アルゴリズムを実装しています。各フレーム（$\Delta t \approx 1/60$ 秒）において複数回のサブステップ（$N_{sub} = 10 \sim 30$）を実行し、トンネリングや発散を抑制した高剛性布シミュレーションを実行します。
+本システムは、**XPBD (Extended Position Based Dynamics)** に基づく時間積分および拘束解消アルゴリズムを実装しています。各フレーム（$`\Delta t \approx 1/60`$ 秒）において複数回のサブステップ（$`N_{sub} = 10 \sim 30`$）を実行し、トンネリングや発散を抑制した高剛性布シミュレーションを実行します。
 
 ### 2.1 サブステップ内の処理シーケンス
 
 1. **位置予測 (Predict Positions)**:
    $$v_i \leftarrow v_i + dt \cdot M^{-1} f_{ext}$$
    $$p_i \leftarrow x_i + dt \cdot v_i$$
-   （$x_i$: 現在位置, $p_i$: 予測位置, $v_i$: 速度, $M$: 質量行列, $f_{ext}$: 重力・空気抵抗・外力）
+   （$`x_i`$: 現在位置, $`p_i`$: 予測位置, $`v_i`$: 速度, $M$: 質量行列, $`f_{ext}`$: 重力・空気抵抗・外力）
 
 2. **空間ハッシュ・近傍探索 (Spatial Hashing)**:
    - 動的空間ハッシュによりグリッドセルを構築し、自己衝突および多層布（マルチレイヤー）衝突候補を並列抽出。
@@ -351,7 +351,7 @@ graph LR
 1. **コライダーの自動検出と抽出 (`extract_scene_colliders`)**:
    - シーン内の全オブジェクトを走査し、`taremin_cloth_collider.is_collider` が有効なオブジェクトを自動抽出。
    - **解析コライダー (Analytical Colliders)**: 球 (Sphere)、平面 (Plane)、カプセル (Capsule) のワールド変換済み中心座標・法線・半径・軸方向を `GuiColliderData` として抽出。
-   - **メッシュコライダー (Mesh Colliders)**: `obj.to_mesh()` によるモディファイア適用済み評価ジオメトリから、ワールド変換された三角形頂点（$v_0, v_1, v_2$）を `GuiMeshTriangleData` として抽出。
+   - **メッシュコライダー (Mesh Colliders)**: `obj.to_mesh()` によるモディファイア適用済み評価ジオメトリから、ワールド変換された三角形頂点（$`v_0, v_1, v_2`$）を `GuiMeshTriangleData` として抽出。
 2. **GPUコアへの登録と衝突判定 (`register_colliders`)**:
    - `GpuClothSimulator::add_sphere_collider`, `add_plane_collider`, `add_capsule_collider`, `add_mesh_collider` を呼び出し、XPBDサブステップループ内の衝突制約として直接登録。
 3. **独立3Dビューポートでの可視化 (`collider_pipeline`)**:
@@ -419,7 +419,7 @@ graph TD
 
 #### 2. BONE_SDF / MESH_SDF コライダーの統合
 - **3Dテクスチャ転送 (Rg16Float)**:
-  - Blender側でGPUベイクされたボーン別3D SDFテクスチャ（$D, \alpha$）をBase64デコードし、`GpuClothSimulator::set_bone_sdf_colliders` によりVRAM上の3Dテクスチャとしてバインド。
+  - Blender側でGPUベイクされたボーン別3D SDFテクスチャ（$`D, \alpha`$）をBase64デコードし、`GpuClothSimulator::set_bone_sdf_colliders` によりVRAM上の3Dテクスチャとしてバインド。
   - ボーンのAABB、UVWスケール/オフセット、摩擦、厚みなどの静的メタデータ（`GpuBoneInfo`）をGPUストレージバッファへアップロード。
   - 関節部メッシュコライダー（ハイブリッドモード）も同時転送・統合。
 - **ボーン姿勢行列ストリーミング (`UpdateBoneTransforms`)**:
@@ -481,7 +481,7 @@ sequenceDiagram
 - **オンデマンド・スクリーン空間ピッキング**:
   - 毎フレームのCPUリードバックによる性能低下を避けるため、左クリック押下時またはキー押下時のみ1度 `sim.get_positions_flat` を実行して最近傍頂点（スクリーン半径45px以内）を特定。
 - **ビュー平面投影ドラッグ**:
-  - クリック時のカメラ視線前方向ベクトルを法線とする平面上でマウス移動差分 $\Delta\vec{W}$ を計算し、$\vec{P}_{\text{target}} = \vec{P}_0 + \Delta\vec{W}$ として `sim.set_pin_target` を更新。ドラッグ中は3D目標座標をGPUに渡すのみで、300+ FPSのシミュレーション速度を維持。
+  - クリック時のカメラ視線前方向ベクトルを法線とする平面上でマウス移動差分 $`\Delta\vec{W}`$ を計算し、$`\vec{P}_{\text{target}} = \vec{P}_0 + \Delta\vec{W}`$ として `sim.set_pin_target` を更新。ドラッグ中は3D目標座標をGPUに渡すのみで、300+ FPSのシミュレーション速度を維持。
 
 #### 2. 動的ピン留め（Dynamic Pinning）と一括解除
 - **`P` キーによるトグル**:

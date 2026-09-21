@@ -10,6 +10,9 @@ GitHub Flavored Markdown (GFM) 上での表示破綻や構文エラーを包括�
 5. KaTeX / MathJax 数式構文エラー検知 ('_' allowed only in math mode 等)
 6. KaTeX 下付き添字の表記ミス検知（例: \mathbf{x}{old} の '_' 脱落）
 7. 日本語強調（太字）と鉤括弧の組み合わせミス検知（例: **「...」** は 「**...**」 に）
+8. GFMインライン数式デリミタミス検知（例: $\alpha = 1/k$ は $`\alpha = 1/k`$ に）
+   - GitHub Docs「Writing mathematical expressions」準拠。プレーン $...$ 内に
+     Markdown干渉文字 (\ _ * | ` < > [ ]) を含む場合はドル・バッククォート形式が必須
 """
 
 import glob
@@ -34,6 +37,12 @@ _BARE_SUBSCRIPT_RE = re.compile(r"(?<![_^\\{])\b[A-Za-z]\{[A-Za-z0-9]+\}")
 _BOLD_SPAN_RE = re.compile(r"\*\*(.+?)\*\*")
 # インラインコード除去
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
+# GFMインライン数式のドル・バッククォート形式 ($`...`$)。GitHub推奨のMarkdown干渉回避記法
+_DOLLAR_BACKTICK_RE = re.compile(r"\$`([^`\n]+?)`\$")
+# プレーンな $...$ に含まれていた場合にMarkdownと干渉する文字
+# GitHub Docs「Writing mathematical expressions」より: バッククォート形式を使うべき
+# 重なり文字 (\: エスケープ, _: 強調, *: 強調, |: テーブル, `: コード, < >: HTML, [ ]: リンク)
+_GFM_RISKY_MATH_CHARS = frozenset({"\\", "_", "*", "|", "`", "<", ">", "[", "]"})
 
 # Windows cp932 環境対策
 if hasattr(sys.stdout, "reconfigure"):
@@ -147,10 +156,15 @@ def lint_markdown_content(file_path: str, lines: List[str]) -> Tuple[List[Tuple[
                             ))
             continue
 
-        # 3. KaTeX / MathJax 数式検証
-        # インラインコードと表示数式ブロックを考慮して数式セグメントを抽出する
-        code_stripped = _INLINE_CODE_RE.sub("", line)
+        # 3. KaTeX / MathJax 数式検証 + GFMデリミタ検証
+        # 抽出順序: $`...`$ (正規形) -> インラインコード除去 -> $$...$$ -> プレーン $...$
+        # $`...`$ を先に保護しないと、バッククォートがインラインコード除去で誤って消える
         math_segments: List[str] = []
+        tmp_protect = line
+        for m in _DOLLAR_BACKTICK_RE.findall(line):
+            math_segments.append(m)
+        tmp_protect = _DOLLAR_BACKTICK_RE.sub(" ", tmp_protect)
+        code_stripped = _INLINE_CODE_RE.sub("", tmp_protect)
         tmp = code_stripped
         # $$...$$ ディスプレイ数式を先に抽出
         for m in re.findall(r"\$\$([^\$]+)\$\$", tmp):
@@ -159,10 +173,30 @@ def lint_markdown_content(file_path: str, lines: List[str]) -> Tuple[List[Tuple[
         # 複数行 $$ ブロックの継続行は行全体を数式として扱う
         if code_stripped.count("$$") % 2 == 1:
             in_math_block = not in_math_block
+        plain_inlines: List[str] = []
         if in_math_block:
             math_segments.append(code_stripped.replace("$", " "))
         else:
-            math_segments.extend(re.findall(r"\$([^$\n]+?)\$", tmp))
+            plain_inlines = re.findall(r"\$([^$\n]+?)\$", tmp)
+            math_segments.extend(plain_inlines)
+        # 3-0: GFMデリミタミス検知 (プレーン $...$ 内のMarkdown干渉文字)
+        # GitHub Docs「Writing mathematical expressions」より、数式内にMarkdownと
+        # 重なる文字 (\ _ * | ` < > [ ]) を含む場合は $`...`$ 形式が必須。
+        # 例: $\alpha = 1/k$ -> $`\alpha = 1/k`$ (\ がエスケープ処理で消えるため)
+        for m_expr in plain_inlines:
+            risky = sorted({c for c in m_expr if c in _GFM_RISKY_MATH_CHARS})
+            if risky:
+                risky_disp = "".join(risky).replace("\\", "\\\\")
+                math_errors.append((
+                    line_no,
+                    f"GFM数式デリミタミス: プレーン '${m_expr.strip()}$' 内にMarkdown干渉文字 [{risky_disp}] が含まれています。$`{m_expr.strip()}`$ 形式 (ドル・バッククォート) に修正してください"
+                ))
+            # 前後の空白チェック (GFMは $ の直内外に空白があると数式として認識しない)
+            if m_expr != m_expr.strip():
+                math_errors.append((
+                    line_no,
+                    f"GFM数式デリミタミス: '${m_expr}$' の $ 直後に空白があります。'$`{m_expr.strip()}`$' のように空白を除去してください"
+                ))
         for m_expr in math_segments:
             # \text{...} 内のアンダースコア検知
             text_blocks = re.findall(r'\\text\{([^}]+)\}', m_expr)

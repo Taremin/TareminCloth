@@ -10,24 +10,24 @@
 従来の古典的PBD（Position Based Dynamics: [Müller et al. 2007](https://matthias-research.github.io/pages/publications/posBasedDyn.pdf)）は、計算の安定性と直感的な位置操作に優れている一方、**剛性（Stiffness）がシミュレーションの反復回数（Iterations）およびタイムステップ幅（$dt$）に強く依存する**という致命的な弱点を抱えていました。サブステップ数や反復数を変えると布の伸縮性やたるみが変化してしまい、実時間での正確な素材表現（綿、シルク、レザー等）が困難でした。
 
 これに対し、本システムでは **XPBD (Extended Position Based Dynamics: [Macklin et al. 2016](https://matthias-research.github.io/pages/publications/XPBD.pdf))** を採用しています。
-XPBDは、物理ポテンシャルエネルギーと連続時間力学に基づき、コンプライアンス（$\alpha = 1/k$、逆剛性）をラグランジュ未定乗数 $\lambda$ の時間発展方程式に組み込むことで、**反復数やサブステップ幅に非依存な物理剛性を実現**します。
+XPBDは、物理ポテンシャルエネルギーと連続時間力学に基づき、コンプライアンス（$`\alpha = 1/k`$、逆剛性）をラグランジュ未定乗数 $`\lambda`$ の時間発展方程式に組み込むことで、**反復数やサブステップ幅に非依存な物理剛性を実現**します。
 
 #### 位置補正量の定式化:
-拘束関数 $C(\mathbf{x}) = 0$ に対するラグランジュ乗数の増分 $\Delta \lambda$ および頂点位置補正 $\Delta \mathbf{x}$ は次式で求められます：
+拘束関数 $`C(\mathbf{x}) = 0`$ に対するラグランジュ乗数の増分 $`\Delta \lambda`$ および頂点位置補正 $`\Delta \mathbf{x}`$ は次式で求められます：
 
 $$\Delta \lambda = \frac{-C(\mathbf{x}) - \tilde{\alpha} \lambda}{\nabla C(\mathbf{x})^T M^{-1} \nabla C(\mathbf{x}) + \tilde{\alpha}}$$
 
 $$\Delta \mathbf{x} = M^{-1} \nabla C(\mathbf{x}) \Delta \lambda$$
 
-ここで $\tilde{\alpha} = \frac{\alpha}{dt^2}$ は時間刻み幅で正規化されたコンプライアンス、$M^{-1}$ は逆質量行列です。反復数やサブステップ幅への剛性依存性が低減され、高剛性設定下でも発散を抑制した収束特性を示します。
+ここで $`\tilde{\alpha} = \frac{\alpha}{dt^2}`$ は時間刻み幅で正規化されたコンプライアンス、$M^{-1}$ は逆質量行列です。反復数やサブステップ幅への剛性依存性が低減され、高剛性設定下でも発散を抑制した収束特性を示します。
 
 ### 1.2 実装されている拘束の種類
 
 | 拘束名 | 幾何学的モデル | 選定理由・特徴 | 参考文献 |
 | :--- | :--- | :--- | :--- |
-| **距離拘束 (Distance)** | $C(\mathbf{x}_1, \mathbf{x}_2) = \|\mathbf{x}_1 - \mathbf{x}_2\| - L_0$ | 布の伸縮（伸び・縮み）を物理的に制御。メッシュ稜線に沿って配置。 | [Macklin 2016](https://matthias-research.github.io/pages/publications/XPBD.pdf) |
-| **曲げ拘束 (Dihedral Bending)** | 共有稜線を持つ隣接2三角形の法線間二面角 $\theta - \theta_0$ | 布の折り曲げ耐性（ドレープ感・シワの立ち方）を制御。面積変化を起こさず純粋な曲率のみを拘束。 | [Müller 2007 (Sec 3.3)](https://matthias-research.github.io/pages/publications/posBasedDyn.pdf) |
-| **ピン拘束 (Pin / Attachment)** | $C(\mathbf{x}) = \|\mathbf{x} - \mathbf{x}_{target}\|$ | 頂点グループウェイトおよびアニメーションボーン/オブジェクト追従、インタラクティブ掴み（Grab）操作。 | - |
+| **距離拘束 (Distance)** | $`C(\mathbf{x}_1, \mathbf{x}_2) = \|\mathbf{x}_1 - \mathbf{x}_2\| - L_0`$ | 布の伸縮（伸び・縮み）を物理的に制御。メッシュ稜線に沿って配置。 | [Macklin 2016](https://matthias-research.github.io/pages/publications/XPBD.pdf) |
+| **曲げ拘束 (Dihedral Bending)** | 共有稜線を持つ隣接2三角形の法線間二面角 $`\theta - \theta_0`$ | 布の折り曲げ耐性（ドレープ感・シワの立ち方）を制御。面積変化を起こさず純粋な曲率のみを拘束。 | [Müller 2007 (Sec 3.3)](https://matthias-research.github.io/pages/publications/posBasedDyn.pdf) |
+| **ピン拘束 (Pin / Attachment)** | $`C(\mathbf{x}) = \|\mathbf{x} - \mathbf{x}_{target}\|`$ | 頂点グループウェイトおよびアニメーションボーン/オブジェクト追従、インタラクティブ掴み（Grab）操作。 | - |
 | **縫合拘束 (Sewing)** | 時間経過で目標距離が $0$ へ収縮するスプリング拘束（独立剛性・密着剛体ロック対応） | 型紙（2Dパターン）の対応エッジ間を引き寄せて立体衣服を仕立てる。縫合ペアはトポロジー近接判定でホップ数0（同一結節点化）として扱われ、自己衝突（2ホップ除外）との誤爆拮抗を回避。 | - |
 
 ### 1.3 並列化手法: 制約グラフ彩色 (Constraint Graph Coloring)
@@ -44,7 +44,7 @@ Taremin Cloth では、**Welsh-Powell法（次数降順貪欲彩色: [Welsh & Po
 初期の実装では、古典的なPBDパイプラインに従い、XPBD反復ループ（距離・曲げ拘束）をすべて解き終えた「後」にコライダー押し出し（SDFやメッシュ衝突）を実行していました。
 しかし、このパイプラインでは以下の深刻な破綻が発生しました：
 1. コライダー表面にめり込んだ布頂点が、衝突処理によって大きく外側へ押し出される。
-2. 押し出された頂点と隣接頂点との間の距離が自然長 $L_0$ より著しく引き伸ばされる。
+2. 押し出された頂点と隣接頂点との間の距離が自然長 $`L_0`$ より著しく引き伸ばされる。
 3. 次のフレームで重力が加わり、さらに押し出しと変形が累積する。
 4. 結果として、重力下でコライダーに接触した布がゴムのようにどこまでも伸びて垂れ下がる（重力下でのコライダー接触検証時に顕著に確認）。
 
@@ -99,18 +99,18 @@ graph TD
 ## 3. 接触・衝突判定アルゴリズム (V-T, E-E, CCD, SDF)
 
 ### 3.1 Vertex-Triangle (V-T) 幾何接触
-- **アルゴリズム**: 点 $\mathbf{p}$ から三角形面 $(\mathbf{a}, \mathbf{b}, \mathbf{c})$ への最近傍点 $\mathbf{q}$ をボロノイ領域分割（Voronoi Regions）により厳密に判定（`closest_point_on_triangle`）。
-- **選定理由**: 面法線ベクトルに依存せず、常に幾何学的な最短分離ベクトル $\Delta \mathbf{x} = \mathbf{p} - \mathbf{q}$ を直接求めるため、布が裏返った状態や鋭角な挟み込みでも安定した反発方向が得られます。
+- **アルゴリズム**: 点 $`\mathbf{p}`$ から三角形面 $`(\mathbf{a}, \mathbf{b}, \mathbf{c})`$ への最近傍点 $`\mathbf{q}`$ をボロノイ領域分割（Voronoi Regions）により厳密に判定（`closest_point_on_triangle`）。
+- **選定理由**: 面法線ベクトルに依存せず、常に幾何学的な最短分離ベクトル $`\Delta \mathbf{x} = \mathbf{p} - \mathbf{q}`$ を直接求めるため、布が裏返った状態や鋭角な挟み込みでも安定した反発方向が得られます。
 - **参考文献**: [Bridson et al. 2002 (Robust treatment of collisions, contact and friction for cloth animation)](https://www.cs.ubc.ca/~rbridson/docs/cloth2002.pdf)
 
 ### 3.2 Edge-Edge (E-E) 接触
-- **アルゴリズム**: 2線分 $\mathbf{p}_0-\mathbf{p}_1$ と $\mathbf{q}_0-\mathbf{q}_1$ 間の最短距離パラメータ $(s, t) \in [0, 1]^2$ を解析的に算出（`closest_points_segments`）。
+- **アルゴリズム**: 2線分 $`\mathbf{p}_0-\mathbf{p}_1`$ と $`\mathbf{q}_0-\mathbf{q}_1`$ 間の最短距離パラメータ $`(s, t) \in [0, 1]^2`$ を解析的に算出（`closest_points_segments`）。
 - **なぜV-Tだけでは不十分なのか**:
   頂点対面（V-T）の判定だけでは、三角形のエッジ同士が交差する「すり抜け（Edge-Edgeトンネリング）」を幾何学的に検知できません。特に薄い布同士やすり抜け角、コライダーの鋭利な角において布が突き抜ける現象を防ぐためにE-E判定が不可欠です。
 
 ### 3.3 連続衝突判定 (CCD: Continuous Collision Detection)
 - **アルゴリズム**: Möller–Trumbore光線交差法（[Möller & Trumbore 1997](https://doi.org/10.1080/10867651.1997.10487468)）を拡張した、動的線分・三角形交差判定（`intersect_segment_triangle`）。
-- **選定理由**: 高速に移動する布頂点 $\mathbf{x}_{old} \to \mathbf{p}_{new}$ の軌道線分が三角形を貫通した瞬間（衝突時刻 $t \in [0, 1]$）を検知し、貫通する手前の安全位置 $\mathbf{p}_{safe}$ へ押し戻すことで、離散判定での飛び越え（トンネリング）を検知・抑制します。
+- **選定理由**: 高速に移動する布頂点 $`\mathbf{x}_{old} \to \mathbf{p}_{new}`$ の軌道線分が三角形を貫通した瞬間（衝突時刻 $`t \in [0, 1]`$）を検知し、貫通する手前の安全位置 $`\mathbf{p}_{safe}`$ へ押し戻すことで、離散判定での飛び越え（トンネリング）を検知・抑制します。
 
 ### 3.4 SDF (Signed Distance Field) コライダーの設計
 - **ボーンSDF (Bone SDF)**:
@@ -131,11 +131,11 @@ graph TD
 
 ### 3.5 自己衝突における作用・反作用の対称分配（固定小数点アトミック加算による運動量保存）
 - **物理的背景**:
-  頂点 $\mathbf{p}_i$ が相手三角形 $(\mathbf{p}_{j}, \mathbf{p}_{v0}, \mathbf{p}_{v1})$ に衝突した際、$\mathbf{p}_i$ に加わった力積（変位 $\Delta \mathbf{p}_i$）と等量・反対向きの変位が、重心座標重み $(1-u-v, u, v)$ および質量比に応じて相手の3頂点にも分配されなければなりません（ニュートンの第3法則・運動量保存則）。
+  頂点 $`\mathbf{p}_i`$ が相手三角形 $`(\mathbf{p}_{j}, \mathbf{p}_{v0}, \mathbf{p}_{v1})`$ に衝突した際、$`\mathbf{p}_i`$ に加わった力積（変位 $`\Delta \mathbf{p}_i`$）と等量・反対向きの変位が、重心座標重み $(1-u-v, u, v)$ および質量比に応じて相手の3頂点にも分配されなければなりません（ニュートンの第3法則・運動量保存則）。
 - **実装された設計 (Taremin Cloth)**:
-  固定小数点（$10^6$ 倍スケール、分解能 $1\mu\text{m}$）の整数アトミック加算（`atomicAdd` on `atomic<i32>`）を用いた専用アキュムレータバッファ（`self_collision_accum_buffer`）を導入。
-  - **V-T（点対面）**: 点 $i$ から三角形 $(j, v0, v1)$ の最近傍点への分離変位 $\Delta \mathbf{p}$ を、自頂点へ $+\Delta \mathbf{p} (w_i / w_{tot})$、相手3頂点へ重心座標重みと質量比に応じて $-\Delta \mathbf{p} (bary_k w_k / w_{tot})$ でスレッドセーフにアトミック加算。
-  - **E-E（辺対辺）**: 2線分最短パラメータ $(s, t)$ に基づき、自エッジ2頂点に $(1-s, s)$、相手エッジ2頂点に $-(1-t, t)$ を質量比重みでアトミック加算。重複評価は動的エッジ間で $index < j$ により排除しつつ、ピン拘束頂点との接触も判定対象に反映。
+  固定小数点（$10^6$ 倍スケール、分解能 $`1\mu\text{m}`$）の整数アトミック加算（`atomicAdd` on `atomic<i32>`）を用いた専用アキュムレータバッファ（`self_collision_accum_buffer`）を導入。
+  - **V-T（点対面）**: 点 $i$ から三角形 $(j, v0, v1)$ の最近傍点への分離変位 $`\Delta \mathbf{p}`$ を、自頂点へ $`+\Delta \mathbf{p} (w_i / w_{tot})`$、相手3頂点へ重心座標重みと質量比に応じて $`-\Delta \mathbf{p} (bary_k w_k / w_{tot})`$ でスレッドセーフにアトミック加算。
+  - **E-E（辺対辺）**: 2線分最短パラメータ $(s, t)$ に基づき、自エッジ2頂点に $(1-s, s)$、相手エッジ2頂点に $-(1-t, t)$ を質量比重みでアトミック加算。重複評価は動的エッジ間で $`index < j`$ により排除しつつ、ピン拘束頂点との接触も判定対象に反映。
   - **Solve → Apply パイプライン分離**: `self_collision.wgsl` でアトミック加算された累積変位は、直後の `self_collision_apply.wgsl` で密度緩和・最大ステップクランプを適用して `prev_pos` に確定され、バッファをゼロクリア。
 - **検証結果**:
   二重布対称性テスト（`test_self_collision_symmetry.py`）により、等質量布および異質量布（2:1）において、相対誤差 0.7% 台の運動量保存（対称反発）を実証済み。GPU並列競合によるメッシュ崩壊を起こすことなく、非対称なめり込みが抑制されていることを確認済み。
@@ -146,7 +146,7 @@ graph TD
   - しかし、型紙エッジ間を結ぶ縫合エッジ（Sewing Spring）が1ホップを消費すると、対向境界のメッシュ頂点や面が3ホップ判定となり、縫合が収縮して布厚み以内に入った瞬間に自己衝突ソルバーが「別パーツの貫通」と誤認して外側へ強く押し戻す拮抗状態が発生します。
   - さらに、自己衝突後のPost-Relaxationにおいて距離拘束のみを単独で解くと、エッジレスト長を保とうとする力によって縫合頂点が身体外側へ強制的に引き戻され、約10〜11mmの隙間が残留してしまう問題がありました。
 - **トポロジー同一視アルゴリズム (Zero-Hop Sewing Topology & Union-Find Graph Contraction)**:
-  - 縫合ペア $(v_0, v_1)$ は縫い合わされて単一の結節点となるトポロジー関係にあるため、縫合エッジを渡る移動は**ホップ数を消費しない（ホップ数0換算）**としてトポロジー近接リストを生成します。
+  - 縫合ペア $`(v_0, v_1)`$ は縫い合わされて単一の結節点となるトポロジー関係にあるため、縫合エッジを渡る移動は**ホップ数を消費しない（ホップ数0換算）**としてトポロジー近接リストを生成します。
   - CPUメッシュ初期化時（`mesh.rs`）において、Union-Find（素集合データ構造）により縫合ペアを同一結節点グループに統合。グループ内の全頂点同士を1ホップ隣接登録し、さらにグループに接続する全隣接頂点を相互に対称登録（完成形メッシュと同一のトポロジー距離グラフを構築）。
   - GPUシェーダー（`self_collision.wgsl`）内では、V-V（頂点対頂点）、V-T（頂点対面）、E-E（辺対辺）のすべてにおいて、一貫して `is_topologically_near`（2ホップ除外スコープ）を統一適用。
 - **Post-Relaxationと縫合の協調（Coupled Post-Relaxation）**:
@@ -160,17 +160,17 @@ graph TD
 
 ### 3.7 Two-Level Bounding Sphere 階層的早期枝切り（10万〜20万ポリゴン級リアルタイム化）
 - **物理・幾何学的背景と課題**:
-  - 高密度メッシュ（VRChat衣装等の数万〜10万ポリゴン規模）において、空間ハッシュセル内に近接する頂点が見つかるたびに、頂点間距離を評価することなく無条件で相手の全三角形（通常 5〜8面）のMöller–Trumbore CCD判定および接続エッジ（最大 $8 \times 8 = 64$ ペア）の線分最短距離計算を実行していたため、狭帯域計算量が爆発しフレームレートが急落していました。
+  - 高密度メッシュ（VRChat衣装等の数万〜10万ポリゴン規模）において、空間ハッシュセル内に近接する頂点が見つかるたびに、頂点間距離を評価することなく無条件で相手の全三角形（通常 5〜8面）のMöller–Trumbore CCD判定および接続エッジ（最大 $`8 \times 8 = 64`$ ペア）の線分最短距離計算を実行していたため、狭帯域計算量が爆発しフレームレートが急落していました。
   - さらに、相手三角形の頂点に対してもGPUグローバルメモリを辿る2ホップトポロジー走査（`is_topologically_near`）を多重に実行しており、ランダムメモリアクセスが集中していました。
 - **実装された設計 (Taremin Cloth)**:
   1. **広域外接球による階層枝切り (Broad Bounding Sphere Early Exit)**:
-     - 頂点 $i$ と相手頂点 $j$ の距離二乗 $d^2 = \|\mathbf{p}_i - \mathbf{p}_j\|^2$ を内積 `dot` 1回で評価。
-      - 接触可能上界半径 $R_{\text{bound}} = d_{\text{eff}} + (L_i + L_j) \times 1.3$（実効厚み $d_{\text{eff}}$ = `effective_thick`、布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全処理を即座にスキップ。
+     - 頂点 $i$ と相手頂点 $j$ の距離二乗 $`d^2 = \|\mathbf{p}_i - \mathbf{p}_j\|^2`$ を内積 `dot` 1回で評価。
+      - 接触可能上界半径 $`R_{\text{bound}} = d_{\text{eff}} + (L_i + L_j) \times 1.3`$（実効厚み $`d_{\text{eff}}`$ = `effective_thick`、布の伸長に備え 1.3 倍マージン）を超えているペアは、トポロジー走査・V-V・V-T・E-E の全処理を即座にスキップ。
   2. **V-T 局所外接球および不要トポロジー走査の排除**:
-     - 点 $i$ から相手三角形への接触可能半径 $R_{VT} = d_{\text{eff}} + L_j \times 1.3 + \Delta \text{sweep}$ により、遠い三角形判定を遮断。
-     - 頂点 $j$ がすでに2ホップ除外を通過している（$\ge 3$ ホップ離れている）場合、その隣接頂点 $v_0, v_1$ が頂点 $i$ の直接隣接頂点になることはグラフ理論的にあり得ないため、V-Tループ内の不要な多重 `is_topologically_near` 走査を排除。
+     - 点 $i$ から相手三角形への接触可能半径 $`R_{VT} = d_{\text{eff}} + L_j \times 1.3 + \Delta \text{sweep}`$ により、遠い三角形判定を遮断。
+     - 頂点 $j$ がすでに2ホップ除外を通過している（$`\ge 3`$ ホップ離れている）場合、その隣接頂点 $`v_0, v_1`$ が頂点 $i$ の直接隣接頂点になることはグラフ理論的にあり得ないため、V-Tループ内の不要な多重 `is_topologically_near` 走査を排除。
   3. **セル走査範囲の27セル適正化**:
-     - サブステップ内の頂点移動量に基づき、通常移動時は周囲 $3 \times 3 \times 3 = 27$ セルに走査を抑制。
+     - サブステップ内の頂点移動量に基づき、通常移動時は周囲 $`3 \times 3 \times 3 = 27`$ セルに走査を抑制。
 - **実証データ (`benchmarks/benchmark_self_collision_scaling.py`, AMD RX 9070 XT)**:
   - 80.0k Verts（158.4k Tris / 約16万ポリゴン）: **86.60 ms (11.5 FPS) → 44.25 ms (22.6 FPS)**（約 1.96 倍高速化、所要時間半減）。
   - 100.4k Verts（198.9k Tris / 約20万ポリゴン）: **51.41 ms (19.5 FPS)** を達成。目標（10万ポリゴンで 10 FPS）を大きく上回り、約20万ポリゴン環境でも約20 FPSを維持。
@@ -178,14 +178,14 @@ graph TD
 ### 3.8 静的2ホップトポロジーのCPU事前計算化とGPU二分探索 (Precomputed 2-Hop CSR & GPU Binary Search)
 - **物理・メモリアクセス上の背景と課題**:
   - メッシュの接続関係（トポロジー）および縫合エッジ統合グラフは初期化時に静的に確定しているにもかかわらず、従来の自己衝突シェーダーは毎フレーム・毎サブステップ・全頂点スレッドにおいてGPUグローバルメモリ上の隣接ポインタを2段階辿る動的グラフ探索（`adj_offsets` → `adj_indices` → `adj_offsets` → `adj_indices`）を実行していました。
-  - 頂点の平均次数が6の場合、1回の判定で最大 $1 + 6 \times 6 = 37$ 回のランダムメモリアクセス（ポインタチェイス）が発生し、GPUのメモリ帯域を圧迫しワープダイバージェンスの原因となっていました。
+  - 頂点の平均次数が6の場合、1回の判定で最大 $`1 + 6 \times 6 = 37`$ 回のランダムメモリアクセス（ポインタチェイス）が発生し、GPUのメモリ帯域を圧迫しワープダイバージェンスの原因となっていました。
 - **実装された設計 (Taremin Cloth)**:
   1. **CPU側での2ホップ近傍CSR事前構築 (`ClothMesh::from_raw`)**:
-     - 縫合ペア統合済みの隣接グラフから、各頂点の2ホップ以内の近傍頂点集合 $S_i = \{i\} \cup \text{Adj}(i) \cup \bigcup_{u \in \text{Adj}(i)} \text{Adj}(u)$ をCPUで一括計算。
+     - 縫合ペア統合済みの隣接グラフから、各頂点の2ホップ以内の近傍頂点集合 $`S_i = \{i\} \cup \text{Adj}(i) \cup \bigcup_{u \in \text{Adj}(i)} \text{Adj}(u)`$ をCPUで一括計算。
      - 各頂点ごとに重複排除（`dedup`）および昇順ソート（`sort_unstable`）を施し、フラットなCSR配列（`two_hop_offsets: Vec<u32>`、`two_hop_indices: Vec<u32>`）としてGPUバッファに転送。
      - 10万頂点の場合でもメモリフットプリントは約 8.4 MB（各頂点平均 20 頂点）と極めてコンパクト。
   2. **シェーダー内二分探索化 (`self_collision.wgsl`)**:
-     - `is_topologically_near(vert_a, vert_b)` を、昇順ソート済み連続メモリ `two_hop_indices` 配列に対する**二分探索（Binary Search: 最大 $\lceil \log_2 25 \rceil = 5$ 回の比較）**へ置き換え。
+     - `is_topologically_near(vert_a, vert_b)` を、昇順ソート済み連続メモリ `two_hop_indices` 配列に対する**二分探索（Binary Search: 最大 $`\lceil \log_2 25 \rceil = 5`$ 回の比較）**へ置き換え。
      - 局所連続配列へのアクセスとなったことでGPUのL1/L2キャッシュヒット率が劇的に向上。
 - **実証データ (`benchmarks/benchmark_self_collision_scaling.py`, AMD RX 9070 XT)**:
   - 80.0k Verts（158.4k Tris / 約16万ポリゴン）: 44.25 ms (22.6 FPS) → **34.25 ms (29.2 FPS)**。
@@ -200,7 +200,7 @@ graph TD
   1. **リンクリストの完全撤廃と連続配列化**:
      - 単方向リンクリスト（`cell_heads` / `vert_next`）を廃止し、同一セル内の頂点インデックスが完全に連続して並ぶソート済み配列 `sorted_indices` と、各セルの開始インデックス配列 `cell_starts` へ刷新。
   2. **GPU Counting Sort (Blelloch Prefix Sum) パイプライン**:
-     - `cell_counts` のカウント $\to$ ワークグループ共有メモリを用いた階層的排他 Prefix Sum（Blelloch Scan） $\to$ スキャッター配置により、GPU内で完全に完結する極小オーバーヘッドの並列ソートを実現。
+     - `cell_counts` のカウント $`\to`$ ワークグループ共有メモリを用いた階層的排他 Prefix Sum（Blelloch Scan） $`\to`$ スキャッター配置により、GPU内で完全に完結する極小オーバーヘッドの並列ソートを実現。
   3. **自己衝突シェーダーの連続イテレーション化 (`self_collision.wgsl`)**:
      - `for (var k = cell_starts[h]; k < cell_starts[h + 1u]; k = k + 1u)` による純粋な固定区間走査へ刷新。
      - 動的ポインタチェイスと反復打ち切り（`max_search_iterations`）が完全不要となり、メモリアクセスが完全にコアレッシング化。
@@ -236,7 +236,7 @@ graph TD
 ### 3.11 接触候補ペアキャッシュ（Active Pair Caching）と時間的再利用（Amortization）
 - **背景と動機**:
   - 自己衝突における最大の計算負荷は、空間ハッシュの構築および全頂点・全隣接セルに対する三角形・エッジの幾何学的網羅探索（Broadphase）です。
-  - 通常、布の自己接触候補は急激には変化せず、サブステップ微小時間（$\Delta t / N_{sub}$）内では空間的・トポロジー的に高いコヒーレンス（連続性）を保ちます。
+  - 通常、布の自己接触候補は急激には変化せず、サブステップ微小時間（$`\Delta t / N_{sub}`$）内では空間的・トポロジー的に高いコヒーレンス（連続性）を保ちます。
   - そこで、[Tang et al. 2018 (I-Cloth)](https://doi.org/10.1145/3272127.3275005) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
 - **実装された設計**:
   1. **フェーズ分離**:
