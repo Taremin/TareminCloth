@@ -1481,10 +1481,13 @@ pub fn build_simulation_resources(
     });
 
     // 接触候補ペアキャッシュ用バッファ & リソース (Active Pair Caching)
-    let max_vt_pairs = 32768u32;
-    let max_ee_pairs = 32768u32;
-    let vt_buffer_size = ((max_vt_pairs as usize) * std::mem::size_of::<GpuVtPair>()).max(64) as u64;
-    let ee_buffer_size = ((max_ee_pairs as usize) * std::mem::size_of::<GpuEePair>()).max(64) as u64;
+    // 物理確保は最大65536(各約1MB)に据え置き、論理上限は頂点数連動でパラメータ制御。再確保なしで飽和回避。
+    let phys_max_vt_pairs = 65536u32;
+    let phys_max_ee_pairs = 65536u32;
+    let max_vt_pairs = (num_vertices * 8).clamp(8192, phys_max_vt_pairs);
+    let max_ee_pairs = (num_vertices * 8).clamp(8192, phys_max_ee_pairs);
+    let vt_buffer_size = ((phys_max_vt_pairs as usize) * std::mem::size_of::<GpuVtPair>()).max(64) as u64;
+    let ee_buffer_size = ((phys_max_ee_pairs as usize) * std::mem::size_of::<GpuEePair>()).max(64) as u64;
 
     let active_vt_pairs_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Active VT Pairs Buffer"),
@@ -1509,7 +1512,7 @@ pub fn build_simulation_resources(
     let pair_counters_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Pair Counters Buffer"),
         contents: bytemuck::bytes_of(&initial_counters),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     });
 
     let pair_collect_params = PairCollectParams {
@@ -1520,6 +1523,10 @@ pub fn build_simulation_resources(
         max_ee_pairs,
         safety_margin: 0.005,
         exclude_neighbors: if self_collision_exclude_neighbors { 1 } else { 0 },
+        margin_mode: 1,
+        dt_frame: 1.0 / 60.0,
+        velocity_horizon_scale: 1.3,
+        max_horizon: 0.02,
         _pad0: 0,
     };
     let pair_collect_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

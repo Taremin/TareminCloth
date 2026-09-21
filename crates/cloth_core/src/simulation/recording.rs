@@ -64,6 +64,13 @@ impl GpuClothSimulator {
             edge_margin_scale: self.edge_margin_scale,
             edge_margin_offset: self.edge_margin_offset,
             self_collision_max_iterations: self.self_collision_max_iterations,
+            enable_pair_cache: self.enable_pair_cache,
+            pair_cache_margin_mode: self.pair_cache_margin_mode,
+            pair_cache_safety_margin: self.pair_cache_safety_margin,
+            pair_cache_horizon_scale: self.pair_cache_horizon_scale,
+            pair_cache_max_horizon: self.pair_cache_max_horizon,
+            pair_cache_max_pairs: self.pair_cache_max_vt_pairs.max(self.pair_cache_max_ee_pairs),
+            enable_pair_cache_final_fallback: self.enable_pair_cache_final_fallback,
         };
 
         self.debug_recorder.start_recording(metadata, max_frames);

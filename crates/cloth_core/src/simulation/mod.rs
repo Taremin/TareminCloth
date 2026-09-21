@@ -171,6 +171,13 @@ pub struct GpuClothSimulator {
 
     // 接触候補ペアキャッシュ (Active Pair Caching) 用
     pub enable_pair_cache: bool,
+    pub(crate) pair_cache_max_vt_pairs: u32,
+    pub(crate) pair_cache_max_ee_pairs: u32,
+    pub(crate) pair_cache_margin_mode: u32,
+    pub(crate) pair_cache_safety_margin: f32,
+    pub(crate) pair_cache_horizon_scale: f32,
+    pub(crate) pair_cache_max_horizon: f32,
+    pub(crate) enable_pair_cache_final_fallback: bool,
     #[allow(dead_code)]
     pub(crate) active_vt_pairs_buffer: wgpu::Buffer,
     #[allow(dead_code)]
@@ -369,6 +376,13 @@ impl GpuClothSimulator {
             update_vel_bind_group: res.update_vel_bind_group,
 
             enable_pair_cache: false,
+            pair_cache_max_vt_pairs: (num_vertices * 8).clamp(8192, 65536),
+            pair_cache_max_ee_pairs: (num_vertices * 8).clamp(8192, 65536),
+            pair_cache_margin_mode: 1,
+            pair_cache_safety_margin: 0.005,
+            pair_cache_horizon_scale: 1.3,
+            pair_cache_max_horizon: 0.02,
+            enable_pair_cache_final_fallback: true,
             active_vt_pairs_buffer: res.active_vt_pairs_buffer,
             active_ee_pairs_buffer: res.active_ee_pairs_buffer,
             pair_counters_buffer: res.pair_counters_buffer,
@@ -426,6 +440,77 @@ impl GpuClothSimulator {
         self.enable_pair_cache
     }
 
+    /// ペアキャッシュ詳細オプションを設定する (後方互換: 既存のsetterはそのまま動作)
+    /// margin_mode: 0=Fixed(従来動作), 1=AutoVelocity(速度スイープ自動拡張, 推奨)
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_pair_cache_options(
+        &mut self,
+        max_vt_pairs: u32,
+        max_ee_pairs: u32,
+        margin_mode: u32,
+        safety_margin: f32,
+        horizon_scale: f32,
+        max_horizon: f32,
+    ) {
+        // 物理上限65536でクランプ (再確保なしの論理上限方式)
+        self.pair_cache_max_vt_pairs = max_vt_pairs.clamp(64, 65536);
+        self.pair_cache_max_ee_pairs = max_ee_pairs.clamp(64, 65536);
+        self.pair_cache_margin_mode = if margin_mode == 0 { 0 } else { 1 };
+        self.pair_cache_safety_margin = safety_margin.clamp(0.0, 0.05);
+        self.pair_cache_horizon_scale = horizon_scale.clamp(0.0, 4.0);
+        self.pair_cache_max_horizon = max_horizon.clamp(0.0, 0.1);
+        self.write_pair_collect_params(1.0 / 60.0);
+        self.write_pair_solve_params();
+    }
+
+    /// 最終サブステップ直進フォールバックの有効/無効を設定する
+    pub fn set_enable_pair_cache_final_fallback(&mut self, enable: bool) {
+        self.enable_pair_cache_final_fallback = enable;
+    }
+
+    /// 最終サブステップ直進フォールバック設定を取得する
+    pub fn enable_pair_cache_final_fallback(&self) -> bool {
+        self.enable_pair_cache_final_fallback
+    }
+
+    /// ペア収集パラメータバッファを現在の論理設定で書き込む
+    pub(crate) fn write_pair_collect_params(&self, dt_frame: f32) {
+        let collect_params = crate::mesh::PairCollectParams {
+            cell_size: self.spatial_hash.cell_size,
+            table_size: self.spatial_hash.table_size,
+            num_vertices: self.num_vertices,
+            max_vt_pairs: self.pair_cache_max_vt_pairs,
+            max_ee_pairs: self.pair_cache_max_ee_pairs,
+            safety_margin: self.pair_cache_safety_margin,
+            exclude_neighbors: if self.self_collision_exclude_neighbors { 1 } else { 0 },
+            margin_mode: self.pair_cache_margin_mode,
+            dt_frame,
+            velocity_horizon_scale: self.pair_cache_horizon_scale,
+            max_horizon: self.pair_cache_max_horizon,
+            _pad0: 0,
+        };
+        self.context.queue.write_buffer(
+            &self.pair_collect_params_buffer,
+            0,
+            bytemuck::bytes_of(&collect_params),
+        );
+    }
+
+    /// ペア解決パラメータバッファを現在の論理設定で書き込む
+    pub(crate) fn write_pair_solve_params(&self) {
+        let solve_params = crate::mesh::PairSolveParams {
+            num_vertices: self.num_vertices,
+            max_vt_pairs: self.pair_cache_max_vt_pairs,
+            max_ee_pairs: self.pair_cache_max_ee_pairs,
+            enable_normal_untangling: if self.enable_normal_untangling { 1 } else { 0 },
+        };
+        self.context.queue.write_buffer(
+            &self.pair_solve_params_buffer,
+            0,
+            bytemuck::bytes_of(&solve_params),
+        );
+    }
+
     /// GPU頂点バッファへの参照を取得する（レンダーパイプラインへのバインド用）
     pub fn vertex_buffer(&self) -> &wgpu::Buffer {
         &self.vertex_buffer
@@ -476,10 +561,14 @@ impl GpuClothSimulator {
             cell_size: self.spatial_hash.cell_size,
             table_size: self.spatial_hash.table_size,
             num_vertices: self.num_vertices,
-            max_vt_pairs: 32768,
-            max_ee_pairs: 32768,
-            safety_margin: 0.005,
+            max_vt_pairs: self.pair_cache_max_vt_pairs,
+            max_ee_pairs: self.pair_cache_max_ee_pairs,
+            safety_margin: self.pair_cache_safety_margin,
             exclude_neighbors: if exclude_neighbors { 1 } else { 0 },
+            margin_mode: self.pair_cache_margin_mode,
+            dt_frame: 1.0 / 60.0,
+            velocity_horizon_scale: self.pair_cache_horizon_scale,
+            max_horizon: self.pair_cache_max_horizon,
             _pad0: 0,
         };
         self.context.queue.write_buffer(
@@ -490,8 +579,8 @@ impl GpuClothSimulator {
 
         let solve_params = crate::mesh::PairSolveParams {
             num_vertices: self.num_vertices,
-            max_vt_pairs: 32768,
-            max_ee_pairs: 32768,
+            max_vt_pairs: self.pair_cache_max_vt_pairs,
+            max_ee_pairs: self.pair_cache_max_ee_pairs,
             enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
         };
         self.context.queue.write_buffer(

@@ -357,6 +357,16 @@ impl GuiApp {
             sim.set_enable_edge_collision(sc.enable_edge_collision);
             sim.set_edge_margin_scale(sc.edge_margin_scale);
             sim.set_edge_margin_offset(sc.edge_margin_offset);
+            sim.set_enable_pair_cache(sc.enable_pair_cache);
+            sim.set_pair_cache_options(
+                sc.pair_cache_max_pairs,
+                sc.pair_cache_max_pairs,
+                sc.pair_cache_margin_mode,
+                sc.pair_cache_safety_margin,
+                sc.pair_cache_horizon_scale,
+                sc.pair_cache_max_horizon,
+            );
+            sim.set_enable_pair_cache_final_fallback(sc.enable_pair_cache_final_fallback);
         }
 
         // 伸縮グループ

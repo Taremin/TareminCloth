@@ -38,6 +38,10 @@ struct PairCollectParams {
     max_ee_pairs: u32,
     safety_margin: f32,
     exclude_neighbors: u32,
+    margin_mode: u32,
+    dt_frame: f32,
+    velocity_horizon_scale: f32,
+    max_horizon: f32,
     _pad0: u32,
 };
 
@@ -216,6 +220,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let base_cell = vec3<i32>(floor(p_i / cell_size));
 
     let margin = params.safety_margin;
+    // 速度スイープホライゾン (AutoVelocityモード時のみ有効、Fixed時は0)
+    // フレーム内に接近するペアを取りこぼさないための予測拡張。頂点ローカルで完結しCPU readback不要。
+    let horizon_i_raw = length(v_i.velocity) * params.dt_frame * params.velocity_horizon_scale;
+    let horizon_i = min(horizon_i_raw, params.max_horizon);
 
     // 27近傍セル走査
     for (var gx = -1; gx <= 1; gx = gx + 1) {
@@ -247,14 +255,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                     let is_pinned_j = (v_j.inv_mass <= 0.0);
                     if (!(is_pinned_i && is_pinned_j)) {
+                        // 相手頂点の速度ホライゾン (Fixedモードでは0に潰す)
+                        let horizon_j_raw = length(v_j.velocity) * params.dt_frame * params.velocity_horizon_scale;
+                        let horizon_j_full = min(horizon_j_raw, params.max_horizon);
+                        let mode_f = f32(params.margin_mode);
+                        let horizon_j = horizon_j_full * mode_f;
+                        let horizon_i_eff = horizon_i * mode_f;
+
                         let diff_vv = p_i - p_j;
                         let dist_sq_vv = dot(diff_vv, diff_vv);
 
                         let effective_thick = v_i.thickness + v_j.thickness;
                         let local_len_j = local_edge_lengths[j];
 
-                        // 広域外接球による早期枝切り (マージン付き)
-                        let broad_bound = effective_thick + (local_len_i + local_len_j) * 1.3 + margin;
+                        // 広域外接球による早期枝切り (マージン+速度ホライゾン付き)
+                        let broad_bound = effective_thick + (local_len_i + local_len_j) * 1.3 + margin + horizon_i_eff + horizon_j;
                         if (dist_sq_vv <= broad_bound * broad_bound) {
                             let same_island = (island_ids[index] == island_ids[j]);
                             let is_near_topology = same_island && (params.exclude_neighbors != 0u) && is_topologically_near(index, j);
@@ -263,7 +278,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 // ==============================================
                                 // 1. V-T (頂点 対 面) ペア収集
                                 // ==============================================
-                                let vt_bound = effective_thick + local_len_j * 1.3 + margin;
+                                let vt_bound = effective_thick + local_len_j * 1.3 + margin + horizon_i_eff + horizon_j;
                                 if (dist_sq_vv <= vt_bound * vt_bound) {
                                     let star_start = star_offsets[j];
                                     let star_end = star_offsets[j + 1u];
@@ -284,7 +299,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 let diff_vt = p_i - res.pt;
                                                 let dist_sq_vt = dot(diff_vt, diff_vt);
 
-                                                let check_thick = effective_thick + margin;
+                                                let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
                                                 if (dist_sq_vt < check_thick * check_thick) {
                                                     let pair_idx = atomicAdd(&counters.vt_count, 1u);
                                                     if (pair_idx < params.max_vt_pairs) {
@@ -299,7 +314,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 // ==============================================
                                 // 2. E-E (辺 対 辺) ペア収集
                                 // ==============================================
-                                let ee_bound = effective_thick + (local_len_i + local_len_j) * 1.3 + margin;
+                                let ee_bound = effective_thick + (local_len_i + local_len_j) * 1.3 + margin + horizon_i_eff + horizon_j;
                                 if (dist_sq_vv <= ee_bound * ee_bound) {
                                     let adj_i_start = adj_offsets[index];
                                     let adj_i_end = adj_offsets[index + 1u];
@@ -336,7 +351,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                                         let diff_ee = pt1 - pt2;
                                                         let dist_sq_ee = dot(diff_ee, diff_ee);
-                                                        let check_thick = effective_thick + margin;
+                                                        let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
 
                                                         if (dist_sq_ee < check_thick * check_thick && dist_sq_ee > EPSILON) {
                                                             let pair_idx = atomicAdd(&counters.ee_count, 1u);

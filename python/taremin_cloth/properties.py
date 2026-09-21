@@ -375,6 +375,53 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Enable contact pair caching for accelerated self-collision (I-Cloth 2018)",
         default=False,
     )
+    pair_cache_margin_mode: EnumProperty(
+        name="Pair Cache Margin",
+        description="Pair collection margin mode (Fixed: legacy narrow, Auto Velocity: velocity-swept predictive)",
+        items=[
+            ('FIXED', "Fixed", "Legacy narrow collection (thickness + margin only)"),
+            ('AUTO', "Auto Velocity (Recommended)", "Expand collection by velocity horizon for approaching pairs"),
+        ],
+        default='AUTO',
+    )
+    pair_cache_safety_margin: FloatProperty(
+        name="Pair Base Margin",
+        description="Base safety margin for pair collection in meters",
+        default=0.005,
+        min=0.0,
+        max=0.05,
+        precision=4,
+        unit='LENGTH',
+    )
+    pair_cache_horizon_scale: FloatProperty(
+        name="Velocity Horizon Scale",
+        description="Velocity horizon multiplier for swept pair collection",
+        default=1.3,
+        min=0.0,
+        max=4.0,
+        precision=2,
+    )
+    pair_cache_max_horizon: FloatProperty(
+        name="Max Horizon",
+        description="Maximum per-vertex horizon clamp in meters to prevent pair explosion",
+        default=0.02,
+        min=0.0,
+        max=0.1,
+        precision=4,
+        unit='LENGTH',
+    )
+    pair_cache_max_pairs: IntProperty(
+        name="Max Pairs",
+        description="Logical upper limit for VT/EE pair buffers (physical cap 65536)",
+        default=32768,
+        min=64,
+        max=65536,
+    )
+    enable_pair_cache_final_fallback: BoolProperty(
+        name="Final Substep Fallback",
+        description="Run fresh direct self-collision on the last substep to block tunneling before velocity commit",
+        default=True,
+    )
     self_collision_exclude_neighbors: BoolProperty(
         name="Exclude Neighbors",
         description="Exclude mesh edge-connected vertices from self-collision",

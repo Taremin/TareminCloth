@@ -99,6 +99,23 @@ def sync_cloth_parameters(sim, obj, scene=None):
         sim.set_self_collision_substep_interval(interval)
     if hasattr(sim, "set_enable_pair_cache"):
         sim.set_enable_pair_cache(getattr(settings, "enable_pair_cache", False))
+    if hasattr(sim, "set_pair_cache_options"):
+        try:
+            max_pairs = int(getattr(settings, "pair_cache_max_pairs", 32768))
+        except (ValueError, TypeError):
+            max_pairs = 32768
+        margin_mode_str = getattr(settings, "pair_cache_margin_mode", "AUTO")
+        margin_mode = 0 if margin_mode_str == "FIXED" else 1
+        sim.set_pair_cache_options(
+            max_pairs,
+            max_pairs,
+            margin_mode,
+            float(getattr(settings, "pair_cache_safety_margin", 0.005)),
+            float(getattr(settings, "pair_cache_horizon_scale", 1.3)),
+            float(getattr(settings, "pair_cache_max_horizon", 0.02)),
+        )
+    if hasattr(sim, "set_enable_pair_cache_final_fallback"):
+        sim.set_enable_pair_cache_final_fallback(getattr(settings, "enable_pair_cache_final_fallback", True))
 
     # 5.5. エッジ詳細接触判定
     if hasattr(sim, "set_enable_edge_collision"):

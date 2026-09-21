@@ -573,6 +573,13 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
                 self_sub.prop(settings, "post_collision_relaxation_iters", text=i18n.trans("Relax Steps"))
             self_sub.prop(settings, "self_collision_substep_interval", text=i18n.trans("Substep Interval"))
             self_sub.prop(settings, "enable_pair_cache", text=i18n.trans("Active Pair Cache (Fast)"))
+            if settings.enable_pair_cache:
+                self_sub.prop(settings, "pair_cache_margin_mode", text=i18n.trans("Pair Margin Mode"))
+                self_sub.prop(settings, "pair_cache_safety_margin", text=i18n.trans("Pair Base Margin"))
+                self_sub.prop(settings, "pair_cache_horizon_scale", text=i18n.trans("Horizon Scale"))
+                self_sub.prop(settings, "pair_cache_max_horizon", text=i18n.trans("Max Horizon"))
+                self_sub.prop(settings, "pair_cache_max_pairs", text=i18n.trans("Max Pairs"))
+                self_sub.prop(settings, "enable_pair_cache_final_fallback", text=i18n.trans("Final Fallback"))
         l_col.separator()
         l_col.prop(settings, "layer_id")
         row_thick = l_col.row(align=True)

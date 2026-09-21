@@ -113,6 +113,23 @@ class ClothReplayer:
                 enable_normal_untangling=bool(self.metadata.get("enable_normal_untangling", True)),
                 max_iterations=int(self.metadata.get("self_collision_max_iterations", 128)),
             )
+            if hasattr(sim, "set_pair_cache_options"):
+                max_pairs = int(self.metadata.get("pair_cache_max_pairs", 32768))
+                margin_mode = 0 if self.metadata.get("pair_cache_margin_mode", "AUTO") == "FIXED" else 1
+                if isinstance(self.metadata.get("pair_cache_margin_mode"), int):
+                    margin_mode = int(self.metadata.get("pair_cache_margin_mode", 1))
+                sim.set_pair_cache_options(
+                    max_pairs,
+                    max_pairs,
+                    margin_mode,
+                    float(self.metadata.get("pair_cache_safety_margin", 0.005)),
+                    float(self.metadata.get("pair_cache_horizon_scale", 1.3)),
+                    float(self.metadata.get("pair_cache_max_horizon", 0.02)),
+                )
+            if hasattr(sim, "set_enable_pair_cache_final_fallback"):
+                sim.set_enable_pair_cache_final_fallback(
+                    bool(self.metadata.get("enable_pair_cache_final_fallback", True))
+                )
 
         # エッジコリジョン設定
         enable_ec = bool(self.metadata.get("enable_edge_collision", False))

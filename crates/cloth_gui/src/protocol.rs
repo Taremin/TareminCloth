@@ -95,7 +95,27 @@ pub struct GuiSelfCollisionData {
     pub edge_margin_scale: f32,
     #[serde(default)]
     pub edge_margin_offset: f32,
+    #[serde(default)]
+    pub enable_pair_cache: bool,
+    #[serde(default = "default_pair_margin_mode")]
+    pub pair_cache_margin_mode: u32,
+    #[serde(default = "default_pair_margin")]
+    pub pair_cache_safety_margin: f32,
+    #[serde(default = "default_horizon_scale")]
+    pub pair_cache_horizon_scale: f32,
+    #[serde(default = "default_max_horizon")]
+    pub pair_cache_max_horizon: f32,
+    #[serde(default = "default_pair_max")]
+    pub pair_cache_max_pairs: u32,
+    #[serde(default = "default_true")]
+    pub enable_pair_cache_final_fallback: bool,
 }
+
+fn default_pair_margin_mode() -> u32 { 1 }
+fn default_pair_margin() -> f32 { 0.005 }
+fn default_horizon_scale() -> f32 { 1.3 }
+fn default_max_horizon() -> f32 { 0.02 }
+fn default_pair_max() -> u32 { 32768 }
 
 fn default_coupled_mode() -> u32 { 1 }
 fn default_post_relax() -> u32 { 2 }

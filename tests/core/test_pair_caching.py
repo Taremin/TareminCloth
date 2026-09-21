@@ -135,6 +135,59 @@ class TestPairCaching(unittest.TestCase):
         self.assertFalse(np.isnan(out_pos).any())
         self.assertEqual(len(out_pos), len(positions) * 3)
 
+    def test_swept_collection_catches_approaching_pairs(self):
+        """速度スイープ収集がフレーム先頭で離れた接近ペアを捕捉することの検証"""
+        pos1, e1, f1, _ = self.create_grid_cloth(nx=3, ny=3, dx=0.05, z=0.0, pin_first_row=False)
+        pos2, e2, f2, _ = self.create_grid_cloth(nx=3, ny=3, dx=0.05, z=0.030, pin_first_row=False)
+
+        n1 = len(pos1)
+        positions = np.vstack([pos1, pos2])
+        edges = np.vstack([e1, e2 + n1])
+        faces = np.vstack([f1, f2 + n1])
+        inv_masses = np.ones(len(positions), dtype=np.float32)
+        velocities = np.zeros_like(positions)
+        velocities[:n1, 2] = 1.0
+        velocities[n1:, 2] = -1.0
+
+        # Fixedモード: 30mm離間は厚み+マージン(15mm)外のため候補ゼロ
+        sim_fixed = self.core.ClothSimulator(positions, edges, faces, inv_masses, thickness=0.005, enable_pair_cache=True)
+        sim_fixed.set_enable_self_collision(True)
+        sim_fixed.set_positions_and_velocities(positions, velocities)
+        sim_fixed.set_pair_cache_options(32768, 32768, 0, 0.005, 1.3, 0.02)
+        sim_fixed.set_enable_pair_cache_final_fallback(False)
+        sim_fixed.step(1.0 / 60.0, 10)
+        vt_fixed, ee_fixed, _, _ = sim_fixed.get_pair_cache_stats()
+        self.assertEqual(vt_fixed, 0)
+        self.assertEqual(ee_fixed, 0)
+
+        # Autoモード: 速度ホライゾンにより接近ペアを捕捉
+        sim_auto = self.core.ClothSimulator(positions, edges, faces, inv_masses, thickness=0.005, enable_pair_cache=True)
+        sim_auto.set_enable_self_collision(True)
+        sim_auto.set_positions_and_velocities(positions, velocities)
+        sim_auto.set_pair_cache_options(32768, 32768, 1, 0.005, 1.3, 0.02)
+        sim_auto.set_enable_pair_cache_final_fallback(False)
+        sim_auto.step(1.0 / 60.0, 10)
+        vt_auto, ee_auto, max_vt, max_ee = sim_auto.get_pair_cache_stats()
+        self.assertGreater(vt_auto, 0, "Auto収集でV-Tペアが捕捉されませんでした")
+        self.assertGreater(ee_auto, 0, "Auto収集でE-Eペアが捕捉されませんでした")
+        self.assertLessEqual(vt_auto, max_vt)
+        self.assertLessEqual(ee_auto, max_ee)
+
+    def test_pair_cache_final_fallback_toggle(self):
+        """最終サブステップフォールバックのgetter/setter動作テスト"""
+        positions, edges, faces, inv_masses = self.create_grid_cloth()
+        sim = self.core.ClothSimulator(positions, edges, faces, inv_masses, enable_pair_cache=True)
+        self.assertTrue(sim.get_enable_pair_cache_final_fallback())
+        sim.set_enable_pair_cache_final_fallback(False)
+        self.assertFalse(sim.get_enable_pair_cache_final_fallback())
+        sim.set_enable_pair_cache_final_fallback(True)
+        self.assertTrue(sim.get_enable_pair_cache_final_fallback())
+        sim.set_enable_self_collision(True)
+        out_pos = np.zeros(len(positions) * 3, dtype=np.float32)
+        sim.step(1.0 / 60.0, 2)
+        sim.get_positions(out_pos)
+        self.assertFalse(np.isnan(out_pos).any())
+
 
 if __name__ == "__main__":
     unittest.main()

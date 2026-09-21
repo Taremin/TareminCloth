@@ -212,6 +212,13 @@ def extract_self_collision_data(settings) -> Optional[Dict[str, Any]]:
         "enable_edge_collision": bool(getattr(settings, "enable_edge_collision", False)),
         "edge_margin_scale": float(getattr(settings, "edge_margin_scale", 1.0)),
         "edge_margin_offset": float(getattr(settings, "edge_margin_offset", 0.0)),
+        "enable_pair_cache": bool(getattr(settings, "enable_pair_cache", False)),
+        "pair_cache_margin_mode": 0 if getattr(settings, "pair_cache_margin_mode", "AUTO") == "FIXED" else 1,
+        "pair_cache_safety_margin": float(getattr(settings, "pair_cache_safety_margin", 0.005)),
+        "pair_cache_horizon_scale": float(getattr(settings, "pair_cache_horizon_scale", 1.3)),
+        "pair_cache_max_horizon": float(getattr(settings, "pair_cache_max_horizon", 0.02)),
+        "pair_cache_max_pairs": int(getattr(settings, "pair_cache_max_pairs", 32768)),
+        "enable_pair_cache_final_fallback": bool(getattr(settings, "enable_pair_cache_final_fallback", True)),
     }
 
 

@@ -32,6 +32,11 @@ impl GpuClothSimulator {
             bytemuck::bytes_of(&params),
         );
 
+        // ペア収集の速度ホライゾン用にフレームdtを反映 (queue書き込みのみ、エンコーダ順序に影響なし)
+        if self.enable_pair_cache {
+            self.write_pair_collect_params(dt);
+        }
+
         let wg_size = self.workgroup_size;
         let vert_workgroups = (self.num_vertices + wg_size - 1) / wg_size;
         let num_pins = self.dynamic_pins.len() as u32;
@@ -130,7 +135,7 @@ impl GpuClothSimulator {
                 // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
                 if should_solve_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
                     let need_rebuild = sub_idx == 0;
-                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild);
+                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild, is_last_substep);
                 }
             }
 
@@ -166,7 +171,7 @@ impl GpuClothSimulator {
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
         if should_solve_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
             let need_rebuild = sub_idx == 0;
-            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild);
+            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild, is_last_substep);
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
@@ -515,6 +520,48 @@ impl GpuClothSimulator {
         }
     }
 
+    /// ペアキャッシュ統計を取得する (vt_count, ee_count, max_vt, max_ee)。
+    /// デバッグ・飽和検出専用のブロッキング読戻し。毎フレーム呼び出しは避けること。
+    pub fn get_pair_cache_stats(&self) -> (u32, u32, u32, u32) {
+        use crate::mesh::PairCounters;
+        let size = std::mem::size_of::<PairCounters>() as u64;
+        let staging = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pair Counters Staging"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("Read Pair Counters Encoder"),
+            },
+        );
+        encoder.copy_buffer_to_buffer(&self.pair_counters_buffer, 0, &staging, 0, size);
+        self.context.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..size);
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        self.context.device.poll(wgpu::Maintain::Wait);
+        pollster::block_on(receiver.receive()).unwrap().unwrap();
+
+        let data = slice.get_mapped_range();
+        let counters: &[PairCounters] = bytemuck::cast_slice(&data);
+        let out = if counters.is_empty() {
+            (0, 0, self.pair_cache_max_vt_pairs, self.pair_cache_max_ee_pairs)
+        } else {
+            (
+                counters[0].vt_count,
+                counters[0].ee_count,
+                self.pair_cache_max_vt_pairs,
+                self.pair_cache_max_ee_pairs,
+            )
+        };
+        drop(data);
+        staging.unmap();
+        out
+    }
+
     /// シミュレーションを 1 フレーム進め、計算結果座標をGPU内部のリングバッファに保存する。
     /// （GPU同期待機やCPUへの転送は行わず、即座に復帰します）
     /// 戻り値: 現在バッファリングされているフレーム数 (1 ..= max_buffered_frames)
@@ -662,6 +709,7 @@ impl GpuClothSimulator {
         _wg_size: u32,
         prefix: &str,
         need_rebuild: bool,
+        is_last_substep: bool,
     ) {
         // 1. Compute Normals Pass
         {
@@ -674,12 +722,18 @@ impl GpuClothSimulator {
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }
 
-        if !self.enable_pair_cache || need_rebuild {
+        // 最終サブステップ直進フォールバック: 速度確定前のトンネリングを新鮮なBroadphaseで遮断。
+        // Narrow置換方式のためディスパッチ増は +1構築+1フルSolve/frame に限定される。
+        let force_direct = self.enable_pair_cache
+            && self.enable_pair_cache_final_fallback
+            && is_last_substep;
+
+        if !self.enable_pair_cache || need_rebuild || force_direct {
             // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
             self.spatial_hash.dispatch_build(encoder, self.num_vertices);
         }
 
-        if self.enable_pair_cache {
+        if self.enable_pair_cache && !force_direct {
             // =========================================================================
             // 接触候補ペアキャッシュ方式 (Active Pair Caching / I-Cloth 方式)
             // =========================================================================
@@ -703,9 +757,11 @@ impl GpuClothSimulator {
             // シェーダー内で `pair_idx >= total_pairs` により早期リターンするため、
             // 不安定で TDR のリスクがある間接ディスパッチ（DispatchIndirect）を避け、
             // 頂点数に応じた安全な上限ワークグループ数で直接ディスパッチする。
-            let max_possible_pairs = (self.num_vertices * 16).clamp(64, 32768);
-            let vt_workgroups = ((max_possible_pairs + 63) / 64).min(512);
-            let ee_workgroups = ((max_possible_pairs + 63) / 64).min(512);
+            // 論理上限は頂点数連動 (P2)。物理上限65536に対応し1024WGまで許容。
+            let max_logical = self.pair_cache_max_vt_pairs.max(self.pair_cache_max_ee_pairs);
+            let max_possible_pairs = (self.num_vertices * 16).clamp(64, max_logical.max(8192).min(65536));
+            let vt_workgroups = ((max_possible_pairs + 63) / 64).min(1024);
+            let ee_workgroups = ((max_possible_pairs + 63) / 64).min(1024);
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

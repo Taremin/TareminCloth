@@ -152,6 +152,10 @@ pub struct PairCollectParams {
     pub max_ee_pairs: u32,
     pub safety_margin: f32,
     pub exclude_neighbors: u32,
+    pub margin_mode: u32,
+    pub dt_frame: f32,
+    pub velocity_horizon_scale: f32,
+    pub max_horizon: f32,
     pub _pad0: u32,
 }
 

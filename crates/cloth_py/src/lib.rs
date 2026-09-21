@@ -1057,6 +1057,43 @@ impl ClothSimulator {
         self.simulator.enable_pair_cache()
     }
 
+    /// ペアキャッシュ詳細オプションを設定
+    /// margin_mode: 0=Fixed(従来), 1=AutoVelocity(速度スイープ自動拡張)
+    #[pyo3(signature = (max_vt_pairs=32768, max_ee_pairs=32768, margin_mode=1, safety_margin=0.005, horizon_scale=1.3, max_horizon=0.02))]
+    fn set_pair_cache_options(
+        &mut self,
+        max_vt_pairs: u32,
+        max_ee_pairs: u32,
+        margin_mode: u32,
+        safety_margin: f32,
+        horizon_scale: f32,
+        max_horizon: f32,
+    ) {
+        self.simulator.set_pair_cache_options(
+            max_vt_pairs,
+            max_ee_pairs,
+            margin_mode,
+            safety_margin,
+            horizon_scale,
+            max_horizon,
+        );
+    }
+
+    /// 最終サブステップ直進フォールバックの有効/無効を設定
+    fn set_enable_pair_cache_final_fallback(&mut self, enable: bool) {
+        self.simulator.set_enable_pair_cache_final_fallback(enable);
+    }
+
+    /// 最終サブステップ直進フォールバック設定を取得
+    fn get_enable_pair_cache_final_fallback(&self) -> bool {
+        self.simulator.enable_pair_cache_final_fallback()
+    }
+
+    /// ペアキャッシュ統計を取得 (vt_count, ee_count, max_vt, max_ee)。飽和検出用。
+    fn get_pair_cache_stats(&self) -> (u32, u32, u32, u32) {
+        self.simulator.get_pair_cache_stats()
+    }
+
 
     /// 頂点位置を NumPy フラット配列 (len = num_vertices * 3) に同期的に書き戻す
     fn get_positions<'py>(&self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<()> {

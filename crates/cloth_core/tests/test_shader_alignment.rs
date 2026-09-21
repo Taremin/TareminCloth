@@ -3,7 +3,8 @@ use std::mem::{offset_of, size_of};
 
 use cloth_core::mesh::{
     GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint,
-    GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
+    GpuSewingConstraint, GpuStarPair, GpuVertex, PairCollectParams, PairCounters, PairSolveParams,
+    SelfCollisionParams, SimParams,
 };
 use cloth_core::simulation::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
@@ -84,6 +85,9 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("skinning.wgsl", include_str!("../src/shaders/skinning.wgsl")),
     ("prep_bone_triangles.wgsl", include_str!("../src/shaders/prep_bone_triangles.wgsl")),
     ("self_collision_apply.wgsl", include_str!("../src/shaders/self_collision_apply.wgsl")),
+    ("self_collision_collect_pairs.wgsl", include_str!("../src/shaders/self_collision_collect_pairs.wgsl")),
+    ("self_collision_solve_vt.wgsl", include_str!("../src/shaders/self_collision_solve_vt.wgsl")),
+    ("self_collision_solve_ee.wgsl", include_str!("../src/shaders/self_collision_solve_ee.wgsl")),
 ];
 
 macro_rules! check_member {
@@ -311,6 +315,35 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_struct_size!(filename, s, GpuStarPair);
             check_member!(filename, s, GpuStarPair, v0);
             check_member!(filename, s, GpuStarPair, v1);
+        }
+
+        if let Some(s) = structs.get("PairCollectParams") {
+            check_struct_size!(filename, s, PairCollectParams);
+            check_member!(filename, s, PairCollectParams, cell_size);
+            check_member!(filename, s, PairCollectParams, table_size);
+            check_member!(filename, s, PairCollectParams, num_vertices);
+            check_member!(filename, s, PairCollectParams, max_vt_pairs);
+            check_member!(filename, s, PairCollectParams, max_ee_pairs);
+            check_member!(filename, s, PairCollectParams, safety_margin);
+            check_member!(filename, s, PairCollectParams, exclude_neighbors);
+            check_member!(filename, s, PairCollectParams, margin_mode);
+            check_member!(filename, s, PairCollectParams, dt_frame);
+            check_member!(filename, s, PairCollectParams, velocity_horizon_scale);
+            check_member!(filename, s, PairCollectParams, max_horizon);
+        }
+
+        if let Some(s) = structs.get("PairCounters") {
+            check_struct_size!(filename, s, PairCounters);
+            check_member!(filename, s, PairCounters, vt_count);
+            check_member!(filename, s, PairCounters, ee_count);
+        }
+
+        if let Some(s) = structs.get("SolveParams") {
+            check_struct_size!(filename, s, PairSolveParams);
+            check_member!(filename, s, PairSolveParams, num_vertices);
+            check_member!(filename, s, PairSolveParams, max_vt_pairs);
+            check_member!(filename, s, PairSolveParams, max_ee_pairs);
+            check_member!(filename, s, PairSolveParams, enable_normal_untangling);
         }
 
         if let Some(s) = structs.get("GpuSkinningVertex") {

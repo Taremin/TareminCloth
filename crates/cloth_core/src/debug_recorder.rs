@@ -87,6 +87,44 @@ pub struct SimulationMetadata {
     pub edge_margin_offset: f32,
     #[serde(default = "default_max_iterations")]
     pub self_collision_max_iterations: u32,
+    #[serde(default)]
+    pub enable_pair_cache: bool,
+    #[serde(default = "default_pair_margin_mode")]
+    pub pair_cache_margin_mode: u32,
+    #[serde(default = "default_pair_margin")]
+    pub pair_cache_safety_margin: f32,
+    #[serde(default = "default_horizon_scale")]
+    pub pair_cache_horizon_scale: f32,
+    #[serde(default = "default_max_horizon")]
+    pub pair_cache_max_horizon: f32,
+    #[serde(default = "default_pair_max")]
+    pub pair_cache_max_pairs: u32,
+    #[serde(default = "default_true")]
+    pub enable_pair_cache_final_fallback: bool,
+}
+
+fn default_pair_margin_mode() -> u32 {
+    1
+}
+
+fn default_pair_margin() -> f32 {
+    0.005
+}
+
+fn default_horizon_scale() -> f32 {
+    1.3
+}
+
+fn default_max_horizon() -> f32 {
+    0.02
+}
+
+fn default_pair_max() -> u32 {
+    32768
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_max_iterations() -> u32 {
@@ -387,6 +425,13 @@ mod tests {
             edge_margin_scale: 1.0,
             edge_margin_offset: 0.0,
             self_collision_max_iterations: 128,
+            enable_pair_cache: false,
+            pair_cache_margin_mode: 1,
+            pair_cache_safety_margin: 0.005,
+            pair_cache_horizon_scale: 1.3,
+            pair_cache_max_horizon: 0.02,
+            pair_cache_max_pairs: 32768,
+            enable_pair_cache_final_fallback: true,
         };
 
         recorder.start_recording(meta, Some(5));

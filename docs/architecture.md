@@ -123,9 +123,10 @@ sequenceDiagram
      - **自己衝突 (Self-Collision)**:
         - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E / V-V 接触判定。2ホップトポロジー近傍判定をV-V、V-T、E-Eで一貫して統一適用。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合を回避してアキュムレータへ対称蓄積。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
-          - **Collect Pairs パス (`self_collision_collect_pairs.wgsl`)**: フレーム先頭サブステップ（`sub_idx == 0`）でのみ空間ハッシュ近傍探索を実行し、接近頂点・面（V-T）および稜線（E-E）ペアを抽出して専用ストレージバッファにキャッシュ。
-          - **時間的再利用（Amortization）**: 以降のサブステップ（`sub_idx > 0`）では空間ハッシュ構築および全頂点ペア収集パスをスキップ。
-          - **Narrowphase Solve パス (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされた有効ペアのみをピンポイントで並列ディスパッチし、高解像度メッシュにおいて約2倍以上の高速化を達成。
+          - **Collect Pairs パス (`self_collision_collect_pairs.wgsl`)**: フレーム先頭サブステップ（`sub_idx == 0`）でのみ空間ハッシュ近傍探索を実行し、接近頂点・面（V-T）および稜線（E-E）ペアを抽出して専用ストレージバッファにキャッシュ。`margin_mode=AUTO`（既定）では頂点速度×フレームdt×係数（`velocity_horizon_scale=1.3`、`max_horizon=0.02`でクランプ）のスイープホライゾンを収集 bound に加算し、フレーム内に接近するペアの取りこぼしを防止。`FIXED` では従来の静的収集（厚み+マージンのみ）。
+          - **時間的再利用（Amortization）**: 以降のサブステップ（`sub_idx > 0`）では空間ハッシュ構築および全頂点ペア収集パスをスキップ。フレームdtは `step()` 先頭で収集パラメータへ毎フレーム反映。
+          - **Narrowphase Solve パス (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされた有効ペアのみをピンポイントで並列ディスパッチ。論理上限は頂点数連動（`clamp(n*8, 8192, 65536)`、物理確保65536）で `set_pair_cache_options` により変更可。飽和検出は `get_pair_cache_stats()`（vt/ee_count読戻し）で行う。
+          - **最終サブステップフォールバック (`enable_pair_cache_final_fallback`, 既定ON)**: 最終サブステップのみ新鮮な空間ハッシュ構築＋直進フルSolveに置換し、速度確定前のトンネリングを遮断。追加コストは1構築+1フルSolve/frameに限定され、約1.8〜2.4倍の高速化を維持。
         - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
         - **協調収束設計 (Coupled Modes)**:
           - `RELAXATION` モード（推奨標準）: 自己衝突直後に距離拘束および縫合拘束を2反復再適用（Post-Relaxation）。エッジ過剰伸長を約5割抑制しつつ、距離拘束による縫合ペア引き戻しを完全に防ぎ、自己衝突ON時でも0.00mmの完全密着縫合を保証。実測153.2 FPSを維持。
