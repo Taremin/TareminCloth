@@ -78,21 +78,19 @@ def restore_fast_playback(scene=None):
     _fast_playback_saved_mods.clear()
 
 
-def get_or_create_simulator(obj):
-    """オブジェクトに対応するClothSimulatorインスタンスを取得または生成する"""
-    import taremin_cloth_core
+def begin_simulator_init(obj):
+    """シミュレータ初期化の前半: メッシュ抽出と生成パラメータの準備を行う (TIMER分割用)。
 
+    Returns:
+        dict: 初期化中間状態。既存インスタンスがある場合は {"cached": True} のみ。
+    """
     if obj.name in _simulators:
-        return _simulators[obj.name]
+        return {"cached": True}
 
     settings = obj.taremin_cloth
     cloth_data = extract_cloth_mesh_data(obj, settings)
     pos_2d = cloth_data.positions
     coords = pos_2d.flatten().copy()
-    edges_2d = cloth_data.normal_edges
-    faces_2d = cloth_data.faces
-    sew_2d = cloth_data.sewing_edges
-    inv_masses = cloth_data.inv_masses
     n_verts = len(pos_2d)
 
     wg_size = int(getattr(settings, "workgroup_size", "32"))
@@ -107,14 +105,34 @@ def get_or_create_simulator(obj):
         if len(raw_rest) == n_verts * 3 * 4:
             rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3))
 
-    sim_init_pos = rest_pos_2d if rest_pos_2d is not None else pos_2d
+    return {
+        "cached": False,
+        "pos_2d": pos_2d,
+        "coords": coords,
+        "edges_2d": cloth_data.normal_edges,
+        "faces_2d": cloth_data.faces,
+        "sew_2d": cloth_data.sewing_edges,
+        "inv_masses": cloth_data.inv_masses,
+        "n_verts": n_verts,
+        "wg_size": wg_size,
+        "s_mode": s_mode,
+        "compact_rb": compact_rb,
+        "rest_pos_2d": rest_pos_2d,
+        "sim_init_pos": rest_pos_2d if rest_pos_2d is not None else pos_2d,
+    }
 
+
+def create_simulator_from_state(obj, state):
+    """シミュレータ初期化の中盤: GPU初期化 (ClothSimulator生成 + Cold Resume) を行う"""
+    import taremin_cloth_core
+
+    settings = obj.taremin_cloth
     sim = taremin_cloth_core.ClothSimulator(
-        positions=sim_init_pos,
-        edges=edges_2d,
-        faces=faces_2d,
-        inv_masses=inv_masses,
-        sewing_springs=sew_2d,
+        positions=state["sim_init_pos"],
+        edges=state["edges_2d"],
+        faces=state["faces_2d"],
+        inv_masses=state["inv_masses"],
+        sewing_springs=state["sew_2d"],
         layer_id=settings.layer_id,
         thickness=settings.thickness,
         stiffness=settings.tension_stiffness,
@@ -124,16 +142,28 @@ def get_or_create_simulator(obj):
         sewing_shrink_speed=settings.sewing_shrink_speed,
         sewing_stiffness=getattr(settings, "sewing_stiffness", 10000.0),
         enable_sewing_lock=getattr(settings, "enable_sewing_lock", True),
-        workgroup_size=wg_size,
-        solver_mode=s_mode,
-        enable_compact_readback=compact_rb,
+        workgroup_size=state["wg_size"],
+        solver_mode=state["s_mode"],
+        enable_compact_readback=state["compact_rb"],
         enable_pair_cache=getattr(settings, "enable_pair_cache", False),
     )
 
     # Cold Resume: レスト座標で自然長を初期化した後、現在の変形頂点座標をGPUにセットして停止位置から再開
-    if rest_pos_2d is not None:
-        sim.set_positions_and_velocities(pos_2d)
+    if state["rest_pos_2d"] is not None:
+        sim.set_positions_and_velocities(state["pos_2d"])
         logger.info(f"[Simulator] Cold resume: Restored positions to previous paused state for '{obj.name}'")
+
+    return sim
+
+
+def finalize_simulator_init(obj, sim, state, scene=None):
+    """シミュレータ初期化の後半: 特性長・レスト・コライダー/SDF同期・パラメータ同期・登録を行う"""
+    sc = scene if scene is not None else bpy.context.scene
+    pos_2d = state["pos_2d"]
+    edges_2d = state["edges_2d"]
+    faces_2d = state["faces_2d"]
+    coords = state["coords"]
+    settings = obj.taremin_cloth
 
     # メッシュ特性長 (最小エッジ長と布厚み) を計算してキャッシュ
     if len(edges_2d) > 0:
@@ -149,13 +179,23 @@ def get_or_create_simulator(obj):
     _mesh_char_len_cache[obj.name] = char_len
 
     cache_rest_positions(obj)
-    sync_colliders(sim, bpy.context.scene, cloth_obj=obj)
-    sync_cloth_parameters(sim, obj, bpy.context.scene)
+    sync_colliders(sim, sc, cloth_obj=obj)
+    sync_cloth_parameters(sim, obj, sc)
 
     _simulators[obj.name] = (sim, coords)
     n_faces = len(faces_2d) if faces_2d is not None else 0
     logger.debug(f"[Simulator] Initialized ClothSimulator for '{obj.name}' (verts={len(pos_2d)}, faces={n_faces})")
     return sim, coords
+
+
+def get_or_create_simulator(obj):
+    """オブジェクトに対応するClothSimulatorインスタンスを取得または生成する"""
+    if obj.name in _simulators:
+        return _simulators[obj.name]
+
+    state = begin_simulator_init(obj)
+    sim = create_simulator_from_state(obj, state)
+    return finalize_simulator_init(obj, sim, state)
 
 
 def get_effective_substeps(obj, coords, dt, scene=None):

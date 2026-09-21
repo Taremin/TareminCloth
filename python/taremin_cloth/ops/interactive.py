@@ -18,6 +18,9 @@ from ..engine.cache import (
 )
 from ..engine.runner import (
     get_or_create_simulator,
+    begin_simulator_init,
+    create_simulator_from_state,
+    finalize_simulator_init,
     get_effective_substeps,
     step_cloth_scene,
     step_cloth_object,
@@ -270,6 +273,24 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     _saved_selection = []
     _saved_active = None
     _perf_samples = []
+    _init_stage = None
+    _init_total = 6
+    _modal_handler_added = False
+    _progress_active = False
+    _cursor_wait_set = False
+
+    # 起動準備の段階メッセージ (i18n辞書キーと1:1対応すること)
+    _INIT_STAGE_MESSAGES = (
+        "Preparing cloth...",
+        "Loading pins...",
+        "Extracting mesh...",
+        "Initializing GPU...",
+        "Syncing colliders...",
+        "Setting up viewport...",
+    )
+
+    # 低速起動とみなしてINFOサマリーを出す合計秒数の閾値
+    _SLOW_STARTUP_SEC = 3.0
 
     @classmethod
     def poll(cls, context):
@@ -361,8 +382,319 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 "step_count": step_count,
             })
 
+    def _reset_run_state(self):
+        """1回の起動試行に先立ち、実行時ステートを初期化する"""
+        self._stop_requested = False
+        self._pinned_verts = set()
+        self._fps_counter = FPSCounter(ema_alpha=0.15)
+        self._grabbed_vert = None
+        self._grab_initial_pos_local = None
+        self._grab_plane_point = None
+        self._grab_plane_normal = None
+        self._grab_initial_plane_hit = None
+        self._grab_current_target_local = None
+        self._anim_frame_counter = 0
+        self._accumulator = 0.0
+        self._last_step_time = time.perf_counter()
+        self._perf_samples = []
+        self._isolated_areas = []
+        self._saved_selection = []
+        self._saved_active = None
+        self._init_stage = 0
+        self._modal_handler_added = False
+        self._progress_active = False
+        self._cursor_wait_set = False
+        self._init_timings = []
+        self._init_partial = None
+        self._init_sim = None
+        drawing.clear_interactive_fps_info()
+        drawing.clear_init_overlay_info()
+
+    def _init_progress_total(self):
+        return len(self._INIT_STAGE_MESSAGES)
+
+    def _update_init_progress(self, context):
+        """現在の準備段階をプログレス・ステータス・HUDに反映する"""
+        total = self._init_progress_total()
+        idx = min(max(self._init_stage or 0, 0), total)
+        if idx < total:
+            message = self._INIT_STAGE_MESSAGES[idx]
+        else:
+            message = self._INIT_STAGE_MESSAGES[-1]
+        try:
+            wm = context.window_manager
+            wm.progress_update(idx)
+        except Exception:
+            pass
+        drawing.set_init_overlay_info(message, idx, total)
+        try:
+            ws = getattr(context, "workspace", None)
+            if ws and hasattr(ws, "status_text_set"):
+                cancel_txt = i18n.trans("[Esc] Cancel")
+                ws.status_text_set(f"{i18n.trans(message)} {idx}/{total}  |  {cancel_txt}")
+        except Exception:
+            pass
+        try:
+            tag_redraw_view3d(context)
+        except Exception:
+            pass
+
+    def _begin_init_ui(self, context):
+        """準備開始時のプログレス・カーソル・HUD初期表示を行う"""
+        try:
+            wm = context.window_manager
+            wm.progress_begin(0, self._init_progress_total())
+            wm.progress_update(0)
+            self._progress_active = True
+        except Exception:
+            pass
+        try:
+            wm = context.window_manager
+            cursor_set = getattr(wm, "cursor_modal_set", None)
+            if callable(cursor_set):
+                cursor_set('WAIT')
+                self._cursor_wait_set = True
+        except Exception:
+            pass
+        self._update_init_progress(context)
+
+    def _end_init_ui(self, context, success: bool):
+        """準備終了・中断時のプログレス・カーソル・HUD後片付けを行う"""
+        if self._progress_active:
+            try:
+                wm = context.window_manager
+                wm.progress_end()
+            except Exception:
+                pass
+            self._progress_active = False
+        if self._cursor_wait_set:
+            try:
+                wm = context.window_manager
+                cursor_restore = getattr(wm, "cursor_modal_restore", None)
+                if callable(cursor_restore):
+                    cursor_restore()
+            except Exception:
+                pass
+            self._cursor_wait_set = False
+        drawing.clear_init_overlay_info()
+        if not success:
+            try:
+                ws = getattr(context, "workspace", None)
+                if ws and hasattr(ws, "status_text_set"):
+                    ws.status_text_set(None)
+            except Exception:
+                pass
+            try:
+                tag_redraw_view3d(context)
+            except Exception:
+                pass
+
+    def _run_init_stage(self, context):
+        """現在の準備段階を1つだけ実行し、次段階へ進める（段階所要時間も記録する）"""
+        obj = context.active_object
+        stage = self._init_stage or 0
+        t0 = time.perf_counter()
+        if stage == 0:
+            self._init_stage_topo(obj)
+        elif stage == 1:
+            self._init_stage_pins(obj)
+        elif stage == 2:
+            self._init_stage_sim_extract(obj)
+        elif stage == 3:
+            self._init_stage_sim_gpu(obj)
+        elif stage == 4:
+            self._init_stage_sim_collider(context, obj)
+        elif stage == 5:
+            self._init_stage_setup(context, obj)
+        else:
+            return False
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        self._init_timings.append((self._INIT_STAGE_MESSAGES[stage], elapsed_ms))
+        self._init_stage = stage + 1
+        return self._init_stage < self._init_progress_total()
+
+    def _init_stage_topo(self, obj):
+        """段階0: 十字分割の自動適用判定"""
+        if obj and obj.type == 'MESH':
+            settings = getattr(obj, "taremin_cloth", None)
+            if settings and settings.triangulation_mode == 'CROSS_SUBDIV' and not topology.is_cross_subdivided(obj):
+                cache_rest_positions(obj, force=True)
+                if topology.apply_cross_subdivision(obj):
+                    clear_simulator_for_object(obj.name)
+                    cache_rest_positions(obj, force=True)
+
+    def _init_stage_pins(self, obj):
+        """段階1: 既存ピン留め頂点の事前ロード"""
+        self._pinned_verts = set()
+        if obj and obj.type == 'MESH':
+            settings = getattr(obj, "taremin_cloth", None)
+            if settings:
+                vg_name = settings.pin_vertex_group or "Pin"
+                vg = obj.vertex_groups.get(vg_name)
+                if vg:
+                    vg_idx = vg.index
+                    for v in obj.data.vertices:
+                        for g in v.groups:
+                            if g.group == vg_idx and g.weight > 0.0:
+                                self._pinned_verts.add(v.index)
+                                break
+
+    def _init_stage_sim_extract(self, obj):
+        """段階2: メッシュ抽出と生成パラメータの準備（Warm Resume時は即時復帰）"""
+        if obj.name in _simulators:
+            self._init_partial = {"cached": True}
+            return
+        self._init_partial = begin_simulator_init(obj)
+
+    def _init_stage_sim_gpu(self, obj):
+        """段階3: GPU初期化 (ClothSimulator生成 + Cold Resume)"""
+        state = self._init_partial
+        if not state or state.get("cached"):
+            return
+        sim = create_simulator_from_state(obj, state)
+        state["sim"] = sim
+        self._init_sim = sim
+
+    def _init_stage_sim_collider(self, context, obj):
+        """段階4: 特性長・レスト・コライダー/SDF同期・パラメータ同期・登録（最重量段階）"""
+        state = self._init_partial
+        if not state or state.get("cached"):
+            return
+        sim = state.get("sim")
+        if sim is None:
+            sim = create_simulator_from_state(obj, state)
+            state["sim"] = sim
+        finalize_simulator_init(obj, sim, state, scene=context.scene)
+        self._init_sim = sim
+        prefs = get_preferences(context)
+        should_debug_record = prefs and (prefs.log_level == 'DEBUG') and getattr(prefs, "enable_debug_recording", True)
+        if should_debug_record and obj and obj.type == 'MESH':
+            if sim and hasattr(sim, "start_debug_recording"):
+                max_frames = getattr(prefs, "debug_max_frames", 3600)
+                sim.start_debug_recording(obj.name, max_frames=max_frames)
+                logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames})")
+
+    def _init_stage_setup(self, context, obj):
+        """段階3: 隔離ビュー等の仕上げ"""
+        self._perf_samples = []
+        self._isolated_areas = []
+        self._saved_selection = []
+        self._saved_active = None
+        settings = getattr(obj, "taremin_cloth", None)
+        if settings and getattr(settings, "isolate_viewport_view", True):
+            self._isolated_areas, self._saved_selection, self._saved_active = enter_isolated_view(context, obj)
+
+    def _report_startup_summary(self, context):
+        """起動準備の段階別サマリーをログレベルに応じて出力する"""
+        timings = list(getattr(self, "_init_timings", None) or [])
+        if not timings:
+            return
+        total_ms = sum(ms for _, ms in timings)
+        total_s = total_ms / 1000.0
+
+        sim = getattr(self, "_init_sim", None)
+        if sim is None:
+            sdf_source = "warm"
+        else:
+            try:
+                from ..engine.collider import _last_sync_info
+                sdf_source = _last_sync_info.get(id(sim), {}).get("sdf_source", "none")
+            except Exception:
+                sdf_source = "unknown"
+
+        prefs = get_preferences(context)
+        level = getattr(prefs, "log_level", "INFO") if prefs else "INFO"
+
+        breakdown = ", ".join(f"{msg} {ms / 1000.0:.2f}s" for msg, ms in timings)
+        if level == 'DEBUG':
+            logger.debug(
+                f"[Interactive Startup] total {total_s:.2f}s (SDF: {sdf_source}) "
+                f"[{breakdown}]"
+            )
+        elif total_s >= self._SLOW_STARTUP_SEC:
+            logger.info(
+                f"[Interactive Startup] Slow startup: total {total_s:.2f}s "
+                f"(SDF: {sdf_source}) [{breakdown}]"
+            )
+
+    def _start_sim_loop(self, context):
+        """準備完了後に本番シミュレーションループを開始する"""
+        global _interactive_running, _interactive_operator_instance
+        wm = context.window_manager
+        if self._timer:
+            try:
+                wm.event_timer_remove(self._timer)
+            except Exception:
+                pass
+            self._timer = None
+        try:
+            self._timer = wm.event_timer_add(0.016, window=context.window)
+        except Exception:
+            self._timer = None
+        # invoke() ですでにモーダルハンドラ登録済みの場合は二重登録しない
+        # （同一インスタンスの二重登録は終了時のクラッシュ要因となる）
+        if not self._modal_handler_added:
+            try:
+                wm.modal_handler_add(self)
+                self._modal_handler_added = True
+            except Exception:
+                pass
+        _interactive_running = True
+        _interactive_operator_instance = self
+        drawing.set_interactive_active(True)
+        if hasattr(context.workspace, "status_text_set"):
+            status_guide = i18n.trans(
+                "Taremin Cloth: [Left Drag] Move Vertex | [P] Toggle Pin | [Right Click / ESC] Exit"
+            )
+            context.workspace.status_text_set(status_guide)
+        self._report_startup_summary(context)
+        self.report({'INFO'}, i18n.trans("Interactive Simulation Started (Press ESC / RightClick or Click Stop to exit)"))
+
+    def _abort_init(self, context):
+        """準備中断時の後片付けを行う"""
+        global _interactive_running, _interactive_operator_instance
+        if self._timer:
+            try:
+                context.window_manager.event_timer_remove(self._timer)
+            except Exception:
+                pass
+            self._timer = None
+        self._end_init_ui(context, success=False)
+        self._init_stage = None
+        _interactive_running = False
+        _interactive_operator_instance = None
+        drawing.set_interactive_active(False)
+
+    def _modal_init_step(self, context, event):
+        """準備中のモーダルイベント処理（TIMERで1段階ずつ進行、ESC/RMBで中断）"""
+        if self._stop_requested:
+            self._abort_init(context)
+            return {'CANCELLED'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            self._abort_init(context)
+            self.report({'INFO'}, i18n.trans("[Esc] Cancel"))
+            return {'CANCELLED'}
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        try:
+            has_more = self._run_init_stage(context)
+        except Exception as e:
+            logger.error(f"[Interactive] Init failed at stage {self._init_stage}: {e}", exc_info=True)
+            self._abort_init(context)
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        if has_more:
+            self._update_init_progress(context)
+            return {'RUNNING_MODAL'}
+        self._init_stage = None
+        self._end_init_ui(context, success=True)
+        self._start_sim_loop(context)
+        return {'RUNNING_MODAL'}
+
     def modal(self, context, event):
         global _interactive_running, _interactive_operator_instance
+        if self._init_stage is not None:
+            return self._modal_init_step(context, event)
         if self._stop_requested:
             self.cancel(context)
             return {'FINISHED'}
@@ -572,6 +904,36 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         return {'PASS_THROUGH'}
 
+    def invoke(self, context, event):
+        global _interactive_running, _interactive_operator_instance
+        # トグル動作: すでに実行中の場合は停止を要求
+        if _interactive_running:
+            if _interactive_operator_instance is not None:
+                _interactive_operator_instance._stop_requested = True
+            return {'FINISHED'}
+        # ヘッドレス/バックグラウンド時は同期 execute に委譲
+        try:
+            if getattr(getattr(bpy, "app", None), "background", False):
+                return self.execute(context)
+        except Exception:
+            pass
+        self._reset_run_state()
+        self._begin_init_ui(context)
+        wm = context.window_manager
+        try:
+            self._timer = wm.event_timer_add(0.001, window=context.window)
+        except Exception:
+            self._timer = None
+            return self.execute(context)
+        try:
+            wm.modal_handler_add(self)
+            self._modal_handler_added = True
+        except Exception:
+            pass
+        _interactive_running = True
+        _interactive_operator_instance = self
+        return {'RUNNING_MODAL'}
+
     def execute(self, context):
         global _interactive_running, _interactive_operator_instance
         # トグル動作: すでに実行中の場合は停止を要求
@@ -581,75 +943,23 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             return {'FINISHED'}
 
         obj = context.active_object
-        self._stop_requested = False
-        self._pinned_verts = set()
-        self._fps_counter = FPSCounter(ema_alpha=0.15)
-        drawing.clear_interactive_fps_info()
-
-        # 十字分割の自動適用（未適用の四角面がある場合、かつCROSS_SUBDIVモード時のみ）
-        if obj and obj.type == 'MESH':
-            settings = getattr(obj, "taremin_cloth", None)
-            if settings and settings.triangulation_mode == 'CROSS_SUBDIV' and not topology.is_cross_subdivided(obj):
-                cache_rest_positions(obj, force=True)
-                if topology.apply_cross_subdivision(obj):
-                    clear_simulator_for_object(obj.name)
-                    cache_rest_positions(obj, force=True)
-
-        # 既存のピン留め頂点を事前ロード
-        if obj and obj.type == 'MESH':
-            settings = getattr(obj, "taremin_cloth", None)
-            if settings:
-                vg_name = settings.pin_vertex_group or "Pin"
-                vg = obj.vertex_groups.get(vg_name)
-                if vg:
-                    vg_idx = vg.index
-                    for v in obj.data.vertices:
-                        for g in v.groups:
-                            if g.group == vg_idx and g.weight > 0.0:
-                                self._pinned_verts.add(v.index)
-                                break
-
-        self._anim_frame_counter = 0
-        self._accumulator = 0.0
-        self._last_step_time = time.perf_counter()
-
-        # デバッグ状態記録の開始判定 (Console Log Level が DEBUG のとき、かつデバッグ記録設定有効時)
-        prefs = get_preferences(context)
-        should_debug_record = prefs and (prefs.log_level == 'DEBUG') and getattr(prefs, "enable_debug_recording", True)
-        if should_debug_record and obj and obj.type == 'MESH':
-            sim, _ = get_or_create_simulator(obj)
-            if sim and hasattr(sim, "start_debug_recording"):
-                max_frames = getattr(prefs, "debug_max_frames", 3600)
-                sim.start_debug_recording(obj.name, max_frames=max_frames)
-                logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames})")
-
-        # パフォーマンスサンプラー初期化
-        self._perf_samples = []
-
-        # ローカルビュー（描画隔離）の適用
-        self._isolated_areas = []
-        self._saved_selection = []
-        self._saved_active = None
-        settings = getattr(obj, "taremin_cloth", None)
-        if settings and getattr(settings, "isolate_viewport_view", True):
-            self._isolated_areas, self._saved_selection, self._saved_active = enter_isolated_view(context, obj)
-
-        wm = context.window_manager
-        # 60 FPS相当 (約16.6ms) の高精度タイマーを登録
-        self._timer = wm.event_timer_add(0.016, window=context.window)
-        wm.modal_handler_add(self)
-        _interactive_running = True
-        _interactive_operator_instance = self
-
-        drawing.set_interactive_active(True)
-
-        if hasattr(context.workspace, "status_text_set"):
-            status_guide = i18n.trans(
-                "Taremin Cloth: [Left Drag] Move Vertex | [P] Toggle Pin | [Right Click / ESC] Exit"
-            )
-            context.workspace.status_text_set(status_guide)
-
-        self.report({'INFO'}, i18n.trans("Interactive Simulation Started (Press ESC / RightClick or Click Stop to exit)"))
+        self._reset_run_state()
+        # 同期パス（バックグラウンド/テスト用）: 全段階を一括実行
+        try:
+            while self._init_stage is not None and self._init_stage < self._init_progress_total():
+                self._update_init_progress(context)
+                has_more = self._run_init_stage(context)
+                if not has_more:
+                    break
+        except Exception as e:
+            logger.error(f"[Interactive] Init failed: {e}", exc_info=True)
+            self._end_init_ui(context, success=False)
+            self._init_stage = None
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        self._init_stage = None
+        self._end_init_ui(context, success=True)
+        self._start_sim_loop(context)
         return {'RUNNING_MODAL'}
 
     def cancel(self, context):
@@ -661,8 +971,26 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         drawing.clear_active_grabbed_vertex()
         drawing.clear_interactive_fps_info()
+        drawing.clear_init_overlay_info()
         drawing.set_interactive_active(False)
         self._fps_counter = None
+        self._init_stage = None
+        self._modal_handler_added = False
+        # 準備UIが開始済みの場合のみ終了処理を行う（二重終了の不整合を防止）
+        if self._progress_active:
+            try:
+                wm.progress_end()
+            except Exception:
+                pass
+            self._progress_active = False
+        if self._cursor_wait_set:
+            try:
+                cursor_restore = getattr(wm, "cursor_modal_restore", None)
+                if callable(cursor_restore):
+                    cursor_restore()
+            except Exception:
+                pass
+            self._cursor_wait_set = False
 
         if self._grabbed_vert is not None:
             if self._grabbed_vert not in self._pinned_verts:

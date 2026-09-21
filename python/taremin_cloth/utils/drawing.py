@@ -111,6 +111,35 @@ def is_bake_overlay_active() -> bool:
     return _bake_overlay_info is not None
 
 
+_init_overlay_info = None  # {"message": str, "current": int, "total": int}
+
+
+def set_init_overlay_info(message: str, current: int, total: int):
+    """インタラクティブ起動準備中のオーバーレイ描画情報を更新する"""
+    global _init_overlay_info
+    _init_overlay_info = {
+        "message": str(message),
+        "current": int(current),
+        "total": int(total),
+    }
+
+
+def clear_init_overlay_info():
+    """起動準備中のオーバーレイ描画情報をクリアする"""
+    global _init_overlay_info
+    _init_overlay_info = None
+
+
+def get_init_overlay_info():
+    """現在の起動準備中オーバーレイ描画情報を取得する（テストまたはUI用）"""
+    return _init_overlay_info
+
+
+def is_init_overlay_active() -> bool:
+    """起動準備中のオーバーレイ描画が有効かどうかを取得する"""
+    return _init_overlay_info is not None
+
+
 def set_active_grabbed_vertex(obj_name: str, vert_idx: int, target_world_pos=None):
     """現在ドラッグ中の頂点情報を設定する"""
     global _active_grabbed_info
@@ -468,9 +497,89 @@ def draw_callback_3d():
             gpu.state.depth_mask_set(orig_depth_mask)
 
 
+def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
+    """画面下部中央に進捗バー付きバッジを描画する（ベイク/起動準備の共通ヘルパー）"""
+    pct = max(0, min(100, int(pct)))
+    guide_h = 32.0
+    pad_x = 18.0
+    text_w = 400.0
+
+    import blf
+    font_id = 0
+    font_size = 12
+
+    try:
+        blf.size(font_id, font_size)
+    except (TypeError, ValueError):
+        try:
+            blf.size(font_id, font_size, 72)
+        except Exception:
+            pass
+
+    try:
+        dims = blf.dimensions(font_id, text)
+        if dims and dims[0] > 0:
+            text_w = dims[0]
+    except Exception:
+        pass
+
+    guide_w = text_w + pad_x * 2.0
+    guide_margin_x = max(10.0, (region.width - guide_w) / 2.0)
+    guide_y_bottom = 24.0
+    guide_y_top = guide_y_bottom + guide_h
+
+    if shader_2d:
+        orig_blend = gpu.state.blend_get()
+        try:
+            gpu.state.blend_set('ALPHA')
+            # 1. メイン半透明背景ボックス
+            vertices = [
+                (guide_margin_x, guide_y_bottom),
+                (guide_margin_x + guide_w, guide_y_bottom),
+                (guide_margin_x + guide_w, guide_y_top),
+                (guide_margin_x, guide_y_bottom),
+                (guide_margin_x + guide_w, guide_y_top),
+                (guide_margin_x, guide_y_top),
+            ]
+            batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
+            if batch:
+                shader_2d.bind()
+                shader_2d.uniform_float("color", (0.10, 0.10, 0.13, 0.85))
+                batch.draw(shader_2d)
+
+            # 2. 進捗プログレスバー（底辺3px）
+            bar_h = 3.0
+            bar_w = guide_w * (pct / 100.0)
+            if bar_w > 0.0:
+                bar_verts = [
+                    (guide_margin_x, guide_y_bottom),
+                    (guide_margin_x + bar_w, guide_y_bottom),
+                    (guide_margin_x + bar_w, guide_y_bottom + bar_h),
+                    (guide_margin_x, guide_y_bottom),
+                    (guide_margin_x + bar_w, guide_y_bottom + bar_h),
+                    (guide_margin_x, guide_y_bottom + bar_h),
+                ]
+                bar_batch = batch_for_shader(shader_2d, 'TRIS', {"pos": bar_verts})
+                if bar_batch:
+                    shader_2d.bind()
+                    shader_2d.uniform_float("color", (0.2, 0.7, 1.0, 0.9))
+                    bar_batch.draw(shader_2d)
+        finally:
+            gpu.state.blend_set(orig_blend)
+
+    try:
+        text_x = guide_margin_x + pad_x
+        text_y = guide_y_bottom + 10.0
+        blf.position(font_id, text_x, text_y, 0.0)
+        blf.color(font_id, 0.95, 0.95, 0.98, 1.0)
+        blf.draw(font_id, text)
+    except Exception:
+        pass
+
+
 def draw_callback_2d():
     """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
-    if not _interactive_active and not _bake_overlay_info:
+    if not _interactive_active and not _bake_overlay_info and not _init_overlay_info:
         return
 
     context = bpy.context
@@ -647,81 +756,23 @@ def draw_callback_2d():
         except Exception:
             bake_text = f"Baking Simulation: Frame {cur_f} / {end_f} ({pct}%)  |  [Esc] Cancel"
 
-        guide_h = 32.0
-        pad_x = 18.0
-        text_w = 400.0
+        _draw_bottom_center_progress(region, shader_2d, bake_text, pct)
 
-        import blf
-        font_id = 0
-        font_size = 12
+    # --- 3. 起動準備中オーバーレイバッジの描画 (画面下部中央) ---
+    if _init_overlay_info:
+        message = _init_overlay_info.get("message", "")
+        cur = _init_overlay_info.get("current", 0)
+        total = _init_overlay_info.get("total", 1)
+        pct = int(min(1.0, max(0.0, cur / max(1, total))) * 100)
 
+        stage_text = i18n.trans(message) if message else ""
+        cancel_text = i18n.trans("[Esc] Cancel")
         try:
-            blf.size(font_id, font_size)
-        except (TypeError, ValueError):
-            try:
-                blf.size(font_id, font_size, 72)
-            except Exception:
-                pass
-
-        try:
-            dims = blf.dimensions(font_id, bake_text)
-            if dims and dims[0] > 0:
-                text_w = dims[0]
+            init_text = f"{stage_text} {cur}/{total} ({pct}%)  |  {cancel_text}"
         except Exception:
-            pass
+            init_text = f"{message} {cur}/{total} ({pct}%)"
 
-        guide_w = text_w + pad_x * 2.0
-        guide_margin_x = max(10.0, (region.width - guide_w) / 2.0)
-        guide_y_bottom = 24.0
-        guide_y_top = guide_y_bottom + guide_h
-
-        if shader_2d:
-            orig_blend = gpu.state.blend_get()
-            try:
-                gpu.state.blend_set('ALPHA')
-                # 1. メイン半透明背景ボックス
-                vertices = [
-                    (guide_margin_x, guide_y_bottom),
-                    (guide_margin_x + guide_w, guide_y_bottom),
-                    (guide_margin_x + guide_w, guide_y_top),
-                    (guide_margin_x, guide_y_bottom),
-                    (guide_margin_x + guide_w, guide_y_top),
-                    (guide_margin_x, guide_y_top),
-                ]
-                batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
-                if batch:
-                    shader_2d.bind()
-                    shader_2d.uniform_float("color", (0.10, 0.10, 0.13, 0.85))
-                    batch.draw(shader_2d)
-
-                # 2. 進捗プログレスバー（底辺3px）
-                bar_h = 3.0
-                bar_w = guide_w * (pct / 100.0)
-                if bar_w > 0.0:
-                    bar_verts = [
-                        (guide_margin_x, guide_y_bottom),
-                        (guide_margin_x + bar_w, guide_y_bottom),
-                        (guide_margin_x + bar_w, guide_y_bottom + bar_h),
-                        (guide_margin_x, guide_y_bottom),
-                        (guide_margin_x + bar_w, guide_y_bottom + bar_h),
-                        (guide_margin_x, guide_y_bottom + bar_h),
-                    ]
-                    bar_batch = batch_for_shader(shader_2d, 'TRIS', {"pos": bar_verts})
-                    if bar_batch:
-                        shader_2d.bind()
-                        shader_2d.uniform_float("color", (0.2, 0.7, 1.0, 0.9))
-                        bar_batch.draw(shader_2d)
-            finally:
-                gpu.state.blend_set(orig_blend)
-
-        try:
-            text_x = guide_margin_x + pad_x
-            text_y = guide_y_bottom + 10.0
-            blf.position(font_id, text_x, text_y, 0.0)
-            blf.color(font_id, 0.95, 0.95, 0.98, 1.0)
-            blf.draw(font_id, bake_text)
-        except Exception:
-            pass
+        _draw_bottom_center_progress(region, shader_2d, init_text, pct)
 
 
 def register_draw_handler():

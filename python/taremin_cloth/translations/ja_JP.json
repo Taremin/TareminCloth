@@ -654,5 +654,12 @@
   "Toggle between Object Mode and Weight Paint Mode for active pin vertex group": "選択中ピングループのオブジェクトモードとウェイトペイントモードを切り替えます",
   "Switched to Object Mode": "オブジェクトモードに切り替えました",
   "Switched to Weight Paint Mode (%s)": "ウェイトペイントモードに切り替えました (%s)",
-  "Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel": "シミュレーションベイク中: フレーム %d / %d (%d%%)  |  [Esc] キャンセル"
+  "Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel": "シミュレーションベイク中: フレーム %d / %d (%d%%)  |  [Esc] キャンセル",
+  "Preparing cloth...": "布データを準備中...",
+  "Loading pins...": "ピン情報を読み込み中...",
+  "Extracting mesh...": "メッシュを抽出中...",
+  "Initializing GPU...": "GPUを初期化中...",
+  "Syncing colliders...": "コライダーを同期中...",
+  "Setting up viewport...": "ビューポートを設定中...",
+  "[Esc] Cancel": "[Esc] 中止"
 }

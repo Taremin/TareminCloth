@@ -15,6 +15,7 @@ from .sdf_baker import (
     BoneSdfBakeResult,
     MeshSdfBakeResult,
     extract_dynamic_sdf_setup_data,
+    _last_sdf_bake_info,
     DEFAULT_MESH_SDF_MAX_VRAM_MB,
 )
 
@@ -23,6 +24,9 @@ _bone_sdf_cache = {}
 _bone_sdf_signatures = {}
 _scene_mesh_collider_cache = {}
 _bone_pose_signatures = {}
+# 直近のコライダー同期のSDF取得元 {sim_id: {"sdf_source": "baked"|"disk"|"memory"|"failed"|"none"}}
+# 起動サマリー表示用。Blenderはシングルスレッド逐次実行のため、呼び出し直後の参照で安全。
+_last_sync_info = {}
 
 COLLIDER_IGNORED_MODIFIER_TYPES = {'SUBSURF', 'SOLIDIFY', 'MULTIRES', 'BEVEL'}
 
@@ -77,6 +81,7 @@ def clear_collider_cache():
     _scene_mesh_collider_cache.clear()
     _bone_pose_signatures.clear()
     _bone_sdf_signatures.clear()
+    _last_sync_info.clear()
 
 
 def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_indices=None):
@@ -412,6 +417,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
         all_mesh_attributes = []
         has_cluster_culling = False
         max_sweep_margin = 0.05
+        sdf_sources = []
 
         for obj, col_settings in collider_objs:
             world_mat = obj.matrix_world
@@ -508,6 +514,10 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 if needs_rebake:
                     bake_res = get_or_bake_bone_sdf_for_object(obj, col_settings)
                     if bake_res and bake_res.depth > 0:
+                        if _last_sdf_bake_info.get("bone", {}).get("cached", False):
+                            sdf_sources.append("disk")
+                        else:
+                            sdf_sources.append("baked")
                         if update_mode == 'DYNAMIC_GPU':
                             dyn_data = extract_dynamic_sdf_setup_data(obj, arm_mod.object, bake_res)
                             update_interval = int(getattr(col_settings, "sdf_dynamic_update_interval", 1))
@@ -549,9 +559,11 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                         bake_res = None
                         _bone_sdf_cache.pop(sim_id, None)
                         _bone_sdf_signatures.pop(sim_id, None)
+                        sdf_sources.append("failed")
                 else:
                     cache_entry = _bone_sdf_cache[sim_id]
                     bake_res = cache_entry[1]
+                    sdf_sources.append("memory")
 
                 # DYNAMIC_GPU の場合はGPU側でメッシュ変形に追従するため、関節メッシュハイブリッドの重いCPU to_mesh()評価はスキップ
                 if update_mode == 'DYNAMIC_GPU':
@@ -572,6 +584,10 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 if needs_rebake:
                     bake_res = get_or_bake_mesh_sdf_for_object(obj, col_settings)
                     if bake_res and bake_res.depth > 0:
+                        if _last_sdf_bake_info.get("mesh", {}).get("cached", False):
+                            sdf_sources.append("disk")
+                        else:
+                            sdf_sources.append("baked")
                         sim.set_bone_sdf_colliders(
                             bake_res.width,
                             bake_res.height,
@@ -585,7 +601,23 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     else:
                         _bone_sdf_cache.pop(sim_id, None)
                         _bone_sdf_signatures.pop(sim_id, None)
+                        sdf_sources.append("failed")
+                else:
+                    sdf_sources.append("memory")
                 continue
+
+        # SDF取得元の集約 (baked > failed > disk > memory > none の優先度)
+        if "baked" in sdf_sources:
+            sdf_source = "baked"
+        elif "failed" in sdf_sources:
+            sdf_source = "failed"
+        elif "disk" in sdf_sources:
+            sdf_source = "disk"
+        elif "memory" in sdf_sources:
+            sdf_source = "memory"
+        else:
+            sdf_source = "none"
+        _last_sync_info[sim_id] = {"sdf_source": sdf_source}
 
         if not use_cached_mesh:
             _scene_mesh_collider_cache[scene_cache_key] = (all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin)

@@ -30,6 +30,7 @@ from .cache import (
 )
 from .collider import (
     _collider_cache,
+    _last_sync_info,
     clear_collider_cache,
     sync_colliders,
 )
@@ -43,6 +44,9 @@ from .runner import (
     apply_fast_playback,
     restore_fast_playback,
     get_or_create_simulator,
+    begin_simulator_init,
+    create_simulator_from_state,
+    finalize_simulator_init,
     get_effective_substeps,
     step_cloth_object,
     step_cloth_scene,
@@ -78,6 +82,7 @@ __all__ = [
     "free_object_bake",
     "free_scene_bake",
     "_collider_cache",
+    "_last_sync_info",
     "clear_collider_cache",
     "sync_colliders",
     "sync_cloth_parameters",
@@ -87,6 +92,9 @@ __all__ = [
     "apply_fast_playback",
     "restore_fast_playback",
     "get_or_create_simulator",
+    "begin_simulator_init",
+    "create_simulator_from_state",
+    "finalize_simulator_init",
     "get_effective_substeps",
     "step_cloth_object",
     "step_cloth_scene",

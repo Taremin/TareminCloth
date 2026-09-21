@@ -654,5 +654,12 @@
   "Toggle between Object Mode and Weight Paint Mode for active pin vertex group": "Toggle between Object Mode and Weight Paint Mode for active pin vertex group",
   "Switched to Object Mode": "Switched to Object Mode",
   "Switched to Weight Paint Mode (%s)": "Switched to Weight Paint Mode (%s)",
-  "Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel": "Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel"
+  "Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel": "Baking Simulation: Frame %d / %d (%d%%)  |  [Esc] Cancel",
+  "Preparing cloth...": "Preparing cloth...",
+  "Loading pins...": "Loading pins...",
+  "Extracting mesh...": "Extracting mesh...",
+  "Initializing GPU...": "Initializing GPU...",
+  "Syncing colliders...": "Syncing colliders...",
+  "Setting up viewport...": "Setting up viewport...",
+  "[Esc] Cancel": "[Esc] Cancel"
 }

@@ -20,10 +20,20 @@ class TestDrawingOverlayOptimization(unittest.TestCase):
     def setUp(self):
         drawing.set_interactive_active(False)
         drawing.clear_overlay_caches()
+        self._saved_shaders = (
+            drawing._cached_point_shader,
+            drawing._cached_line_shader,
+            drawing._cached_2d_shader,
+            drawing._cached_smooth_line_shader,
+        )
 
     def tearDown(self):
         drawing.set_interactive_active(False)
         drawing.clear_overlay_caches()
+        (drawing._cached_point_shader,
+         drawing._cached_line_shader,
+         drawing._cached_2d_shader,
+         drawing._cached_smooth_line_shader) = self._saved_shaders
 
     def test_interactive_state_toggle_and_cache_clear(self):
         """インタラクティブ状態の切り替えとキャッシュクリアの連動テスト"""

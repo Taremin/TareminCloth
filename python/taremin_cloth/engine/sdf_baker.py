@@ -800,6 +800,11 @@ def bake_bone_sdf_from_data(
     )
 
 
+# 直近のSDFベイク取得元情報 {kind("bone"/"mesh"): {"cached": bool}}
+# 起動サマリー表示用。Blenderはシングルスレッド逐次実行のため、呼び出し直後の参照で安全。
+_last_sdf_bake_info = {}
+
+
 def get_cache_dir() -> str:
     """SDFキャッシュ保存先ディレクトリを取得・作成する"""
     import tempfile
@@ -1144,6 +1149,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
         if cached is not None:
+            _last_sdf_bake_info["bone"] = {"cache_key": cache_key, "cached": True}
             # 最新の衝突・マテリアルパラメータを確実に適用
             cached.bone_infos = update_bone_sdf_params(
                 cached.bone_infos,
@@ -1200,6 +1206,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     if cache_enabled and result is not None and result.depth > 0:
         save_cached_sdf(cache_key, result)
 
+    _last_sdf_bake_info["bone"] = {"cache_key": cache_key, "cached": False}
     return result
 
 
@@ -1334,6 +1341,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         cached = load_cached_sdf(cache_key)
         if cached is not None:
             logger.info(f"[Mesh SDF Baker] キャッシュロード成功: '{obj.name}' ({cached.width}x{cached.height}x{cached.depth})")
+            _last_sdf_bake_info["mesh"] = {"cache_key": cache_key, "cached": True}
             return MeshSdfBakeResult(
                 texture_bytes=cached.texture_bytes,
                 width=cached.width,
@@ -1372,6 +1380,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         if cache_enabled:
             save_cached_sdf(cache_key, res)
 
+    _last_sdf_bake_info["mesh"] = {"cache_key": cache_key, "cached": False}
     return res
 
 
