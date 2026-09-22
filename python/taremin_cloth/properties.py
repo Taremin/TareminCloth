@@ -546,6 +546,42 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Lock sewing edges rigidly once fully contracted, preventing gap reopen",
         default=True,
     )
+    enable_sewing_priority: BoolProperty(
+        name="Sewing Priority",
+        description="Suppress gravity until the specified share of sewing pairs has closed (garment assembly phase)",
+        default=False,
+    )
+    sewing_priority_threshold: FloatProperty(
+        name="Closure Threshold",
+        description="Share of sewing pairs regarded as closed before gravity is restored (0.0-1.0)",
+        default=0.9,
+        min=0.0,
+        max=1.0,
+    )
+    sewing_priority_merge_dist: FloatProperty(
+        name="Merge Distance",
+        description="Distance below which a sewing pair counts as closed",
+        default=0.005,
+        min=0.0005,
+        max=0.1,
+        step=0.1,
+        precision=4,
+        unit='LENGTH',
+    )
+    sewing_priority_ramp_frames: IntProperty(
+        name="Gravity Ramp Frames",
+        description="Frames over which gravity is smoothly restored after latch (prevents snapping)",
+        default=3,
+        min=0,
+        max=120,
+    )
+    sewing_priority_max_frames: IntProperty(
+        name="Max Priority Frames",
+        description="Forced gravity restore after this many frames even if the threshold is not reached (0=disabled)",
+        default=600,
+        min=0,
+        max=100000,
+    )
     # ピン留め・アタッチメント
     pin_target_object: PointerProperty(
         name="Pin Target",

@@ -331,6 +331,17 @@ impl GuiApp {
         self.gravity = data.gravity;
         sim.set_gravity(data.gravity[0], data.gravity[1], data.gravity[2]);
 
+        // 縫合優先モード (工程フェーズ制御)。無効時はコア側で恒等動作する。
+        sim.set_sewing_priority_options(
+            data.sewing_priority_enabled,
+            data.sewing_priority_threshold,
+            data.sewing_priority_merge_dist,
+            data.sewing_priority_ramp_frames,
+            data.sewing_priority_max_frames,
+        );
+        // 初期座標で初回測定し、1フレーム目から抑制を有効化する。
+        sim.update_sewing_priority_from_positions(&data.positions);
+
         // ソルバー設定
         sim.solver_iterations = data.solver_iterations;
         self.solver_iterations = data.solver_iterations;
@@ -519,6 +530,11 @@ impl GuiApp {
 
         // タイマーの微小な揺らぎ（16.5ms等）でステップがスキップされないよう2msの許容余裕を持たせる
         let step_threshold = (fixed_dt - 0.002).max(0.001);
+        // 縫合優先モード: 直近の既知座標で結合率を測定し、step 前にラッチ状態を更新する。
+        // cached_positions はオンデマンド読戻しの最新値であり、追加のGPU同期を発行しない。
+        if self.cached_positions.len() == sim.num_vertices as usize {
+            sim.update_sewing_priority_from_positions(&self.cached_positions);
+        }
         while self.time_accumulator >= step_threshold && steps_done < max_steps {
             sim.solver_iterations = self.solver_iterations;
             sim.step(fixed_dt, self.substeps);
@@ -691,6 +707,9 @@ impl GuiApp {
                     if ui.button("⏭ Step").clicked() {
                         if let Some(ref mut sim) = self.simulator {
                             sim.solver_iterations = self.solver_iterations;
+                            if self.cached_positions.len() == sim.num_vertices as usize {
+                                sim.update_sewing_priority_from_positions(&self.cached_positions);
+                            }
                             sim.step(1.0 / 60.0, self.substeps);
                         }
                     }
@@ -1069,6 +1088,30 @@ impl GuiApp {
                         }
                         if let Some(fps) = p.target_fps {
                             self.target_fps = fps;
+                        }
+                        if p.sewing_priority_enabled.is_some()
+                            || p.sewing_priority_threshold.is_some()
+                            || p.sewing_priority_merge_dist.is_some()
+                            || p.sewing_priority_ramp_frames.is_some()
+                            || p.sewing_priority_max_frames.is_some()
+                        {
+                            if let Some(ref mut sim) = self.simulator {
+                                // 現在値を読んで未指定項目を維持する
+                                let (enabled, threshold, merge_dist, ramp_frames, max_frames) = (
+                                    p.sewing_priority_enabled.unwrap_or(sim.sewing_priority_enabled),
+                                    p.sewing_priority_threshold.unwrap_or(sim.sewing_priority_threshold),
+                                    p.sewing_priority_merge_dist.unwrap_or(sim.sewing_priority_merge_dist),
+                                    p.sewing_priority_ramp_frames.unwrap_or(sim.sewing_priority_ramp_frames),
+                                    p.sewing_priority_max_frames.unwrap_or(sim.sewing_priority_max_frames),
+                                );
+                                sim.set_sewing_priority_options(
+                                    enabled,
+                                    threshold,
+                                    merge_dist,
+                                    ramp_frames,
+                                    max_frames,
+                                );
+                            }
                         }
                     }
                     GuiCommand::UpdateColliders { colliders, mesh_triangles } => {

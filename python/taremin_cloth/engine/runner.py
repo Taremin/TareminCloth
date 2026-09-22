@@ -315,6 +315,17 @@ def step_cloth_object(
     actual_substeps = substeps if substeps is not None else get_effective_substeps(obj, coords, dt, scene=scene)
     actual_iters = solver_iterations if solver_iterations is not None else (getattr(settings, "solver_iterations", 1) if settings else 1)
 
+    # 縫合優先モード: 直近座標で結合率を測定し、step 前にラッチ状態を更新する。
+    # 追加のGPU読戻しなし (coords は前ステップ確定値のキャッシュ)。
+    if settings is not None and bool(getattr(settings, "enable_sewing_priority", False)):
+        updater = getattr(sim, "update_sewing_priority", None)
+        if callable(updater):
+            try:
+                pos_2d = np.ascontiguousarray(coords.reshape(-1, 3), dtype=np.float32)
+                updater(pos_2d)
+            except Exception:
+                pass
+
     sim.step(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
 
     if update_mesh:

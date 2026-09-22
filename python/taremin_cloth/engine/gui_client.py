@@ -446,6 +446,11 @@ class ClothGuiClient:
                 "gravity": gravity,
                 "gravity_scale": scale,
                 "sewing_shrink_speed": float(getattr(settings, "sewing_shrink_speed", 0.5)) if settings else 0.5,
+                "sewing_priority_enabled": bool(getattr(settings, "enable_sewing_priority", False)) if settings else False,
+                "sewing_priority_threshold": float(getattr(settings, "sewing_priority_threshold", 0.9)) if settings else 0.9,
+                "sewing_priority_merge_dist": float(getattr(settings, "sewing_priority_merge_dist", 0.005)) if settings else 0.005,
+                "sewing_priority_ramp_frames": int(getattr(settings, "sewing_priority_ramp_frames", 3)) if settings else 3,
+                "sewing_priority_max_frames": int(getattr(settings, "sewing_priority_max_frames", 600)) if settings else 600,
                 "workgroup_size": int(getattr(settings, "workgroup_size", "32")) if settings else 32,
                 "solver_mode": 1 if getattr(settings, "solver_mode", "COLORING") == 'ATOMIC' else 0,
                 "solver_iterations": int(getattr(settings, "solver_iterations", 10)) if settings else 10,
@@ -600,6 +605,11 @@ class ClothGuiClient:
         shear_stiffness=None,
         bending_stiffness=None,
         solver_iterations=None,
+        sewing_priority_enabled=None,
+        sewing_priority_threshold=None,
+        sewing_priority_merge_dist=None,
+        sewing_priority_ramp_frames=None,
+        sewing_priority_max_frames=None,
     ) -> bool:
         """物理パラメータの動的更新コマンドを送信する"""
         params = {}
@@ -627,6 +637,16 @@ class ClothGuiClient:
             params["bending_stiffness"] = float(bending_stiffness)
         if solver_iterations is not None:
             params["solver_iterations"] = int(solver_iterations)
+        if sewing_priority_enabled is not None:
+            params["sewing_priority_enabled"] = bool(sewing_priority_enabled)
+        if sewing_priority_threshold is not None:
+            params["sewing_priority_threshold"] = float(sewing_priority_threshold)
+        if sewing_priority_merge_dist is not None:
+            params["sewing_priority_merge_dist"] = float(sewing_priority_merge_dist)
+        if sewing_priority_ramp_frames is not None:
+            params["sewing_priority_ramp_frames"] = int(sewing_priority_ramp_frames)
+        if sewing_priority_max_frames is not None:
+            params["sewing_priority_max_frames"] = int(sewing_priority_max_frames)
 
         return self.send_command("SetParams", params)
 
@@ -662,6 +682,11 @@ class ClothGuiClient:
             "shear_stiffness": float(getattr(settings, "shear_stiffness", 100.0)),
             "bending_stiffness": float(getattr(settings, "bending_stiffness", 10.0)),
             "solver_iterations": int(getattr(settings, "solver_iterations", 2)),
+            "sewing_priority_enabled": bool(getattr(settings, "enable_sewing_priority", False)),
+            "sewing_priority_threshold": float(getattr(settings, "sewing_priority_threshold", 0.9)),
+            "sewing_priority_merge_dist": float(getattr(settings, "sewing_priority_merge_dist", 0.005)),
+            "sewing_priority_ramp_frames": int(getattr(settings, "sewing_priority_ramp_frames", 3)),
+            "sewing_priority_max_frames": int(getattr(settings, "sewing_priority_max_frames", 600)),
         }
 
         # 差分検知: 前回送信したパラメータと完全一致している場合はスキップ

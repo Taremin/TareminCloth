@@ -12,6 +12,8 @@ from ..engine import (
     is_object_baked,
 )
 from ..engine import runner
+from ..engine.cache import _simulators
+from ..engine.sewing_priority import sim_phase, phase_text
 from ..utils.drawing import set_bake_overlay_info, clear_bake_overlay_info
 from ..utils.view3d import tag_redraw_view3d
 from .. import i18n
@@ -80,7 +82,23 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
                     wm.progress_update(baked_cnt)
 
                     pct = int(min(1.0, baked_cnt / max(1, self.total_steps + 1)) * 100)
-                    set_bake_overlay_info(self.current_frame, self.end_frame, pct)
+                    # 縫合優先フェーズの表示 (有効な布のみ・simキャッシュ読取のみ)
+                    sewing_text = None
+                    try:
+                        for o in self.bake_ctx["cloth_objs"]:
+                            st = getattr(o, "taremin_cloth", None)
+                            if st is None or not bool(getattr(st, "enable_sewing_priority", False)):
+                                continue
+                            entry = _simulators.get(o.name)
+                            if entry is None:
+                                continue
+                            ph = sim_phase(entry[0])
+                            if ph is not None:
+                                sewing_text = phase_text(ph[0], ph[1], ph[2], i18n.trans)
+                                break
+                    except Exception:
+                        sewing_text = None
+                    set_bake_overlay_info(self.current_frame, self.end_frame, pct, sewing_text=sewing_text)
                     status_str = f"Taremin Cloth: Baking frame {self.current_frame}/{self.end_frame} ({pct}%) - ESC to Cancel"
                     if hasattr(context, "workspace") and context.workspace:
                         context.workspace.status_text_set(status_str)

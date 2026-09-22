@@ -140,6 +140,56 @@ class TestDrawingHud(unittest.TestCase):
             self.fail(f"draw_callback_2d with both disabled raised exception: {e}")
         self.assertFalse(mock_batch.draw.called)
 
+    @patch.dict("sys.modules", {"blf": MagicMock()})
+    @patch("taremin_cloth.utils.drawing.batch_for_shader")
+    @patch("taremin_cloth.utils.drawing.gpu")
+    @patch("taremin_cloth.utils.drawing.bpy")
+    def test_draw_callback_2d_sewing_badge(self, mock_bpy, mock_gpu, mock_batch_for_shader):
+        """縫合フェーズバッジ付きでも2Dオーバーレイ描画が正常に実行されるか確認"""
+        mock_region = MagicMock()
+        mock_region.width = 1920
+        mock_region.height = 1080
+        mock_bpy.context.region = mock_region
+
+        mock_batch = MagicMock()
+        mock_batch_for_shader.return_value = mock_batch
+
+        mock_shader = MagicMock()
+        mock_gpu.shader.from_builtin.return_value = mock_shader
+
+        drawing.set_interactive_active(True)
+        drawing.set_interactive_fps_info(
+            fps=60.0,
+            frame_ms=16.6,
+            show_overlay=True,
+            position='TOP_CENTER',
+            show_help=False,
+            sewing_text="Phase: Sewing 62% (gravity 0.00x)",
+            sewing_active=True,
+        )
+        try:
+            drawing.draw_callback_2d()
+        except Exception as e:
+            self.fail(f"draw_callback_2d with sewing badge raised exception: {e}")
+        self.assertTrue(mock_batch.draw.called)
+
+        # FPS非表示時も縫合バッジ単独で描画されること
+        mock_batch.reset_mock()
+        drawing.set_interactive_fps_info(
+            fps=60.0,
+            frame_ms=16.6,
+            show_overlay=False,
+            position='TOP_CENTER',
+            show_help=False,
+            sewing_text="Phase: Normal (gravity 1.00x)",
+            sewing_active=False,
+        )
+        try:
+            drawing.draw_callback_2d()
+        except Exception as e:
+            self.fail(f"draw_callback_2d with sewing-only badge raised exception: {e}")
+        self.assertTrue(mock_batch.draw.called)
+
     def test_bake_overlay_info_state(self):
         """ベイクオーバーレイ情報の更新・取得・クリアの動作確認"""
         self.assertFalse(drawing.is_bake_overlay_active())
@@ -152,10 +202,30 @@ class TestDrawingHud(unittest.TestCase):
         self.assertEqual(info["current_frame"], 15)
         self.assertEqual(info["end_frame"], 250)
         self.assertEqual(info["pct"], 6)
+        self.assertIsNone(info["sewing_text"])
+
+        drawing.set_bake_overlay_info(current_frame=15, end_frame=250, pct=6,
+                                      sewing_text="Phase: Sewing 62% (gravity 0.00x)")
+        info = drawing.get_bake_overlay_info()
+        self.assertEqual(info["sewing_text"], "Phase: Sewing 62% (gravity 0.00x)")
 
         drawing.clear_bake_overlay_info()
         self.assertFalse(drawing.is_bake_overlay_active())
         self.assertIsNone(drawing.get_bake_overlay_info())
+
+    def test_interactive_fps_info_sewing_keys(self):
+        """FPS情報に縫合フェーズ表示キーが既定保持されること"""
+        drawing.set_interactive_fps_info(fps=60.0, frame_ms=16.6)
+        info = drawing.get_interactive_fps_info()
+        self.assertIsNone(info["sewing_text"])
+        self.assertFalse(info["sewing_active"])
+
+        drawing.set_interactive_fps_info(fps=60.0, frame_ms=16.6,
+                                         sewing_text="Phase: Sewing 62% (gravity 0.00x)",
+                                         sewing_active=True)
+        info = drawing.get_interactive_fps_info()
+        self.assertEqual(info["sewing_text"], "Phase: Sewing 62% (gravity 0.00x)")
+        self.assertTrue(info["sewing_active"])
 
     @patch.dict("sys.modules", {"blf": MagicMock()})
     @patch("taremin_cloth.utils.drawing.batch_for_shader")

@@ -615,9 +615,9 @@ class TestI18nDynamicUIDraw(unittest.TestCase):
                 # 2. 布・コライダー無効（Enable Cloth, Enable Collider ボタン）
                 {"active": True, "is_cloth": False, "is_col": False, "mode": 'SIMPLE'},
                 # 3. 布有効・簡単モード（縫合・自己衝突も有効）
-                {"active": True, "is_cloth": True, "is_col": False, "mode": 'SIMPLE', "sewing": True, "self_col": True},
+                {"active": True, "is_cloth": True, "is_col": False, "mode": 'SIMPLE', "sewing": True, "sewing_priority": True, "self_col": True},
                 # 4. 布有効・詳細モード（全サブパネル展開状態）
-                {"active": True, "is_cloth": True, "is_col": False, "mode": 'ADVANCED', "sewing": True, "self_col": True, "adaptive": True, "buffering": True, "fps": True},
+                {"active": True, "is_cloth": True, "is_col": False, "mode": 'ADVANCED', "sewing": True, "sewing_priority": True, "self_col": True, "adaptive": True, "buffering": True, "fps": True},
                 # 5. コライダー有効・簡単モード（SPHERE, BONE_SDF, MESH）
                 {"active": True, "is_cloth": False, "is_col": True, "mode": 'SIMPLE', "col_type": 'SPHERE'},
                 {"active": True, "is_cloth": False, "is_col": True, "mode": 'SIMPLE', "col_type": 'BONE_SDF'},
@@ -644,6 +644,7 @@ class TestI18nDynamicUIDraw(unittest.TestCase):
                         scene.taremin_cloth_ui_mode = st.get("mode", "SIMPLE")
                     self.obj.taremin_cloth.is_cloth = st.get("is_cloth", False)
                     self.obj.taremin_cloth.enable_sewing = st.get("sewing", False)
+                    self.obj.taremin_cloth.enable_sewing_priority = st.get("sewing_priority", False)
                     self.obj.taremin_cloth.enable_self_collision = st.get("self_col", False)
                     self.obj.taremin_cloth.enable_adaptive_substep = st.get("adaptive", False)
                     self.obj.taremin_cloth.enable_frame_buffering = st.get("buffering", False)

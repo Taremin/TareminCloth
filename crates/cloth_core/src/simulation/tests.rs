@@ -439,4 +439,121 @@ mod tests {
         assert!(y1 < 0.5 - 1e-3, "w=0.5 must stay below target (y1={})", y1);
     }
 
+    fn make_sewing_constraint(v0: u32, v1: u32) -> crate::mesh::GpuSewingConstraint {
+        crate::mesh::GpuSewingConstraint {
+            v0,
+            v1,
+            current_rest_len: 1.0,
+            target_rest_len: 0.0,
+            shrink_speed: 1.0,
+            compliance: 0.0,
+            lock_on_close: 1.0,
+            _pad1: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_sewing_closure_ratio_pure() {
+        // GPU不要の純粋関数試験
+        let sc = vec![make_sewing_constraint(0, 1), make_sewing_constraint(2, 3)];
+        let pos = vec![
+            [0.0, 0.0, 0.0],
+            [0.001, 0.0, 0.0], // 結合 (1mm)
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0], // 非結合
+        ];
+        let ratio = GpuClothSimulator::compute_sewing_closure_ratio(&pos, &sc, 0.005);
+        assert!((ratio - 0.5).abs() < 1e-6, "ratio must be 0.5 (got {})", ratio);
+        // 縫合なしは恒等 1.0
+        let empty: Vec<crate::mesh::GpuSewingConstraint> = vec![];
+        assert_eq!(GpuClothSimulator::compute_sewing_closure_ratio(&pos, &empty, 0.005), 1.0);
+        // 範囲外インデックスはスキップされ、分母から除外される
+        let bad = vec![make_sewing_constraint(0, 99)];
+        assert_eq!(GpuClothSimulator::compute_sewing_closure_ratio(&pos, &bad, 0.005), 1.0);
+    }
+
+    #[test]
+    fn test_sewing_priority_latch_and_ramp() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        // 2頂点・縫合1本の最小メッシュ
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let edges: Vec<[u32; 2]> = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&[[0u32, 1u32]]),
+            None, None, 0, 0.005, 10000.0, 10.0, 5000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        assert_eq!(sim.num_sewing_constraints, 1);
+        sim.set_sewing_priority_options(true, 0.9, 0.005, 2, 0);
+
+        // 未結合: スケール0
+        let (r0, s0, lat0) = sim.update_sewing_priority_from_positions(&positions);
+        assert_eq!(r0, 0.0);
+        assert_eq!(s0, 0.0);
+        assert!(!lat0);
+        assert!(sim.is_sewing_priority_active());
+
+        // 結合: ラッチし、ランプ1段目は smoothstep(0.5)=0.5
+        let closed = vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0]];
+        let (r1, s1, lat1) = sim.update_sewing_priority_from_positions(&closed);
+        assert_eq!(r1, 1.0);
+        assert!(lat1);
+        assert!((s1 - 0.5).abs() < 1e-6, "ramp step1 must be 0.5 (got {})", s1);
+
+        // 2段目で復帰完了
+        let (_, s2, _) = sim.update_sewing_priority_from_positions(&closed);
+        assert!((s2 - 1.0).abs() < 1e-6, "ramp step2 must be 1.0 (got {})", s2);
+
+        // 片道ラッチ: 再び離れても戻らない
+        let (_, s3, lat3) = sim.update_sewing_priority_from_positions(&positions);
+        assert!(lat3);
+        assert_eq!(s3, 1.0);
+    }
+
+    #[test]
+    fn test_sewing_priority_max_frames_fallback() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let edges: Vec<[u32; 2]> = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&[[0u32, 1u32]]),
+            None, None, 0, 0.005, 10000.0, 10.0, 5000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        // 閾値1.0 (到達不能) + 上限2フレーム + 即時復帰
+        sim.set_sewing_priority_options(true, 1.0, 0.005, 0, 2);
+        let (_, s0, lat0) = sim.update_sewing_priority_from_positions(&positions);
+        assert!(!lat0);
+        assert_eq!(s0, 0.0);
+        let (_, s1, lat1) = sim.update_sewing_priority_from_positions(&positions);
+        assert!(lat1, "max_frames fallback must latch");
+        assert_eq!(s1, 1.0);
+    }
+
+    #[test]
+    fn test_sewing_priority_disabled_identity() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let edges: Vec<[u32; 2]> = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&[[0u32, 1u32]]),
+            None, None, 0, 0.005, 10000.0, 10.0, 5000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        // 既定OFF: 恒等動作
+        assert_eq!(sim.sewing_priority_scale(), 1.0);
+        assert!(!sim.is_sewing_priority_active());
+        let (r, s, lat) = sim.update_sewing_priority_from_positions(&positions);
+        assert_eq!((r, s, lat), (1.0, 1.0, true));
+    }
+
 }

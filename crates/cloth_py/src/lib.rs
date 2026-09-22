@@ -1903,6 +1903,56 @@ impl ClothSimulator {
         self.simulator.set_enable_sewing_lock(enabled);
     }
 
+    /// 縫合優先モードのオプションを設定する (工程フェーズ制御)。
+    /// threshold: 結合とみなすペア割合 (0.0〜1.0)。merge_dist: 結合判定距離 (m)。
+    /// ramp_frames: 重力復帰にかけるフレーム数。max_frames: 強制復帰までの上限 (0=無効)。
+    #[pyo3(signature = (enabled, threshold=0.9, merge_dist=0.005, ramp_frames=3, max_frames=600))]
+    fn set_sewing_priority_options(
+        &mut self,
+        enabled: bool,
+        threshold: f32,
+        merge_dist: f32,
+        ramp_frames: u32,
+        max_frames: u32,
+    ) {
+        self.simulator.set_sewing_priority_options(
+            enabled,
+            threshold,
+            merge_dist,
+            ramp_frames,
+            max_frames,
+        );
+    }
+
+    /// 直近座標から縫合結合率を測定し、ラッチ・ランプ状態を更新する。
+    /// 戻り値: (結合率, 実効重力スケール, ラッチ済みか)。GPU読戻しは行わない。
+    fn update_sewing_priority(&mut self, positions: PyReadonlyArray2<f32>) -> (f32, f32, bool) {
+        let view = positions.as_array();
+        let mut pos_vec = Vec::with_capacity(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 3 {
+                pos_vec.push([row[0], row[1], row[2]]);
+            }
+        }
+        self.simulator
+            .update_sewing_priority_from_positions(&pos_vec)
+    }
+
+    /// 現在の実効重力スケール (0.0〜1.0) を返す。
+    fn get_sewing_priority_scale(&self) -> f32 {
+        self.simulator.sewing_priority_scale()
+    }
+
+    /// 最後に測定された縫合結合率キャッシュを返す。
+    fn get_sewing_closure_ratio(&self) -> f32 {
+        self.simulator.sewing_closure_ratio()
+    }
+
+    /// 縫合優先モードにより現在重力が抑制されているかを返す。
+    fn is_sewing_priority_active(&self) -> bool {
+        self.simulator.is_sewing_priority_active()
+    }
+
     /// 頂点数を取得
 
     #[getter]

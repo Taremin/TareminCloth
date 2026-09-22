@@ -71,6 +71,11 @@ impl GpuClothSimulator {
             pair_cache_max_horizon: self.pair_cache_max_horizon,
             pair_cache_max_pairs: self.pair_cache_max_vt_pairs.max(self.pair_cache_max_ee_pairs),
             enable_pair_cache_final_fallback: self.enable_pair_cache_final_fallback,
+            sewing_priority_enabled: self.sewing_priority_enabled,
+            sewing_priority_threshold: self.sewing_priority_threshold,
+            sewing_priority_merge_dist: self.sewing_priority_merge_dist,
+            sewing_priority_ramp_frames: self.sewing_priority_ramp_frames,
+            sewing_priority_max_frames: self.sewing_priority_max_frames,
         };
 
         self.debug_recorder.start_recording(metadata, max_frames);

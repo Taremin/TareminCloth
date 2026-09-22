@@ -10,8 +10,16 @@ impl GpuClothSimulator {
         }
 
         let substep_dt = dt / (substeps as f32);
+        // 縫合優先モード: 工程フェーズ中は重力ベクトルをスケール (0=無重力〜1=通常)。
+        // WGSL側の変更なし。ラッチ・ランプ状態はホストが update_sewing_priority_from_positions で更新する。
+        let priority_scale = self.sewing_priority_scale();
         let params = SimParams {
-            gravity: [self.gravity[0], self.gravity[1], self.gravity[2], substep_dt],
+            gravity: [
+                self.gravity[0] * priority_scale,
+                self.gravity[1] * priority_scale,
+                self.gravity[2] * priority_scale,
+                substep_dt,
+            ],
             damping: self.damping,
             substeps,
             num_vertices: self.num_vertices,
@@ -661,6 +669,10 @@ impl GpuClothSimulator {
     pub fn reset(&mut self) {
         self.dynamic_pins.clear();
         self.upload_pins();
+        self.sewing_priority_latched = false;
+        self.sewing_priority_frame = 0;
+        self.sewing_priority_ramp_t = 0.0;
+        self.sewing_priority_ratio = 0.0;
         self.context.queue.write_buffer(
             &self.vertex_buffer,
             0,

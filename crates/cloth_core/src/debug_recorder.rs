@@ -101,6 +101,16 @@ pub struct SimulationMetadata {
     pub pair_cache_max_pairs: u32,
     #[serde(default = "default_true")]
     pub enable_pair_cache_final_fallback: bool,
+    #[serde(default)]
+    pub sewing_priority_enabled: bool,
+    #[serde(default = "default_sewing_priority_threshold")]
+    pub sewing_priority_threshold: f32,
+    #[serde(default = "default_sewing_priority_merge_dist")]
+    pub sewing_priority_merge_dist: f32,
+    #[serde(default = "default_sewing_priority_ramp_frames")]
+    pub sewing_priority_ramp_frames: u32,
+    #[serde(default = "default_sewing_priority_max_frames")]
+    pub sewing_priority_max_frames: u32,
 }
 
 fn default_pair_margin_mode() -> u32 {
@@ -125,6 +135,22 @@ fn default_pair_max() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_sewing_priority_threshold() -> f32 {
+    0.9
+}
+
+fn default_sewing_priority_merge_dist() -> f32 {
+    0.005
+}
+
+fn default_sewing_priority_ramp_frames() -> u32 {
+    3
+}
+
+fn default_sewing_priority_max_frames() -> u32 {
+    600
 }
 
 fn default_max_iterations() -> u32 {
@@ -432,6 +458,11 @@ mod tests {
             pair_cache_max_horizon: 0.02,
             pair_cache_max_pairs: 32768,
             enable_pair_cache_final_fallback: true,
+            sewing_priority_enabled: false,
+            sewing_priority_threshold: 0.9,
+            sewing_priority_merge_dist: 0.005,
+            sewing_priority_ramp_frames: 3,
+            sewing_priority_max_frames: 600,
         };
 
         recorder.start_recording(meta, Some(5));

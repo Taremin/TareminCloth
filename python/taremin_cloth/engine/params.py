@@ -142,6 +142,19 @@ def sync_cloth_parameters(sim, obj, scene=None):
     if hasattr(sim, "set_enable_sewing_lock"):
         sim.set_enable_sewing_lock(getattr(settings, "enable_sewing_lock", True))
 
+    # 5.8. 縫合優先モード (工程フェーズ制御: 測定値に基づきRust側で重力スケールを適用)
+    if hasattr(sim, "set_sewing_priority_options"):
+        try:
+            sim.set_sewing_priority_options(
+                bool(getattr(settings, "enable_sewing_priority", False)),
+                float(getattr(settings, "sewing_priority_threshold", 0.9)),
+                float(getattr(settings, "sewing_priority_merge_dist", 0.005)),
+                int(getattr(settings, "sewing_priority_ramp_frames", 3)),
+                int(getattr(settings, "sewing_priority_max_frames", 600)),
+            )
+        except (ValueError, TypeError):
+            pass
+
     # 6. 伸縮グループ (Elastic Bands / Edge Scaling)
     sync_elastic_groups(sim, obj)
 

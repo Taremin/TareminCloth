@@ -4,6 +4,35 @@ from .operators import is_interactive_running
 from .utils import topology
 
 
+def _sewing_priority_status_text(obj):
+    """縫合優先モードの現在フェーズ表示文を返す (GPU同期なしのキャッシュ読取のみ)。
+
+    - sim未生成時: 待機表示
+    - 抑制中: 縫合フェーズ＋結合率・重力スケール
+    - ラッチ後: 通常フェーズ＋重力スケール
+    旧バイナリ等で状態取得不可の場合はNoneを返す。
+    """
+    try:
+        from .engine.cache import _simulators
+    except Exception:
+        return None
+    try:
+        entry = _simulators.get(obj.name)
+    except Exception:
+        return None
+    if not entry:
+        return f"{i18n.trans('Phase: Waiting')} ({i18n.trans('Sim not started')})"
+    sim = entry[0]
+    try:
+        from .engine.sewing_priority import sim_phase, phase_text
+        ph = sim_phase(sim)
+        if ph is None:
+            return None
+        return phase_text(ph[0], ph[1], ph[2], i18n.trans)
+    except Exception:
+        return None
+
+
 class TAREMIN_CLOTH_UL_elastic_groups(bpy.types.UIList):
     """伸縮グループ一覧のUIList"""
     bl_translation_context = i18n.CONTEXT
@@ -335,6 +364,15 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sew.prop(settings, "sewing_shrink_speed", text=i18n.trans("Shrink Speed"))
                 col_sew.prop(settings, "sewing_stiffness", text=i18n.trans("Stiffness"))
                 col_sew.prop(settings, "enable_sewing_lock", text=i18n.trans("Lock When Closed"))
+                col_sew.prop(settings, "enable_sewing_priority", text=i18n.trans("Sewing Priority"))
+                if settings.enable_sewing_priority:
+                    col_sew.prop(settings, "sewing_priority_threshold", text=i18n.trans("Closure Threshold"))
+                    col_sew.prop(settings, "sewing_priority_merge_dist", text=i18n.trans("Merge Distance"))
+                    col_sew.prop(settings, "sewing_priority_ramp_frames", text=i18n.trans("Gravity Ramp Frames"))
+                    col_sew.prop(settings, "sewing_priority_max_frames", text=i18n.trans("Max Priority Frames"))
+                    _phase_text = _sewing_priority_status_text(obj)
+                    if _phase_text:
+                        col_sew.label(text=_phase_text, icon='INFO')
                 col_sew.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam (Select 2 Verts)"), icon='EDGESEL')
 
             # 3. 素材プリセット (Fabric Material)
@@ -619,6 +657,15 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
             s_col.prop(settings, "sewing_shrink_speed")
             s_col.prop(settings, "sewing_stiffness")
             s_col.prop(settings, "enable_sewing_lock")
+            s_col.prop(settings, "enable_sewing_priority")
+            if settings.enable_sewing_priority:
+                s_col.prop(settings, "sewing_priority_threshold")
+                s_col.prop(settings, "sewing_priority_merge_dist")
+                s_col.prop(settings, "sewing_priority_ramp_frames")
+                s_col.prop(settings, "sewing_priority_max_frames")
+                _phase_text = _sewing_priority_status_text(obj)
+                if _phase_text:
+                    s_col.label(text=_phase_text, icon='INFO')
             s_col.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam Between 2 Verts"), icon='EDGESEL')
 
         # 伸縮グループ (Elastic Bands)

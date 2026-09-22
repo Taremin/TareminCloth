@@ -30,6 +30,7 @@ from ..preferences import get_preferences
 from ..utils import drawing, topology, anim_driver
 from ..utils.logger import logger
 from ..utils.view3d import tag_redraw_view3d
+from ..engine.sewing_priority import sim_phase, phase_text
 from .. import i18n
 from ..brush import create_tools, active_tool_name
 from ..brush.base import BrushContext, RadialController, init_brush_circle_at, nudge_brush_radius
@@ -454,7 +455,18 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     tool_text = f"[E] {i18n.trans('Range Grab')} / {i18n.trans('Smooth')}"
             except Exception:
                 tool_text = None
-            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help, tool_text=tool_text)
+            # 縫合優先フェーズのHUD表示 (simキャッシュ読取のみ・GPU同期なし)
+            sewing_text = None
+            sewing_active = False
+            if settings is not None and bool(getattr(settings, "enable_sewing_priority", False)):
+                try:
+                    ph = sim_phase(sim)
+                    if ph is not None:
+                        sewing_active = ph[0]
+                        sewing_text = phase_text(ph[0], ph[1], ph[2], i18n.trans)
+                except Exception:
+                    sewing_text = None
+            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help, tool_text=tool_text, sewing_text=sewing_text, sewing_active=sewing_active)
 
         # パフォーマンスサンプリング記録
         if delta_time > 0:

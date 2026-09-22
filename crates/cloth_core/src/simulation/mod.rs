@@ -230,6 +230,19 @@ pub struct GpuClothSimulator {
     pub sewing_stiffness: f32,
     pub enable_sewing_lock: bool,
 
+    // 縫合優先モード (Sewing Priority): 指定割合の縫合が結合するまで重力を抑制する工程フェーズ制御。
+    // 測定はホスト側の既知座標から行い、本コアはラッチ・ランプ・スケール算出の状態機械のみを持つ
+    // (GPUリードバックを step 内部で追加発行しない設計)。
+    pub sewing_priority_enabled: bool,
+    pub sewing_priority_threshold: f32, // 0.0〜1.0 (結合とみなすペア割合)
+    pub sewing_priority_merge_dist: f32, // 結合とみなす距離 (m)
+    pub sewing_priority_ramp_frames: u32, // 重力復帰にかけるフレーム数
+    pub sewing_priority_max_frames: u32, // フォールバック: このフレーム数を超えたら強制復帰 (0=無効)
+    pub(crate) sewing_priority_latched: bool, // 閾値到達済み (片道ラッチ)
+    pub(crate) sewing_priority_frame: u32, // 有効化後の経過フレーム数
+    pub(crate) sewing_priority_ramp_t: f32, // 0.0〜1.0 (復帰ランプ進行度)
+    pub(crate) sewing_priority_ratio: f32, // 最後に測定された結合率キャッシュ
+
     // デバッグ記録用
     pub mesh_edges: Vec<[u32; 2]>,
     pub mesh_faces: Vec<[u32; 3]>,
@@ -417,6 +430,15 @@ impl GpuClothSimulator {
             edge_collision_bind_groups: res.edge_collision_bind_groups,
             sewing_stiffness: 10000.0,
             enable_sewing_lock: true,
+            sewing_priority_enabled: false,
+            sewing_priority_threshold: 0.9,
+            sewing_priority_merge_dist: 0.005,
+            sewing_priority_ramp_frames: 3,
+            sewing_priority_max_frames: 600,
+            sewing_priority_latched: false,
+            sewing_priority_frame: 0,
+            sewing_priority_ramp_t: 0.0,
+            sewing_priority_ratio: 0.0,
             mesh_edges,
 
             mesh_faces,
@@ -717,6 +739,145 @@ impl GpuClothSimulator {
     /// 縫合完了時の密着ロック有効/無効を設定する
     pub fn set_enable_sewing_lock(&mut self, enabled: bool) {
         self.enable_sewing_lock = enabled;
+    }
+
+    /// 縫合優先モードのオプションを設定する (工程フェーズ制御)。
+    /// threshold: 結合とみなすペア割合 (0.0〜1.0)。merge_dist: 結合判定距離 (m)。
+    /// ramp_frames: 重力復帰にかけるフレーム数。max_frames: 強制復帰までの上限 (0=無効)。
+    /// 設定変更時はラッチ状態をリセットし、次フレームから再評価する。
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_sewing_priority_options(
+        &mut self,
+        enabled: bool,
+        threshold: f32,
+        merge_dist: f32,
+        ramp_frames: u32,
+        max_frames: u32,
+    ) {
+        let threshold = threshold.clamp(0.0, 1.0);
+        let merge_dist = merge_dist.clamp(0.0005, 0.1);
+        let ramp_frames = ramp_frames.min(120);
+        let max_frames = max_frames.min(100000);
+        // 毎フレームの同期転送でラッチが消えないよう、変更時のみリセットする。
+        if self.sewing_priority_enabled == enabled
+            && self.sewing_priority_threshold == threshold
+            && self.sewing_priority_merge_dist == merge_dist
+            && self.sewing_priority_ramp_frames == ramp_frames
+            && self.sewing_priority_max_frames == max_frames
+        {
+            return;
+        }
+        self.sewing_priority_enabled = enabled;
+        self.sewing_priority_threshold = threshold;
+        self.sewing_priority_merge_dist = merge_dist;
+        self.sewing_priority_ramp_frames = ramp_frames;
+        self.sewing_priority_max_frames = max_frames;
+        self.sewing_priority_latched = false;
+        self.sewing_priority_frame = 0;
+        self.sewing_priority_ramp_t = 0.0;
+        self.sewing_priority_ratio = 0.0;
+    }
+
+    /// ホスト側で既知の頂点座標から縫合結合率を測定し、ラッチ・ランプ状態を更新する。
+    /// 戻り値: (結合率 0.0〜1.0, 実効重力スケール 0.0〜1.0, ラッチ済みか)。
+    /// GPUリードバックは行わない。呼び出し側は step 前に直近座標で呼ぶこと。
+    pub fn update_sewing_priority_from_positions(
+        &mut self,
+        positions: &[[f32; 3]],
+    ) -> (f32, f32, bool) {
+        if !self.sewing_priority_enabled || self.sewing_constraints.is_empty() {
+            return (1.0, 1.0, true);
+        }
+        let ratio = Self::compute_sewing_closure_ratio(
+            positions,
+            &self.sewing_constraints,
+            self.sewing_priority_merge_dist,
+        );
+        self.sewing_priority_ratio = ratio;
+        self.sewing_priority_frame = self.sewing_priority_frame.saturating_add(1);
+
+        // 片道ラッチ: 閾値到達または上限フレーム超過で確定し、二度と戻さない (振動防止)。
+        if !self.sewing_priority_latched
+            && (ratio >= self.sewing_priority_threshold
+                || (self.sewing_priority_max_frames > 0
+                    && self.sewing_priority_frame >= self.sewing_priority_max_frames))
+        {
+            self.sewing_priority_latched = true;
+        }
+
+        if self.sewing_priority_latched && self.sewing_priority_ramp_frames > 0 {
+            let step = 1.0 / (self.sewing_priority_ramp_frames as f32);
+            self.sewing_priority_ramp_t = (self.sewing_priority_ramp_t + step).min(1.0);
+        } else if self.sewing_priority_latched {
+            self.sewing_priority_ramp_t = 1.0;
+        } else {
+            self.sewing_priority_ramp_t = 0.0;
+        }
+        (ratio, self.sewing_priority_scale(), self.sewing_priority_latched)
+    }
+
+    /// 現在の実効重力スケール (0.0〜1.0) を返す。無効時・縫合なし・ラッチ完了後は 1.0。
+    pub fn sewing_priority_scale(&self) -> f32 {
+        if !self.sewing_priority_enabled || self.sewing_constraints.is_empty() {
+            return 1.0;
+        }
+        if !self.sewing_priority_latched {
+            return 0.0;
+        }
+        // ランプ完了までは 0→1 へ単調増加 (スナップ防止)。ramp_frames=0 は即時復帰。
+        if self.sewing_priority_ramp_frames == 0 {
+            return 1.0;
+        }
+        smoothstep01(self.sewing_priority_ramp_t)
+    }
+
+    /// 最後に測定された縫合結合率キャッシュを返す。
+    pub fn sewing_closure_ratio(&self) -> f32 {
+        if !self.sewing_priority_enabled || self.sewing_constraints.is_empty() {
+            return 1.0;
+        }
+        self.sewing_priority_ratio
+    }
+
+    /// 縫合優先モードにより現在重力が抑制されているか (ラッチ前) を返す。
+    pub fn is_sewing_priority_active(&self) -> bool {
+        self.sewing_priority_enabled
+            && !self.sewing_constraints.is_empty()
+            && !self.sewing_priority_latched
+    }
+
+    /// 位置配列から縫合ペアの結合率を計算する純粋関数 (GPU不要・単体試験可能)。
+    pub(crate) fn compute_sewing_closure_ratio(
+        positions: &[[f32; 3]],
+        sewing_constraints: &[crate::mesh::GpuSewingConstraint],
+        merge_dist: f32,
+    ) -> f32 {
+        if sewing_constraints.is_empty() {
+            return 1.0;
+        }
+        let merge_sq = merge_dist * merge_dist;
+        let mut closed = 0usize;
+        let mut total = 0usize;
+        for sc in sewing_constraints {
+            let a = sc.v0 as usize;
+            let b = sc.v1 as usize;
+            if a >= positions.len() || b >= positions.len() {
+                continue;
+            }
+            total += 1;
+            let pa = positions[a];
+            let pb = positions[b];
+            let dx = pa[0] - pb[0];
+            let dy = pa[1] - pb[1];
+            let dz = pa[2] - pb[2];
+            if dx * dx + dy * dy + dz * dz <= merge_sq {
+                closed += 1;
+            }
+        }
+        if total == 0 {
+            return 1.0;
+        }
+        closed as f32 / total as f32
     }
 
     /// 大域空気減衰率（Air Damping / Velocity Damping）を設定する
@@ -1703,6 +1864,12 @@ impl GpuClothSimulator {
     pub fn set_workgroup_size(&mut self, wg_size: u32) {
         self.workgroup_size = wg_size;
     }
+}
+
+#[inline]
+fn smoothstep01(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
 }
 
 #[inline]

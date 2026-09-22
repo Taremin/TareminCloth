@@ -173,6 +173,16 @@ pub struct SceneInitData {
     #[serde(default = "default_one")]
     pub gravity_scale: f32,
     pub sewing_shrink_speed: f32,
+    #[serde(default)]
+    pub sewing_priority_enabled: bool,
+    #[serde(default = "default_sewing_priority_threshold")]
+    pub sewing_priority_threshold: f32,
+    #[serde(default = "default_sewing_priority_merge_dist")]
+    pub sewing_priority_merge_dist: f32,
+    #[serde(default = "default_sewing_priority_ramp_frames")]
+    pub sewing_priority_ramp_frames: u32,
+    #[serde(default = "default_sewing_priority_max_frames")]
+    pub sewing_priority_max_frames: u32,
     pub workgroup_size: u32,
     pub solver_mode: u32,
     #[serde(default = "default_solver_iters")]
@@ -197,6 +207,10 @@ pub struct SceneInitData {
 fn default_solver_iters() -> u32 { 10 }
 fn default_substeps() -> u32 { 20 }
 fn default_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
+fn default_sewing_priority_threshold() -> f32 { 0.9 }
+fn default_sewing_priority_merge_dist() -> f32 { 0.005 }
+fn default_sewing_priority_ramp_frames() -> u32 { 3 }
+fn default_sewing_priority_max_frames() -> u32 { 600 }
 
 /// 物理パラメータの更新
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -219,6 +233,16 @@ pub struct GuiParamsUpdate {
     pub solver_iterations: Option<u32>,
     #[serde(default)]
     pub target_fps: Option<f32>,
+    #[serde(default)]
+    pub sewing_priority_enabled: Option<bool>,
+    #[serde(default)]
+    pub sewing_priority_threshold: Option<f32>,
+    #[serde(default)]
+    pub sewing_priority_merge_dist: Option<f32>,
+    #[serde(default)]
+    pub sewing_priority_ramp_frames: Option<u32>,
+    #[serde(default)]
+    pub sewing_priority_max_frames: Option<u32>,
 }
 
 /// GUIからBlenderへ返送するレスポンスメッセージ (JSON)

@@ -65,6 +65,8 @@ def set_interactive_fps_info(
     position: str = 'TOP_CENTER',
     show_help: bool = True,
     tool_text=None,
+    sewing_text=None,
+    sewing_active: bool = False,
 ):
     """インタラクティブモード中のFPSおよび操作ヘルプ計測情報を更新する"""
     global _interactive_fps_info
@@ -75,6 +77,8 @@ def set_interactive_fps_info(
         "position": str(position),
         "show_help": bool(show_help),
         "tool_text": str(tool_text) if tool_text else None,
+        "sewing_text": str(sewing_text) if sewing_text else None,
+        "sewing_active": bool(sewing_active),
     }
 
 
@@ -89,13 +93,14 @@ def get_interactive_fps_info():
     return _interactive_fps_info
 
 
-def set_bake_overlay_info(current_frame: int, end_frame: int, pct: int):
+def set_bake_overlay_info(current_frame: int, end_frame: int, pct: int, sewing_text=None):
     """ベイク中のオーバーレイ描画情報を更新する"""
     global _bake_overlay_info
     _bake_overlay_info = {
         "current_frame": int(current_frame),
         "end_frame": int(end_frame),
         "pct": int(pct),
+        "sewing_text": str(sewing_text) if sewing_text else None,
     }
 
 
@@ -602,6 +607,62 @@ def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
         pass
 
 
+def _draw_top_badge(region, shader_2d, margin_x: float, y_top: float, text: str,
+                    text_color=(0.95, 0.95, 0.98, 1.0), font_size: int = 13, min_w: float = 200.0):
+    """画面上部バッジ（背景＋1行テキスト）を描画する。テキスト幅に合わせて自動拡幅する。"""
+    import blf
+    font_id = 0
+    box_h = 28.0
+    pad_x = 12.0
+
+    try:
+        blf.size(font_id, font_size)
+    except (TypeError, ValueError):
+        try:
+            blf.size(font_id, font_size, 72)
+        except Exception:
+            pass
+
+    text_w = min_w - pad_x * 2.0
+    try:
+        dims = blf.dimensions(font_id, text)
+        if dims and dims[0] > 0:
+            text_w = dims[0]
+    except Exception:
+        pass
+
+    box_w = max(min_w, text_w + pad_x * 2.0)
+    margin_x = max(10.0, min(margin_x, max(10.0, region.width - box_w - 10.0)))
+    y_bottom = y_top - box_h
+
+    if shader_2d:
+        orig_blend = gpu.state.blend_get()
+        try:
+            gpu.state.blend_set('ALPHA')
+            vertices = [
+                (margin_x, y_bottom),
+                (margin_x + box_w, y_bottom),
+                (margin_x + box_w, y_top),
+                (margin_x, y_bottom),
+                (margin_x + box_w, y_top),
+                (margin_x, y_top),
+            ]
+            batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
+            if batch:
+                shader_2d.bind()
+                shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
+                batch.draw(shader_2d)
+        finally:
+            gpu.state.blend_set(orig_blend)
+
+    try:
+        blf.position(font_id, margin_x + pad_x, y_bottom + 8.0, 0.0)
+        blf.color(font_id, text_color[0], text_color[1], text_color[2], text_color[3])
+        blf.draw(font_id, text)
+    except Exception:
+        pass
+
+
 def draw_callback_2d():
     """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
     if not _interactive_active and not _bake_overlay_info and not _init_overlay_info:
@@ -709,6 +770,21 @@ def draw_callback_2d():
             except Exception:
                 pass
 
+        # 1b. 縫合優先フェーズバッジの描画 (FPSバッジ直下。FPS非表示時も単独表示)
+        sewing_text = _interactive_fps_info.get("sewing_text")
+        if sewing_text:
+            if show_fps:
+                sew_margin_x = margin_x
+                sew_y_top = y_bottom - 8.0
+            else:
+                sew_margin_x = (region.width - 240.0) / 2.0
+                sew_y_top = region.height - 40.0
+            if _interactive_fps_info.get("sewing_active"):
+                sew_color = (0.35, 0.85, 1.0, 1.0)   # 縫合中: シアン
+            else:
+                sew_color = (0.3, 0.95, 0.4, 1.0)    # 通常: グリーン
+            _draw_top_badge(region, shader_2d, sew_margin_x, sew_y_top, sewing_text, sew_color)
+
         # 2. キー操作ガイドバッジの描画 (画面下部中央)
         if show_help:
             guide_text = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
@@ -814,6 +890,10 @@ def draw_callback_2d():
             bake_text = msg % (cur_f, end_f, pct)
         except Exception:
             bake_text = f"Baking Simulation: Frame {cur_f} / {end_f} ({pct}%)  |  [Esc] Cancel"
+
+        sewing_text = _bake_overlay_info.get("sewing_text")
+        if sewing_text:
+            bake_text = f"{bake_text}  |  {sewing_text}"
 
         _draw_bottom_center_progress(region, shader_2d, bake_text, pct)
 
