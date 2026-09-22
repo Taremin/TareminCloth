@@ -252,6 +252,85 @@ def exit_isolated_view(context, isolated_areas, saved_selection, saved_active):
         logger.warning(f"[Interactive] Failed to restore viewport view: {e}")
 
 
+def _is_viewport_window(context) -> bool:
+    """VIEW_3DのWINDOWリージョン上のイベントかを判定する。UIパネル上はFalse。
+
+    モーダル中にLEFTMOUSE等を無条件でRUNNING_MODAL消費すると、
+    サイドバー/プロパティ等のパネル上のボタン (Stop等) がクリックを
+    受け取れず操作不能になる。ドラッグ中・ラジアル調整中は継続を優先し、
+    それ以外のマウス/キー操作のみパネルへPASS_THROUGHで譲るための判定。
+    """
+    try:
+        area = getattr(context, "area", None)
+        if area is None:
+            return True
+        area_type = getattr(area, "type", None)
+        # MagicMock等 (単体テスト) では判定不能としてビューポート扱い
+        if not isinstance(area_type, str):
+            return True
+        if area_type != 'VIEW_3D':
+            return False
+        region = getattr(context, "region", None)
+        if region is not None:
+            rtype = getattr(region, "type", None)
+            if isinstance(rtype, str) and rtype != 'WINDOW':
+                return False
+        return True
+    except Exception:
+        return True
+
+
+def _event_in_viewport_window(context, event=None) -> bool:
+    """イベントがVIEW_3DのWINDOWリージョン上かを判定する。UIパネル上はFalse。
+
+    context.area/region はモーダル中に古い値のままの可能性があるため、
+    第一に event.mouse_x/y (ウィンドウ相対) と screen.areas/regions の
+    矩形 (いずれもウィンドウ相対) でヒット判定する。取得不能時は
+    _is_viewport_window(context) にフォールバックする。
+    """
+    try:
+        if event is not None:
+            mx = getattr(event, "mouse_x", None)
+            my = getattr(event, "mouse_y", None)
+            screen = getattr(context, "screen", None)
+            areas = getattr(screen, "areas", None) if screen is not None else None
+            if isinstance(mx, (int, float)) and isinstance(my, (int, float)) and areas is not None:
+                try:
+                    area_list = list(areas)
+                except TypeError:
+                    area_list = None
+                if area_list:
+                    for area in area_list:
+                        try:
+                            ax = area.x
+                            ay = area.y
+                            aw = area.width
+                            ah = area.height
+                        except Exception:
+                            continue
+                        if not all(isinstance(v, (int, float)) for v in (ax, ay, aw, ah)):
+                            continue
+                        if ax <= mx < ax + aw and ay <= my < ay + ah:
+                            if getattr(area, "type", None) != 'VIEW_3D':
+                                return False
+                            for region in getattr(area, "regions", None) or []:
+                                try:
+                                    rx = region.x
+                                    ry = region.y
+                                    rw = region.width
+                                    rh = region.height
+                                except Exception:
+                                    continue
+                                if not all(isinstance(v, (int, float)) for v in (rx, ry, rw, rh)):
+                                    continue
+                                if rx <= mx < rx + rw and ry <= my < ry + rh:
+                                    return getattr(region, "type", None) == 'WINDOW'
+                            return True
+    except Exception:
+        pass
+    return _is_viewport_window(context)
+
+
 class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     """3Dビューポート上でリアルタイムに布を掴んで動かすモーダルオペレーター"""
     bl_idname = "taremin_cloth.interactive"
@@ -740,6 +819,11 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     if context.area:
                         context.area.tag_redraw()
                     return {'RUNNING_MODAL'}
+                # パネル上のクリックはUIに譲る (Stopボタン等の操作ブロック防止)。
+                # 範囲/平滑ブラシはPRESSを無条件消費するため、GRABと異なり
+                # パネル上でも奪ってしまう問題の対策。ドラッグ中は継続優先。
+                if self._brush_dragging is None and not _event_in_viewport_window(context, event):
+                    return {'PASS_THROUGH'}
                 mouse_pos = (event.mouse_region_x, event.mouse_region_y)
                 ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
                 tool = self._active_brush_tool(self._brush_settings_of(obj))
@@ -780,7 +864,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         context.area.tag_redraw()
                     return {'RUNNING_MODAL'}
                 return {'PASS_THROUGH'}
-            # ホバー時は円だけ追従 (パネル操作はPASS_THROUGHで継続可能)
+            # ホバー時は円だけ追従 (パネル上ではUIに譲るため何もせずPASS_THROUGH)
+            if not _event_in_viewport_window(context, event):
+                return {'PASS_THROUGH'}
             tool = self._active_brush_tool(self._brush_settings_of(obj))
             if tool is not None and tool.on_hover(ctx):
                 if context.area:
@@ -788,6 +874,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             return {'PASS_THROUGH'}
 
         elif event.type == 'E' and event.value == 'PRESS':
+            # パネル上のテキスト入力等を奪わない (Eキー切替はビューポートのみ)
+            if not _event_in_viewport_window(context, event):
+                return {'PASS_THROUGH'}
             # Eキーでブラシツールを順方向に切替 (TOOLS登録順に循環)
             try:
                 brush = self._brush_settings_of(obj)
@@ -816,6 +905,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 pass
 
         elif event.type == 'F' and event.value == 'PRESS':
+            # パネル上のテキスト入力等を奪わない (ラジアル調整はビューポートのみ)
+            if not _event_in_viewport_window(context, event):
+                return {'PASS_THROUGH'}
             # F / Shift+F でラジアル調整 (Blender準拠: 半径 / 強度)
             try:
                 brush = self._brush_settings_of(obj)
@@ -842,6 +934,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         elif event.type == 'LEFT_BRACKET' and event.value == 'PRESS':
+            if not _event_in_viewport_window(context, event):
+                return {'PASS_THROUGH'}
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
             nudge_brush_radius(obj, 0.9, mouse_pos)
             if context.area:
@@ -849,6 +943,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         elif event.type == 'RIGHT_BRACKET' and event.value == 'PRESS':
+            if not _event_in_viewport_window(context, event):
+                return {'PASS_THROUGH'}
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
             nudge_brush_radius(obj, 1.1, mouse_pos)
             if context.area:
@@ -856,6 +952,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         elif event.type == 'P' and event.value == 'PRESS':
+            if not _event_in_viewport_window(context, event):
+                return {'PASS_THROUGH'}
             # Pキーで掴んでいる頂点（またはカーソル下の頂点）をピン留め／解除（トグル）
             _sg = self._brush_tools.get('GRAB')
             target_v_idx = _sg.grabbed_vert if _sg is not None else None

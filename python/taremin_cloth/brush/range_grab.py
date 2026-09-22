@@ -26,9 +26,13 @@ class RangeGrabTool(BaseBrushTool):
         self.initial_plane_hit = None
 
     def on_press(self, ctx):
-        self.dragging = True
-        self._start(ctx)
-        return True
+        # 中心解決に失敗 (パネル上など region_data なし) した場合は
+        # イベントを消費せず False を返し、UI操作へ PASS_THROUGH させる。
+        # GRAB と異なり従来は無条件 True で奪っていたのが操作不能の原因。
+        self.reset()
+        ok = self._start(ctx)
+        self.dragging = bool(ok)
+        return bool(ok)
 
     def on_move(self, ctx):
         if not self.dragging:

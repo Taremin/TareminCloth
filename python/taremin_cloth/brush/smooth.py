@@ -51,10 +51,15 @@ class SmoothTool(BaseBrushTool):
         self.adj_num_verts = 0
 
     def on_press(self, ctx):
-        self.dragging = True
+        # 隣接構築・中心解決に失敗 (パネル上など) した場合は False を返し、
+        # UI操作へ PASS_THROUGH させる (GRAB との挙動差が操作不能の原因)。
+        self.dragging = False
         self._ensure_adjacency(ctx)
-        self._dab(ctx, _pinned_set_of(ctx))
-        return True
+        if self.adj_offsets is None or self.adj_indices is None:
+            return False
+        ok = self._dab(ctx, _pinned_set_of(ctx))
+        self.dragging = bool(ok)
+        return bool(ok)
 
     def on_move(self, ctx):
         if not self.dragging:
