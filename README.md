@@ -142,6 +142,8 @@ Taremin Cloth では、目的に応じて **「インタラクティブモード
 4. **「Interactive Mode (Grab/Drag)」**（またはハンドアイコン）をクリックすると、リアルタイム物理シミュレーションが開始されます。
 5. **ビューポート上での直感操作**:
    - **左クリック＋ドラッグ**: 任意の頂点を掴んで自由に引っ張ることができます。
+   - **[E] キー**: 単一グラブと範囲グラブ（ブラシ円内の頂点を減衰付きで掴む）を切り替え。
+   - **[F] / [Shift+F] ドラッグ**: ブラシ半径 / 強度のラジアル調整（`[` `]` でも段階変更可）。
    - **[P] キー**: マウスカーソル直下の頂点をワンキーでピン留め（固定）/ ピン解除。
    - **[Space] キー**: シミュレーションの一時停止 / 再開。
    - **右クリック** または **[Esc] キー**（またはパネルの「Stop Interactive Mode」）: インタラクティブモードを終了。
@@ -365,23 +367,28 @@ python run_tests.py
 
 ```
 taremin_cloth/
-├── __init__.py                # アドオンエントリポイント
-├── properties.py              # Blender プロパティ定義
-├── operators.py               # オペレーター & タイムラインハンドラー
-├── panels.py                  # 3Dビューポート NパネルUI
-├── taremin_cloth_core.pyd     # PyO3 GPU コアバイナリ
+├── python/taremin_cloth/        # Blender アドオン本体
+│   ├── __init__.py              # アドオンエントリポイント
+│   ├── properties.py            # Blender プロパティ定義
+│   ├── operators.py             # オペレーター & タイムラインハンドラー
+│   ├── panels.py                # 3Dビューポート NパネルUI
+│   ├── ops/                     # オペレーター実装 (interactive / basic / tools / bake / pose / gui)
+│   ├── brush/                   # ブラシツール (base・math 基盤 + single_grab・range_grab 個別実装)
+│   ├── engine/                  # 同期・実行・キャッシュ管理
+│   ├── utils/                   # 描画・メッシュ抽出等の共通処理
+│   └── taremin_cloth_core.pyd   # PyO3 GPU コアバイナリ
 ├── crates/
-│   ├── cloth_core/            # wgpu XPBD 物理計算コア & WGSL シェーダー
+│   ├── cloth_core/              # wgpu XPBD 物理計算コア & WGSL シェーダー
 │   │   ├── src/
-│   │   │   ├── context.rs     # GPU Device / Queue 管理
-│   │   │   ├── mesh.rs        # 頂点・拘束・コライダー構造体
-│   │   │   ├── coloring.rs    # グラフ彩色 (Welsh-Powell)
-│   │   │   ├── simulation.rs  # シミュレーションループ & ディスパッチ
-│   │   │   └── shaders/       # WGSL コンピュートシェーダー群
-│   └── cloth_py/              # PyO3 Python バインディング
-├── tests/                     # 単体テスト & E2E テスト
-├── run_tests.py               # Blender 自動テストランナー
-├── Cargo.toml                 # Rust ワークスペース設定
+│   │   │   ├── context.rs       # GPU Device / Queue 管理
+│   │   │   ├── mesh.rs          # 頂点・拘束・コライダー構造体
+│   │   │   ├── coloring.rs      # グラフ彩色 (Welsh-Powell)
+│   │   │   ├── simulation/      # シミュレーションループ & ディスパッチ
+│   │   │   └── shaders/         # WGSL コンピュートシェーダー群
+│   └── cloth_py/                # PyO3 Python バインディング
+├── tests/                       # 単体テスト & E2E テスト
+├── run_tests.py                 # Blender 自動テストランナー
+├── Cargo.toml                   # Rust ワークスペース設定
 └── README.md
 ```
 

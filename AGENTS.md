@@ -255,3 +255,14 @@ python tools/release.py 0.0.1
 1. `tools/release.py` により `__init__.py`、`pyproject.toml`、`Cargo.toml`（3クレート）、`Cargo.lock` が同期更新され、テスト通過後に `chore(release): vX.Y.Z` コミットと `vX.Y.Z` アノテーションタグが作成されます。
 2. リモートへタグがプッシュされると、GitHub Actions の `release.yml` が自動起動し、Windows (x64)、Linux (x64)、macOS (Universal) のバイナリが並列ビルドされ、GitHub Releases に各プラットフォーム向けアドオンzipが自動添付・公開されます（`beta` や `rc` が含まれるタグは自動的に Pre-release として公開されます）。
 
+---
+
+## 11. README・ユーザー向けドキュメントの同期運用 (`README.md`)
+
+プロジェクトの構成図や操作手順は [README.md](README.md) に記載されています。
+
+> [!IMPORTANT]
+> **「構成変更・機能追加とREADMEの同期」**
+> - パッケージ・モジュール構成の変更（新設・移動・分割）、ユーザー操作手順の変更（キー操作・UI項目の追加/変更）、新機能の追加を行う際は、必ず README の該当箇所（プロジェクト構成図・操作手順）を最新の実装に合わせて更新・同期してください。
+> - 背景: 構成図が `python/` 再配置前の平面レイアウトのまま放置され、実態と乖離した事例がありました。第7章の仕様書同期と同様、ドキュメントの陳腐化を防ぎます。
+
