@@ -45,6 +45,31 @@ class BaseBrushTool:
     """個別ブラシのインターフェース。戻り値 True = イベント消費"""
 
     name = 'BASE'
+    # HUD表示用ラベルキー（i18n.trans適用は呼出側で行う）
+    label_key = 'Grab'
+
+    def hud_info(self, brush, radial=None):
+        """HUD Guidance用の構造化情報を返す（docs/hud.md:5）。
+
+        戻り値: {"tool", "label_key", "radius", "strength",
+                 "falloff", "show_falloff", "adjusting"}
+        新規ブラシは本メソッドのオーバーライド＋TOOLS登録のみで表示拡張できる。
+        """
+        adjusting = None
+        try:
+            if radial is not None and bool(getattr(radial, "active", False)):
+                adjusting = getattr(radial, "mode", None)
+        except Exception:
+            adjusting = None
+        return {
+            "tool": self.name,
+            "label_key": self.label_key,
+            "radius": None,
+            "strength": None,
+            "falloff": None,
+            "show_falloff": False,
+            "adjusting": adjusting,
+        }
 
     def on_press(self, ctx):
         return False

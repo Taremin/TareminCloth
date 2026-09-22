@@ -14,6 +14,27 @@ class RangeGrabTool(BaseBrushTool):
     """ブラシ半径内の頂点群を減衰重みでドラッグする"""
 
     name = 'RANGE_GRAB'
+    label_key = 'Range Grab'
+
+    def hud_info(self, brush, radial=None):
+        base = super().hud_info(brush, radial)
+        try:
+            base["radius"] = float(brush_opt(brush, "radius", 0.05)) if brush is not None else None
+        except Exception:
+            base["radius"] = None
+        try:
+            base["strength"] = float(brush_opt(brush, "strength", 0.8)) if brush is not None else None
+        except Exception:
+            base["strength"] = None
+        try:
+            falloff = brush_opt(brush, "falloff_shape", 'SPHERE') if brush is not None else None
+            base["falloff"] = falloff
+            # 既定（SPHERE）以外のみ付記する
+            base["show_falloff"] = bool(falloff) and str(falloff) != 'SPHERE'
+        except Exception:
+            base["falloff"] = None
+            base["show_falloff"] = False
+        return base
 
     def __init__(self):
         self.reset()

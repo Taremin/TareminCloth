@@ -694,5 +694,6 @@
   "Workgroup Size": "Workgroup Size",
   "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "Zero vertex overhead during sim; split quads along strain on stop (Recommended)",
   "[Esc] Cancel": "[Esc] Cancel",
-  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit"
+  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit",
+  "<adjusting>": "<adjusting>"
 }

@@ -694,5 +694,6 @@
   "Workgroup Size": "ワークグループサイズ",
   "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "シミュレーション中の頂点オーバーヘッドゼロ。停止時に歪みに沿ってQuadを分割 (推奨)",
   "[Esc] Cancel": "[Esc] 中止",
-  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[左ドラッグ] 頂点移動  |  [P] ピン留め/解除  |  [Esc / 右クリック] 終了"
+  "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[左ドラッグ] 頂点移動  |  [P] ピン留め/解除  |  [Esc / 右クリック] 終了",
+  "<adjusting>": "<調整中>"
 }

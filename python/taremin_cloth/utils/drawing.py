@@ -58,6 +58,30 @@ def is_interactive_active() -> bool:
     return _interactive_active
 
 
+def _setup_font(font_size: int, font_id: int = 0):
+    """blf.size のバージョン差を吸収してフォントサイズを設定する（docs/hud.md:4）"""
+    import blf
+    try:
+        blf.size(font_id, font_size)
+    except (TypeError, ValueError):
+        try:
+            blf.size(font_id, font_size, 72)
+        except Exception:
+            pass
+
+
+def _measure_text(text: str, font_id: int = 0) -> float:
+    """blf.dimensions の例外を吸収してテキスト幅を返す。失敗時は0.0。"""
+    import blf
+    try:
+        dims = blf.dimensions(font_id, text)
+        if dims and dims[0] > 0:
+            return float(dims[0])
+    except Exception:
+        pass
+    return 0.0
+
+
 def set_interactive_fps_info(
     fps: float,
     frame_ms: float,
@@ -65,6 +89,8 @@ def set_interactive_fps_info(
     position: str = 'TOP_CENTER',
     show_help: bool = True,
     tool_text=None,
+    guide_line1_suffix=None,
+    guide_line2=None,
     sewing_text=None,
     sewing_active: bool = False,
 ):
@@ -77,6 +103,8 @@ def set_interactive_fps_info(
         "position": str(position),
         "show_help": bool(show_help),
         "tool_text": str(tool_text) if tool_text else None,
+        "guide_line1_suffix": str(guide_line1_suffix) if guide_line1_suffix else None,
+        "guide_line2": str(guide_line2) if guide_line2 else None,
         "sewing_text": str(sewing_text) if sewing_text else None,
         "sewing_active": bool(sewing_active),
     }
@@ -663,6 +691,62 @@ def _draw_top_badge(region, shader_2d, margin_x: float, y_top: float, text: str,
         pass
 
 
+def _draw_bottom_badge_2row(region, shader_2d, line1: str, line2=None,
+                            font_size: int = 12):
+    """画面下部中央のガイダンスバッジ（最大2行）を描画する（docs/hud.md:4）。
+
+    line1=操作キー（下段・常に表示）、line2=ツール状態（上段・ある時のみ）。
+    単行時は従来と同一見た目（box_h=28、y_bottom=20）を維持する。
+    """
+    import blf
+    font_id = 0
+    pad_x = 14.0
+    guide_y_bottom = 20.0
+    _setup_font(font_size, font_id)
+    w1 = _measure_text(line1, font_id) or 340.0
+    if line2:
+        w2 = _measure_text(line2, font_id)
+        text_w = max(w1, w2)
+        box_h = 50.0
+    else:
+        box_h = 28.0
+        text_w = w1
+    guide_w = text_w + pad_x * 2.0
+    guide_margin_x = max(10.0, (region.width - guide_w) / 2.0)
+    guide_y_top = guide_y_bottom + box_h
+
+    if shader_2d:
+        orig_blend = gpu.state.blend_get()
+        try:
+            gpu.state.blend_set('ALPHA')
+            vertices = [
+                (guide_margin_x, guide_y_bottom),
+                (guide_margin_x + guide_w, guide_y_bottom),
+                (guide_margin_x + guide_w, guide_y_top),
+                (guide_margin_x, guide_y_bottom),
+                (guide_margin_x + guide_w, guide_y_top),
+                (guide_margin_x, guide_y_top),
+            ]
+            batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
+            if batch:
+                shader_2d.bind()
+                shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
+                batch.draw(shader_2d)
+        finally:
+            gpu.state.blend_set(orig_blend)
+
+    try:
+        blf.position(font_id, guide_margin_x + pad_x, guide_y_bottom + 8.0, 0.0)
+        blf.color(font_id, 0.92, 0.92, 0.95, 0.95)
+        blf.draw(font_id, line1)
+        if line2:
+            blf.position(font_id, guide_margin_x + pad_x, guide_y_bottom + 30.0, 0.0)
+            blf.color(font_id, 0.35, 0.85, 1.0, 0.95)
+            blf.draw(font_id, line2)
+    except Exception:
+        pass
+
+
 def draw_callback_2d():
     """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
     if not _interactive_active and not _bake_overlay_info and not _init_overlay_info:
@@ -741,14 +825,7 @@ def draw_callback_2d():
                 font_id = 0
                 font_size = 13
 
-                # blf.size の互換性対応 (Blenderバージョン差対応)
-                try:
-                    blf.size(font_id, font_size)
-                except (TypeError, ValueError):
-                    try:
-                        blf.size(font_id, font_size, 72)
-                    except Exception:
-                        pass
+                _setup_font(font_size, font_id)
 
                 # FPSステータスに応じた文字色判定
                 if fps >= 50.0:
@@ -785,68 +862,21 @@ def draw_callback_2d():
                 sew_color = (0.3, 0.95, 0.4, 1.0)    # 通常: グリーン
             _draw_top_badge(region, shader_2d, sew_margin_x, sew_y_top, sewing_text, sew_color)
 
-        # 2. キー操作ガイドバッジの描画 (画面下部中央)
+        # 2. キー操作ガイドバッジの描画 (画面下部中央・最大2行、docs/hud.md:5)
         if show_help:
-            guide_text = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
-            tool_text = _interactive_fps_info.get("tool_text")
-            if tool_text:
-                guide_text = f"{guide_text}  |  {tool_text}"
-            guide_h = 28.0
-            pad_x = 14.0
-            text_w = 340.0
-
-            import blf
-            font_id = 0
-            font_size = 12
-
-            try:
-                blf.size(font_id, font_size)
-            except (TypeError, ValueError):
-                try:
-                    blf.size(font_id, font_size, 72)
-                except Exception:
-                    pass
-
-            try:
-                dims = blf.dimensions(font_id, guide_text)
-                if dims and dims[0] > 0:
-                    text_w = dims[0]
-            except Exception:
-                pass
-
-            guide_w = text_w + pad_x * 2.0
-            guide_margin_x = max(10.0, (region.width - guide_w) / 2.0)
-            guide_y_bottom = 20.0
-            guide_y_top = guide_y_bottom + guide_h
-
-            if shader_2d:
-                orig_blend = gpu.state.blend_get()
-                try:
-                    gpu.state.blend_set('ALPHA')
-                    vertices = [
-                        (guide_margin_x, guide_y_bottom),
-                        (guide_margin_x + guide_w, guide_y_bottom),
-                        (guide_margin_x + guide_w, guide_y_top),
-                        (guide_margin_x, guide_y_bottom),
-                        (guide_margin_x + guide_w, guide_y_top),
-                        (guide_margin_x, guide_y_top),
-                    ]
-                    batch = batch_for_shader(shader_2d, 'TRIS', {"pos": vertices})
-                    if batch:
-                        shader_2d.bind()
-                        shader_2d.uniform_float("color", (0.12, 0.12, 0.14, 0.75))
-                        batch.draw(shader_2d)
-                finally:
-                    gpu.state.blend_set(orig_blend)
-
-            try:
-                text_x = guide_margin_x + pad_x
-                text_y = guide_y_bottom + 8.0
-                blf.position(font_id, text_x, text_y, 0.0)
-                blf.color(font_id, 0.92, 0.92, 0.95, 0.95)
-                blf.draw(font_id, guide_text)
-            except Exception:
-                pass
+            base_guide = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
+            suffix = _interactive_fps_info.get("guide_line1_suffix")
+            line2 = _interactive_fps_info.get("guide_line2")
+            if suffix:
+                line1 = f"{base_guide}  |  {suffix}"
+            else:
+                # 後方互換: 旧tool_text単一行呼出し
+                legacy = _interactive_fps_info.get("tool_text")
+                if legacy:
+                    line1 = f"{base_guide}  |  {legacy}"
+                else:
+                    line1 = base_guide
+            _draw_bottom_badge_2row(region, shader_2d, line1, line2)
 
         # 3. ブラシカーソル円の描画 (2Dスクリーン空間)
         if _brush_info:

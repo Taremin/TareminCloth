@@ -227,6 +227,55 @@ class TestDrawingHud(unittest.TestCase):
         self.assertEqual(info["sewing_text"], "Phase: Sewing 62% (gravity 0.00x)")
         self.assertTrue(info["sewing_active"])
 
+    def test_interactive_fps_info_guide_lines(self):
+        """Guidance 2行表示キー（guide_line1_suffix/guide_line2）の保持確認"""
+        drawing.set_interactive_fps_info(
+            fps=60.0, frame_ms=16.6,
+            guide_line1_suffix="[E] switch [F]radius",
+            guide_line2="Tool: Range Grab r=50mm s=0.80",
+        )
+        info = drawing.get_interactive_fps_info()
+        self.assertEqual(info["guide_line1_suffix"], "[E] switch [F]radius")
+        self.assertEqual(info["guide_line2"], "Tool: Range Grab r=50mm s=0.80")
+        # 既定はNone（単行フォールバック）
+        drawing.set_interactive_fps_info(fps=60.0, frame_ms=16.6)
+        info = drawing.get_interactive_fps_info()
+        self.assertIsNone(info["guide_line1_suffix"])
+        self.assertIsNone(info["guide_line2"])
+
+    @patch.dict("sys.modules", {"blf": MagicMock()})
+    @patch("taremin_cloth.utils.drawing.batch_for_shader")
+    @patch("taremin_cloth.utils.drawing.gpu")
+    @patch("taremin_cloth.utils.drawing.bpy")
+    def test_draw_callback_2d_guide_2row(self, mock_bpy, mock_gpu, mock_batch_for_shader):
+        """2行ガイダンス指定でも2Dオーバーレイ描画が正常に実行されるか確認"""
+        mock_region = MagicMock()
+        mock_region.width = 1920
+        mock_region.height = 1080
+        mock_bpy.context.region = mock_region
+
+        mock_batch = MagicMock()
+        mock_batch_for_shader.return_value = mock_batch
+
+        mock_shader = MagicMock()
+        mock_gpu.shader.from_builtin.return_value = mock_shader
+
+        drawing.set_interactive_active(True)
+        drawing.set_interactive_fps_info(
+            fps=60.0,
+            frame_ms=16.6,
+            show_overlay=False,
+            position='TOP_CENTER',
+            show_help=True,
+            guide_line1_suffix="[E] switch [F]radius",
+            guide_line2="Tool: Range Grab r=50mm s=0.80",
+        )
+        try:
+            drawing.draw_callback_2d()
+        except Exception as e:
+            self.fail(f"draw_callback_2d with 2-row guide raised exception: {e}")
+        self.assertTrue(mock_batch.draw.called)
+
     @patch.dict("sys.modules", {"blf": MagicMock()})
     @patch("taremin_cloth.utils.drawing.batch_for_shader")
     @patch("taremin_cloth.utils.drawing.gpu")

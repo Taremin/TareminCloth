@@ -32,7 +32,7 @@ from ..utils.logger import logger
 from ..utils.view3d import tag_redraw_view3d
 from ..engine.sewing_priority import sim_phase, phase_text
 from .. import i18n
-from ..brush import create_tools, active_tool_name
+from ..brush import create_tools, active_tool_name, get_brush_hud_info
 from ..brush.base import BrushContext, RadialController, init_brush_circle_at, nudge_brush_radius
 
 _interactive_running = False
@@ -444,17 +444,44 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
             show_help = getattr(settings, "show_hud_help", True) if settings else True
             tool_text = None
+            guide_line1_suffix = None
+            guide_line2 = None
             try:
                 brush = self._brush_settings_of(obj)
-                mode = getattr(brush, "tool_mode", 'GRAB') if brush is not None else 'GRAB'
-                if brush is not None and mode in ('RANGE_GRAB', 'SMOOTH'):
-                    _r = float(getattr(brush, "radius", 0.05))
-                    _label = {'RANGE_GRAB': 'Range Grab', 'SMOOTH': 'Smooth'}.get(mode, mode)
-                    tool_text = i18n.trans("Tool: %s") % f"{i18n.trans(_label)} r={_r * 1000.0:.0f}mm"
-                elif brush is not None:
-                    tool_text = f"[E] {i18n.trans('Range Grab')} / {i18n.trans('Smooth')}"
+                radial = getattr(self, "_radial", None)
+                tools = getattr(self, "_brush_tools", None) or None
+                hud = get_brush_hud_info(brush, radial, _tools=tools)
+                label = i18n.trans(hud.get("label_key", "Grab"))
+                # line1: ツール固有キー（共通キーはdrawing側で描画）
+                if hud.get("tool") == 'GRAB':
+                    guide_line1_suffix = f"[E] {i18n.trans('Range Grab')} / {i18n.trans('Smooth')}"
+                else:
+                    guide_line1_suffix = "[E] switch [F]radius [Shift+F]strength"
+                # line2: ツール状態（r/s/falloff、調整中強調）
+                parts = [f"{i18n.trans('Tool: %s') % label}"]
+                _r = hud.get("radius")
+                if _r is not None:
+                    r_txt = f"r={float(_r) * 1000.0:.0f}mm"
+                    if hud.get("adjusting") == 'RADIUS':
+                        r_txt += f" {i18n.trans('<adjusting>')}"
+                    parts.append(r_txt)
+                _s = hud.get("strength")
+                if _s is not None:
+                    s_txt = f"s={float(_s):.2f}"
+                    if hud.get("adjusting") == 'STRENGTH':
+                        s_txt += f" {i18n.trans('<adjusting>')}"
+                    parts.append(s_txt)
+                if hud.get("show_falloff") and hud.get("falloff"):
+                    parts.append(str(hud.get("falloff")))
+                guide_line2 = " ".join(parts)
+                # 後方互換: 従来の単一行tool_textも維持する
+                tool_text = guide_line2
+                if hud.get("tool") == 'GRAB':
+                    tool_text = guide_line1_suffix
             except Exception:
                 tool_text = None
+                guide_line1_suffix = None
+                guide_line2 = None
             # 縫合優先フェーズのHUD表示 (simキャッシュ読取のみ・GPU同期なし)
             sewing_text = None
             sewing_active = False
@@ -466,7 +493,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         sewing_text = phase_text(ph[0], ph[1], ph[2], i18n.trans)
                 except Exception:
                     sewing_text = None
-            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help, tool_text=tool_text, sewing_text=sewing_text, sewing_active=sewing_active)
+            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help, tool_text=tool_text, guide_line1_suffix=guide_line1_suffix, guide_line2=guide_line2, sewing_text=sewing_text, sewing_active=sewing_active)
 
         # パフォーマンスサンプリング記録
         if delta_time > 0:

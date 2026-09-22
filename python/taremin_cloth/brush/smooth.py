@@ -39,6 +39,26 @@ class SmoothTool(BaseBrushTool):
     """ブラシ円内を1反復ラプラシアン平滑化ターゲットへ一時ピン留めする"""
 
     name = 'SMOOTH'
+    label_key = 'Smooth'
+
+    def hud_info(self, brush, radial=None):
+        base = super().hud_info(brush, radial)
+        try:
+            base["radius"] = float(brush_opt(brush, "radius", 0.05)) if brush is not None else None
+        except Exception:
+            base["radius"] = None
+        try:
+            base["strength"] = float(brush_opt(brush, "strength", 0.8)) if brush is not None else None
+        except Exception:
+            base["strength"] = None
+        try:
+            falloff = brush_opt(brush, "falloff_shape", 'SPHERE') if brush is not None else None
+            base["falloff"] = falloff
+            base["show_falloff"] = bool(falloff) and str(falloff) != 'SPHERE'
+        except Exception:
+            base["falloff"] = None
+            base["show_falloff"] = False
+        return base
 
     def __init__(self):
         self.reset()

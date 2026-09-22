@@ -15,6 +15,7 @@ class SingleGrabTool(BaseBrushTool):
     """1頂点を掴んでビュー平面上でドラッグする"""
 
     name = 'GRAB'
+    label_key = 'Grab'
 
     def __init__(self):
         self.reset()
