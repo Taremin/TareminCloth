@@ -10,7 +10,13 @@ pub mod sdf_baker;
 
 pub use context::{GpuBufferLimits, GpuContext, GpuContextError, GpuDeviceInfo};
 pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams};
-pub use smooth::{TENSION_EXPAND, build_adjacency_csr, laplacian_smooth_targets, radial_expand_targets};
+pub use smooth::{
+    TENSION_EXPAND, GRAB_PIN_THRESHOLD,
+    FALLOFF_SMOOTH, FALLOFF_SPHERE, FALLOFF_SHARP, FALLOFF_LINEAR, FALLOFF_CONSTANT,
+    build_adjacency_csr, laplacian_smooth_targets, radial_expand_targets,
+    falloff_weights, verts_in_brush, depth_keep_mask, select_grab_pins,
+    radial_adjust, radial_adjust_with_scale, grab_drag_targets, ray_plane_hit,
+};
 pub use simulation::{DynamicBoneSdfSetup, GpuClothSimulator};
 pub use simulation::types::{GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex};
 pub use debug_recorder::{ColliderRecord, FrameRecord, FrameStats, JsonlRecord, PinRecord, SimulationDebugRecorder, SimulationMetadata};

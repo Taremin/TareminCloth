@@ -11,6 +11,13 @@ use cloth_core::{
     build_adjacency_csr as core_build_adjacency_csr,
     laplacian_smooth_targets as core_smooth_targets,
     radial_expand_targets as core_expand_targets,
+    falloff_weights as core_falloff_weights,
+    verts_in_brush as core_verts_in_brush,
+    depth_keep_mask as core_depth_keep_mask,
+    select_grab_pins as core_select_grab_pins,
+    radial_adjust as core_radial_adjust,
+    grab_drag_targets as core_grab_drag_targets,
+    ray_plane_hit as core_ray_plane_hit,
 };
 
 /// GPUが利用可能かどうかを判定する
@@ -374,6 +381,127 @@ fn brush_radial_expand_targets<'py>(
     let rows: Vec<Vec<f32>> = targets.iter().map(|t| t.to_vec()).collect();
     PyArray2::from_vec2(py, &rows)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("配列変換失敗: {e}")))
+}
+
+/// ブラシ用: 距離配列から減衰重み [N] を求める (shape: 0=SMOOTH..4=CONSTANT)。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+fn brush_falloff_weights(distances: Vec<f32>, radius: f32, shape: u32) -> Vec<f32> {
+    core_falloff_weights(&distances, radius, shape)
+}
+
+/// ブラシ用: ブラシ球内の頂点 (indices, weights) を列挙する。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+fn brush_verts_in_brush<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    center: [f32; 3],
+    radius: f32,
+    shape: u32,
+) -> PyResult<(Bound<'py, PyArray1<u32>>, Bound<'py, PyArray1<f32>>)> {
+    let p_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "positions配列の各頂点は3次元である必要があります",
+            ));
+        }
+        pos_vec.push([row[0], row[1], row[2]]);
+    }
+    let (found, weights) = core_verts_in_brush(&pos_vec, center, radius, shape);
+    Ok((
+        PyArray1::from_vec(py, found),
+        PyArray1::from_vec(py, weights),
+    ))
+}
+
+/// ブラシ用: レイ命中面より奥の点を除外するマスク [N] (hit_t=None 時は全て真)。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+#[pyo3(signature = (points, origin, direction, hit_t=None, eps=0.0))]
+fn brush_depth_keep_mask<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<f32>,
+    origin: [f32; 3],
+    direction: [f32; 3],
+    hit_t: Option<f32>,
+    eps: f32,
+) -> PyResult<Bound<'py, PyArray1<bool>>> {
+    let p_view = points.as_array();
+    let mut pts_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "points配列の各点は3次元である必要があります",
+            ));
+        }
+        pts_vec.push([row[0], row[1], row[2]]);
+    }
+    Ok(PyArray1::from_vec(
+        py,
+        core_depth_keep_mask(&pts_vec, origin, direction, hit_t, eps),
+    ))
+}
+
+/// ブラシ用: グラブ対象の選別 (閾値未満の裾野を除外)。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+#[pyo3(signature = (found, weights, threshold=0.01))]
+fn brush_select_grab_pins(
+    found: Vec<u32>,
+    weights: Vec<f32>,
+    threshold: f32,
+) -> PyResult<(Vec<u32>, Vec<f32>)> {
+    core_select_grab_pins(&found, &weights, threshold)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
+/// ブラシ用: ラジアル操作の相対値計算。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+fn brush_radial_adjust(start_value: f64, dx_px: f64, min_value: f64, max_value: f64) -> f64 {
+    core_radial_adjust(start_value, dx_px, min_value, max_value)
+}
+
+/// ブラシ用: 範囲グラブのドラッグ目標 [N, 3] (`init + delta * w * strength`)。
+/// 純CPU・GPU初期化不要。Python `RangeGrabTool._move` と同一仕様。
+#[pyfunction]
+fn brush_grab_drag_targets<'py>(
+    py: Python<'py>,
+    initials: PyReadonlyArray2<f32>,
+    delta: [f32; 3],
+    weights: Vec<f32>,
+    strength: f32,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let i_view = initials.as_array();
+    let mut init_vec = Vec::with_capacity(i_view.shape()[0]);
+    for row in i_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "initials配列の各頂点は3次元である必要があります",
+            ));
+        }
+        init_vec.push([row[0], row[1], row[2]]);
+    }
+    let targets = core_grab_drag_targets(&init_vec, delta, &weights, strength)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let rows: Vec<Vec<f32>> = targets.iter().map(|t| t.to_vec()).collect();
+    PyArray2::from_vec2(py, &rows)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("配列変換失敗: {e}")))
+}
+
+/// ブラシ用: レイと平面の交点 (平行時は None)。
+/// 純CPU・GPU初期化不要。Python 単一グラブの交点計算と同一仕様。
+#[pyfunction]
+fn brush_ray_plane_hit(
+    origin: [f32; 3],
+    direction: [f32; 3],
+    plane_point: [f32; 3],
+    plane_normal: [f32; 3],
+) -> Option<[f32; 3]> {
+    core_ray_plane_hit(origin, direction, plane_point, plane_normal)
 }
 
 /// メモリ上のRGBバイト配列を直接返却する高速レンダリング関数 (ディスクI/Oなし)
@@ -1852,6 +1980,13 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(brush_build_adjacency_csr, m)?)?;
     m.add_function(wrap_pyfunction!(brush_smooth_targets, m)?)?;
     m.add_function(wrap_pyfunction!(brush_radial_expand_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_falloff_weights, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_verts_in_brush, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_depth_keep_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_select_grab_pins, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_radial_adjust, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_grab_drag_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_ray_plane_hit, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

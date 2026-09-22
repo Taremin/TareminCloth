@@ -493,9 +493,9 @@ sequenceDiagram
 - **GPUベクタ即時描画 (`layer_painter`)**:
   - egui の `layer_painter(Order::Foreground)` を活用し、追加のGPUシェーダーや頂点バッファを生成することなく、固定ピン（赤丸）およびドラッグ目標位置・接続ライン（黄丸＋ライン）を論理ポイント座標系で即時テッセレーション・描画。
 
-#### 4. 平滑化ブラシ核 (Smooth Brush Kernel: `cloth_core::smooth`)
-- **配置**: ブラシ目標計算の単一真実源としてRust核に純CPU関数群を置く (`build_adjacency_csr` / `laplacian_smooth_targets` / `radial_expand_targets`)。GPU初期化不要・WGSL不使用のため、Blenderアドオン・GUI・ヘッドレステストの三者で再利用可能。
-- **PyO3公開**: `brush_build_adjacency_csr` / `brush_smooth_targets` / `brush_radial_expand_targets` および一括ピンAPI `ClothSimulator.set_pins_batch` (単一 `upload_pins` で確定し、毎頂点全量再送の O(N^2) を回避)。Python側 (`brush/smooth.py`) はRust優先・NumPyフォールバックで、parity は `tests/core/test_smooth_parity.py` (許容誤差 1e-4) で保証する。
+#### 4. ブラシ演算核 (Brush Kernel: `cloth_core::smooth`)
+- **配置**: ブラシ演算の単一真実源としてRust核に純CPU関数群を置く。平滑化（`build_adjacency_csr` / `laplacian_smooth_targets` / `radial_expand_targets`）に加え、グラブ系の共通演算（`falloff_weights` / `verts_in_brush` / `depth_keep_mask` / `select_grab_pins` / `radial_adjust` / `grab_drag_targets` / `ray_plane_hit`）も同モジュールに集約する。GPU初期化不要・WGSL不使用のため、Blenderアドオン・GUI・ヘッドレステストの三者で再利用可能。単一グラブのピッキング（レイキャスト・画面最近傍・座標変換）は `bpy` 依存のため Python 側に残し、平面と差分のデータ境界で分離する。
+- **PyO3公開**: `brush_*` 関数群および一括ピンAPI `ClothSimulator.set_pins_batch` (単一 `upload_pins` で確定し、毎頂点全量再送の O(N^2) を回避)。Python側 (`brush/math.py`・各ツール) はRust優先・NumPyフォールバックで、parity は `tests/core/test_smooth_parity.py` (許容誤差 1e-4) で保証する。
 - **注意**: 入力は明示CSRであり、縫合展開済みの sim 内部隣接 (`ClothMesh::adj_*`) ではない。縫合トポロジーへの依存を排し、Python/Rust 間の決定性を優先した設計である。
 
 ### 6.6 高精度絶対時刻フレームペーシングとオンデマンドリードバック設計

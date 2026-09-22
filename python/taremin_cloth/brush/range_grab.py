@@ -7,7 +7,7 @@ import mathutils
 import numpy as np
 
 from .base import BaseBrushTool, resolve_brush_center, update_brush_circle, brush_opt
-from .math import verts_in_brush, depth_keep_mask, select_grab_pins
+from .math import verts_in_brush, depth_keep_mask, select_grab_pins, grab_drag_targets
 
 
 class RangeGrabTool(BaseBrushTool):
@@ -191,12 +191,32 @@ class RangeGrabTool(BaseBrushTool):
             delta_local = matrix_inv.to_3x3() @ delta_world
         except Exception:
             return False
-        for v_idx, (init, w) in self.grab.items():
-            k = w * strength
-            tx = init.x + delta_local.x * k
-            ty = init.y + delta_local.y * k
-            tz = init.z + delta_local.z * k
-            sim.set_pin(v_idx, [tx, ty, tz], w)
+        v_ids = list(self.grab.keys())
+        try:
+            init_mat = np.array(
+                [[self.grab[v][0].x, self.grab[v][0].y, self.grab[v][0].z] for v in v_ids],
+                dtype=np.float32)
+            w_arr = np.array([self.grab[v][1] for v in v_ids], dtype=np.float32)
+            targets = grab_drag_targets(
+                init_mat,
+                np.array([delta_local.x, delta_local.y, delta_local.z], dtype=np.float32),
+                w_arr, strength)
+        except Exception:
+            return False
+        if hasattr(sim, "set_pins_batch"):
+            try:
+                sim.set_pins_batch(
+                    [int(v) for v in v_ids],
+                    np.ascontiguousarray(targets, dtype=np.float32),
+                    [float(self.grab[v][1]) for v in v_ids])
+            except Exception:
+                return False
+        else:
+            for v_idx, w, t in zip(v_ids, w_arr.tolist(), targets.tolist()):
+                try:
+                    sim.set_pin(int(v_idx), [float(t[0]), float(t[1]), float(t[2])], float(w))
+                except Exception:
+                    pass
         return True
 
     def _release(self, ctx, pinned_verts):

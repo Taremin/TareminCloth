@@ -8,6 +8,7 @@ from bpy_extras import view3d_utils
 
 from ..utils import drawing
 from .base import BaseBrushTool
+from .math import ray_plane_hit
 
 
 class SingleGrabTool(BaseBrushTool):
@@ -120,12 +121,18 @@ class SingleGrabTool(BaseBrushTool):
         direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse_pos)
         if not (origin and direction):
             return False
-        denom = direction.dot(self.grab_plane_normal)
-        if abs(denom) <= 1e-6:
+        # 現在のマウスレイとビュー平面の交点を計算 (実演算はRust核)
+        try:
+            hit = ray_plane_hit(
+                (origin.x, origin.y, origin.z),
+                (direction.x, direction.y, direction.z),
+                (self.grab_plane_point.x, self.grab_plane_point.y, self.grab_plane_point.z),
+                (self.grab_plane_normal.x, self.grab_plane_normal.y, self.grab_plane_normal.z))
+        except Exception:
             return False
-        # 現在のマウスレイとビュー平面の交点を計算
-        t = (self.grab_plane_point - origin).dot(self.grab_plane_normal) / denom
-        current_plane_hit = origin + direction * t
+        if hit is None:
+            return False
+        current_plane_hit = mathutils.Vector((float(hit[0]), float(hit[1]), float(hit[2])))
 
         # ビュー平面上のワールド移動差分（オフセット）
         delta_world = current_plane_hit - self.grab_initial_plane_hit

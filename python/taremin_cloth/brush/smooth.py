@@ -9,7 +9,6 @@ import numpy as np
 
 from .base import BaseBrushTool, resolve_brush_center, update_brush_circle, brush_opt
 from .math import (
-    TENSION_EXPAND,
     verts_in_brush,
     depth_keep_mask,
     select_grab_pins,
@@ -17,21 +16,6 @@ from .math import (
     laplacian_smooth_targets,
     radial_expand_targets,
 )
-
-try:
-    import taremin_cloth_core as _core
-
-    _RUST_BRUSH = all(
-        hasattr(_core, n)
-        for n in (
-            "brush_build_adjacency_csr",
-            "brush_smooth_targets",
-            "brush_radial_expand_targets",
-        )
-    )
-except Exception:
-    _core = None
-    _RUST_BRUSH = False
 
 
 def _pinned_set_of(ctx, fallback=None):
@@ -161,15 +145,7 @@ class SmoothTool(BaseBrushTool):
             # sim頂点順とメッシュ頂点順の一致を前提とする (不一致時は再抽出不能なので無効化)
             if int(np.max(edges)) >= n_verts:
                 return False
-            if _RUST_BRUSH:
-                try:
-                    offsets, indices = _core.brush_build_adjacency_csr(n_verts, edges)
-                    offsets = np.ascontiguousarray(offsets, dtype=np.uint32)
-                    indices = np.ascontiguousarray(indices, dtype=np.uint32)
-                except Exception:
-                    offsets, indices = build_adjacency_csr(n_verts, edges)
-            else:
-                offsets, indices = build_adjacency_csr(n_verts, edges)
+            offsets, indices = build_adjacency_csr(n_verts, edges)
             self.adj_offsets = offsets
             self.adj_indices = indices
             self.adj_num_verts = n_verts
@@ -223,37 +199,15 @@ class SmoothTool(BaseBrushTool):
             pos_c = np.ascontiguousarray(pos_2d, dtype=np.float32)
             idx_arr = np.ascontiguousarray(live_idx, dtype=np.uint32)
             w_arr = np.ascontiguousarray(live_w, dtype=np.float32)
-            off_c = np.ascontiguousarray(self.adj_offsets, dtype=np.uint32)
-            nbr_c = np.ascontiguousarray(self.adj_indices, dtype=np.uint32)
-            center = np.ascontiguousarray(res["center"], dtype=np.float32).reshape(3)
-            if _RUST_BRUSH:
-                try:
-                    targets = np.asarray(
-                        _core.brush_smooth_targets(
-                            pos_c, off_c, nbr_c, idx_arr, w_arr, strength, list(pinned)),
-                        dtype=np.float32)
-                except Exception:
-                    targets = laplacian_smooth_targets(
-                        pos_c, off_c, nbr_c, idx_arr, w_arr, strength, exclude=pinned)
-            else:
-                targets = laplacian_smooth_targets(
-                    pos_c, off_c, nbr_c, idx_arr, w_arr, strength, exclude=pinned)
+            targets = laplacian_smooth_targets(
+                pos_c, self.adj_offsets, self.adj_indices,
+                idx_arr, w_arr, strength, exclude=pinned)
             # 平滑化だけでは余剰長が残りリリース後に再座屈するため、
             # 放射方向への弱い拡張で弛みをパッチ外へ逃がす (張力アシスト)。
             smoothed = pos_c.copy()
             smoothed[idx_arr.astype(np.int64)] = targets
-            if _RUST_BRUSH:
-                try:
-                    targets = np.asarray(
-                        _core.brush_radial_expand_targets(
-                            smoothed, center, idx_arr, w_arr, strength, TENSION_EXPAND),
-                        dtype=np.float32)
-                except Exception:
-                    targets = radial_expand_targets(
-                        smoothed, center, idx_arr, w_arr, strength)
-            else:
-                targets = radial_expand_targets(
-                    smoothed, center, idx_arr, w_arr, strength)
+            targets = radial_expand_targets(
+                smoothed, res["center"], idx_arr, w_arr, strength)
         except Exception:
             return False
         if hasattr(sim, "set_pins_batch"):
