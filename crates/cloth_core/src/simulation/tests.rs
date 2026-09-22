@@ -371,4 +371,72 @@ mod tests {
         println!("[Test Bone SDF Collision] Moved Vertex Z: {}", z_moved);
         assert!(z_moved >= 0.14 - 2e-3, "ボーン移動に伴い頂点が z=0.14 以上に押し上げられること (実測 z={})", z_moved);
     }
+
+    fn make_pin_test_sim(
+        ctx: &std::sync::Arc<crate::context::GpuContext>,
+    ) -> GpuClothSimulator {
+        // 3頂点の鎖 (0-1-2)、両端固定・中央自由。有限剛性で布側の抵抗を作る
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let edges = vec![[0, 1], [1, 2]];
+        let inv_masses = vec![0.0, 1.0, 0.0];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            Some(&inv_masses),
+            None,
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx.clone(), mesh);
+        sim.gravity = [0.0, 0.0, 0.0]; // 無重力
+        sim
+    }
+
+    #[test]
+    fn test_compliant_pin_full_hold() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let mut sim = make_pin_test_sim(&ctx);
+        // w=1.0: 完全固定で目標へ吸着し、隣接頂点を引き連れる
+        sim.set_pin_target(1, [1.0, 0.5, 0.0], 1.0);
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0, 20);
+        }
+        let verts = sim.read_vertices();
+        let y1 = verts[1].position[1];
+        println!("[Test Compliant Pin Full] y1={}", y1);
+        assert!((y1 - 0.5).abs() < 1e-2, "w=1.0 hold failed (y1={})", y1);
+    }
+
+    #[test]
+    fn test_compliant_pin_partial_blend() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let mut sim = make_pin_test_sim(&ctx);
+        // w=0.5: 目標と布拘束のブレンド (0 < y < 0.5 の中間) になること
+        sim.set_pin_target(1, [1.0, 0.5, 0.0], 0.5);
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0, 20);
+        }
+        let verts = sim.read_vertices();
+        let y1 = verts[1].position[1];
+        println!("[Test Compliant Pin Partial] y1={}", y1);
+        assert!(y1 > 1e-3, "w=0.5 must pull toward target (y1={})", y1);
+        assert!(y1 < 0.5 - 1e-3, "w=0.5 must stay below target (y1={})", y1);
+    }
+
 }

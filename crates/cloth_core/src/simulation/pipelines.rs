@@ -235,8 +235,8 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    // 動的ピンバッファ
-    let max_pins = 1024;
+    // 動的ピンバッファ (範囲グラブ等の多頂点ピンに備えて余裕を持たせる。8192×32B = 256KB)
+    let max_pins = 8192;
     let pin_buffer_size = (max_pins * std::mem::size_of::<GpuPinConstraint>()) as u64;
     let pin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Pin Buffer"),
@@ -625,7 +625,7 @@ pub fn build_simulation_resources(
 
     let pin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Pin Bind Group Layout"),
-        entries: &[storage_rw, storage_ro(1), uniform_entry(2)],
+        entries: &[storage_rw, storage_ro(1), uniform_entry(2), uniform_entry(3)],
     });
 
     let collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -866,6 +866,10 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: pin_params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buffer.as_entire_binding(),
             },
         ],
     });

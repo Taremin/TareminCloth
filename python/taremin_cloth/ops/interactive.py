@@ -31,6 +31,8 @@ from ..utils import drawing, topology, anim_driver
 from ..utils.logger import logger
 from ..utils.view3d import tag_redraw_view3d
 from .. import i18n
+from ..brush import create_tools, active_tool_name
+from ..brush.base import BrushContext, RadialController, init_brush_circle_at, nudge_brush_radius
 
 _interactive_running = False
 _interactive_operator_instance = None
@@ -259,14 +261,11 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
     _timer = None
     _fps_counter = None
-    _grabbed_vert = None
-    _grab_initial_pos_local = None
-    _grab_plane_point = None
-    _grab_plane_normal = None
-    _grab_initial_plane_hit = None
-    _grab_current_target_local = None
     _stop_requested = False
     _pinned_verts = set()
+    _brush_tools = {}
+    _brush_dragging = None
+    _radial = None
     _anim_frame_counter = 0
     _accumulator = 0.0
     _isolated_areas = []
@@ -364,7 +363,17 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             show_overlay = getattr(settings, "show_fps_overlay", True) if settings else True
             position = getattr(settings, "fps_overlay_position", 'TOP_CENTER') if settings else 'TOP_CENTER'
             show_help = getattr(settings, "show_hud_help", True) if settings else True
-            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help)
+            tool_text = None
+            try:
+                brush = self._brush_settings_of(obj)
+                if brush is not None and getattr(brush, "tool_mode", 'GRAB') == 'RANGE_GRAB':
+                    _r = float(getattr(brush, "radius", 0.05))
+                    tool_text = i18n.trans("Tool: %s") % f"{i18n.trans('Range Grab')} r={_r * 1000.0:.0f}mm"
+                elif brush is not None:
+                    tool_text = f"[E] {i18n.trans('Range Grab')}"
+            except Exception:
+                tool_text = None
+            drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help, tool_text=tool_text)
 
         # パフォーマンスサンプリング記録
         if delta_time > 0:
@@ -382,17 +391,24 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 "step_count": step_count,
             })
 
+    def _brush_settings_of(self, obj):
+        settings = getattr(obj, "taremin_cloth", None)
+        return getattr(settings, "brush", None) if settings else None
+
+    def _brush_ctx(self, context, obj, sim, coords, event, mouse_pos):
+        return BrushContext(self, context, obj, sim, coords, event, mouse_pos)
+
+    def _active_brush_tool(self, brush):
+        return self._brush_tools.get(active_tool_name(brush))
+
     def _reset_run_state(self):
         """1回の起動試行に先立ち、実行時ステートを初期化する"""
         self._stop_requested = False
         self._pinned_verts = set()
+        self._brush_tools = create_tools()
+        self._brush_dragging = None
+        self._radial = RadialController()
         self._fps_counter = FPSCounter(ema_alpha=0.15)
-        self._grabbed_vert = None
-        self._grab_initial_pos_local = None
-        self._grab_plane_point = None
-        self._grab_plane_normal = None
-        self._grab_initial_plane_hit = None
-        self._grab_current_target_local = None
         self._anim_frame_counter = 0
         self._accumulator = 0.0
         self._last_step_time = time.perf_counter()
@@ -646,6 +662,10 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             status_guide = i18n.trans(
                 "Taremin Cloth: [Left Drag] Move Vertex | [P] Toggle Pin | [Right Click / ESC] Exit"
             )
+            try:
+                status_guide = f"{status_guide} | [E] {i18n.trans('Range Grab')}"
+            except Exception:
+                pass
             context.workspace.status_text_set(status_guide)
         self._report_startup_summary(context)
         self.report({'INFO'}, i18n.trans("Interactive Simulation Started (Press ESC / RightClick or Click Stop to exit)"))
@@ -712,129 +732,128 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         elif event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
-                region = context.region
-                rv3d = context.region_data
-                if region and rv3d:
-                    mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-                    pos_2d = coords.reshape((-1, 3))
-                    origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, mouse_pos)
-                    direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse_pos)
-
-                    best_idx = None
-
-                    # 1. 視線レイキャストによる最前面ポリゴンの交差判定
-                    if origin and direction:
-                        matrix_world = obj.matrix_world
-                        matrix_inv = matrix_world.inverted()
-                        ray_origin_local = matrix_inv @ origin
-                        ray_dir_local = (matrix_inv.to_3x3() @ direction).normalized()
-
-                        hit, hit_loc, hit_normal, face_idx = obj.ray_cast(ray_origin_local, ray_dir_local)
-                        if hit and face_idx is not None and 0 <= face_idx < len(obj.data.polygons):
-                            polygon = obj.data.polygons[face_idx]
-                            min_dist_sq = float('inf')
-                            # ヒットしたポリゴンの構成頂点から交点に最も近い頂点を選択
-                            for v_idx in polygon.vertices:
-                                v_co = obj.data.vertices[v_idx].co
-                                dist_sq = (v_co - hit_loc).length_squared
-                                if dist_sq < min_dist_sq:
-                                    min_dist_sq = dist_sq
-                                    best_idx = v_idx
-
-                    # 2. 面に直接ヒットしなかった場合のフォールバック（画面最近傍探索）
-                    if best_idx is None:
-                        best_dist = float('inf')
-                        for i, p in enumerate(pos_2d):
-                            world_p = obj.matrix_world @ mathutils.Vector(p)
-                            screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_p)
-                            if screen_co:
-                                dist = (screen_co.x - mouse_pos[0]) ** 2 + (screen_co.y - mouse_pos[1]) ** 2
-                                if dist < best_dist and dist < 2500:
-                                    best_dist = dist
-                                    best_idx = i
-
-                    if best_idx is not None and origin and direction:
-                        self._grabbed_vert = best_idx
-                        p = pos_2d[best_idx]
-                        v_initial_local = mathutils.Vector((p[0], p[1], p[2]))
-                        v_initial_world = obj.matrix_world @ v_initial_local
-
-                        # カメラの視線前方向ベクトルを取得（ビュー平面の法線）
-                        view_inv = rv3d.view_matrix.inverted()
-                        camera_forward = -view_inv.to_3x3().col[2].normalized()
-
-                        # ビュー平面の通過点は「選択された頂点自身のワールド位置」
-                        self._grab_plane_point = v_initial_world
-                        self._grab_plane_normal = camera_forward
-                        self._grab_initial_pos_local = v_initial_local
-                        self._grab_current_target_local = v_initial_local
-
-                        # クリック時のレイとビュー平面との初期交点を計算・記録
-                        denom = direction.dot(camera_forward)
-                        if abs(denom) > 1e-6:
-                            t0 = (v_initial_world - origin).dot(camera_forward) / denom
-                            self._grab_initial_plane_hit = origin + direction * t0
-                        else:
-                            self._grab_initial_plane_hit = v_initial_world
-
-                        sim.set_pin(best_idx, [p[0], p[1], p[2]], 1.0)
-                        drawing.set_active_grabbed_vertex(obj.name, best_idx, v_initial_world)
-                        if context.area:
-                            context.area.tag_redraw()
-                        return {'RUNNING_MODAL'}
-
-            elif event.value == 'RELEASE':
-                if self._grabbed_vert is not None:
-                    # ピン留めされていない頂点のみ物理解放
-                    if self._grabbed_vert not in self._pinned_verts:
-                        sim.release_pin(self._grabbed_vert)
-                    drawing.clear_active_grabbed_vertex()
-                    self._grabbed_vert = None
-                    self._grab_initial_pos_local = None
-                    self._grab_plane_point = None
-                    self._grab_plane_normal = None
-                    self._grab_initial_plane_hit = None
-                    self._grab_current_target_local = None
+                # ラジアル調整中は確定として消費する
+                if self._radial is not None and self._radial.active:
+                    self._radial.confirm()
+                    if context.area:
+                        context.area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+                mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+                ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+                tool = self._active_brush_tool(self._brush_settings_of(obj))
+                if tool is not None and tool.on_press(ctx):
+                    self._brush_dragging = tool.name
                     if context.area:
                         context.area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-        elif event.type == 'MOUSEMOVE' and self._grabbed_vert is not None:
-            region = context.region
-            rv3d = context.region_data
-            if (region and rv3d and 
-                self._grab_plane_point is not None and 
-                self._grab_plane_normal is not None and 
-                self._grab_initial_plane_hit is not None and 
-                self._grab_initial_pos_local is not None):
+            elif event.value == 'RELEASE':
+                if self._brush_dragging:
+                    mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+                    ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+                    tool = self._brush_tools.get(self._brush_dragging)
+                    if tool is not None:
+                        tool.on_release(ctx, self._pinned_verts)
+                    self._brush_dragging = None
+                    if context.area:
+                        context.area.tag_redraw()
+                    return {'RUNNING_MODAL'}
 
-                mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-                origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, mouse_pos)
-                direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse_pos)
-                if origin and direction:
-                    denom = direction.dot(self._grab_plane_normal)
-                    if abs(denom) > 1e-6:
-                        # 現在のマウスレイとビュー平面の交点を計算
-                        t = (self._grab_plane_point - origin).dot(self._grab_plane_normal) / denom
-                        current_plane_hit = origin + direction * t
+        elif event.type == 'MOUSEMOVE':
+            mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+            ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+            if self._radial is not None and self._radial.active:
+                # ラジアル調整: 開始値×(1+dx/200px)
+                try:
+                    if self._radial.update(ctx):
+                        if context.area:
+                            context.area.tag_redraw()
+                except Exception:
+                    pass
+                return {'RUNNING_MODAL'}
+            if self._brush_dragging:
+                tool = self._brush_tools.get(self._brush_dragging)
+                if tool is not None and tool.on_move(ctx):
+                    if context.area:
+                        context.area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+                return {'PASS_THROUGH'}
+            # ホバー時は円だけ追従 (パネル操作はPASS_THROUGHで継続可能)
+            tool = self._active_brush_tool(self._brush_settings_of(obj))
+            if tool is not None and tool.on_hover(ctx):
+                if context.area:
+                    context.area.tag_redraw()
+            return {'PASS_THROUGH'}
 
-                        # ビュー平面上のワールド移動差分（オフセット）
-                        delta_world = current_plane_hit - self._grab_initial_plane_hit
+        elif event.type == 'E' and event.value == 'PRESS':
+            # Eキーで Grab / Range Grab を切替 (FはBlender準拠のサイズ変更用に確保)
+            try:
+                brush = self._brush_settings_of(obj)
+                if brush is not None:
+                    mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+                    ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+                    cur = getattr(brush, "tool_mode", 'GRAB')
+                    new_mode = 'RANGE_GRAB' if cur != 'RANGE_GRAB' else 'GRAB'
+                    old_tool = self._brush_tools.get(cur)
+                    if old_tool is not None:
+                        old_tool.on_deactivate(ctx, self._pinned_verts)
+                    brush.tool_mode = new_mode
+                    if self._brush_dragging == cur:
+                        self._brush_dragging = None
+                    new_tool = self._brush_tools.get(new_mode)
+                    if new_tool is not None:
+                        new_tool.on_activate(ctx)
+                    self.report({'INFO'}, i18n.trans("Tool: %s") % new_mode)
+                    if context.area:
+                        context.area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+            except Exception:
+                pass
 
-                        # オブジェクトローカル空間の移動差分に変換
-                        matrix_inv = obj.matrix_world.inverted()
-                        delta_local = matrix_inv.to_3x3() @ delta_world
+        elif event.type == 'F' and event.value == 'PRESS':
+            # F / Shift+F でラジアル調整 (Blender準拠: 半径 / 強度)
+            try:
+                brush = self._brush_settings_of(obj)
+                if brush is not None and self._radial is not None:
+                    mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+                    if bool(getattr(event, 'shift', False)):
+                        self._radial.enter('STRENGTH', event.mouse_region_x, brush)
+                    else:
+                        self._radial.enter('RADIUS', event.mouse_region_x, brush)
+                    # 円未表示の場合はこの場で初期化する
+                    if drawing.get_brush_info() is None:
+                        ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+                        init_brush_circle_at(ctx, max(float(getattr(brush, "radius", 0.05)), 1e-4))
+                    if context.area:
+                        context.area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+            except Exception:
+                pass
 
-                        # 初期のローカル頂点位置にオフセットを加算
-                        target_pos_local = self._grab_initial_pos_local + delta_local
-                        self._grab_current_target_local = target_pos_local
-                        sim.set_pin(self._grabbed_vert, [target_pos_local.x, target_pos_local.y, target_pos_local.z], 1.0)
-                        target_world = obj.matrix_world @ target_pos_local
-                        drawing.set_active_grabbed_vertex(obj.name, self._grabbed_vert, target_world)
+        elif event.type == 'RET' and event.value == 'PRESS' and self._radial is not None and self._radial.active:
+            self._radial.confirm()
+            if context.area:
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        elif event.type == 'LEFT_BRACKET' and event.value == 'PRESS':
+            mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+            nudge_brush_radius(obj, 0.9, mouse_pos)
+            if context.area:
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        elif event.type == 'RIGHT_BRACKET' and event.value == 'PRESS':
+            mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+            nudge_brush_radius(obj, 1.1, mouse_pos)
+            if context.area:
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
 
         elif event.type == 'P' and event.value == 'PRESS':
             # Pキーで掴んでいる頂点（またはカーソル下の頂点）をピン留め／解除（トグル）
-            target_v_idx = self._grabbed_vert
+            _sg = self._brush_tools.get('GRAB')
+            target_v_idx = _sg.grabbed_vert if _sg is not None else None
             if target_v_idx is None:
                 # ドラッグしていない場合はマウスカーソル直下の頂点を探索
                 region = context.region
@@ -878,7 +897,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         pass
                     self._pinned_verts.discard(target_v_idx)
                     # ドラッグ中でなければ物理ピンも解除
-                    if self._grabbed_vert != target_v_idx:
+                    if _sg is None or _sg.grabbed_vert != target_v_idx:
                         sim.release_pin(target_v_idx)
                     self.report({'INFO'}, i18n.trans("Unpinned vertex #%d") % target_v_idx)
                 else:
@@ -886,8 +905,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     vg.add([target_v_idx], 1.0, 'REPLACE')
                     self._pinned_verts.add(target_v_idx)
                     # 現在のローカル目標位置（または頂点現在位置）で固定
-                    if self._grabbed_vert == target_v_idx and self._grab_current_target_local is not None:
-                        t_pos = self._grab_current_target_local
+                    _grab_cur = _sg.grab_current_target_local if _sg is not None else None
+                    if _sg is not None and _sg.grabbed_vert == target_v_idx and _grab_cur is not None:
+                        t_pos = _grab_cur
                     else:
                         p = coords.reshape((-1, 3))[target_v_idx]
                         t_pos = mathutils.Vector((p[0], p[1], p[2]))
@@ -899,6 +919,17 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            # ラジアル調整中は開始値へ復元してモード終了 (モーダル自体は継続)
+            if self._radial is not None and self._radial.active:
+                try:
+                    mouse_pos = (event.mouse_region_x, event.mouse_region_y)
+                    ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+                    self._radial.cancel(ctx)
+                except Exception:
+                    pass
+                if context.area:
+                    context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
             self.cancel(context)
             return {'FINISHED'}
 
@@ -992,19 +1023,20 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 pass
             self._cursor_wait_set = False
 
-        if self._grabbed_vert is not None:
-            if self._grabbed_vert not in self._pinned_verts:
-                obj = context.active_object
-                if obj and obj.name in _simulators:
-                    sim, _ = _simulators[obj.name]
-                    sim.release_pin(self._grabbed_vert)
-            self._grabbed_vert = None
+        try:
+            obj = context.active_object
+            sim = _simulators[obj.name][0] if obj is not None and obj.name in _simulators else None
+            if sim is not None:
+                for tool in self._brush_tools.values():
+                    try:
+                        tool.abort(sim, self._pinned_verts)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._brush_dragging = None
+        self._radial = RadialController()
 
-        self._grab_initial_pos_local = None
-        self._grab_plane_point = None
-        self._grab_plane_normal = None
-        self._grab_initial_plane_hit = None
-        self._grab_current_target_local = None
         self._pinned_verts.clear()
         _interactive_running = False
         _interactive_operator_instance = None

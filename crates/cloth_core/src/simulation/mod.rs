@@ -1587,7 +1587,12 @@ impl GpuClothSimulator {
             );
             self.upload_pins();
 
-            let new_inv_m = if weight > 0.5 { 0.0f32 } else { self.original_inv_masses[vertex_idx as usize] };
+            let clamped_w = if weight.is_finite() { weight.clamp(0.0, 1.0) } else { 0.0 };
+            // ピンウェイトに応じた連続的な質量ブレンド (w=0: 不変, w=1: 完全固定)。
+            // 旧仕様の weight > 0.5 二値判定は、連続スライダー・減衰に対する
+            // 不連続応答 (0.49/0.51 での重力・衝突挙動の反転) を招くため廃止。
+            let orig_m = self.original_inv_masses[vertex_idx as usize];
+            let new_inv_m = orig_m * (1.0 - clamped_w);
             let offset = (vertex_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
             self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&new_inv_m));
         }

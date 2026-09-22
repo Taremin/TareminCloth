@@ -14,7 +14,8 @@ _draw_handler = None
 _draw_handler_2d = None
 _interactive_active = False
 _active_grabbed_info = None  # {"obj_name": str, "vert_idx": int, "target_world_pos": Vector or None}
-_interactive_fps_info = None  # {"fps": float, "frame_ms": float, "show_overlay": bool, "position": str, "show_help": bool}
+_interactive_fps_info = None  # {"fps": float, "frame_ms": float, "show_overlay": bool, "position": str, "show_help": bool, "tool_text": str or None}
+_brush_info = None  # {"x": float, "y": float, "radius_px": float}
 _pin_indices_cache = {}  # {(obj_name, vg_name): (indices_list, vert_count)}
 _sewing_edge_indices_cache = {}  # {obj_name: (edge_pairs_list, vert_count, edge_count)}
 _bake_overlay_info = None  # {"current_frame": int, "end_frame": int, "pct": int}
@@ -49,6 +50,7 @@ def set_interactive_active(active: bool):
     _interactive_active = active
     if not active:
         clear_overlay_caches()
+        clear_brush_info()
 
 
 def is_interactive_active() -> bool:
@@ -62,6 +64,7 @@ def set_interactive_fps_info(
     show_overlay: bool = True,
     position: str = 'TOP_CENTER',
     show_help: bool = True,
+    tool_text=None,
 ):
     """インタラクティブモード中のFPSおよび操作ヘルプ計測情報を更新する"""
     global _interactive_fps_info
@@ -71,6 +74,7 @@ def set_interactive_fps_info(
         "show_overlay": bool(show_overlay),
         "position": str(position),
         "show_help": bool(show_help),
+        "tool_text": str(tool_text) if tool_text else None,
     }
 
 
@@ -154,6 +158,27 @@ def clear_active_grabbed_vertex():
     """現在ドラッグ中の頂点情報をクリアする"""
     global _active_grabbed_info
     _active_grabbed_info = None
+
+
+def set_brush_info(x: float, y: float, radius_px: float):
+    """範囲グラブブラシカーソル円の表示情報を更新する"""
+    global _brush_info
+    _brush_info = {
+        "x": float(x),
+        "y": float(y),
+        "radius_px": max(float(radius_px), 2.0),
+    }
+
+
+def clear_brush_info():
+    """範囲グラブブラシカーソル円の表示情報をクリアする"""
+    global _brush_info
+    _brush_info = None
+
+
+def get_brush_info():
+    """現在のブラシカーソル円情報を取得する（テストまたはUI用）"""
+    return _brush_info
 
 
 def apply_view_depth_bias(coords, region_3d=None):
@@ -687,6 +712,9 @@ def draw_callback_2d():
         # 2. キー操作ガイドバッジの描画 (画面下部中央)
         if show_help:
             guide_text = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
+            tool_text = _interactive_fps_info.get("tool_text")
+            if tool_text:
+                guide_text = f"{guide_text}  |  {tool_text}"
             guide_h = 28.0
             pad_x = 14.0
             text_w = 340.0
@@ -741,6 +769,37 @@ def draw_callback_2d():
                 blf.position(font_id, text_x, text_y, 0.0)
                 blf.color(font_id, 0.92, 0.92, 0.95, 0.95)
                 blf.draw(font_id, guide_text)
+            except Exception:
+                pass
+
+        # 3. ブラシカーソル円の描画 (2Dスクリーン空間)
+        if _brush_info:
+            try:
+                import math
+
+                cx = _brush_info.get("x", 0.0)
+                cy = _brush_info.get("y", 0.0)
+                pr = max(_brush_info.get("radius_px", 20.0), 2.0)
+                segments = 48
+                pts = [
+                    (cx + pr * math.cos(2.0 * math.pi * i / segments),
+                     cy + pr * math.sin(2.0 * math.pi * i / segments))
+                    for i in range(segments + 1)
+                ]
+                orig_blend = gpu.state.blend_get()
+                try:
+                    gpu.state.blend_set('ALPHA')
+                    try:
+                        gpu.state.line_width_set(2.0)
+                    except Exception:
+                        pass
+                    batch = batch_for_shader(shader_2d, 'LINE_STRIP', {"pos": pts})
+                    if batch:
+                        shader_2d.bind()
+                        shader_2d.uniform_float("color", (0.2, 0.8, 1.0, 0.9))
+                        batch.draw(shader_2d)
+                finally:
+                    gpu.state.blend_set(orig_blend)
             except Exception:
                 pass
 

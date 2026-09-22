@@ -109,6 +109,45 @@ def _on_enable_self_collision_updated(self, context):
         pass
 
 
+class TareminClothBrushSettings(PropertyGroup):
+    """ブラシツール共通設定 (個別ブラシ間で共有する基本パラメータ)"""
+    tool_mode: EnumProperty(
+        name="Brush Tool",
+        description="Viewport brush tool (single grab or range grab)",
+        items=[
+            ('GRAB', "Grab", "Drag a single vertex"),
+            ('RANGE_GRAB', "Range Grab", "Drag vertices within the brush radius"),
+        ],
+        default='GRAB',
+    )
+    radius: FloatProperty(
+        name="Brush Radius",
+        description="Brush radius in meters",
+        default=0.05,
+        min=0.005,
+        max=0.5,
+    )
+    strength: FloatProperty(
+        name="Brush Strength",
+        description="How strongly grabbed vertices follow the brush",
+        default=0.8,
+        min=0.01,
+        max=1.0,
+    )
+    falloff_shape: EnumProperty(
+        name="Falloff",
+        description="Brush falloff shape from center to edge",
+        items=[
+            ('SMOOTH', "Smooth", "Smooth falloff"),
+            ('SPHERE', "Sphere", "Spherical falloff"),
+            ('SHARP', "Sharp", "Sharp falloff"),
+            ('LINEAR', "Linear", "Linear falloff"),
+            ('CONSTANT', "Constant", "Constant weight inside the brush"),
+        ],
+        default='SPHERE',
+    )
+
+
 class TareminClothObjectSettings(PropertyGroup):
     is_cloth: BoolProperty(
         name="Cloth Enabled",
@@ -598,6 +637,8 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Show elastic band highlight only during interactive mode",
         default=True,
     )
+    # 範囲グラブブラシ (Range Grab Brush)
+    brush: PointerProperty(type=TareminClothBrushSettings)
     # トポロジー・分割モード (Triangulation & Topology)
     triangulation_mode: EnumProperty(
         name="Triangulation Mode",
@@ -1090,7 +1131,7 @@ class TareminClothColliderSettings(PropertyGroup):
 
 
 def register():
-    for cls in (TareminClothElasticGroup, TareminClothObjectSettings, TareminClothColliderAnimSettings, TareminClothColliderSettings):
+    for cls in (TareminClothElasticGroup, TareminClothBrushSettings, TareminClothObjectSettings, TareminClothColliderAnimSettings, TareminClothColliderSettings):
         try:
             bpy.utils.register_class(cls)
         except ValueError:
@@ -1136,7 +1177,7 @@ def unregister():
         del bpy.types.Object.taremin_cloth
     if hasattr(bpy.types.Object, "taremin_cloth_collider"):
         del bpy.types.Object.taremin_cloth_collider
-    for cls in (TareminClothColliderSettings, TareminClothColliderAnimSettings, TareminClothObjectSettings, TareminClothElasticGroup):
+    for cls in (TareminClothColliderSettings, TareminClothColliderAnimSettings, TareminClothObjectSettings, TareminClothBrushSettings, TareminClothElasticGroup):
         try:
             bpy.utils.unregister_class(cls)
         except RuntimeError:

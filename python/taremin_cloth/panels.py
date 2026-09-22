@@ -794,6 +794,14 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
             row_fps.prop(settings, "fps_overlay_position", text="")
         col.prop(settings, "show_hud_help", text=i18n.trans("Show Key Guide"))
         col.separator()
+        brush = getattr(settings, "brush", None)
+        if brush is not None:
+            col.prop(brush, "tool_mode", text=i18n.trans("Tool"))
+            if getattr(brush, "tool_mode", 'GRAB') == 'RANGE_GRAB':
+                col.prop(brush, "radius", text=i18n.trans("Radius"))
+                col.prop(brush, "strength", text=i18n.trans("Strength"))
+                col.prop(brush, "falloff_shape", text=i18n.trans("Falloff"))
+        col.separator()
         col.operator("taremin_cloth.benchmark_fps", text=i18n.trans("Benchmark FPS (2 sec)"), icon='TIME')
 
 
