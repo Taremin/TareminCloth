@@ -117,6 +117,7 @@ class TareminClothBrushSettings(PropertyGroup):
         items=[
             ('GRAB', "Grab", "Drag a single vertex"),
             ('RANGE_GRAB', "Range Grab", "Drag vertices within the brush radius"),
+            ('SMOOTH', "Smooth", "Temporarily smooth wrinkles within the brush radius"),
         ],
         default='GRAB',
     )

@@ -1598,6 +1598,47 @@ impl GpuClothSimulator {
         }
     }
 
+    /// 複数の動的ピンを一括設定・更新する (単一upload_pinsで確定)。
+    /// 長さ不一致時は最短に切り詰め、範囲外頂点は無視する。
+    pub fn set_pin_targets_batch(
+        &mut self,
+        indices: &[u32],
+        targets: &[[f32; 3]],
+        weights: &[f32],
+    ) {
+        let count = indices.len().min(targets.len()).min(weights.len());
+        for i in 0..count {
+            let vertex_idx = indices[i];
+            if vertex_idx < self.num_vertices {
+                self.dynamic_pins.insert(
+                    vertex_idx,
+                    GpuPinConstraint {
+                        vertex_idx,
+                        weight: weights[i],
+                        _pad: [0.0; 2],
+                        target_pos: targets[i],
+                        _pad2: 0.0,
+                    },
+                );
+                let clamped_w = if weights[i].is_finite() {
+                    weights[i].clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let orig_m = self.original_inv_masses[vertex_idx as usize];
+                let new_inv_m = orig_m * (1.0 - clamped_w);
+                let offset =
+                    (vertex_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+                self.context.queue.write_buffer(
+                    &self.vertex_buffer,
+                    offset,
+                    bytemuck::bytes_of(&new_inv_m),
+                );
+            }
+        }
+        self.upload_pins();
+    }
+
     /// 指定頂点の動的ピンを解除する
     pub fn release_pin(&mut self, vertex_idx: u32) {
         if self.dynamic_pins.remove(&vertex_idx).is_some() {

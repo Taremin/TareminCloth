@@ -644,6 +644,7 @@
   "Template": "テンプレート",
   "Tensile stiffness linked with tension_stiffness": "引張剛性（tension_stiffnessと連動）",
   "Tension": "引張剛性",
+  "Temporarily smooth wrinkles within the brush radius": "ブラシ半径内のシワを一時的にならす",
   "Texture resolution for each bone-local SDF": "各ボーン局所SDFのテクスチャ解像度",
   "Thickness": "厚み",
   "Thin / Delicate (Silk & Light)": "Thin / Delicate (薄手・シルク)",

@@ -6,16 +6,19 @@
 
 from .single_grab import SingleGrabTool
 from .range_grab import RangeGrabTool
+from .smooth import SmoothTool
 
 TOOLS = {
     'GRAB': SingleGrabTool,
     'RANGE_GRAB': RangeGrabTool,
+    'SMOOTH': SmoothTool,
 }
 
 __all__ = [
     "TOOLS",
     "SingleGrabTool",
     "RangeGrabTool",
+    "SmoothTool",
     "create_tools",
     "active_tool_name",
 ]

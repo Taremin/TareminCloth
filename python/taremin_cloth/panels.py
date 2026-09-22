@@ -797,7 +797,7 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
         brush = getattr(settings, "brush", None)
         if brush is not None:
             col.prop(brush, "tool_mode", text=i18n.trans("Tool"))
-            if getattr(brush, "tool_mode", 'GRAB') == 'RANGE_GRAB':
+            if getattr(brush, "tool_mode", 'GRAB') in ('RANGE_GRAB', 'SMOOTH'):
                 col.prop(brush, "radius", text=i18n.trans("Radius"))
                 col.prop(brush, "strength", text=i18n.trans("Strength"))
                 col.prop(brush, "falloff_shape", text=i18n.trans("Falloff"))

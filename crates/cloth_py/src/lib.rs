@@ -8,6 +8,9 @@ use cloth_core::{
     BoneInput, ClothMesh, DynamicBoneSdfSetup,
     GpuBakeParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuClothSimulator,
     GpuContext, GpuMeshTriangle, GpuSkinningVertex,
+    build_adjacency_csr as core_build_adjacency_csr,
+    laplacian_smooth_targets as core_smooth_targets,
+    radial_expand_targets as core_expand_targets,
 };
 
 /// GPUが利用可能かどうかを判定する
@@ -273,6 +276,104 @@ fn render_scene_to_png<'py>(
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("PNG描画保存に失敗しました: {e}")))?;
 
     Ok(result.red_pixels)
+}
+
+/// 平滑化ブラシ用: 無向辺配列から1-ring隣接CSRを構築する (offsets, indices)。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+fn brush_build_adjacency_csr<'py>(
+    py: Python<'py>,
+    num_vertices: usize,
+    edges: PyReadonlyArray2<u32>,
+) -> PyResult<(Bound<'py, PyArray1<u32>>, Bound<'py, PyArray1<u32>>)> {
+    let e_view = edges.as_array();
+    let mut e_vec = Vec::with_capacity(e_view.shape()[0]);
+    for row in e_view.outer_iter() {
+        if row.len() == 2 {
+            e_vec.push([row[0], row[1]]);
+        }
+    }
+    let (offsets, indices) = core_build_adjacency_csr(num_vertices, &e_vec);
+    Ok((
+        PyArray1::from_vec(py, offsets),
+        PyArray1::from_vec(py, indices),
+    ))
+}
+
+/// 平滑化ブラシ用: 1-ring平均への減衰ブレンド目標 [B, 3] を計算する。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+#[pyo3(signature = (positions, adj_offsets, adj_indices, brush_idx, brush_weights, strength, exclude=None))]
+fn brush_smooth_targets<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    adj_offsets: PyReadonlyArray1<u32>,
+    adj_indices: PyReadonlyArray1<u32>,
+    brush_idx: PyReadonlyArray1<u32>,
+    brush_weights: PyReadonlyArray1<f32>,
+    strength: f32,
+    exclude: Option<Vec<u32>>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let p_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "positions配列の各頂点は3次元である必要があります",
+            ));
+        }
+        pos_vec.push([row[0], row[1], row[2]]);
+    }
+    let targets = core_smooth_targets(
+        &pos_vec,
+        adj_offsets.as_slice()?,
+        adj_indices.as_slice()?,
+        brush_idx.as_slice()?,
+        brush_weights.as_slice()?,
+        strength,
+        exclude.as_deref().unwrap_or(&[]),
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let rows: Vec<Vec<f32>> = targets.iter().map(|t| t.to_vec()).collect();
+    PyArray2::from_vec2(py, &rows)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("配列変換失敗: {e}")))
+}
+
+/// 平滑化ブラシ用: ブラシ中心からの放射拡張目標 [B, 3] を計算する (張力アシスト)。
+/// 純CPU・GPU初期化不要。Python `brush/math.py` と同一仕様。
+#[pyfunction]
+#[pyo3(signature = (positions, center, brush_idx, brush_weights, strength, expand=0.05))]
+fn brush_radial_expand_targets<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    center: [f32; 3],
+    brush_idx: PyReadonlyArray1<u32>,
+    brush_weights: PyReadonlyArray1<f32>,
+    strength: f32,
+    expand: f32,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let p_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "positions配列の各頂点は3次元である必要があります",
+            ));
+        }
+        pos_vec.push([row[0], row[1], row[2]]);
+    }
+    let targets = core_expand_targets(
+        &pos_vec,
+        center,
+        brush_idx.as_slice()?,
+        brush_weights.as_slice()?,
+        strength,
+        expand,
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let rows: Vec<Vec<f32>> = targets.iter().map(|t| t.to_vec()).collect();
+    PyArray2::from_vec2(py, &rows)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("配列変換失敗: {e}")))
 }
 
 /// メモリ上のRGBバイト配列を直接返却する高速レンダリング関数 (ディスクI/Oなし)
@@ -1543,6 +1644,29 @@ impl ClothSimulator {
         self.simulator.clear_dynamic_pins();
     }
 
+    /// 複数の動的ピンを一括設定する (単一upload_pinsで確定)。
+    /// targets: [N, 3] 目標位置、weights: [N] ピンウェイト。
+    fn set_pins_batch(
+        &mut self,
+        indices: Vec<u32>,
+        targets: PyReadonlyArray2<f32>,
+        weights: Vec<f32>,
+    ) -> PyResult<()> {
+        let t_view = targets.as_array();
+        let mut t_vec = Vec::with_capacity(t_view.shape()[0]);
+        for row in t_view.outer_iter() {
+            if row.len() != 3 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "targets配列の各目標は3次元である必要があります",
+                ));
+            }
+            t_vec.push([row[0], row[1], row[2]]);
+        }
+        self.simulator
+            .set_pin_targets_batch(&indices, &t_vec, &weights);
+        Ok(())
+    }
+
     /// 初期状態にリセット
     fn reset(&mut self) {
         self.simulator.reset();
@@ -1725,6 +1849,9 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bake_mesh_sdf_gpu, m)?)?;
     m.add_function(wrap_pyfunction!(bake_mesh_sdf_hierarchical_gpu, m)?)?;
     m.add_function(wrap_pyfunction!(bake_mesh_sdf_coarse_gpu, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_build_adjacency_csr, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_smooth_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(brush_radial_expand_targets, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

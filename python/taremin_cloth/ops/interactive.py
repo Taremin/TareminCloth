@@ -366,11 +366,13 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             tool_text = None
             try:
                 brush = self._brush_settings_of(obj)
-                if brush is not None and getattr(brush, "tool_mode", 'GRAB') == 'RANGE_GRAB':
+                mode = getattr(brush, "tool_mode", 'GRAB') if brush is not None else 'GRAB'
+                if brush is not None and mode in ('RANGE_GRAB', 'SMOOTH'):
                     _r = float(getattr(brush, "radius", 0.05))
-                    tool_text = i18n.trans("Tool: %s") % f"{i18n.trans('Range Grab')} r={_r * 1000.0:.0f}mm"
+                    _label = {'RANGE_GRAB': 'Range Grab', 'SMOOTH': 'Smooth'}.get(mode, mode)
+                    tool_text = i18n.trans("Tool: %s") % f"{i18n.trans(_label)} r={_r * 1000.0:.0f}mm"
                 elif brush is not None:
-                    tool_text = f"[E] {i18n.trans('Range Grab')}"
+                    tool_text = f"[E] {i18n.trans('Range Grab')} / {i18n.trans('Smooth')}"
             except Exception:
                 tool_text = None
             drawing.set_interactive_fps_info(fps, frame_ms, show_overlay=show_overlay, position=position, show_help=show_help, tool_text=tool_text)
@@ -786,14 +788,17 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             return {'PASS_THROUGH'}
 
         elif event.type == 'E' and event.value == 'PRESS':
-            # Eキーで Grab / Range Grab を切替 (FはBlender準拠のサイズ変更用に確保)
+            # Eキーでブラシツールを順方向に切替 (TOOLS登録順に循環)
             try:
                 brush = self._brush_settings_of(obj)
                 if brush is not None:
                     mouse_pos = (event.mouse_region_x, event.mouse_region_y)
                     ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
+                    order = list(self._brush_tools.keys())
                     cur = getattr(brush, "tool_mode", 'GRAB')
-                    new_mode = 'RANGE_GRAB' if cur != 'RANGE_GRAB' else 'GRAB'
+                    if cur not in order:
+                        cur = order[0] if order else 'GRAB'
+                    new_mode = order[(order.index(cur) + 1) % len(order)] if order else cur
                     old_tool = self._brush_tools.get(cur)
                     if old_tool is not None:
                         old_tool.on_deactivate(ctx, self._pinned_verts)

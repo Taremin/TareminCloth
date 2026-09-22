@@ -493,6 +493,11 @@ sequenceDiagram
 - **GPUベクタ即時描画 (`layer_painter`)**:
   - egui の `layer_painter(Order::Foreground)` を活用し、追加のGPUシェーダーや頂点バッファを生成することなく、固定ピン（赤丸）およびドラッグ目標位置・接続ライン（黄丸＋ライン）を論理ポイント座標系で即時テッセレーション・描画。
 
+#### 4. 平滑化ブラシ核 (Smooth Brush Kernel: `cloth_core::smooth`)
+- **配置**: ブラシ目標計算の単一真実源としてRust核に純CPU関数群を置く (`build_adjacency_csr` / `laplacian_smooth_targets` / `radial_expand_targets`)。GPU初期化不要・WGSL不使用のため、Blenderアドオン・GUI・ヘッドレステストの三者で再利用可能。
+- **PyO3公開**: `brush_build_adjacency_csr` / `brush_smooth_targets` / `brush_radial_expand_targets` および一括ピンAPI `ClothSimulator.set_pins_batch` (単一 `upload_pins` で確定し、毎頂点全量再送の O(N^2) を回避)。Python側 (`brush/smooth.py`) はRust優先・NumPyフォールバックで、parity は `tests/core/test_smooth_parity.py` (許容誤差 1e-4) で保証する。
+- **注意**: 入力は明示CSRであり、縫合展開済みの sim 内部隣接 (`ClothMesh::adj_*`) ではない。縫合トポロジーへの依存を排し、Python/Rust 間の決定性を優先した設計である。
+
 ### 6.6 高精度絶対時刻フレームペーシングとオンデマンドリードバック設計
 
 Taremin Cloth GUI は、GPUの計算余力を活かしつつ、目標フレームレート（例: 60 FPS）の安定維持を目的とした絶対時刻フレームペーシング機構を備えています。
