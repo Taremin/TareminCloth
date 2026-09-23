@@ -95,6 +95,21 @@ sequenceDiagram
 - **HUD表示指針**:
   表示内容の分類・Theme値・共通ヘルパーの使用義務・ブラシ状態の供給I/Fは [docs/hud.md](hud.md) に集約。本節との乖離を防ぐため、詳細はhud.mdを正本とする。
 
+### 1.5 GPUリソース初期化と共有パイプラインキャッシュ (Shared Pipeline Cache)
+
+`ClothSimulator` 生成時 (インタラクティブモード起動の「GPUを初期化中...」段階) の待ち時間の大半は、WGSL 16 本・コンピュートパイプライン 23 本のコンパイル (実測約 5.5 秒) でした。メッシュ非依存部分をプロセス全体で共有し、未使用機能を遅延生成することで、初回約 1 秒・2 個目以降 1 ミリ秒台に短縮しています。
+
+- **共有単位 (`simulation/pipeline_cache.rs`)**:
+  メッシュ非依存物 (シェーダ・BindGroupLayout・コンピュートパイプライン) を `(デバイス世代, workgroup_size, コンテキスト同一性)` キーの `SharedPipelines` として保持。per-sim 側 (`GpuClothSimulator`) はバッファと BindGroup のみを持つ。同一 BGL オブジェクトを使い回すことでレイアウト互換性を構造的に保証する。
+- **常時 (eager) 8 本**:
+  predict / distance / bending / sewing / pin / collision / update_vel / extract_positions。いずれも毎フレーム到達し得るため初回に生成する。
+- **遅延 (lazy) 15 本**:
+  Atomic ソルバー対 (`solver_mode == 1` 時のみ) / PairCache 3 本 (`enable_pair_cache` 時のみ) / Edge 衝突 (`enable_edge_collision` 時のみ) / 自己衝突 3 本 + 空間ハッシュ 6 本 (`enable_self_collision` 時のみ)。`set_enable_*()` およびディスパッチ到達時に `ensure_*()` で生成するため、初回有効化のフレームに約 0.3〜3 秒の1回限りのヒッチが発生する。
+- **デバイス差し替え時の無効化**:
+  `set_gpu_device` (`GpuContext::init_or_reset`) でデバイス世代カウンタを進め、旧世代エントリを除去する。既存 sim は自前の `Arc` を保持するため動作継続し、新規 sim は新世代で構築される。
+- **計測 API**:
+  `ClothSimulator.get_build_timings()` (生成時内訳) および `shared_pipeline_cache_info()` (キャッシュ診断) で起動時間を検証可能。Blender を起動せず `python -m taremin_cloth.log_tools` / `tests/core/test_pipeline_cache.py` で回帰計測する。
+
 ---
 
 ## 2. 物理シミュレーション仕様 (XPBD)

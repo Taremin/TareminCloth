@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use crate::context::GpuContext;
+use crate::simulation::pipeline_cache::HashPipelines;
 
 pub const DEFAULT_HASH_TABLE_SIZE: u32 = 32768;
 
@@ -21,21 +22,18 @@ pub struct GpuSpatialHash {
     pub block_sums_buffer: wgpu::Buffer,
     pub params_buffer: wgpu::Buffer,
 
-    pub clear_pipeline: wgpu::ComputePipeline,
-    pub count_pipeline: wgpu::ComputePipeline,
-    pub scan_blocks_pipeline: wgpu::ComputePipeline,
-    pub scan_top_pipeline: wgpu::ComputePipeline,
-    pub add_offsets_pipeline: wgpu::ComputePipeline,
-    pub scatter_pipeline: wgpu::ComputePipeline,
-
     pub grid_bind_group: wgpu::BindGroup,
     pub table_size: u32,
     pub cell_size: f32,
 }
 
 impl GpuSpatialHash {
+    /// 空間ハッシュの per-sim リソース (バッファ + BindGroup) を構築する。
+    /// 6 本のコンピュートパイプラインは共有キャッシュ由来の `hash` を参照する
+    /// (コンパイルは `SharedPipelines::ensure_hash` で遅延・共有化済み)。
     pub fn new(
         context: &Arc<GpuContext>,
+        hash_bgl: &wgpu::BindGroupLayout,
         vertex_buffer: &wgpu::Buffer,
         num_vertices: u32,
         cell_size: f32,
@@ -92,99 +90,9 @@ impl GpuSpatialHash {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SpatialGrid Sort Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("shaders/spatial_grid_sort.wgsl").into(),
-            ),
-        });
-
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("SpatialGrid Sort BGL"),
-            entries: &[
-                // 0: vertices (storage, read)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // 1: cell_counts (storage, read_write)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // 2: cell_starts (storage, read_write)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // 3: cell_currents (storage, read_write)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // 4: sorted_indices (storage, read_write)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // 5: block_sums (storage, read_write)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // 6: params (uniform)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
         let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SpatialGrid Sort BG"),
-            layout: &bgl,
+            layout: hash_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -217,66 +125,6 @@ impl GpuSpatialHash {
             ],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("SpatialGrid Pipeline Layout"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        });
-
-        let clear_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SpatialGrid Clear Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("clear_counts"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let count_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SpatialGrid Count Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("count_vertices"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let scan_blocks_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SpatialGrid Scan Blocks Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("scan_blocks"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let scan_top_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SpatialGrid Scan Top Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("scan_top"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let add_offsets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SpatialGrid Add Offsets Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("add_offsets"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let scatter_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SpatialGrid Scatter Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("scatter_indices"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
         Self {
             cell_starts_buffer,
             sorted_indices_buffer,
@@ -284,20 +132,20 @@ impl GpuSpatialHash {
             cell_currents_buffer,
             block_sums_buffer,
             params_buffer,
-            clear_pipeline,
-            count_pipeline,
-            scan_blocks_pipeline,
-            scan_top_pipeline,
-            add_offsets_pipeline,
-            scatter_pipeline,
             grid_bind_group,
             table_size,
             cell_size,
         }
     }
 
-    /// GPU Counting Sort による空間グリッドの構築（6コンピュートパスを一括ディスパッチ）
-    pub fn dispatch_build(&self, encoder: &mut wgpu::CommandEncoder, num_vertices: u32) {
+    /// GPU Counting Sort による空間グリッドの構築（6コンピュートパスを一括ディスパッチ）。
+    /// パイプラインは共有キャッシュ由来の `hash` を使用する。
+    pub fn dispatch_build(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        num_vertices: u32,
+        hash: &HashPipelines,
+    ) {
         let num_blocks = (self.table_size + 255) / 256;
         let vert_workgroups = (num_vertices + 255) / 256;
 
@@ -307,7 +155,7 @@ impl GpuSpatialHash {
                 label: Some("SpatialGrid Clear Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.clear_pipeline);
+            cpass.set_pipeline(&hash.clear);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
         }
@@ -318,7 +166,7 @@ impl GpuSpatialHash {
                 label: Some("SpatialGrid Count Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.count_pipeline);
+            cpass.set_pipeline(&hash.count);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }
@@ -329,7 +177,7 @@ impl GpuSpatialHash {
                 label: Some("SpatialGrid Scan Blocks Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.scan_blocks_pipeline);
+            cpass.set_pipeline(&hash.scan_blocks);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
         }
@@ -340,7 +188,7 @@ impl GpuSpatialHash {
                 label: Some("SpatialGrid Scan Top Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.scan_top_pipeline);
+            cpass.set_pipeline(&hash.scan_top);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
         }
@@ -351,7 +199,7 @@ impl GpuSpatialHash {
                 label: Some("SpatialGrid Add Offsets Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.add_offsets_pipeline);
+            cpass.set_pipeline(&hash.add_offsets);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
         }
@@ -362,7 +210,7 @@ impl GpuSpatialHash {
                 label: Some("SpatialGrid Scatter Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.scatter_pipeline);
+            cpass.set_pipeline(&hash.scatter);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }

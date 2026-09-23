@@ -88,7 +88,7 @@ impl GpuClothSimulator {
                     label: Some("Predict Pass"),
                     timestamp_writes: None,
                 });
-                cpass.set_pipeline(&self.predict_pipeline);
+                cpass.set_pipeline(&self.shared.predict_pipeline);
                 cpass.set_bind_group(0, &self.predict_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }
@@ -102,7 +102,7 @@ impl GpuClothSimulator {
 
                 // 1. Pin Constraints
                 if num_pins > 0 {
-                    cpass.set_pipeline(&self.pin_pipeline);
+                    cpass.set_pipeline(&self.shared.pin_pipeline);
                     cpass.set_bind_group(0, &self.pin_bind_group, &[]);
                     cpass.dispatch_workgroups(pin_workgroups, 1, 1);
                 }
@@ -111,7 +111,7 @@ impl GpuClothSimulator {
                 self.dispatch_distance_constraints(&mut cpass, vert_workgroups, wg_size);
 
                 // 3. Sewing Constraints Projection
-                cpass.set_pipeline(&self.sewing_pipeline);
+                cpass.set_pipeline(&self.shared.sewing_pipeline);
                 for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
                     if count > 0 {
                         cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
@@ -121,7 +121,7 @@ impl GpuClothSimulator {
 
                 // 4. Bending Constraints Projection (反復ループ内でDistance等と同調解決)
                 if !self.bend_color_counts.is_empty() {
-                    cpass.set_pipeline(&self.bending_pipeline);
+                    cpass.set_pipeline(&self.shared.bending_pipeline);
                     for (color_idx, &count) in self.bend_color_counts.iter().enumerate() {
                         if count > 0 {
                             cpass.set_bind_group(0, &self.bending_bind_groups[color_idx], &[]);
@@ -133,7 +133,7 @@ impl GpuClothSimulator {
                 // 5. コライダー衝突拘束 (Coupled XPBD: 押し出しと距離拘束の協調収束)
                 //    反復ループ内で距離拘束等と同調して解くことで、押し出しによるエッジの過剰伸長を防止
                 if has_colliders {
-                    cpass.set_pipeline(&self.collision_pipeline);
+                    cpass.set_pipeline(&self.shared.collision_pipeline);
                     cpass.set_bind_group(0, &self.collider_bind_group, &[]);
                     cpass.dispatch_workgroups(vert_workgroups, 1, 1);
                 }
@@ -153,7 +153,7 @@ impl GpuClothSimulator {
                 label: Some("Final Pin Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.pin_pipeline);
+            cpass.set_pipeline(&self.shared.pin_pipeline);
             cpass.set_bind_group(0, &self.pin_bind_group, &[]);
             cpass.dispatch_workgroups(pin_workgroups, 1, 1);
         }
@@ -167,7 +167,7 @@ impl GpuClothSimulator {
                 label: Some("Edge Collision Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.edge_collision_pipeline);
+            cpass.set_pipeline(self.shared.ensure_edge());
             for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
                 if count > 0 {
                     cpass.set_bind_group(0, &self.edge_collision_bind_groups[color_idx], &[]);
@@ -196,7 +196,7 @@ impl GpuClothSimulator {
 
                 // 縫合拘束も同時に適用して、距離拘束による縫合ペアの再開口を防止
                 if self.num_sewing_constraints > 0 {
-                    cpass.set_pipeline(&self.sewing_pipeline);
+                    cpass.set_pipeline(&self.shared.sewing_pipeline);
                     for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
                         if count > 0 {
                             cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
@@ -213,7 +213,7 @@ impl GpuClothSimulator {
                     label: Some("Update Vel Pass"),
                     timestamp_writes: None,
                 });
-                cpass.set_pipeline(&self.update_vel_pipeline);
+                cpass.set_pipeline(&self.shared.update_vel_pipeline);
                 cpass.set_bind_group(0, &self.update_vel_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }
@@ -266,7 +266,7 @@ impl GpuClothSimulator {
             label: Some("Extract Positions Pass"),
             timestamp_writes: None,
         });
-        cpass.set_pipeline(&self.extract_positions_pipeline);
+        cpass.set_pipeline(&self.shared.extract_positions_pipeline);
         cpass.set_bind_group(0, &self.extract_positions_bind_group, &[]);
         cpass.dispatch_workgroups(vert_workgroups as u32, 1, 1);
     }
@@ -694,16 +694,16 @@ impl GpuClothSimulator {
             // Atomic Jacobi モード (全エッジを単一ディスパッチで一斉評価 + 頂点変位平均適用)
             if self.num_distance_constraints > 0 {
                 let edge_workgroups = (self.num_distance_constraints + wg_size - 1) / wg_size;
-                cpass.set_pipeline(&self.distance_atomic_solve_pipeline);
+                cpass.set_pipeline(&self.shared.ensure_atomic().solve);
                 cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
                 cpass.dispatch_workgroups(edge_workgroups, 1, 1);
             }
-            cpass.set_pipeline(&self.distance_atomic_apply_pipeline);
+            cpass.set_pipeline(&self.shared.ensure_atomic().apply);
             cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         } else {
             // Coloring モード (全色グループを連続ディスパッチ)
-            cpass.set_pipeline(&self.distance_pipeline);
+            cpass.set_pipeline(&self.shared.distance_pipeline);
             for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
                 if count > 0 {
                     cpass.set_bind_group(0, &self.distance_bind_groups[color_idx], &[]);
@@ -729,7 +729,7 @@ impl GpuClothSimulator {
                 label: Some(&format!("{prefix} Compute Normals Pass")),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.compute_normals_pipeline);
+            cpass.set_pipeline(&self.shared.ensure_self_collision().normals);
             cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }
@@ -742,7 +742,7 @@ impl GpuClothSimulator {
 
         if !self.enable_pair_cache || need_rebuild || force_direct {
             // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
-            self.spatial_hash.dispatch_build(encoder, self.num_vertices);
+            self.spatial_hash.dispatch_build(encoder, self.num_vertices, self.shared.ensure_hash());
         }
 
         if self.enable_pair_cache && !force_direct {
@@ -759,7 +759,7 @@ impl GpuClothSimulator {
                         label: Some(&format!("{prefix} Pair Collect Pass")),
                         timestamp_writes: None,
                     });
-                    cpass.set_pipeline(&self.pair_collect_pipeline);
+                    cpass.set_pipeline(&self.shared.ensure_pair().collect);
                     cpass.set_bind_group(0, &self.pair_collect_bind_group, &[]);
                     cpass.dispatch_workgroups(vert_workgroups, 1, 1);
                 }
@@ -782,12 +782,12 @@ impl GpuClothSimulator {
                 });
 
                 // V-T ペア解決
-                cpass.set_pipeline(&self.pair_solve_vt_pipeline);
+                cpass.set_pipeline(&self.shared.ensure_pair().solve_vt);
                 cpass.set_bind_group(0, &self.pair_solve_vt_bind_group, &[]);
                 cpass.dispatch_workgroups(vt_workgroups, 1, 1);
 
                 // E-E ペア解決
-                cpass.set_pipeline(&self.pair_solve_ee_pipeline);
+                cpass.set_pipeline(&self.shared.ensure_pair().solve_ee);
                 cpass.set_bind_group(0, &self.pair_solve_ee_bind_group, &[]);
                 cpass.dispatch_workgroups(ee_workgroups, 1, 1);
             }
@@ -798,7 +798,7 @@ impl GpuClothSimulator {
                     label: Some(&format!("{prefix} Pair Self Collision Apply Pass")),
                     timestamp_writes: None,
                 });
-                cpass.set_pipeline(&self.self_collision_apply_pipeline);
+                cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
                 cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }
@@ -810,7 +810,7 @@ impl GpuClothSimulator {
                     label: Some(&format!("{prefix} Self Collision Pass")),
                     timestamp_writes: None,
                 });
-                cpass.set_pipeline(&self.self_collision_pipeline);
+                cpass.set_pipeline(&self.shared.ensure_self_collision().solve);
                 cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }
@@ -821,7 +821,7 @@ impl GpuClothSimulator {
                     label: Some(&format!("{prefix} Self Collision Apply Pass")),
                     timestamp_writes: None,
                 });
-                cpass.set_pipeline(&self.self_collision_apply_pipeline);
+                cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
                 cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             }

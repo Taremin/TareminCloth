@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 
 use crate::context::GpuContext;
@@ -8,23 +9,18 @@ use crate::mesh::{
     GpuVtPair, GpuEePair, PairCollectParams, PairCounters, PairSolveParams,
 };
 use crate::spatial_hash::GpuSpatialHash;
+use super::pipeline_cache::{get_or_create_shared, SharedPipelines};
 use super::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, NormalParams, PinParams,
 };
 
-pub fn create_shader_with_wg_size(device: &wgpu::Device, label: &str, src: &str, wg_size: u32) -> wgpu::ShaderModule {
-    let source = if wg_size != 64 {
-        src.replace("@workgroup_size(64)", &format!("@workgroup_size({})", wg_size))
-    } else {
-        src.to_string()
-    };
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
-    })
-}
-
 pub struct SimulationResources {
+    /// 共有パイプライン群 (プロセス全体でキャッシュ・メッシュ非依存)
+    pub shared: Arc<SharedPipelines>,
+    /// 今回の呼び出しで共有キャッシュを新規生成したか (計測用)
+    pub shared_built_now: bool,
+    /// per-sim 構築のフェーズ別所要時間 (名前, ミリ秒)
+    pub build_timings: Vec<(String, f32)>,
     pub vertex_buffer: wgpu::Buffer,
     pub dist_buffer: wgpu::Buffer,
     pub bend_buffer: wgpu::Buffer,
@@ -34,12 +30,9 @@ pub struct SimulationResources {
     pub staging_buffer: wgpu::Buffer,
     pub staging_buffers: [wgpu::Buffer; 2],
     pub accum_buffer: wgpu::Buffer,
-    pub distance_atomic_solve_pipeline: wgpu::ComputePipeline,
-    pub distance_atomic_apply_pipeline: wgpu::ComputePipeline,
     pub distance_atomic_bind_group: wgpu::BindGroup,
     pub compact_position_buffer: wgpu::Buffer,
     pub compact_staging_buffers: [wgpu::Buffer; 2],
-    pub extract_positions_pipeline: wgpu::ComputePipeline,
     pub extract_positions_bind_group: wgpu::BindGroup,
     pub buffered_position_buffer: wgpu::Buffer,
     pub buffered_staging_buffer: wgpu::Buffer,
@@ -47,37 +40,29 @@ pub struct SimulationResources {
     pub pin_buffer: wgpu::Buffer,
     pub pin_params_buffer: wgpu::Buffer,
     pub pin_bind_group: wgpu::BindGroup,
-    pub pin_pipeline: wgpu::ComputePipeline,
     pub collider_buffer: wgpu::Buffer,
     pub mesh_triangles_buffer: wgpu::Buffer,
     pub mesh_bounds_buffer: wgpu::Buffer,
     pub collider_group_bounds_buffer: wgpu::Buffer,
     pub collider_params_buffer: wgpu::Buffer,
     pub collider_bind_group: wgpu::BindGroup,
-    pub collision_pipeline: wgpu::ComputePipeline,
-    pub collision_bgl: wgpu::BindGroupLayout,
     pub bone_sdf_texture: wgpu::Texture,
     pub bone_sdf_texture_view: wgpu::TextureView,
     pub bone_sdf_sampler: wgpu::Sampler,
     pub bone_info_buffer: wgpu::Buffer,
     pub bone_transform_buffer: wgpu::Buffer,
     pub spatial_hash: GpuSpatialHash,
-    pub self_collision_pipeline: wgpu::ComputePipeline,
     pub self_collision_bind_group: wgpu::BindGroup,
     pub self_collision_params_buffer: wgpu::Buffer,
     pub self_collision_accum_buffer: wgpu::Buffer,
-    pub self_collision_apply_pipeline: wgpu::ComputePipeline,
     pub self_collision_apply_bind_group: wgpu::BindGroup,
     pub active_vt_pairs_buffer: wgpu::Buffer,
     pub active_ee_pairs_buffer: wgpu::Buffer,
     pub pair_counters_buffer: wgpu::Buffer,
     pub pair_collect_params_buffer: wgpu::Buffer,
     pub pair_solve_params_buffer: wgpu::Buffer,
-    pub pair_collect_pipeline: wgpu::ComputePipeline,
     pub pair_collect_bind_group: wgpu::BindGroup,
-    pub pair_solve_vt_pipeline: wgpu::ComputePipeline,
     pub pair_solve_vt_bind_group: wgpu::BindGroup,
-    pub pair_solve_ee_pipeline: wgpu::ComputePipeline,
     pub pair_solve_ee_bind_group: wgpu::BindGroup,
     pub normals_buffer: wgpu::Buffer,
     pub local_edge_lengths_buffer: wgpu::Buffer,
@@ -86,19 +71,12 @@ pub struct SimulationResources {
     pub two_hop_offsets_buffer: wgpu::Buffer,
     pub two_hop_indices_buffer: wgpu::Buffer,
     pub island_ids_buffer: wgpu::Buffer,
-    pub compute_normals_pipeline: wgpu::ComputePipeline,
     pub compute_normals_bind_group: wgpu::BindGroup,
-    pub predict_pipeline: wgpu::ComputePipeline,
-    pub distance_pipeline: wgpu::ComputePipeline,
-    pub bending_pipeline: wgpu::ComputePipeline,
-    pub sewing_pipeline: wgpu::ComputePipeline,
-    pub update_vel_pipeline: wgpu::ComputePipeline,
     pub predict_bind_group: wgpu::BindGroup,
     pub distance_bind_groups: Vec<wgpu::BindGroup>,
     pub bending_bind_groups: Vec<wgpu::BindGroup>,
     pub sewing_bind_groups: Vec<wgpu::BindGroup>,
     pub update_vel_bind_group: wgpu::BindGroup,
-    pub edge_collision_pipeline: wgpu::ComputePipeline,
     pub edge_collision_bind_groups: Vec<wgpu::BindGroup>,
     pub self_collision_relief_factor: f32,
     pub self_collision_max_displacement_ratio: f32,
@@ -113,6 +91,12 @@ pub fn build_simulation_resources(
     workgroup_size: u32,
 ) -> SimulationResources {
     let device = &context.device;
+    // 共有パイプライン群を取得 (初回のみ eager 8 本をコンパイル・約 2 秒)。
+    // per-sim 側はバッファと BindGroup のみを構築する。
+    let t_shared = Instant::now();
+    let (shared, shared_built_now) = get_or_create_shared(context, workgroup_size);
+    let shared_ms = t_shared.elapsed().as_secs_f32() * 1000.0;
+    let t_buffers = Instant::now();
     let num_vertices = mesh.vertices.len() as u32;
     let num_distance_constraints = mesh.distance_constraints.len() as u32;
     let num_bending_constraints = mesh.bending_constraints.len() as u32;
@@ -451,394 +435,14 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
-    // 2. シェーダーモジュール
-    let predict_shader = create_shader_with_wg_size(
-        device,
-        "Predict Shader",
-        include_str!("../shaders/predict.wgsl"),
-        workgroup_size,
-    );
-
-    let distance_shader = create_shader_with_wg_size(
-        device,
-        "Distance Shader",
-        include_str!("../shaders/distance.wgsl"),
-        workgroup_size,
-    );
-
-    let bending_shader = create_shader_with_wg_size(
-        device,
-        "Bending Shader",
-        include_str!("../shaders/bending.wgsl"),
-        workgroup_size,
-    );
-
-    let sewing_shader = create_shader_with_wg_size(
-        device,
-        "Sewing Shader",
-        include_str!("../shaders/sewing.wgsl"),
-        workgroup_size,
-    );
-
-    let collision_shader = create_shader_with_wg_size(
-        device,
-        "Collision Shader",
-        include_str!("../shaders/collision.wgsl"),
-        workgroup_size,
-    );
-
-    let self_collision_shader = create_shader_with_wg_size(
-        device,
-        "Self Collision Shader",
-        include_str!("../shaders/self_collision.wgsl"),
-        workgroup_size,
-    );
-
-    let self_collision_apply_shader = create_shader_with_wg_size(
-        device,
-        "Self Collision Apply Shader",
-        include_str!("../shaders/self_collision_apply.wgsl"),
-        workgroup_size,
-    );
-
-    let pair_collect_shader = create_shader_with_wg_size(
-        device,
-        "Pair Collect Shader",
-        include_str!("../shaders/self_collision_collect_pairs.wgsl"),
-        workgroup_size,
-    );
-
-
-    let pair_solve_vt_shader = create_shader_with_wg_size(
-        device,
-        "Pair Solve VT Shader",
-        include_str!("../shaders/self_collision_solve_vt.wgsl"),
-        workgroup_size,
-    );
-
-    let pair_solve_ee_shader = create_shader_with_wg_size(
-        device,
-        "Pair Solve EE Shader",
-        include_str!("../shaders/self_collision_solve_ee.wgsl"),
-        workgroup_size,
-    );
-
-
-    let edge_collision_shader = create_shader_with_wg_size(
-        device,
-        "Edge Collision Shader",
-        include_str!("../shaders/edge_collision.wgsl"),
-        workgroup_size,
-    );
-
-    let compute_normals_shader = create_shader_with_wg_size(
-        device,
-        "Compute Normals Shader",
-        include_str!("../shaders/compute_normals.wgsl"),
-        workgroup_size,
-    );
-
-    let pin_shader = create_shader_with_wg_size(
-        device,
-        "Pin Shader",
-        include_str!("../shaders/pin.wgsl"),
-        workgroup_size,
-    );
-
-    let update_vel_shader = create_shader_with_wg_size(
-        device,
-        "Update Velocity Shader",
-        include_str!("../shaders/update_vel.wgsl"),
-        workgroup_size,
-    );
-
-    let distance_atomic_shader = create_shader_with_wg_size(
-        device,
-        "Distance Atomic Shader",
-        include_str!("../shaders/distance_atomic.wgsl"),
-        workgroup_size,
-    );
-
-    let extract_positions_shader = create_shader_with_wg_size(
-        device,
-        "Extract Positions Shader",
-        include_str!("../shaders/extract_positions.wgsl"),
-        workgroup_size,
-    );
-
-    // 3. バインドグループレイアウト
-    let storage_rw = wgpu::BindGroupLayoutEntry {
-        binding: 0,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-    let storage_rw_at = |binding: u32| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only: false },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-    let storage_ro = |binding: u32| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only: true },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-    let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    };
-
-    let predict_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Predict Bind Group Layout"),
-        entries: &[storage_rw, uniform_entry(1)],
-    });
-
-    let constraint_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Constraint Bind Group Layout"),
-        entries: &[storage_rw, storage_ro(1), uniform_entry(2), uniform_entry(3)],
-    });
-
-    let sewing_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Sewing Bind Group Layout"),
-        entries: &[storage_rw, storage_rw_at(1), uniform_entry(2), uniform_entry(3)],
-    });
-
-    let pin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Pin Bind Group Layout"),
-        entries: &[storage_rw, storage_ro(1), uniform_entry(2), uniform_entry(3)],
-    });
-
-    let collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Collision Bind Group Layout"),
-        entries: &[
-            storage_rw,
-            storage_ro(1),
-            storage_ro(2),
-            uniform_entry(3),
-            storage_ro(4),
-            storage_ro(5),
-            wgpu::BindGroupLayoutEntry {
-                binding: 6,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D3,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 7,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            storage_ro(8),
-            storage_ro(9),
-        ],
-    });
-
-    let edge_collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Edge Collision Bind Group Layout"),
-        entries: &[storage_rw, storage_ro(1), storage_ro(2), storage_ro(3), storage_ro(4), uniform_entry(5), uniform_entry(6)],
-    });
-
-    let update_vel_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Update Vel Bind Group Layout"),
-        entries: &[storage_rw, uniform_entry(1)],
-    });
-
-    let distance_atomic_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Distance Atomic Bind Group Layout"),
-        entries: &[
-            storage_rw,
-            storage_ro(1),
-            uniform_entry(2),
-            storage_rw_at(3),
-        ],
-    });
-
-    let extract_positions_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Extract Positions Bind Group Layout"),
-        entries: &[
-            storage_ro(0),
-            storage_rw_at(1),
-        ],
-    });
-
-    // 4. パイプライン作成
-    let predict_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Predict Pipeline Layout"),
-        bind_group_layouts: &[&predict_bgl],
-        push_constant_ranges: &[],
-    });
-    let predict_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Predict Pipeline"),
-        layout: Some(&predict_pl),
-        module: &predict_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let distance_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Distance Pipeline Layout"),
-        bind_group_layouts: &[&constraint_bgl],
-        push_constant_ranges: &[],
-    });
-    let distance_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Distance Pipeline"),
-        layout: Some(&distance_pl),
-        module: &distance_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let bending_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Bending Pipeline Layout"),
-        bind_group_layouts: &[&constraint_bgl],
-        push_constant_ranges: &[],
-    });
-    let bending_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Bending Pipeline"),
-        layout: Some(&bending_pl),
-        module: &bending_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let sewing_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Sewing Pipeline Layout"),
-        bind_group_layouts: &[&sewing_bgl],
-        push_constant_ranges: &[],
-    });
-    let sewing_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Sewing Pipeline"),
-        layout: Some(&sewing_pl),
-        module: &sewing_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let pin_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Pin Pipeline Layout"),
-        bind_group_layouts: &[&pin_bgl],
-        push_constant_ranges: &[],
-    });
-    let pin_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Pin Pipeline"),
-        layout: Some(&pin_pl),
-        module: &pin_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let collision_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Collision Pipeline Layout"),
-        bind_group_layouts: &[&collision_bgl],
-        push_constant_ranges: &[],
-    });
-    let collision_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Collision Pipeline"),
-        layout: Some(&collision_pl),
-        module: &collision_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let edge_collision_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Edge Collision Pipeline Layout"),
-        bind_group_layouts: &[&edge_collision_bgl],
-        push_constant_ranges: &[],
-    });
-    let edge_collision_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Edge Collision Pipeline"),
-        layout: Some(&edge_collision_pl),
-        module: &edge_collision_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let update_vel_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Update Vel Pipeline Layout"),
-        bind_group_layouts: &[&update_vel_bgl],
-        push_constant_ranges: &[],
-    });
-    let update_vel_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Update Vel Pipeline"),
-        layout: Some(&update_vel_pl),
-        module: &update_vel_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let distance_atomic_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Distance Atomic Pipeline Layout"),
-        bind_group_layouts: &[&distance_atomic_bgl],
-        push_constant_ranges: &[],
-    });
-    let distance_atomic_solve_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Distance Atomic Solve Pipeline"),
-        layout: Some(&distance_atomic_pl),
-        module: &distance_atomic_shader,
-        entry_point: Some("solve_distance_atomic"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let distance_atomic_apply_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Distance Atomic Apply Pipeline"),
-        layout: Some(&distance_atomic_pl),
-        module: &distance_atomic_shader,
-        entry_point: Some("apply_atomic_accum"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    let extract_positions_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Extract Positions Pipeline Layout"),
-        bind_group_layouts: &[&extract_positions_bgl],
-        push_constant_ranges: &[],
-    });
-    let extract_positions_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Extract Positions Pipeline"),
-        layout: Some(&extract_positions_pl),
-        module: &extract_positions_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
+    // 2. シェーダーモジュール・BGL・パイプラインは共有キャッシュ由来 (SharedPipelines)。
+    //    per-sim 側はバッファと BindGroup のみを構築する。
+    let buffers_ms = t_buffers.elapsed().as_secs_f32() * 1000.0;
+    let t_bindgroups = Instant::now();
     // 5. バインドグループ作成
     let predict_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Predict Bind Group"),
-        layout: &predict_bgl,
+        layout: &shared.predict_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -853,7 +457,7 @@ pub fn build_simulation_resources(
 
     let pin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Pin Bind Group"),
-        layout: &pin_bgl,
+        layout: &shared.pin_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -876,7 +480,7 @@ pub fn build_simulation_resources(
 
     let collider_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Collider Bind Group"),
-        layout: &collision_bgl,
+        layout: &shared.collision_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -923,7 +527,7 @@ pub fn build_simulation_resources(
 
     let update_vel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Update Vel Bind Group"),
-        layout: &update_vel_bgl,
+        layout: &shared.update_vel_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -938,7 +542,7 @@ pub fn build_simulation_resources(
 
     let distance_atomic_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Distance Atomic Bind Group"),
-        layout: &distance_atomic_bgl,
+        layout: &shared.distance_atomic_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -961,7 +565,7 @@ pub fn build_simulation_resources(
 
     let extract_positions_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Extract Positions Bind Group"),
-        layout: &extract_positions_bgl,
+        layout: &shared.extract_positions_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -991,7 +595,7 @@ pub fn build_simulation_resources(
 
         distance_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Distance Bind Group"),
-            layout: &constraint_bgl,
+            layout: &shared.constraint_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1030,7 +634,7 @@ pub fn build_simulation_resources(
 
         edge_collision_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Edge Collision Bind Group"),
-            layout: &edge_collision_bgl,
+            layout: &shared.edge_collision_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1081,7 +685,7 @@ pub fn build_simulation_resources(
 
         bending_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Bending Bind Group"),
-            layout: &constraint_bgl,
+            layout: &shared.constraint_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1120,7 +724,7 @@ pub fn build_simulation_resources(
 
         sewing_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sewing Bind Group"),
-            layout: &sewing_bgl,
+            layout: &shared.sewing_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1152,7 +756,7 @@ pub fn build_simulation_resources(
     let thickness = mesh.vertices.first().map(|v| v.thickness).unwrap_or(0.005);
     let cell_size = (thickness * 4.0).max(0.01);
     let table_size = (num_vertices * 4).next_power_of_two().max(1024);
-    let spatial_hash = GpuSpatialHash::new(context, &vertex_buffer, num_vertices, cell_size, table_size);
+    let spatial_hash = GpuSpatialHash::new(context, &shared.hash_bgl, &vertex_buffer, num_vertices, cell_size, table_size);
 
     let self_col_params = SelfCollisionParams {
         cell_size,
@@ -1273,44 +877,9 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
-    let self_collision_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Self Collision Bind Group Layout"),
-        entries: &[
-            storage_rw,
-            storage_ro(1),
-            storage_ro(2),
-            uniform_entry(3),
-            storage_ro(4),
-            storage_ro(5),
-            storage_ro(6),
-            storage_ro(7),
-            storage_ro(8),
-            storage_ro(9),
-            storage_ro(10),
-            storage_rw_at(11),
-            storage_ro(12),
-            storage_ro(13),
-        ],
-    });
-
-    let self_collision_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Self Collision Pipeline Layout"),
-        bind_group_layouts: &[&self_collision_bgl],
-        push_constant_ranges: &[],
-    });
-
-    let self_collision_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Self Collision Pipeline"),
-        layout: Some(&self_collision_pl),
-        module: &self_collision_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
     let self_collision_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Self Collision Bind Group"),
-        layout: &self_collision_bgl,
+        layout: &shared.self_collision_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1371,34 +940,9 @@ pub fn build_simulation_resources(
         ],
     });
 
-    let self_collision_apply_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Self Collision Apply Bind Group Layout"),
-        entries: &[
-            storage_rw,
-            storage_rw_at(1),
-            uniform_entry(2),
-            storage_ro(3),
-        ],
-    });
-
-    let self_collision_apply_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Self Collision Apply Pipeline Layout"),
-        bind_group_layouts: &[&self_collision_apply_bgl],
-        push_constant_ranges: &[],
-    });
-
-    let self_collision_apply_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Self Collision Apply Pipeline"),
-        layout: Some(&self_collision_apply_pl),
-        module: &self_collision_apply_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
     let self_collision_apply_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Self Collision Apply Bind Group"),
-        layout: &self_collision_apply_bgl,
+        layout: &shared.self_collision_apply_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1419,32 +963,6 @@ pub fn build_simulation_resources(
         ],
     });
 
-    let compute_normals_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Compute Normals Bind Group Layout"),
-        entries: &[
-            storage_ro(0),
-            storage_ro(1),
-            storage_ro(2),
-            storage_rw_at(3),
-            uniform_entry(4),
-        ],
-    });
-
-    let compute_normals_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Compute Normals Pipeline Layout"),
-        bind_group_layouts: &[&compute_normals_bgl],
-        push_constant_ranges: &[],
-    });
-
-    let compute_normals_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Compute Normals Pipeline"),
-        layout: Some(&compute_normals_pl),
-        module: &compute_normals_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
     let normal_params = NormalParams {
         num_vertices,
         _pad0: 0,
@@ -1459,7 +977,7 @@ pub fn build_simulation_resources(
 
     let compute_normals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Compute Normals Bind Group"),
-        layout: &compute_normals_bgl,
+        layout: &shared.compute_normals_bgl,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -1551,43 +1069,9 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    // 1. Pair Collect BGL & Pipeline & BindGroup
-    let pair_collect_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Pair Collect Bind Group Layout"),
-        entries: &[
-            storage_ro(0),
-            storage_ro(1),
-            storage_ro(2),
-            uniform_entry(3),
-            storage_ro(4),
-            storage_ro(5),
-            storage_ro(6),
-            storage_ro(7),
-            storage_ro(8),
-            storage_ro(9),
-            storage_ro(10),
-            storage_ro(11),
-            storage_rw_at(12),
-            storage_rw_at(13),
-            storage_rw_at(14),
-        ],
-    });
-    let pair_collect_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Pair Collect Pipeline Layout"),
-        bind_group_layouts: &[&pair_collect_bgl],
-        push_constant_ranges: &[],
-    });
-    let pair_collect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Pair Collect Pipeline"),
-        layout: Some(&pair_collect_pl),
-        module: &pair_collect_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
     let pair_collect_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Pair Collect Bind Group"),
-        layout: &pair_collect_bgl,
+        layout: &shared.pair_collect_bgl,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: vertex_buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: spatial_hash.cell_starts_buffer.as_entire_binding() },
@@ -1609,34 +1093,9 @@ pub fn build_simulation_resources(
 
 
 
-    // 3. Pair Solve VT BGL & Pipeline & BindGroup
-    let pair_solve_vt_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Pair Solve VT Bind Group Layout"),
-        entries: &[
-            storage_ro(0),
-            storage_ro(1),
-            storage_ro(2),
-            storage_rw_at(3),
-            uniform_entry(4),
-            storage_ro(5),
-        ],
-    });
-    let pair_solve_vt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Pair Solve VT Pipeline Layout"),
-        bind_group_layouts: &[&pair_solve_vt_bgl],
-        push_constant_ranges: &[],
-    });
-    let pair_solve_vt_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Pair Solve VT Pipeline"),
-        layout: Some(&pair_solve_vt_pl),
-        module: &pair_solve_vt_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
     let pair_solve_vt_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Pair Solve VT Bind Group"),
-        layout: &pair_solve_vt_bgl,
+        layout: &shared.pair_solve_vt_bgl,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: vertex_buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: active_vt_pairs_buffer.as_entire_binding() },
@@ -1647,34 +1106,9 @@ pub fn build_simulation_resources(
         ],
     });
 
-    // 4. Pair Solve EE BGL & Pipeline & BindGroup
-    let pair_solve_ee_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Pair Solve EE Bind Group Layout"),
-        entries: &[
-            storage_ro(0),
-            storage_ro(1),
-            storage_ro(2),
-            storage_rw_at(3),
-            uniform_entry(4),
-            storage_ro(5),
-        ],
-    });
-    let pair_solve_ee_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Pair Solve EE Pipeline Layout"),
-        bind_group_layouts: &[&pair_solve_ee_bgl],
-        push_constant_ranges: &[],
-    });
-    let pair_solve_ee_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Pair Solve EE Pipeline"),
-        layout: Some(&pair_solve_ee_pl),
-        module: &pair_solve_ee_shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
     let pair_solve_ee_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Pair Solve EE Bind Group"),
-        layout: &pair_solve_ee_bgl,
+        layout: &shared.pair_solve_ee_bgl,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: vertex_buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: active_ee_pairs_buffer.as_entire_binding() },
@@ -1685,7 +1119,17 @@ pub fn build_simulation_resources(
         ],
     });
 
+    let bind_groups_ms = t_bindgroups.elapsed().as_secs_f32() * 1000.0;
+    let build_timings = vec![
+        ("shared_cache_ms".to_string(), shared_ms),
+        ("buffers_ms".to_string(), buffers_ms),
+        ("bind_groups_ms".to_string(), bind_groups_ms),
+    ];
+
     SimulationResources {
+        shared,
+        shared_built_now,
+        build_timings,
         vertex_buffer,
         dist_buffer,
         bend_buffer,
@@ -1694,12 +1138,9 @@ pub fn build_simulation_resources(
         staging_buffer,
         staging_buffers: [staging_buffer_0, staging_buffer_1],
         accum_buffer,
-        distance_atomic_solve_pipeline,
-        distance_atomic_apply_pipeline,
         distance_atomic_bind_group,
         compact_position_buffer,
         compact_staging_buffers: [compact_staging_0, compact_staging_1],
-        extract_positions_pipeline,
         extract_positions_bind_group,
         buffered_position_buffer,
         buffered_staging_buffer,
@@ -1707,37 +1148,29 @@ pub fn build_simulation_resources(
         pin_buffer,
         pin_params_buffer,
         pin_bind_group,
-        pin_pipeline,
         collider_buffer,
         mesh_triangles_buffer,
         mesh_bounds_buffer,
         collider_group_bounds_buffer,
         collider_params_buffer,
         collider_bind_group,
-        collision_pipeline,
-        collision_bgl,
         bone_sdf_texture,
         bone_sdf_texture_view,
         bone_sdf_sampler,
         bone_info_buffer,
         bone_transform_buffer,
         spatial_hash,
-        self_collision_pipeline,
         self_collision_bind_group,
         self_collision_params_buffer,
         self_collision_accum_buffer,
-        self_collision_apply_pipeline,
         self_collision_apply_bind_group,
         active_vt_pairs_buffer,
         active_ee_pairs_buffer,
         pair_counters_buffer,
         pair_collect_params_buffer,
         pair_solve_params_buffer,
-        pair_collect_pipeline,
         pair_collect_bind_group,
-        pair_solve_vt_pipeline,
         pair_solve_vt_bind_group,
-        pair_solve_ee_pipeline,
         pair_solve_ee_bind_group,
         normals_buffer,
 
@@ -1747,19 +1180,12 @@ pub fn build_simulation_resources(
         two_hop_offsets_buffer,
         two_hop_indices_buffer,
         island_ids_buffer,
-        compute_normals_pipeline,
         compute_normals_bind_group,
-        predict_pipeline,
-        distance_pipeline,
-        bending_pipeline,
-        sewing_pipeline,
-        update_vel_pipeline,
         predict_bind_group,
         distance_bind_groups,
         bending_bind_groups,
         sewing_bind_groups,
         update_vel_bind_group,
-        edge_collision_pipeline,
         edge_collision_bind_groups,
         self_collision_relief_factor,
         self_collision_max_displacement_ratio,

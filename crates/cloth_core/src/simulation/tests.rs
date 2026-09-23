@@ -1,19 +1,149 @@
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use crate::context::GpuContext;
     use crate::mesh::{ClothMesh, GpuMeshTriangle};
     use crate::simulation::GpuClothSimulator;
 
+    /// テスト用 GPU コンテキストをプロセス内で共有する。
+    /// 本番 (`GLOBAL_CONTEXT`) と同様に単一デバイスを使い回すことで、
+    /// 共有パイプラインキャッシュのヒット経路も検証対象に含める。
+    static TEST_CONTEXT: Mutex<Option<Arc<GpuContext>>> = Mutex::new(None);
+
     fn get_test_context() -> Option<Arc<GpuContext>> {
+        let mut guard = TEST_CONTEXT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ctx) = guard.as_ref() {
+            return Some(Arc::clone(ctx));
+        }
         match GpuContext::new() {
-            Ok(c) => Some(Arc::new(c)),
+            Ok(c) => {
+                let ctx = Arc::new(c);
+                *guard = Some(Arc::clone(&ctx));
+                Some(ctx)
+            }
             Err(crate::context::GpuContextError::AdapterNotFound) => {
                 eprintln!("警告: GPU アダプタが検出されなかったため、テストをスキップします (CI環境の可能性があります)");
                 None
             }
             Err(e) => panic!("GPU Context 作成エラー: {:?}", e),
         }
+    }
+
+    fn make_quad_mesh() -> ClothMesh {
+        let positions = vec![
+            [0.0, 0.0, 0.5],
+            [1.0, 0.0, 0.5],
+            [1.0, 1.0, 0.5],
+            [0.0, 1.0, 0.5],
+        ];
+        let edges = vec![[0, 1], [1, 2], [2, 3], [3, 0], [0, 2]];
+        let faces = vec![[0, 1, 2], [0, 2, 3]];
+        ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.02,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_shared_pipeline_cache_hit_and_lazy() {
+        use crate::simulation::pipeline_cache::{
+            cache_info, get_or_create_shared, normalize_workgroup_size,
+        };
+
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // workgroup_size 正規化
+        assert_eq!(normalize_workgroup_size(32), 32);
+        assert_eq!(normalize_workgroup_size(64), 64);
+        assert_eq!(normalize_workgroup_size(99), 32);
+
+        // 同一キーでは同一 Arc が返る (共有ヒット)
+        let (s1, _) = get_or_create_shared(&ctx, 32);
+        let (s2, built2) = get_or_create_shared(&ctx, 32);
+        assert!(Arc::ptr_eq(&s1, &s2));
+        assert!(!built2, "2 回目はキャッシュヒットでなければならない");
+
+        // workgroup_size 違いでは別エントリ
+        let (s64, _) = get_or_create_shared(&ctx, 64);
+        assert!(!Arc::ptr_eq(&s1, &s64));
+
+        // 遅延 ensure は冪等 (同一オブジェクトを返す)
+        let p1 = s1.ensure_pair() as *const _;
+        let p2 = s1.ensure_pair() as *const _;
+        assert_eq!(p1, p2);
+        let a1 = s1.ensure_atomic() as *const _;
+        assert_eq!(a1, s1.ensure_atomic() as *const _);
+        let e1 = s1.ensure_edge() as *const _;
+        assert_eq!(e1, s1.ensure_edge() as *const _);
+        let sc = s1.ensure_self_collision();
+        assert_eq!(sc as *const _, s1.ensure_self_collision() as *const _);
+        let h = s1.ensure_hash();
+        assert_eq!(h as *const _, s1.ensure_hash() as *const _);
+
+        // 遅延ビルドが計測ログに記録される
+        let names: Vec<String> = s1
+            .timings_snapshot()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        for want in [
+            "predict",
+            "distance",
+            "pair_collect",
+            "pair_solve_vt",
+            "pair_solve_ee",
+            "hash_clear",
+        ] {
+            assert!(names.contains(&want.to_string()), "計測ログに {} が必要", want);
+        }
+
+        // 2 つのシミュレータが同一 Shared を参照する
+        let sim1 = GpuClothSimulator::with_options(Arc::clone(&ctx), make_quad_mesh(), 32, 0);
+        let sim2 = GpuClothSimulator::with_options(Arc::clone(&ctx), make_quad_mesh(), 32, 0);
+        assert!(Arc::ptr_eq(&sim1.shared, &sim2.shared));
+        assert!(!sim1.build_timings().is_empty());
+        assert!(!sim2.build_timings().is_empty());
+
+        // 診断 API がエントリを返す
+        assert!(!cache_info().is_empty());
+    }
+
+    #[test]
+    fn test_lazy_pipeline_mid_sim_enable() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let mut sim = GpuClothSimulator::with_options(Arc::clone(&ctx), make_quad_mesh(), 32, 0);
+
+        // 途中有効化の各パスがコンパイル・実行できること
+        sim.set_enable_self_collision(true);
+        sim.set_enable_pair_cache(true);
+        sim.set_enable_edge_collision(true);
+        sim.set_solver_mode(1);
+        sim.step(1.0 / 60.0, 2);
+        sim.set_solver_mode(0);
+        sim.set_enable_edge_collision(false);
+        sim.set_enable_pair_cache(false);
+        sim.set_enable_self_collision(false);
+        sim.step(1.0 / 60.0, 2);
     }
 
     #[test]

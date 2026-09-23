@@ -1,5 +1,6 @@
 pub mod types;
 pub mod pipelines;
+pub mod pipeline_cache;
 pub mod dispatch;
 pub mod recording;
 #[cfg(test)]
@@ -18,6 +19,7 @@ use crate::spatial_hash::GpuSpatialHash;
 use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
 pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
+use self::pipeline_cache::SharedPipelines;
 
 /// 動的ボーンSDF（GPU LBS + インメモリSDF更新）の初期設定データ
 #[derive(Clone, Debug)]
@@ -73,15 +75,20 @@ pub struct GpuClothSimulator {
     pub solver_mode: u32, // 0: Coloring (Gauss-Seidel), 1: Atomic (Jacobi)
     #[allow(dead_code)]
     pub(crate) accum_buffer: wgpu::Buffer,
-    pub(crate) distance_atomic_solve_pipeline: wgpu::ComputePipeline,
-    pub(crate) distance_atomic_apply_pipeline: wgpu::ComputePipeline,
     pub(crate) distance_atomic_bind_group: wgpu::BindGroup,
+
+    // 共有パイプライン群 (プロセス全体でキャッシュ・メッシュ非依存)。
+    // コンピュートパイプライン実体はここにのみ存在し、per-sim 側は
+    // バッファと BindGroup のみを保持する。未使用機能のパイプラインは
+    // `ensure_*()` で初回有効化時に遅延生成される。
+    pub shared: Arc<SharedPipelines>,
+    /// 生成時のビルド計測 (名前, ミリ秒)。先頭は共有キャッシュのヒット情報。
+    pub build_timings: Vec<(String, f32)>,
 
     // コンパクトリードバック用 (頂点座標 12B/頂点 のみ抽出・転送)
     pub enable_compact_readback: bool,
     pub(crate) compact_position_buffer: wgpu::Buffer,
     pub(crate) compact_staging_buffers: [wgpu::Buffer; 2],
-    pub(crate) extract_positions_pipeline: wgpu::ComputePipeline,
     pub(crate) extract_positions_bind_group: wgpu::BindGroup,
 
     // フレームバッファリング用 (直近NフレームをGPU上で保持し一括転送)
@@ -95,7 +102,6 @@ pub struct GpuClothSimulator {
     pub(crate) pin_buffer: wgpu::Buffer,
     pub(crate) pin_params_buffer: wgpu::Buffer,
     pub(crate) pin_bind_group: wgpu::BindGroup,
-    pub(crate) pin_pipeline: wgpu::ComputePipeline,
 
     // プリミティブ & メッシュコライダー用
     pub(crate) colliders: Vec<GpuCollider>,
@@ -106,8 +112,6 @@ pub struct GpuClothSimulator {
     pub(crate) collider_group_bounds_buffer: wgpu::Buffer,
     pub(crate) collider_params_buffer: wgpu::Buffer,
     pub(crate) collider_bind_group: wgpu::BindGroup,
-    pub(crate) collision_pipeline: wgpu::ComputePipeline,
-    pub(crate) collision_bgl: wgpu::BindGroupLayout,
 
     // ボーンSDFコライダー用
     pub(crate) bone_infos: Vec<GpuBoneInfo>,
@@ -145,12 +149,10 @@ pub struct GpuClothSimulator {
 
     // 自己・レイヤー衝突 & 貫通解消 (Untangling) 用
     pub(crate) spatial_hash: GpuSpatialHash,
-    pub(crate) self_collision_pipeline: wgpu::ComputePipeline,
     pub(crate) self_collision_bind_group: wgpu::BindGroup,
     pub(crate) self_collision_params_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     pub(crate) self_collision_accum_buffer: wgpu::Buffer,
-    pub(crate) self_collision_apply_pipeline: wgpu::ComputePipeline,
     pub(crate) self_collision_apply_bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
     pub(crate) normals_buffer: wgpu::Buffer,
@@ -166,7 +168,6 @@ pub struct GpuClothSimulator {
     pub(crate) two_hop_indices_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     pub(crate) island_ids_buffer: wgpu::Buffer,
-    pub(crate) compute_normals_pipeline: wgpu::ComputePipeline,
     pub(crate) compute_normals_bind_group: wgpu::BindGroup,
 
     // 接触候補ペアキャッシュ (Active Pair Caching) 用
@@ -185,20 +186,10 @@ pub struct GpuClothSimulator {
     pub(crate) pair_counters_buffer: wgpu::Buffer,
     pub(crate) pair_collect_params_buffer: wgpu::Buffer,
     pub(crate) pair_solve_params_buffer: wgpu::Buffer,
-    pub(crate) pair_collect_pipeline: wgpu::ComputePipeline,
     pub(crate) pair_collect_bind_group: wgpu::BindGroup,
-    pub(crate) pair_solve_vt_pipeline: wgpu::ComputePipeline,
     pub(crate) pair_solve_vt_bind_group: wgpu::BindGroup,
-    pub(crate) pair_solve_ee_pipeline: wgpu::ComputePipeline,
     pub(crate) pair_solve_ee_bind_group: wgpu::BindGroup,
 
-
-    pub(crate) predict_pipeline: wgpu::ComputePipeline,
-
-    pub(crate) distance_pipeline: wgpu::ComputePipeline,
-    pub(crate) bending_pipeline: wgpu::ComputePipeline,
-    pub(crate) sewing_pipeline: wgpu::ComputePipeline,
-    pub(crate) update_vel_pipeline: wgpu::ComputePipeline,
 
     pub(crate) predict_bind_group: wgpu::BindGroup,
     pub(crate) distance_bind_groups: Vec<wgpu::BindGroup>,
@@ -224,7 +215,6 @@ pub struct GpuClothSimulator {
     pub coupled_self_collision_mode: u32,
     pub post_collision_relaxation_iters: u32,
     pub self_collision_substep_interval: u32,
-    pub(crate) edge_collision_pipeline: wgpu::ComputePipeline,
     pub(crate) edge_collision_bind_groups: Vec<wgpu::BindGroup>,
 
     pub sewing_stiffness: f32,
@@ -274,7 +264,7 @@ impl GpuClothSimulator {
         let mesh_edges: Vec<[u32; 2]> = mesh.distance_constraints.iter().map(|dc| [dc.v0, dc.v1]).collect();
         let mesh_faces: Vec<[u32; 3]> = mesh.triangles.iter().map(|tri| [tri.v0, tri.v1, tri.v2]).collect();
 
-        Self {
+        let sim = Self {
             context,
             num_vertices,
             num_distance_constraints,
@@ -306,13 +296,29 @@ impl GpuClothSimulator {
             workgroup_size,
             solver_mode,
             accum_buffer: res.accum_buffer,
-            distance_atomic_solve_pipeline: res.distance_atomic_solve_pipeline,
-            distance_atomic_apply_pipeline: res.distance_atomic_apply_pipeline,
             distance_atomic_bind_group: res.distance_atomic_bind_group,
+            shared: res.shared,
+            build_timings: {
+                let mut t = Vec::with_capacity(res.build_timings.len() + 1);
+                t.push((
+                    if res.shared_built_now {
+                        "shared_cache_build"
+                    } else {
+                        "shared_cache_hit"
+                    }
+                    .to_string(),
+                    res.build_timings
+                        .iter()
+                        .find(|(n, _)| n == "shared_cache_ms")
+                        .map(|(_, ms)| *ms)
+                        .unwrap_or(0.0),
+                ));
+                t.extend(res.build_timings.into_iter().filter(|(n, _)| n != "shared_cache_ms"));
+                t
+            },
             enable_compact_readback: true,
             compact_position_buffer: res.compact_position_buffer,
             compact_staging_buffers: res.compact_staging_buffers,
-            extract_positions_pipeline: res.extract_positions_pipeline,
             extract_positions_bind_group: res.extract_positions_bind_group,
             buffered_position_buffer: res.buffered_position_buffer,
             buffered_staging_buffer: res.buffered_staging_buffer,
@@ -322,7 +328,6 @@ impl GpuClothSimulator {
             pin_buffer: res.pin_buffer,
             pin_params_buffer: res.pin_params_buffer,
             pin_bind_group: res.pin_bind_group,
-            pin_pipeline: res.pin_pipeline,
             colliders: Vec::new(),
             mesh_triangles: Vec::new(),
             collider_buffer: res.collider_buffer,
@@ -331,8 +336,6 @@ impl GpuClothSimulator {
             collider_group_bounds_buffer: res.collider_group_bounds_buffer,
             collider_params_buffer: res.collider_params_buffer,
             collider_bind_group: res.collider_bind_group,
-            collision_pipeline: res.collision_pipeline,
-            collision_bgl: res.collision_bgl,
             bone_infos: Vec::new(),
             bone_transforms: Vec::new(),
             enable_bone_sdf: false,
@@ -362,11 +365,9 @@ impl GpuClothSimulator {
             active_dirty_bone_indices: None,
             dynamic_sdf_initial_baked: false,
             spatial_hash: res.spatial_hash,
-            self_collision_pipeline: res.self_collision_pipeline,
             self_collision_bind_group: res.self_collision_bind_group,
             self_collision_params_buffer: res.self_collision_params_buffer,
             self_collision_accum_buffer: res.self_collision_accum_buffer,
-            self_collision_apply_pipeline: res.self_collision_apply_pipeline,
             self_collision_apply_bind_group: res.self_collision_apply_bind_group,
             normals_buffer: res.normals_buffer,
             local_edge_lengths_buffer: res.local_edge_lengths_buffer,
@@ -375,13 +376,7 @@ impl GpuClothSimulator {
             two_hop_offsets_buffer: res.two_hop_offsets_buffer,
             two_hop_indices_buffer: res.two_hop_indices_buffer,
             island_ids_buffer: res.island_ids_buffer,
-            compute_normals_pipeline: res.compute_normals_pipeline,
             compute_normals_bind_group: res.compute_normals_bind_group,
-            predict_pipeline: res.predict_pipeline,
-            distance_pipeline: res.distance_pipeline,
-            bending_pipeline: res.bending_pipeline,
-            sewing_pipeline: res.sewing_pipeline,
-            update_vel_pipeline: res.update_vel_pipeline,
             predict_bind_group: res.predict_bind_group,
             distance_bind_groups: res.distance_bind_groups,
             bending_bind_groups: res.bending_bind_groups,
@@ -401,11 +396,8 @@ impl GpuClothSimulator {
             pair_counters_buffer: res.pair_counters_buffer,
             pair_collect_params_buffer: res.pair_collect_params_buffer,
             pair_solve_params_buffer: res.pair_solve_params_buffer,
-            pair_collect_pipeline: res.pair_collect_pipeline,
             pair_collect_bind_group: res.pair_collect_bind_group,
-            pair_solve_vt_pipeline: res.pair_solve_vt_pipeline,
             pair_solve_vt_bind_group: res.pair_solve_vt_bind_group,
-            pair_solve_ee_pipeline: res.pair_solve_ee_pipeline,
             pair_solve_ee_bind_group: res.pair_solve_ee_bind_group,
 
             solver_iterations: 2,
@@ -426,7 +418,6 @@ impl GpuClothSimulator {
             enable_collider_cluster_culling: false,
             enable_single_sided_recovery: true,
             collider_sweep_margin_offset: 0.05,
-            edge_collision_pipeline: res.edge_collision_pipeline,
             edge_collision_bind_groups: res.edge_collision_bind_groups,
             sewing_stiffness: 10000.0,
             enable_sewing_lock: true,
@@ -444,17 +435,32 @@ impl GpuClothSimulator {
             mesh_faces,
             debug_recorder: SimulationDebugRecorder::default(),
             original_inv_masses: mesh.vertices.iter().map(|v| v.inv_mass).collect(),
+        };
+        // ATOMIC モード指定時は初回から必要なため、ここで先行生成する
+        if solver_mode == 1 {
+            sim.shared.ensure_atomic();
         }
+        sim
     }
 
     /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を切り替える
     pub fn set_pair_cache_enabled(&mut self, enabled: bool) {
-        self.enable_pair_cache = enabled;
+        self.set_enable_pair_cache(enabled);
     }
 
-    /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を設定する
+    /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を設定する。
+    /// 初回有効化時は共有パイプラインの遅延生成のため約 1 秒のヒッチが発生する。
     pub fn set_enable_pair_cache(&mut self, enable: bool) {
+        if enable {
+            self.shared.ensure_pair();
+        }
         self.enable_pair_cache = enable;
+    }
+
+    /// 生成時のビルド計測 (名前, ミリ秒) を返す (起動時間の診断用)。
+    /// 先頭エントリは共有キャッシュのヒット/ビルド結果を示す。
+    pub fn build_timings(&self) -> &[(String, f32)] {
+        &self.build_timings
     }
 
     /// 接触候補ペアキャッシュの有効/無効を取得する
@@ -623,13 +629,22 @@ impl GpuClothSimulator {
         self.edge_margin_offset = offset.max(0.0);
     }
 
-    /// エッジ詳細接触判定の有効/無効を設定する
+    /// エッジ詳細接触判定の有効/無効を設定する。
+    /// 初回有効化時は共有パイプラインの遅延生成のため約 0.3 秒のヒッチが発生する。
     pub fn set_enable_edge_collision(&mut self, enable: bool) {
+        if enable {
+            self.shared.ensure_edge();
+        }
         self.enable_edge_collision = enable;
     }
 
-    /// 自己衝突・レイヤー衝突処理の有効/無効を設定する
+    /// 自己衝突・レイヤー衝突処理の有効/無効を設定する。
+    /// 初回有効化時は共有パイプラインの遅延生成のため約 2 秒のヒッチが発生する。
     pub fn set_enable_self_collision(&mut self, enable: bool) {
+        if enable {
+            self.shared.ensure_self_collision();
+            self.shared.ensure_hash();
+        }
         self.enable_self_collision = enable;
     }
 
@@ -1585,7 +1600,7 @@ impl GpuClothSimulator {
     fn recreate_collider_bind_group(&mut self) {
         self.collider_bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Collider Bind Group (Recreated with Bone SDF)"),
-            layout: &self.collision_bgl,
+            layout: &self.shared.collision_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1855,8 +1870,13 @@ impl GpuClothSimulator {
         self.enable_compact_readback = enable;
     }
 
-    /// ソルバーモードを設定する (0: Coloring, 1: Atomic Jacobi)
+    /// ソルバーモードを設定する (0: Coloring, 1: Atomic Jacobi)。
+    /// ATOMIC への初回切り替え時は共有パイプラインの遅延生成のため
+    /// 約 0.5 秒のヒッチが発生する。
     pub fn set_solver_mode(&mut self, mode: u32) {
+        if mode == 1 {
+            self.shared.ensure_atomic();
+        }
         self.solver_mode = mode;
     }
 

@@ -1,7 +1,12 @@
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 static GLOBAL_CONTEXT: RwLock<Option<Arc<GpuContext>>> = RwLock::new(None);
+
+/// GPUデバイス世代カウンタ。`init_or_reset` による差し替えのたびに加算され、
+/// プロセス全体の共有パイプラインキャッシュの無効化キーとして使用する。
+static DEVICE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Error, Debug)]
 pub enum GpuContextError {
@@ -38,6 +43,9 @@ pub struct GpuContext {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// 生成時点のデバイス世代 (`DEVICE_EPOCH` のスナップショット)。
+    /// 共有パイプラインキャッシュのキーに使用する。
+    pub epoch: u64,
 }
 
 fn format_backend(b: wgpu::Backend) -> String {
@@ -231,6 +239,7 @@ impl GpuContext {
             adapter,
             device,
             queue,
+            epoch: DEVICE_EPOCH.load(Ordering::SeqCst),
         })
     }
 
@@ -247,6 +256,8 @@ impl GpuContext {
         backend_str: Option<&str>,
         device_index: Option<usize>,
     ) -> Result<Arc<Self>, GpuContextError> {
+        // 世代を先に進めて旧デバイス由来の共有パイプライン再利用を防止する
+        DEVICE_EPOCH.fetch_add(1, Ordering::SeqCst);
         let ctx = Arc::new(Self::create_device_async(backend_str, device_index).await?);
         {
             let mut write_lock = GLOBAL_CONTEXT.write().unwrap();

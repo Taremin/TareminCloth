@@ -675,6 +675,24 @@ fn render_scene_to_rgb<'py>(
     Ok((bytes_obj, result.red_pixels))
 }
 
+/// 共有パイプラインキャッシュの診断情報を取得する。
+/// 戻り値: [{"epoch": int, "workgroup_size": int, "eager_ms": float,
+///           "lazy_built": [str], "lazy_ms": float}]
+#[pyfunction]
+fn shared_pipeline_cache_info<'py>(py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let mut list = Vec::new();
+    for entry in cloth_core::simulation::pipeline_cache::cache_info() {
+        let dict = PyDict::new(py);
+        dict.set_item("epoch", entry.epoch)?;
+        dict.set_item("workgroup_size", entry.workgroup_size)?;
+        dict.set_item("eager_ms", entry.eager_ms)?;
+        dict.set_item("lazy_built", entry.lazy_built)?;
+        dict.set_item("lazy_ms", entry.lazy_ms)?;
+        list.push(dict);
+    }
+    Ok(list)
+}
+
 /// 既存互換用のラッパー
 #[pyfunction]
 #[pyo3(signature = (filepath, positions, faces, width=800, height=600, camera_pos=None, camera_target=None, fov=45.0))]
@@ -1274,6 +1292,12 @@ impl ClothSimulator {
     /// 現在のコンパクトリードバック設定を取得
     fn get_enable_compact_readback(&self) -> bool {
         self.simulator.enable_compact_readback
+    }
+
+    /// 生成時のビルド計測 [(名前, ミリ秒)] を取得する (起動時間の診断用)。
+    /// 先頭エントリは共有キャッシュのヒット/ビルド結果を示す。
+    fn get_build_timings(&self) -> Vec<(String, f32)> {
+        self.simulator.build_timings().to_vec()
     }
 
     /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を設定
@@ -2020,6 +2044,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(get_current_gpu_device, m)?)?;
     m.add_function(wrap_pyfunction!(get_device_buffer_limits, m)?)?;
+    m.add_function(wrap_pyfunction!(shared_pipeline_cache_info, m)?)?;
     m.add_function(wrap_pyfunction!(render_mesh_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(render_scene_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(render_scene_to_rgb, m)?)?;
