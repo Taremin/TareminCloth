@@ -1,4 +1,5 @@
 pub mod context;
+pub mod config;
 pub mod mesh;
 pub mod coloring;
 pub mod smooth;
@@ -9,6 +10,7 @@ pub mod renderer;
 pub mod sdf_baker;
 
 pub use context::{GpuBufferLimits, GpuContext, GpuContextError, GpuDeviceInfo};
+pub use config::SimConfig;
 pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams};
 pub use smooth::{
     TENSION_EXPAND, GRAB_PIN_THRESHOLD,
@@ -19,7 +21,7 @@ pub use smooth::{
 };
 pub use simulation::{DynamicBoneSdfSetup, GpuClothSimulator};
 pub use simulation::types::{GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex};
-pub use debug_recorder::{ColliderRecord, FrameRecord, FrameStats, JsonlRecord, PinRecord, SimulationDebugRecorder, SimulationMetadata};
+pub use debug_recorder::{BoneFrameState, BoneSdfRecord, ColliderRecord, DebugRecordOptions, ElasticScaleRecord, FrameRecord, FrameStats, JsonlRecord, PinRecord, SimulationDebugRecorder, SimulationMetadata};
 pub use renderer::{
     render_mesh_to_buffer, render_mesh_to_png_file, render_scene_to_buffer,
     render_scene_to_png_file, RenderOptions, RenderResult, SceneData,

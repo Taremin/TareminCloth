@@ -7,6 +7,7 @@ import bpy
 import numpy as np
 from ..utils import topology
 from ..utils.logger import logger
+from .simconfig import collect_sim_config, sim_config_signature, purge_applied_signature
 
 # シミュレータインスタンスを保持するグローバルキャッシュ (obj_name -> (sim, coords))
 _simulators = {}
@@ -28,8 +29,6 @@ _timeline_frame_cache = {}
 _buffered_start_frames = {}
 # 布パラメータシグネチャキャッシュ (obj_name -> params_tuple)
 _cloth_param_signatures = {}
-# 剛性パラメータの前回同期値キャッシュ (obj_name -> (tension, compression, shear, bending))
-_prev_stiffness_cache = {}
 # アタッチメントピンの頂点インデックス・ウェイト一覧キャッシュ (cache_key -> list[(vert_idx, weight)])
 _attachment_pin_indices_cache = {}
 # アタッチメントピンの前回ローカルターゲット位置キャッシュ (obj_name -> (local_target_tuple, target_mat_tuple))
@@ -179,8 +178,8 @@ def clear_simulator_for_object(obj_name, clear_timeline=True):
     _effective_substeps_cache.pop(obj_name, None)
     _collider_prev_locs_cache.pop(obj_name, None)
     _prev_elastic_scales.pop(obj_name, None)
-    _prev_stiffness_cache.pop(obj_name, None)
     _prev_attachment_pin_targets.pop(obj_name, None)
+    purge_applied_signature(obj_name)
     for k in list(_attachment_pin_indices_cache.keys()):
         if isinstance(k, tuple) and k[0] == obj_name:
             _attachment_pin_indices_cache.pop(k, None)
@@ -199,9 +198,10 @@ def clear_simulators():
     global _simulators, _prev_coords_cache
     global _mesh_char_len_cache, _effective_substeps_cache, _collider_prev_locs_cache
     global _prev_elastic_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
-    global _prev_stiffness_cache, _attachment_pin_indices_cache, _prev_attachment_pin_targets
+    global _attachment_pin_indices_cache, _prev_attachment_pin_targets
     restore_fast_playback()
     clear_collider_cache()
+    purge_applied_signature(None)
     count = len(_simulators)
     _simulators.clear()
     _prev_coords_cache.clear()
@@ -212,7 +212,6 @@ def clear_simulators():
     _timeline_frame_cache.clear()
     _buffered_start_frames.clear()
     _cloth_param_signatures.clear()
-    _prev_stiffness_cache.clear()
     _attachment_pin_indices_cache.clear()
     _prev_attachment_pin_targets.clear()
     logger.debug(f"[Simulator] Cleared all {count} simulators and caches")
@@ -232,6 +231,8 @@ def get_cloth_params_signature(obj):
         )
 
     pin_obj_name = settings.pin_target_object.name if getattr(settings, "pin_target_object", None) else ""
+    # 前半: 再構築キー (メッシュ同一性・ピン・縫合・ベイク条件)。後半: Liveキー
+    # (simconfig収集値。 relief/coupled/pair等の途中変更も検知して stale bake を防ぐ)。
     return (
         round(float(getattr(settings, "tension_stiffness", 1000.0)), 2),
         round(float(getattr(settings, "compression_stiffness", 1000.0)), 2),
@@ -263,12 +264,13 @@ def get_cloth_params_signature(obj):
         round(float(getattr(settings, "pair_cache_safety_margin", 0.005)), 5),
         round(float(getattr(settings, "pair_cache_horizon_scale", 1.3)), 3),
         round(float(getattr(settings, "pair_cache_max_horizon", 0.02)), 5),
-        int(getattr(settings, "pair_cache_max_pairs", 32768)),
+        int(getattr(settings, "pair_cache_max_pairs", 65536)),
         bool(getattr(settings, "enable_pair_cache_final_fallback", True)),
         int(getattr(settings, "substeps", 10)),
         int(getattr(settings, "solver_iterations", 2)),
         str(getattr(settings, "solver_mode", "COLORING")),
         elastic_tuples,
+        sim_config_signature(collect_sim_config(settings)),
     )
 
 

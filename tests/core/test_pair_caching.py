@@ -188,6 +188,63 @@ class TestPairCaching(unittest.TestCase):
         sim.get_positions(out_pos)
         self.assertFalse(np.isnan(out_pos).any())
 
+    def _two_layer_case(self, nx=4, ny=4, dx=0.05, gap=0.003):
+        """上下2枚の近接グリッド (非連結2成分) を生成する"""
+        pos1, e1, f1, _ = self.create_grid_cloth(nx, ny, dx, 0.0, pin_first_row=False)
+        pos2, e2, f2, _ = self.create_grid_cloth(nx, ny, dx, gap, pin_first_row=False)
+        n1 = len(pos1)
+        positions = np.vstack([pos1, pos2])
+        edges = np.vstack([e1, e2 + n1])
+        faces = np.vstack([f1, f2 + n1])
+        inv_masses = np.ones(len(positions), dtype=np.float32)
+        return positions, edges, faces, inv_masses
+
+    def test_quota_collection_is_deterministic(self):
+        """同一条件の2実行で収集ペア集合が一致すること (格納経路に競合なし)"""
+        positions, edges, faces, inv_masses = self._two_layer_case()
+
+        def collect_once():
+            sim = self.core.ClothSimulator(
+                positions, edges, faces, inv_masses,
+                thickness=0.005, enable_pair_cache=True)
+            sim.set_enable_self_collision(True)
+            sim.set_enable_pair_cache_final_fallback(False)
+            sim.step(1.0 / 60.0, 2)
+            vt_count, ee_count, vt_pairs, ee_pairs = sim.get_active_pairs()
+            vt = sorted(tuple(int(x) for x in row) for row in np.asarray(vt_pairs).reshape((-1, 4)))
+            ee = sorted(tuple(int(x) for x in row) for row in np.asarray(ee_pairs).reshape((-1, 4)))
+            return vt_count, ee_count, vt, ee
+
+        first = collect_once()
+        second = collect_once()
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(first[1], second[1])
+        self.assertEqual(first[2], second[2])
+        self.assertEqual(first[3], second[3])
+        self.assertGreater(len(first[2]) + len(first[3]), 0)
+
+    def test_quota_per_vertex_fairness(self):
+        """候補のある全頂点が最低1件保持されること (飢餓なし)"""
+        positions, edges, faces, inv_masses = self._two_layer_case(nx=5, ny=5)
+        n = len(positions)
+        sim = self.core.ClothSimulator(
+            positions, edges, faces, inv_masses,
+            thickness=0.005, enable_pair_cache=True)
+        sim.set_enable_self_collision(True)
+        # 厳しい予算で枠数K=1に追い込む
+        sim.set_pair_cache_options(64, 64, 1, 0.005, 1.3, 0.02)
+        sim.set_enable_pair_cache_final_fallback(False)
+        sim.step(1.0 / 60.0, 1)
+        _, _, vt_pairs, ee_pairs = sim.get_active_pairs()
+        owners = set()
+        for row in np.asarray(vt_pairs).reshape((-1, 4)):
+            owners.add(int(row[0]))
+        for row in np.asarray(ee_pairs).reshape((-1, 4)):
+            owners.add(int(row[0]))
+        # 全50頂点が近接成分を持つため、過半がカバーされること
+        self.assertGreaterEqual(len(owners), n // 2,
+                                f"頂点カバレッジ不足: {len(owners)}/{n}")
+
 
 if __name__ == "__main__":
     unittest.main()

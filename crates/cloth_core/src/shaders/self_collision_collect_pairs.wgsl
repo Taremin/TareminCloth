@@ -1,6 +1,7 @@
 // 接触候補ペア収集シェーダー (Broadphase Pair Collection)
 // 空間グリッドから接触可能圏内にある V-T (頂点対面) および E-E (辺対辺) ペアを検出し、
-// GPUアクティブペアバッファにアトミック収集する。
+// 頂点スレッドごとに距離上位 quota 件を固定スロット (頂点メジャー配置) に保持する。
+// グローバルアトミックは統計用のみ (格納は競合なし・決定的)。
 
 struct GpuVertex {
     position: vec3<f32>,
@@ -42,14 +43,15 @@ struct PairCollectParams {
     dt_frame: f32,
     velocity_horizon_scale: f32,
     max_horizon: f32,
-    _pad0: u32,
+    quota_vt: u32,
+    quota_ee: u32,
 };
 
 struct PairCounters {
     vt_count: atomic<u32>,
     ee_count: atomic<u32>,
-    _pad0: u32,
-    _pad1: u32,
+    vt_dropped: atomic<u32>,
+    ee_dropped: atomic<u32>,
 };
 
 struct ClosestBaryResult {
@@ -219,6 +221,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let table_size = params.table_size;
     let base_cell = vec3<i32>(floor(p_i / cell_size));
 
+    // 頂点ローカル Top-K 保持域 (距離昇順)。重複排除キー付き。
+    var vt_n = 0u;
+    var vt_dists: array<f32, 8>;
+    var vt_data: array<GpuVtPair, 8>;
+    var vt_eval = 0u;
+    var vt_drop = 0u;
+    var ee_n = 0u;
+    var ee_dists: array<f32, 8>;
+    var ee_data: array<GpuEePair, 8>;
+    var ee_eval = 0u;
+    var ee_drop = 0u;
+    let quota_vt = clamp(params.quota_vt, 1u, 8u);
+    let quota_ee = clamp(params.quota_ee, 1u, 8u);
+
     let margin = params.safety_margin;
     // 速度スイープホライゾン (AutoVelocityモード時のみ有効、Fixed時は0)
     // フレーム内に接近するペアを取りこぼさないための予測拡張。頂点ローカルで完結しCPU readback不要。
@@ -301,9 +317,53 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                                 let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
                                                 if (dist_sq_vt < check_thick * check_thick) {
-                                                    let pair_idx = atomicAdd(&counters.vt_count, 1u);
-                                                    if (pair_idx < params.max_vt_pairs) {
-                                                        active_vt_pairs[pair_idx] = GpuVtPair(index, j, v0, v1);
+                                                    // V-T候補を受理: 面トリプルで重複排除し距離上位quota件を保持
+                                                    // (同一面は中心違いで最大3回評価されるため)
+                                                    let t0 = min(min(j, v0), v1);
+                                                    let t2 = max(max(j, v0), v1);
+                                                    let t1 = j + v0 + v1 - t0 - t2;
+                                                    var dup = false;
+                                                    for (var qk = 0u; qk < 8u; qk = qk + 1u) {
+                                                        if (qk >= vt_n) {
+                                                            break;
+                                                        }
+                                                        let e = vt_data[qk];
+                                                        let s0 = min(min(e.vert_j, e.v0), e.v1);
+                                                        let s2 = max(max(e.vert_j, e.v0), e.v1);
+                                                        let s1 = e.vert_j + e.v0 + e.v1 - s0 - s2;
+                                                        if (s0 == t0 && s1 == t1 && s2 == t2) {
+                                                            dup = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if (!dup) {
+                                                        vt_eval = vt_eval + 1u;
+                                                        var pos = vt_n;
+                                                        for (var qk = 0u; qk < 8u; qk = qk + 1u) {
+                                                            if (qk < vt_n && dist_sq_vt < vt_dists[qk]) {
+                                                                pos = qk;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if (pos < quota_vt) {
+                                                            var up = min(vt_n, quota_vt - 1u);
+                                                            var qk = up;
+                                                            loop {
+                                                                if (qk <= pos) {
+                                                                    break;
+                                                                }
+                                                                vt_dists[qk] = vt_dists[qk - 1u];
+                                                                vt_data[qk] = vt_data[qk - 1u];
+                                                                qk = qk - 1u;
+                                                            }
+                                                            vt_dists[pos] = dist_sq_vt;
+                                                            vt_data[pos] = GpuVtPair(index, j, v0, v1);
+                                                            if (vt_n < quota_vt) {
+                                                                vt_n = vt_n + 1u;
+                                                            }
+                                                        } else {
+                                                            vt_drop = vt_drop + 1u;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -354,9 +414,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                         let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
 
                                                         if (dist_sq_ee < check_thick * check_thick && dist_sq_ee > EPSILON) {
-                                                            let pair_idx = atomicAdd(&counters.ee_count, 1u);
-                                                            if (pair_idx < params.max_ee_pairs) {
-                                                                active_ee_pairs[pair_idx] = GpuEePair(index, ui, j, vj);
+                                                            // E-E候補を受理: 距離上位quota件を保持
+                                                            // (index<j重複排除済みのためスレッド内重複なし)
+                                                            ee_eval = ee_eval + 1u;
+                                                            var pos = ee_n;
+                                                            for (var qk = 0u; qk < 8u; qk = qk + 1u) {
+                                                                if (qk < ee_n && dist_sq_ee < ee_dists[qk]) {
+                                                                    pos = qk;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (pos < quota_ee) {
+                                                                var up = min(ee_n, quota_ee - 1u);
+                                                                var qk = up;
+                                                                loop {
+                                                                    if (qk <= pos) {
+                                                                        break;
+                                                                    }
+                                                                    ee_dists[qk] = ee_dists[qk - 1u];
+                                                                    ee_data[qk] = ee_data[qk - 1u];
+                                                                    qk = qk - 1u;
+                                                                }
+                                                                ee_dists[pos] = dist_sq_ee;
+                                                                ee_data[pos] = GpuEePair(index, ui, j, vj);
+                                                                if (ee_n < quota_ee) {
+                                                                    ee_n = ee_n + 1u;
+                                                                }
+                                                            } else {
+                                                                ee_drop = ee_drop + 1u;
                                                             }
                                                         }
                                                     }
@@ -371,5 +456,45 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 }
             }
         }
+    }
+
+    // 頂点メジャー固定スロットへ書き戻し (未使用枠はセンチネル)。
+    // 物理配置は index*quota+k のコンパクト配置 (quotaは論理枠数)。
+    // 収集は毎フレーム全論理範囲を書き直すため quota 変更時も整合する。
+    let base_vt = index * quota_vt;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        if (k >= quota_vt) {
+            break;
+        }
+        if (k < vt_n) {
+            active_vt_pairs[base_vt + k] = vt_data[k];
+        } else {
+            active_vt_pairs[base_vt + k] = GpuVtPair(0xFFFFFFFFu, 0u, 0u, 0u);
+        }
+    }
+    let base_ee = index * quota_ee;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        if (k >= quota_ee) {
+            break;
+        }
+        if (k < ee_n) {
+            active_ee_pairs[base_ee + k] = ee_data[k];
+        } else {
+            active_ee_pairs[base_ee + k] = GpuEePair(0xFFFFFFFFu, 0u, 0u, 0u);
+        }
+    }
+
+    // 統計のみアトミック加算 (格納自体は競合なし)
+    if (vt_eval > 0u) {
+        atomicAdd(&counters.vt_count, vt_eval);
+    }
+    if (vt_drop > 0u) {
+        atomicAdd(&counters.vt_dropped, vt_drop);
+    }
+    if (ee_eval > 0u) {
+        atomicAdd(&counters.ee_count, ee_eval);
+    }
+    if (ee_drop > 0u) {
+        atomicAdd(&counters.ee_dropped, ee_drop);
     }
 }

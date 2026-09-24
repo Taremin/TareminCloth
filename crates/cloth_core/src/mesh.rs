@@ -156,17 +156,22 @@ pub struct PairCollectParams {
     pub dt_frame: f32,
     pub velocity_horizon_scale: f32,
     pub max_horizon: f32,
-    pub _pad0: u32,
+    /// 頂点あたり保持枠数 (V-T用、1..=8)。配置は index*quota+k のコンパクト配置。
+    pub quota_vt: u32,
+    /// 頂点あたり保持枠数 (E-E用、1..=8)。
+    pub quota_ee: u32,
 }
 
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PairCounters {
+    /// 受理された候補数 (check通過・重複排除後。枠上限を超え得る)
     pub vt_count: u32,
     pub ee_count: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    /// 枠不足で破棄された候補数
+    pub vt_dropped: u32,
+    pub ee_dropped: u32,
 }
 
 #[repr(C)]

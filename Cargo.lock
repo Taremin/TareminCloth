@@ -366,6 +366,7 @@ dependencies = [
 name = "cloth_core"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "bytemuck",
  "env_logger",
  "flate2",
@@ -2615,6 +2616,7 @@ dependencies = [
  "numpy",
  "pollster",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

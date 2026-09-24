@@ -65,6 +65,10 @@ def save_preferences_to_disk(prefs=None) -> bool:
         "debug_output_dir": getattr(prefs, "debug_output_dir", ""),
         "debug_filename_template": getattr(prefs, "debug_filename_template", "cloth_debug_{datetime}_{object}.{ext}"),
         "debug_max_frames": getattr(prefs, "debug_max_frames", 3600),
+        "debug_sparse_stride": getattr(prefs, "debug_sparse_stride", 1),
+        "debug_sparse_ring": getattr(prefs, "debug_sparse_ring", 0),
+        "debug_sparse_lookahead": getattr(prefs, "debug_sparse_lookahead", 0),
+        "debug_sparse_triggers": getattr(prefs, "debug_sparse_triggers", False),
         "enable_standalone_gui": getattr(prefs, "enable_standalone_gui", False),
     }
     filepath = get_preferences_filepath()
@@ -124,6 +128,14 @@ def apply_saved_preferences(prefs=None) -> bool:
             prefs.debug_filename_template = data["debug_filename_template"]
         if "debug_max_frames" in data and hasattr(prefs, "debug_max_frames"):
             prefs.debug_max_frames = data["debug_max_frames"]
+        if "debug_sparse_stride" in data and hasattr(prefs, "debug_sparse_stride"):
+            prefs.debug_sparse_stride = data["debug_sparse_stride"]
+        if "debug_sparse_ring" in data and hasattr(prefs, "debug_sparse_ring"):
+            prefs.debug_sparse_ring = data["debug_sparse_ring"]
+        if "debug_sparse_lookahead" in data and hasattr(prefs, "debug_sparse_lookahead"):
+            prefs.debug_sparse_lookahead = data["debug_sparse_lookahead"]
+        if "debug_sparse_triggers" in data and hasattr(prefs, "debug_sparse_triggers"):
+            prefs.debug_sparse_triggers = bool(data["debug_sparse_triggers"])
         if "enable_standalone_gui" in data and hasattr(prefs, "enable_standalone_gui"):
             prefs.enable_standalone_gui = bool(data["enable_standalone_gui"])
     finally:
@@ -301,6 +313,40 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         update=_on_debug_pref_update,
     )
 
+    debug_sparse_stride: IntProperty(
+        name="Sparse Stride",
+        description="Full-coordinate save interval for debug recording (1=every frame, 5=sparse two-tier logging)",
+        default=1,
+        min=1,
+        max=100,
+        update=_on_debug_pref_update,
+    )
+
+    debug_sparse_ring: IntProperty(
+        name="Sparse Ring",
+        description="Recent full frames retained for trigger lookback context",
+        default=0,
+        min=0,
+        max=60,
+        update=_on_debug_pref_update,
+    )
+
+    debug_sparse_lookahead: IntProperty(
+        name="Sparse Lookahead",
+        description="Full frames to keep saving after a recording trigger fires",
+        default=0,
+        min=0,
+        max=60,
+        update=_on_debug_pref_update,
+    )
+
+    debug_sparse_triggers: BoolProperty(
+        name="Sparse Triggers",
+        description="Auto-restore full context on displacement/velocity/saturation/config-change triggers",
+        default=False,
+        update=_on_debug_pref_update,
+    )
+
     enable_standalone_gui: BoolProperty(
         name="Enable Standalone GUI Client",
         description="Enable external process standalone GPU simulation GUI client (Experimental)",
@@ -346,6 +392,10 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         col_debug.prop(self, "debug_output_dir", text=i18n.trans("Output Folder"))
         col_debug.prop(self, "debug_filename_template", text=i18n.trans("Template"))
         col_debug.prop(self, "debug_max_frames", text=i18n.trans("Max Frames"))
+        col_debug.prop(self, "debug_sparse_stride", text=i18n.trans("Sparse Stride (1=Full)"))
+        col_debug.prop(self, "debug_sparse_ring", text=i18n.trans("Sparse Ring"))
+        col_debug.prop(self, "debug_sparse_lookahead", text=i18n.trans("Sparse Lookahead"))
+        col_debug.prop(self, "debug_sparse_triggers", text=i18n.trans("Sparse Auto Triggers"))
 
         row_prev = col_debug.row()
         row_prev.alignment = 'RIGHT'

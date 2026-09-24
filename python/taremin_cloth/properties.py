@@ -452,10 +452,10 @@ class TareminClothObjectSettings(PropertyGroup):
     )
     pair_cache_max_pairs: IntProperty(
         name="Max Pairs",
-        description="Logical upper limit for VT/EE pair buffers (physical cap 65536)",
-        default=32768,
+        description="Total pair budget (per-vertex quota = Max Pairs / verts, max 8). Physical buffers scale with mesh.",
+        default=65536,
         min=64,
-        max=65536,
+        max=262144,
     )
     enable_pair_cache_final_fallback: BoolProperty(
         name="Final Substep Fallback",

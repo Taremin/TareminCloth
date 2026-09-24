@@ -89,6 +89,10 @@ pub struct GuiSelfCollisionData {
     pub exclude_neighbors: bool,
     #[serde(default = "default_true")]
     pub enable_normal_untangling: bool,
+    #[serde(default = "default_max_search_iters")]
+    pub max_iterations: u32,
+    #[serde(default = "default_substep_interval")]
+    pub substep_interval: u32,
     #[serde(default)]
     pub enable_edge_collision: bool,
     #[serde(default = "default_one")]
@@ -115,10 +119,12 @@ fn default_pair_margin_mode() -> u32 { 1 }
 fn default_pair_margin() -> f32 { 0.005 }
 fn default_horizon_scale() -> f32 { 1.3 }
 fn default_max_horizon() -> f32 { 0.02 }
-fn default_pair_max() -> u32 { 32768 }
+fn default_pair_max() -> u32 { 65536 }
 
 fn default_coupled_mode() -> u32 { 1 }
 fn default_post_relax() -> u32 { 2 }
+fn default_max_search_iters() -> u32 { 256 }
+fn default_substep_interval() -> u32 { 1 }
 fn default_relief_factor() -> f32 { 0.2 }
 fn default_max_disp() -> f32 { 0.2 }
 fn default_true() -> bool { true }
@@ -173,6 +179,10 @@ pub struct SceneInitData {
     #[serde(default = "default_one")]
     pub gravity_scale: f32,
     pub sewing_shrink_speed: f32,
+    #[serde(default = "default_sewing_stiffness")]
+    pub sewing_stiffness: f32,
+    #[serde(default = "default_true")]
+    pub enable_sewing_lock: bool,
     #[serde(default)]
     pub sewing_priority_enabled: bool,
     #[serde(default = "default_sewing_priority_threshold")]
@@ -205,6 +215,7 @@ pub struct SceneInitData {
 }
 
 fn default_solver_iters() -> u32 { 10 }
+fn default_sewing_stiffness() -> f32 { 10000.0 }
 fn default_substeps() -> u32 { 20 }
 fn default_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
 fn default_sewing_priority_threshold() -> f32 { 0.9 }
@@ -278,5 +289,63 @@ pub enum GuiResponse {
         num_vertices: u32,
         positions: Vec<[f32; 3]>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_client_json_without_new_fields_parses_with_defaults() {
+        // 新規キー (max_iterations/substep_interval/sewing_stiffness/enable_sewing_lock)
+        // を送らない旧Blenderクライアントでも受信できること
+        let sc_json = r#"{"enabled": true, "coupled_mode": 1}"#;
+        let sc: GuiSelfCollisionData = serde_json::from_str(sc_json).unwrap();
+        assert_eq!(sc.max_iterations, 256);
+        assert_eq!(sc.substep_interval, 1);
+        let init_json = r#"{
+            "object_name": "O", "positions": [], "faces": [], "edges": [],
+            "sewing_springs": null, "inv_masses": [], "layer_id": 0,
+            "thickness": 0.005, "stiffness": 100.0,
+            "compression_stiffness": 100.0, "shear_stiffness": 50.0,
+            "bending_stiffness": 1.0, "gravity": [0.0, 0.0, -9.81],
+            "sewing_shrink_speed": 0.5, "workgroup_size": 32,
+            "solver_mode": 0, "solver_iterations": 2,
+            "self_collision": {"enabled": false},
+            "bone_sdf": null
+        }"#;
+        let init: SceneInitData = serde_json::from_str(init_json).unwrap();
+        assert_eq!(init.sewing_stiffness, 10000.0);
+        assert!(init.enable_sewing_lock);
+    }
+
+    #[test]
+    fn new_keys_roundtrip() {
+        let sc = GuiSelfCollisionData {
+            enabled: true,
+            coupled_mode: 3,
+            post_relaxation_iters: 1,
+            relief_factor: 0.2,
+            max_displacement_ratio: 0.2,
+            exclude_neighbors: true,
+            enable_normal_untangling: true,
+            max_iterations: 512,
+            substep_interval: 2,
+            enable_edge_collision: false,
+            edge_margin_scale: 1.0,
+            edge_margin_offset: 0.0,
+            enable_pair_cache: true,
+            pair_cache_margin_mode: 1,
+            pair_cache_safety_margin: 0.005,
+            pair_cache_horizon_scale: 1.3,
+            pair_cache_max_horizon: 0.02,
+            pair_cache_max_pairs: 32768,
+            enable_pair_cache_final_fallback: true,
+        };
+        let s = serde_json::to_string(&sc).unwrap();
+        let d: GuiSelfCollisionData = serde_json::from_str(&s).unwrap();
+        assert_eq!(d.max_iterations, 512);
+        assert_eq!(d.substep_interval, 2);
+    }
 }
 

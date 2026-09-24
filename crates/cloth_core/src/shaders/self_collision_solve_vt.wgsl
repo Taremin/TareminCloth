@@ -27,8 +27,8 @@ struct SolveParams {
 struct PairCounters {
     vt_count: u32,
     ee_count: u32,
-    _pad0: u32,
-    _pad1: u32,
+    vt_dropped: u32,
+    ee_dropped: u32,
 };
 
 struct SelfCollisionAccum {
@@ -177,18 +177,25 @@ fn intersect_segment_triangle(
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pair_idx = global_id.x;
-    let total_pairs = min(counters.vt_count, params.max_vt_pairs);
-    if (pair_idx >= total_pairs) {
+    // 頂点メジャー固定スロット配置 (N*quota entries)。未使用枠は
+    // センチネル (vert_i == 0xFFFFFFFF) で埋められている。
+    let n_verts = params.num_vertices;
+    if (n_verts == 0u) {
+        return;
+    }
+    if (pair_idx >= params.max_vt_pairs) {
         return;
     }
 
     let pair = active_vt_pairs[pair_idx];
+    if (pair.vert_i == 0xFFFFFFFFu) {
+        return;
+    }
     let index = pair.vert_i;
     let j = pair.vert_j;
     let v0 = pair.v0;
     let v1 = pair.v1;
 
-    let n_verts = params.num_vertices;
     if (index >= n_verts || j >= n_verts || v0 >= n_verts || v1 >= n_verts) {
         return;
     }

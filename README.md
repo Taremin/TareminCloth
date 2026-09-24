@@ -334,7 +334,7 @@ Taremin Cloth では、目的に応じて **「インタラクティブモード
 2. **出力設定**:
    - **Output Folder**: 保存先ディレクトリ（空欄時はアドオン内の `frame_logs` フォルダを使用）。
    - **Template**: ファイル名テンプレート。デフォルト: `cloth_debug_{datetime}_{object}.{ext}`（拡張子 `{ext}` は自動的に `jsonl.gz` となります）。
-   - **Max Frames**: メモリ保護用の最大記録フレーム数（デフォルト: 3600フレーム = 60FPSで約1分間）。
+   - **Max Frames**: メモリ保護用の最大記録フレーム数（デフォルト: 3600フレーム = 60FPSで約1分間）。Sparse Stride/Ring/Lookahead/Triggersで2階層記録を設定可能。
 3. **実行と出力**:
    - インタラクティブモードを実行し、ESC または右クリックで終了すると、自動的に指定フォルダへ `.jsonl.gz` が保存され、コンソールおよび情報ヘッダーに保存パスとフレーム数が通知されます。
 4. **Blender非依存の解析・再現・可視化CLI (`log_tools`)**:
@@ -348,6 +348,10 @@ Taremin Cloth では、目的に応じて **「インタラクティブモード
 
    # 問題直前のフレームから始まる自己完結型 unittest スクリプトを自動生成
    python -m taremin_cloth.log_tools make-test cloth_debug.jsonl.gz --frame 71 --lookback 3 --output tests/test_issue_f71.py
+
+    # Conditional break (watch) and PairCache audit (see AGENTS.md section 5)
+    python -m taremin_cloth.log_tools watch cloth_debug.jsonl.gz --stop-on "disp>5,vt_sat" -o scratch/hit.jsonl.gz
+    python -m taremin_cloth.log_tools audit cache.jsonl.gz direct.jsonl.gz --tolerance 1.0
    ```
 
 

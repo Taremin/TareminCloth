@@ -1312,7 +1312,7 @@ impl ClothSimulator {
 
     /// ペアキャッシュ詳細オプションを設定
     /// margin_mode: 0=Fixed(従来), 1=AutoVelocity(速度スイープ自動拡張)
-    #[pyo3(signature = (max_vt_pairs=32768, max_ee_pairs=32768, margin_mode=1, safety_margin=0.005, horizon_scale=1.3, max_horizon=0.02))]
+    #[pyo3(signature = (max_vt_pairs=65536, max_ee_pairs=65536, margin_mode=1, safety_margin=0.005, horizon_scale=1.3, max_horizon=0.02))]
     fn set_pair_cache_options(
         &mut self,
         max_vt_pairs: u32,
@@ -1345,6 +1345,18 @@ impl ClothSimulator {
     /// ペアキャッシュ統計を取得 (vt_count, ee_count, max_vt, max_ee)。飽和検出用。
     fn get_pair_cache_stats(&self) -> (u32, u32, u32, u32) {
         self.simulator.get_pair_cache_stats()
+    }
+
+    /// 収集中のアクティブペア一覧を取得 (vt_count, ee_count, vt4頂点ID列, ee4頂点ID列)。
+    /// デバッグ専用ブロッキング読戻し。監査サンプリング等に限定すること。
+    fn get_active_pairs(&self) -> (u32, u32, Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        let (vt_count, ee_count, vt_pairs, ee_pairs) = self.simulator.get_active_pairs();
+        (
+            vt_count,
+            ee_count,
+            vt_pairs.iter().map(|p| p.to_vec()).collect(),
+            ee_pairs.iter().map(|p| p.to_vec()).collect(),
+        )
     }
 
 
@@ -1948,6 +1960,12 @@ impl ClothSimulator {
         );
     }
 
+    /// 縫合優先モードのラッチ内部状態を復元する (記録・再現用)
+    #[pyo3(signature = (latched, frame, ramp_t, ratio))]
+    fn set_sewing_priority_state(&mut self, latched: bool, frame: u32, ramp_t: f32, ratio: f32) {
+        self.simulator.set_sewing_priority_state(latched, frame, ramp_t, ratio);
+    }
+
     /// 直近座標から縫合結合率を測定し、ラッチ・ランプ状態を更新する。
     /// 戻り値: (結合率, 実効重力スケール, ラッチ済みか)。GPU読戻しは行わない。
     fn update_sewing_priority(&mut self, positions: PyReadonlyArray2<f32>) -> (f32, f32, bool) {
@@ -1960,6 +1978,37 @@ impl ClothSimulator {
         }
         self.simulator
             .update_sewing_priority_from_positions(&pos_vec)
+    }
+
+    /// ボーンSDFコライダーの状態を取得 (デバッグ・検証用)
+    fn get_bone_sdf_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        use pyo3::types::PyDict;
+        let d = PyDict::new(py);
+        d.set_item("enabled", self.simulator.bone_sdf_enabled())?;
+        let (w, h, dep) = self.simulator.bone_sdf_dims().unwrap_or((0, 0, 0));
+        d.set_item("width", w)?;
+        d.set_item("height", h)?;
+        d.set_item("depth", dep)?;
+        d.set_item("num_bones", self.simulator.bone_info_count())?;
+        d.set_item("num_transforms", self.simulator.bone_transform_count())?;
+        Ok(d)
+    }
+
+    /// ボーンSDFテクスチャ内容を読戻す (デバッグ・検証用、密パックバイト列)
+    fn read_bone_sdf_texture_bytes(&self) -> PyResult<Vec<u8>> {
+        self.simulator.read_bone_sdf_texture().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("BONE_SDFテクスチャの読戻しに失敗")
+        })
+    }
+
+    /// 縫合拘束の現在自然長を読戻す (デバッグ・再現用)
+    fn get_sewing_current_rest_lengths(&self) -> Vec<f32> {
+        self.simulator.read_sewing_current_rest_lengths()
+    }
+
+    /// 縫合拘束の現在自然長を復元する (デバッグ・再現用)
+    fn set_sewing_current_rest_lengths(&mut self, values: Vec<f32>) {
+        self.simulator.set_sewing_current_rest_lengths(&values);
     }
 
     /// 現在の実効重力スケール (0.0〜1.0) を返す。
@@ -2032,6 +2081,73 @@ impl ClothSimulator {
     /// デバッグ状態記録を停止しメモリバッファを解放する
     fn stop_debug_recording(&mut self) {
         self.simulator.stop_debug_recording();
+    }
+
+    /// 2階層記録オプションを設定する (full_stride=1で従来動作)
+    #[pyo3(signature = (full_stride=1, ring_size=0, lookahead=0, enable_triggers=false, disp_trigger_mm=5.0, vel_trigger=10.0, strain_trigger=0.5, pair_stats_stride=1))]
+    fn set_debug_recording_options(
+        &mut self,
+        full_stride: u32,
+        ring_size: usize,
+        lookahead: u32,
+        enable_triggers: bool,
+        disp_trigger_mm: f32,
+        vel_trigger: f32,
+        strain_trigger: f32,
+        pair_stats_stride: u32,
+    ) {
+        self.simulator.set_debug_recording_options(
+            full_stride,
+            ring_size,
+            lookahead,
+            enable_triggers,
+            disp_trigger_mm,
+            vel_trigger,
+            strain_trigger,
+            pair_stats_stride,
+        );
+    }
+
+    /// 現在の2階層記録オプションを辞書で返す
+    fn get_debug_recording_options<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        use pyo3::types::PyDict;
+        let o = self.simulator.debug_recording_options();
+        let d = PyDict::new(py);
+        d.set_item("full_stride", o.full_stride)?;
+        d.set_item("ring_size", o.ring_size)?;
+        d.set_item("lookahead", o.lookahead)?;
+        d.set_item("enable_triggers", o.enable_triggers)?;
+        d.set_item("disp_trigger_mm", o.disp_trigger_mm)?;
+        d.set_item("vel_trigger", o.vel_trigger)?;
+        d.set_item("strain_trigger", o.strain_trigger)?;
+        d.set_item("pair_stats_stride", o.pair_stats_stride)?;
+        Ok(d)
+    }
+
+    /// (保存数, フル数, スタブ数) を返す
+    fn get_debug_sparse_info(&self) -> (usize, usize, usize) {
+        self.simulator.debug_recording_sparse_info()
+    }
+
+    /// 現在の全可変パラメータを SimConfig JSON として書き出す (記録・差分用)
+    fn get_config_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.simulator.export_config()).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("設定のシリアライズに失敗: {e}"))
+        })
+    }
+
+    /// SimConfig JSON を一括適用する (再生・初期化用)
+    fn apply_config_json(&mut self, json_str: &str) -> PyResult<()> {
+        let cfg: cloth_core::config::SimConfig = serde_json::from_str(json_str).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("設定JSONの解析に失敗: {e}"))
+        })?;
+        self.simulator.apply_config(&cfg);
+        Ok(())
+    }
+
+    /// 現在設定のハッシュ (フレーム途中変更検出用)
+    fn get_config_hash(&self) -> u64 {
+        self.simulator.config_hash_u64()
     }
 }
 

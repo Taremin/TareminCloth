@@ -141,8 +141,11 @@ sequenceDiagram
         - **Solve パス (`self_collision.wgsl`)**: 空間ハッシュに基づく近傍探索および V-T / E-E / V-V 接触判定。2ホップトポロジー近傍判定をV-V、V-T、E-Eで一貫して統一適用。固定小数点（$10^6$ スケール）`atomicAdd` により、自頂点だけでなく相手三角形・エッジ頂点へも作用・反作用（運動量保存）変位をデータ競合を回避してアキュムレータへ対称蓄積。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
           - **Collect Pairs パス (`self_collision_collect_pairs.wgsl`)**: フレーム先頭サブステップ（`sub_idx == 0`）でのみ空間ハッシュ近傍探索を実行し、接近頂点・面（V-T）および稜線（E-E）ペアを抽出して専用ストレージバッファにキャッシュ。`margin_mode=AUTO`（既定）では頂点速度×フレームdt×係数（`velocity_horizon_scale=1.3`、`max_horizon=0.02`でクランプ）のスイープホライゾンを収集 bound に加算し、フレーム内に接近するペアの取りこぼしを防止。`FIXED` では従来の静的収集（厚み+マージンのみ）。
+          - **保持方式 (頂点メジャー固定枠)**: 頂点スレッドが候補を距離昇順の Top-K（V-Tは面トリプルで重複排除）に保持し、`index*quota+k` のコンパクト配置へ書き戻す（未使用枠はセンチネル）。総予算 `max_pairs` から枠数 `quota = clamp(budget/N, 1, 8)` を導出。グローバルアトミックは統計（受理数・破棄数）のみで格納は競合なし・決定的。バッファ物理確保は N*8。
+          - **Narrowphase Solve パス (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされた有効ペアのみをピンポイントで並列ディスパッチ。センチネル枠は早期リターン。解決パラメータの上限値はスロット数 (N*quota)。
+          - **カウンタ (`PairCounters`)**: `vt/ee_count` は受理候補総数（枠超過分を含む）、`vt/ee_dropped` は枠不足破棄数。`get_pair_cache_stats()` の4値は従来通り（件数・予算上限）。
           - **時間的再利用（Amortization）**: 以降のサブステップ（`sub_idx > 0`）では空間ハッシュ構築および全頂点ペア収集パスをスキップ。フレームdtは `step()` 先頭で収集パラメータへ毎フレーム反映。
-          - **Narrowphase Solve パス (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされた有効ペアのみをピンポイントで並列ディスパッチ。論理上限は頂点数連動（`clamp(n*8, 8192, 65536)`、物理確保65536）で `set_pair_cache_options` により変更可。飽和検出は `get_pair_cache_stats()`（vt/ee_count読戻し）で行う。
+          - **最終サブステップフォールバック (`enable_pair_cache_final_fallback`, 既定ON)**: 最終サブステップのみ新鮮な空間ハッシュ構築＋直進フルSolveに置換し、速度確定前のトンネリングを遮断。追加コストは1構築+1フルSolve/frameに限定され、約1.8〜2.4倍の高速化を維持。
           - **最終サブステップフォールバック (`enable_pair_cache_final_fallback`, 既定ON)**: 最終サブステップのみ新鮮な空間ハッシュ構築＋直進フルSolveに置換し、速度確定前のトンネリングを遮断。追加コストは1構築+1フルSolve/frameに限定され、約1.8〜2.4倍の高速化を維持。
         - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
         - **協調収束設計 (Coupled Modes)**:
@@ -278,6 +281,14 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
    - Rust側の `repr(C)` 構造体サイズ・オフセットと WGSL シェーダー側の Uniform / Storage バッファレイアウトが一致することを `naga` による自動解析テストで常時検証。
 6. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
    - デバッグレコーダーが出力する `.jsonl.gz` を活用し、Blender非依存のCLIおよびPythonテストコード上でサブステップ解析・異常検出を実行。
+   - 可変パラメータは `SimConfig` (`crates/cloth_core/src/config.rs`) に一本化し、`export_config/apply_config` で記録・再生する。新規パラメータは `tests/core/test_config_parity.py` が写像漏れを検出する。
+   - `FrameStats` に `vt/ee_count・vt_saturated・max_strain・config_hash` を記録し、`inspect` でPair飽和と設定変更を検出する。条件付きブレーク (`watch`) と精度監査 (`audit`) については `AGENTS.md` §5 を参照。
+   - 2階層記録 (`DebugRecordOptions`, `debug_recorder.rs`): `full_stride` 間引きでフル座標を削減し、間欠フレームは stats+pins/colliders のみ持つスタブとして保存する。`ring_size/lookahead` と変位・速度・歪み・飽和・NaN・設定変更トリガーにより、発火前後の文脈フルを自動復元する。スタブ形式ファイルは `version: 3` で識別され、`replayer`/`log_tools` は入力連続性を保ちつつフル区間のみ比較・描画する (`tests/core/test_sparse_recording.py`)。
+   - パラメータ同期一本化 (`python/taremin_cloth/engine/simconfig.py`): Blender設定→`SimConfig`辞書の収集は本モジュールのみが行い、`params.py` (In-proc毎フレーム同期・署名差分スキップ)、`gui_client.py` (GUI転送辞書)、`cache.py` (無効化署名) が共有する。新パラメータは `tests/core/test_simconfig_sync.py` が収集網羅・往復一致・署名感度を検証する。GUIサーバー (`crates/cloth_gui`) のInitScene適用も `apply_config` 一括化し、旧来の `max_iterations=256` ハードコード等を排除した。転送プロトコルは serde 既定値により前後互換 (`protocol.rs` 単体テストで検証)。
+   - フレーム途中変更の再現 (`param_deltas`): 設定変更フレームのみ当時のフル`SimConfig`を保存し (初回は`metadata.config`)、`replay_range/replay_until/trace_substeps` は開始時点までの差分を折り畳んで適用する (`tests/core/test_param_deltas.py`)。`watch --stop-on config` で変更点停止も可能。
+   - 解放後残存貫通の診断: `watch --require-release --persist N` (ピン数減少でアームしN連続成立で発火。grab中の瞬間貫通を除外) と `audit-cache` (同一ログのON/OFF再現で起因判定。再記録不要) を併用する。
+   - メタデータ完全化: 頂点毎厚み・レイヤー、元メッシュ辺 (`original_edges`、せん断対角を除外してリプレイ再構築の型崩れを防止)、辺スケール差分 (`elastic_scales`)、BONE_SDF (テクスチャ＋姿勢。動的再ベイク有効時はテクスチャが古くなる旨を記録)、縫合現在自然長＋優先ラッチ状態を記録する。旧フィールドの剛性換算 (1000倍ズレ) も修正済み。
+   - 再現性の既知の制限: stiffなスナップ遷移・活発な自己接触下ではGPU実行順序の非決定性がmm級に増幅される (双子実行同士でも再現しない)。穏やかな regime ではbit級に一致する。`make-test` の厳密一致判定は穏やかな区間に用い、激しい区間は `audit-pairs` とトポロジー検査で診断すること。
 
 ---
 

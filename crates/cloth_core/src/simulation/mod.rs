@@ -3,6 +3,7 @@ pub mod pipelines;
 pub mod pipeline_cache;
 pub mod dispatch;
 pub mod recording;
+pub mod config_impl;
 #[cfg(test)]
 pub mod tests;
 
@@ -20,6 +21,18 @@ use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
 pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
 use self::pipeline_cache::SharedPipelines;
+
+/// 頂点あたり保持枠数の上限。物理バッファは N*QUOTA_MAX 確保し、
+/// 論理配置は index*quota+k のコンパクト配置 (収集時に毎回全範囲書換え)。
+pub(crate) const PAIR_QUOTA_MAX: u32 = 8;
+
+/// 総予算 (ペア数) と頂点数から頂点あたり枠数を導出する。
+fn quota_for_budget(budget: u32, num_vertices: u32) -> u32 {
+    if num_vertices == 0 {
+        return 1;
+    }
+    (budget / num_vertices).clamp(1, PAIR_QUOTA_MAX)
+}
 
 /// 動的ボーンSDF（GPU LBS + インメモリSDF更新）の初期設定データ
 #[derive(Clone, Debug)]
@@ -174,6 +187,9 @@ pub struct GpuClothSimulator {
     pub enable_pair_cache: bool,
     pub(crate) pair_cache_max_vt_pairs: u32,
     pub(crate) pair_cache_max_ee_pairs: u32,
+    /// 頂点あたり保持枠数 (1..=PAIR_QUOTA_MAX)。予算/頂点数から導出。
+    pub(crate) pair_cache_quota_vt: u32,
+    pub(crate) pair_cache_quota_ee: u32,
     pub(crate) pair_cache_margin_mode: u32,
     pub(crate) pair_cache_safety_margin: f32,
     pub(crate) pair_cache_horizon_scale: f32,
@@ -384,8 +400,16 @@ impl GpuClothSimulator {
             update_vel_bind_group: res.update_vel_bind_group,
 
             enable_pair_cache: false,
-            pair_cache_max_vt_pairs: (num_vertices * 8).clamp(8192, 65536),
-            pair_cache_max_ee_pairs: (num_vertices * 8).clamp(8192, 65536),
+            pair_cache_max_vt_pairs: (num_vertices * 8).clamp(8192, 262144),
+            pair_cache_max_ee_pairs: (num_vertices * 8).clamp(8192, 262144),
+            pair_cache_quota_vt: quota_for_budget(
+                (num_vertices * 8).clamp(8192, 262144),
+                num_vertices,
+            ),
+            pair_cache_quota_ee: quota_for_budget(
+                (num_vertices * 8).clamp(8192, 262144),
+                num_vertices,
+            ),
             pair_cache_margin_mode: 1,
             pair_cache_safety_margin: 0.005,
             pair_cache_horizon_scale: 1.3,
@@ -480,9 +504,14 @@ impl GpuClothSimulator {
         horizon_scale: f32,
         max_horizon: f32,
     ) {
-        // 物理上限65536でクランプ (再確保なしの論理上限方式)
-        self.pair_cache_max_vt_pairs = max_vt_pairs.clamp(64, 65536);
-        self.pair_cache_max_ee_pairs = max_ee_pairs.clamp(64, 65536);
+        // 上限262144でクランプ (頂点数連動の割合制を大規模メッシュまで維持)
+        self.pair_cache_max_vt_pairs = max_vt_pairs.clamp(64, 262144);
+        self.pair_cache_max_ee_pairs = max_ee_pairs.clamp(64, 262144);
+        // 総予算から頂点あたり枠を導出 (頂点メジャー固定スロット配置)
+        self.pair_cache_quota_vt =
+            quota_for_budget(self.pair_cache_max_vt_pairs, self.num_vertices);
+        self.pair_cache_quota_ee =
+            quota_for_budget(self.pair_cache_max_ee_pairs, self.num_vertices);
         self.pair_cache_margin_mode = if margin_mode == 0 { 0 } else { 1 };
         self.pair_cache_safety_margin = safety_margin.clamp(0.0, 0.05);
         self.pair_cache_horizon_scale = horizon_scale.clamp(0.0, 4.0);
@@ -515,7 +544,8 @@ impl GpuClothSimulator {
             dt_frame,
             velocity_horizon_scale: self.pair_cache_horizon_scale,
             max_horizon: self.pair_cache_max_horizon,
-            _pad0: 0,
+            quota_vt: self.pair_cache_quota_vt.clamp(1, PAIR_QUOTA_MAX),
+            quota_ee: self.pair_cache_quota_ee.clamp(1, PAIR_QUOTA_MAX),
         };
         self.context.queue.write_buffer(
             &self.pair_collect_params_buffer,
@@ -524,12 +554,14 @@ impl GpuClothSimulator {
         );
     }
 
-    /// ペア解決パラメータバッファを現在の論理設定で書き込む
+    /// ペア解決パラメータバッファを現在の論理設定で書き込む。
+    /// max_* には予算ではなくスロット数 (N*quota) を格納し、
+    /// 解決シェーダーの範囲ガードと頂点メジャー配置の除数に用いる。
     pub(crate) fn write_pair_solve_params(&self) {
         let solve_params = crate::mesh::PairSolveParams {
             num_vertices: self.num_vertices,
-            max_vt_pairs: self.pair_cache_max_vt_pairs,
-            max_ee_pairs: self.pair_cache_max_ee_pairs,
+            max_vt_pairs: self.num_vertices * self.pair_cache_quota_vt.clamp(1, PAIR_QUOTA_MAX),
+            max_ee_pairs: self.num_vertices * self.pair_cache_quota_ee.clamp(1, PAIR_QUOTA_MAX),
             enable_normal_untangling: if self.enable_normal_untangling { 1 } else { 0 },
         };
         self.context.queue.write_buffer(
@@ -597,7 +629,8 @@ impl GpuClothSimulator {
             dt_frame: 1.0 / 60.0,
             velocity_horizon_scale: self.pair_cache_horizon_scale,
             max_horizon: self.pair_cache_max_horizon,
-            _pad0: 0,
+            quota_vt: self.pair_cache_quota_vt.clamp(1, PAIR_QUOTA_MAX),
+            quota_ee: self.pair_cache_quota_ee.clamp(1, PAIR_QUOTA_MAX),
         };
         self.context.queue.write_buffer(
             &self.pair_collect_params_buffer,
@@ -607,8 +640,8 @@ impl GpuClothSimulator {
 
         let solve_params = crate::mesh::PairSolveParams {
             num_vertices: self.num_vertices,
-            max_vt_pairs: self.pair_cache_max_vt_pairs,
-            max_ee_pairs: self.pair_cache_max_ee_pairs,
+            max_vt_pairs: self.num_vertices * self.pair_cache_quota_vt.clamp(1, PAIR_QUOTA_MAX),
+            max_ee_pairs: self.num_vertices * self.pair_cache_quota_ee.clamp(1, PAIR_QUOTA_MAX),
             enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
         };
         self.context.queue.write_buffer(
@@ -791,6 +824,32 @@ impl GpuClothSimulator {
         self.sewing_priority_frame = 0;
         self.sewing_priority_ramp_t = 0.0;
         self.sewing_priority_ratio = 0.0;
+    }
+
+    /// 縫合優先モードのラッチ内部状態を取得する (記録・再現用)。
+    /// 戻り値: (ラッチ済みか, 経過フレーム数, ランプ進行度, 結合率)
+    pub fn sewing_priority_state(&self) -> (bool, u32, f32, f32) {
+        (
+            self.sewing_priority_latched,
+            self.sewing_priority_frame,
+            self.sewing_priority_ramp_t,
+            self.sewing_priority_ratio,
+        )
+    }
+
+    /// 縫合優先モードのラッチ内部状態を復元する (記録・再現用)。
+    /// GPUバッファに触れないため安全。無効な値はクランプされる。
+    pub fn set_sewing_priority_state(
+        &mut self,
+        latched: bool,
+        frame: u32,
+        ramp_t: f32,
+        ratio: f32,
+    ) {
+        self.sewing_priority_latched = latched;
+        self.sewing_priority_frame = frame;
+        self.sewing_priority_ramp_t = ramp_t.clamp(0.0, 1.0);
+        self.sewing_priority_ratio = ratio.clamp(0.0, 1.0);
     }
 
     /// ホスト側で既知の頂点座標から縫合結合率を測定し、ラッチ・ランプ状態を更新する。
@@ -1064,7 +1123,9 @@ impl GpuClothSimulator {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::Rg16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         self.bone_sdf_texture_view = self.bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1138,6 +1199,128 @@ impl GpuClothSimulator {
         self.upload_colliders();
     }
 
+    /// BONE_SDFが有効な場合のテクスチャ寸法 (w, h, d) を返す
+    pub fn bone_sdf_dims(&self) -> Option<(u32, u32, u32)> {
+        if !self.enable_bone_sdf || self.bone_infos.is_empty() {
+            return None;
+        }
+        let s = self.bone_sdf_texture.size();
+        if s.width == 0 || s.height == 0 || s.depth_or_array_layers == 0 {
+            return None;
+        }
+        Some((s.width, s.height, s.depth_or_array_layers))
+    }
+
+    /// BONE_SDFテクスチャ内容を密パックバイト列 (Rg16Float, 4B/voxel) で読戻す。
+    /// デバッグ記録専用のブロッキング読戻し。異常時は None。
+    pub fn read_bone_sdf_texture(&self) -> Option<Vec<u8>> {
+        let (w, h, d) = self.bone_sdf_dims()?;
+        let bytes_per_pixel = 4u64;
+        let unpadded = (w as u64) * bytes_per_pixel;
+        let padded = ((unpadded + 255) / 256) * 256;
+        let total = padded * (h as u64) * (d as u64);
+        if total == 0 || total > 256 * 1024 * 1024 {
+            return None;
+        }
+        let staging = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Bone SDF Texture Staging"),
+            size: total,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("Read Bone SDF Texture Encoder"),
+            },
+        );
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.bone_sdf_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: d,
+            },
+        );
+        self.context.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..total);
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        self.context.device.poll(wgpu::Maintain::Wait);
+        pollster::block_on(receiver.receive()).unwrap().ok()?;
+
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((unpadded * (h as u64) * (d as u64)) as usize);
+        for slab in data.chunks((padded * (h as u64)) as usize) {
+            for row in slab.chunks(padded as usize) {
+                if row.len() < unpadded as usize {
+                    return None;
+                }
+                out.extend_from_slice(&row[..unpadded as usize]);
+            }
+        }
+        drop(data);
+        staging.unmap();
+        Some(out)
+    }
+
+    /// ボーン静的情報のスナップショット (20float/行: aabb×2, uvw×2, params)
+    pub fn bone_infos_flat(&self) -> Vec<[f32; 20]> {
+        self.bone_infos
+            .iter()
+            .map(|b| {
+                let mut row = [0.0f32; 20];
+                row[0..4].copy_from_slice(&b.aabb_min);
+                row[4..8].copy_from_slice(&b.aabb_max);
+                row[8..12].copy_from_slice(&b.uvw_scale);
+                row[12..16].copy_from_slice(&b.uvw_offset);
+                row[16..20].copy_from_slice(&b.params);
+                row
+            })
+            .collect()
+    }
+
+    /// ボーン変換行列のスナップショット (world行列群, inv行列群)
+    pub fn bone_transforms_snapshot(
+        &self,
+    ) -> (Vec<[[f32; 4]; 4]>, Vec<[[f32; 4]; 4]>) {
+        let mut world = Vec::with_capacity(self.bone_transforms.len());
+        let mut inv = Vec::with_capacity(self.bone_transforms.len());
+        for t in &self.bone_transforms {
+            world.push(t.world_matrix);
+            inv.push(t.inv_world_matrix);
+        }
+        (world, inv)
+    }
+
+    /// BONE_SDF有効フラグを取得する (デバッグ・検証用)
+    pub fn bone_sdf_enabled(&self) -> bool {
+        self.enable_bone_sdf
+    }
+
+    /// ボーン情報数を返す (デバッグ・検証用)
+    pub fn bone_info_count(&self) -> usize {
+        self.bone_infos.len()
+    }
+
+    /// ボーン変換行列数を返す (デバッグ・検証用)
+    pub fn bone_transform_count(&self) -> usize {
+        self.bone_transforms.len()
+    }
+
     /// 各ボーンのワールド変換行列を更新（毎フレーム実行）
     pub fn update_bone_transforms(&mut self, transforms: &[GpuBoneTransform]) {
         self.bone_transforms = transforms.to_vec();
@@ -1208,7 +1391,9 @@ impl GpuClothSimulator {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::Rg16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         self.bone_sdf_texture_view = self.bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());

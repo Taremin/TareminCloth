@@ -708,7 +708,17 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             if sim and hasattr(sim, "start_debug_recording"):
                 max_frames = getattr(prefs, "debug_max_frames", 3600)
                 sim.start_debug_recording(obj.name, max_frames=max_frames)
-                logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames})")
+                try:
+                    from ..engine.simconfig import (
+                        recording_options_from_prefs,
+                        apply_recording_options,
+                    )
+                    applied = apply_recording_options(
+                        sim, recording_options_from_prefs(prefs)
+                    )
+                except Exception:
+                    applied = False
+                logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames}, sparse={applied})")
 
     def _init_stage_setup(self, context, obj):
         """段階3: 隔離ビュー等の仕上げ"""

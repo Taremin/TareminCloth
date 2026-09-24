@@ -250,15 +250,15 @@ graph TD
   - そこで、[Tang et al. 2018 (I-Cloth)](https://doi.org/10.1145/3272127.3275005) の Active Pair Caching 思想に基づき、BroadphaseとNarrowphaseを物理的に分離し、時間的再利用（Amortization）を行うパイプラインを実装しました。
 - **実装された設計**:
   1. **フェーズ分離**:
-     - **Broadphase (`self_collision_collect_pairs.wgsl`)**: 空間ハッシュを探索し、接近している V-T（頂点-面）ペアおよび E-E（辺-辺）ペアを抽出し、専用のGPUストレージバッファにアトミック追加で記録。
-     - **Narrowphase (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされたペアのみをピンポイントで並列ディスパッチし、V-T/E-E幾何接触とCCD遮断変位を蓄積。
+     - **Broadphase (`self_collision_collect_pairs.wgsl`)**: 空間ハッシュを探索し、接近している V-T（頂点-面）ペアおよび E-E（辺-辺）ペアを抽出し、頂点スレッドごとに距離上位 quota 件を固定スロット（頂点メジャー配置）へ保持する。V-Tは面トリプルで重複排除する。グローバルアトミックは統計（受理数・破棄数）のみに用い、格納は競合なし・決定的。
+     - **Narrowphase (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされたペアのみをピンポイントで並列ディスパッチし、V-T/E-E幾何接触とCCD遮断変位を蓄積。未使用枠はセンチネルで早期リターン。
   2. **時間的再利用（Amortization）**:
      - フレームの先頭サブステップ（`sub_idx == 0`）でのみ空間ハッシュ構築と候補ペア抽出を実行。
      - サブステップ 1〜N では探索を完全スキップし、キャッシュされたペアのナローフェーズのみを実行。
      - 最終サブステップではオプション（`enable_pair_cache_final_fallback`、既定ON）により直進フルSolveに置換し、速度確定前のトンネリングを遮断する。
   3. **速度スイープ収集（Swept Collection）**:
      - `margin_mode=AUTO`（既定）では頂点ローカルの速度ホライゾン（`|v|*dt_frame*scale`、`max_horizon`でクランプ）を収集 bound（broad/vt/ee）および `check_thick` に加算。直進パス（`self_collision.wgsl` の `move_len` 項）と同等以上のスーパーセットを確保し、シワ稜線の接近を見逃さない。`FIXED` では従来の静的収集にフォールバックする。
-     - 論理上限は頂点数連動（`clamp(n*8, 8192, 65536)`）で `set_pair_cache_options` により変更可能。飽和時は `get_pair_cache_stats()` で検出する（全密着の病理条件では Narrow が飽和し任意ドロップが発生するため、警告用途）。
+     - 論理上限は総予算 `max_pairs` から頂点あたり枠数 `quota = clamp(budget/N, 1, 8)` を導出（`set_pair_cache_options` で変更可、物理確保は N*8）。飽和時は `get_pair_cache_stats()` の受理数と破棄数 (`vt/ee_dropped`) で検出する。旧方式の先着順・任意ドロップは廃止された。
   4. **直接ディスパッチと安全クランプ**:
      - GPUペア数に応じた直接ディスパッチ（`dispatch_workgroups`）を採用し、D3D12/Vulkan環境におけるゼロワークグループTDR（画面暗転）を防止。
 - **実測性能 (AMD Radeon RX 9070 XT, DirectX 12, substeps=10)**:
@@ -271,6 +271,10 @@ graph TD
   - 10k 頂点（単層カーテン）: 直進 22.2 ms → キャッシュ(Auto+FB) 11.9 ms [**1.86倍**]、Fixed相当 9.4 ms
   - 接近ペア捕捉テスト（30mm離間・相対2m/s）: Fixed 0件 → Auto 48 V-T / 68 E-E件を捕捉（`test_pair_caching.py`）
   - フォールバック分の上乗せは直進1サブステップ相当（+1構築+1フルSolve/frame）に限定される。
+- **頂点枠方式への移行後実測 (RX 9070 XT・substeps=10・同一ベンチマーク)**:
+  - 5k 頂点（二層、K=8）: 直進 約35.6 ms → 頂点枠キャッシュ 約14.0 ms [**約2.5倍**]
+  - 20k 頂点（二層、K=8）: 直進 約26.4 ms → 頂点枠キャッシュ 約12.5 ms [**約2.1倍**]
+  - 旧先着順方式（10.3/10.6 ms）比で約1〜4割の低速化は、Top-K挿入の分岐コストによる。直進比では依然2倍以上高速であり、カバレッジは同予算で約7〜8倍（実ログF90でVT 0.8% → 8.6%）、収集の決定性と頂点間公平性を獲得している。
 
 ---
 

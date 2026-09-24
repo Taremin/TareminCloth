@@ -1,15 +1,22 @@
 """
 taremin_cloth 物理・拘束パラメータ同期モジュール
 剛性・減衰・重力・自己衝突・伸縮グループ・外部追従ピンの各プロパティをGPUシミュレータに同期する。
+設定値の収集は engine.simconfig.collect_sim_config に一本化している。
 """
 
 import bpy
 import numpy as np
 from .cache import (
     _prev_elastic_scales,
-    _prev_stiffness_cache,
     _attachment_pin_indices_cache,
     _prev_attachment_pin_targets,
+)
+from .simconfig import (
+    collect_sim_config,
+    sim_config_signature,
+    apply_sim_config,
+    is_config_current,
+    mark_config_applied,
 )
 from ..utils.logger import logger
 
@@ -20,140 +27,19 @@ def sync_cloth_parameters(sim, obj, scene=None):
     if not settings:
         return
 
-    # 1. 剛性4種 (引張・圧縮・せん断・曲げ)
-    curr_stiffness = (
-        float(settings.tension_stiffness),
-        float(settings.compression_stiffness),
-        float(settings.shear_stiffness),
-        float(settings.bending_stiffness),
-    )
-    if _prev_stiffness_cache.get(obj.name) != curr_stiffness:
-        if hasattr(sim, "set_stiffness_all"):
-            sim.set_stiffness_all(
-                curr_stiffness[0],
-                curr_stiffness[1],
-                curr_stiffness[2],
-                curr_stiffness[3],
-            )
-        elif hasattr(sim, "set_stiffness"):
-            sim.set_stiffness(curr_stiffness[0], curr_stiffness[3])
-        _prev_stiffness_cache[obj.name] = curr_stiffness
+    # 設定収集 (単一経路) と差分スキップ
+    cfg = collect_sim_config(settings, scene)
+    if scene is None:
+        # 従来動作の維持: sceneなしでは重力に触れない
+        cfg.pop("gravity", None)
+    sig = sim_config_signature(cfg)
+    if not is_config_current(obj.name, sig):
+        apply_sim_config(sim, cfg)
+        mark_config_applied(obj.name, sig)
 
-    # 2. 減衰 (空気抵抗・大域減衰 + 減衰4種)
-    if hasattr(sim, "set_damping"):
-        sim.set_damping(settings.air_damping)
-    if hasattr(sim, "set_damping_all"):
-        sim.set_damping_all(
-            settings.tension_damping,
-            settings.compression_damping,
-            settings.shear_damping,
-            settings.bending_damping,
-        )
-
-    # 3. 重力 (Blenderシーン重力 × オブジェクト重力倍率)
-    if scene is not None and hasattr(sim, "set_gravity"):
-        if getattr(scene, "use_gravity", True):
-            sg = scene.gravity
-            scale = settings.gravity
-            sim.set_gravity(sg.x * scale, sg.y * scale, sg.z * scale)
-        else:
-            sim.set_gravity(0.0, 0.0, 0.0)
-
-    # 4. ソルバー反復回数
-    if hasattr(sim, "set_solver_iterations"):
-        sim.set_solver_iterations(settings.solver_iterations)
-
-    # 5. 自己衝突・レイヤー衝突
-    if hasattr(sim, "set_enable_self_collision"):
-        sim.set_enable_self_collision(getattr(settings, "enable_self_collision", False))
-    if hasattr(sim, "set_self_collision_options"):
-        try:
-            max_iters = int(getattr(settings, "self_collision_max_iterations", 256))
-        except (ValueError, TypeError):
-            max_iters = 256
-        sim.set_self_collision_options(
-            relief_factor=getattr(settings, "self_collision_relief_factor", 0.2),
-            max_displacement_ratio=getattr(settings, "self_collision_max_displacement_ratio", 0.2),
-            exclude_neighbors=getattr(settings, "self_collision_exclude_neighbors", True),
-            enable_normal_untangling=getattr(settings, "enable_normal_untangling", True),
-            max_iterations=max_iters,
-        )
-    if hasattr(sim, "set_coupled_self_collision_options"):
-        mode_str = getattr(settings, "coupled_self_collision_mode", "RELAXATION")
-        if mode_str == "OFF":
-            mode_int = 0
-            relax_iters = 0
-        elif mode_str == "FULL_COUPLED":
-            mode_int = 3
-            relax_iters = getattr(settings, "post_collision_relaxation_iters", 1)
-            if relax_iters == 0:
-                relax_iters = 1
-        else:  # "RELAXATION"
-            mode_int = 1
-            relax_iters = getattr(settings, "post_collision_relaxation_iters", 2)
-            if relax_iters == 0:
-                relax_iters = 2
-        sim.set_coupled_self_collision_options(mode_int, relax_iters)
-    if hasattr(sim, "set_self_collision_substep_interval"):
-        interval = int(getattr(settings, "self_collision_substep_interval", 1))
-        sim.set_self_collision_substep_interval(interval)
-    if hasattr(sim, "set_enable_pair_cache"):
-        sim.set_enable_pair_cache(getattr(settings, "enable_pair_cache", False))
-    if hasattr(sim, "set_pair_cache_options"):
-        try:
-            max_pairs = int(getattr(settings, "pair_cache_max_pairs", 32768))
-        except (ValueError, TypeError):
-            max_pairs = 32768
-        margin_mode_str = getattr(settings, "pair_cache_margin_mode", "AUTO")
-        margin_mode = 0 if margin_mode_str == "FIXED" else 1
-        sim.set_pair_cache_options(
-            max_pairs,
-            max_pairs,
-            margin_mode,
-            float(getattr(settings, "pair_cache_safety_margin", 0.005)),
-            float(getattr(settings, "pair_cache_horizon_scale", 1.3)),
-            float(getattr(settings, "pair_cache_max_horizon", 0.02)),
-        )
-    if hasattr(sim, "set_enable_pair_cache_final_fallback"):
-        sim.set_enable_pair_cache_final_fallback(getattr(settings, "enable_pair_cache_final_fallback", True))
-
-    # 5.5. エッジ詳細接触判定
-    if hasattr(sim, "set_enable_edge_collision"):
-        sim.set_enable_edge_collision(getattr(settings, "enable_edge_collision", False))
-    if hasattr(sim, "set_edge_margin_scale"):
-        sim.set_edge_margin_scale(getattr(settings, "edge_margin_scale", 1.0))
-    if hasattr(sim, "set_edge_margin_offset"):
-        sim.set_edge_margin_offset(getattr(settings, "edge_margin_offset", 0.0))
-
-
-    # 5.6. チューニングパラメータ (ソルバー方式・ワークグループサイズ)
-    if hasattr(sim, "set_solver_mode"):
-        s_mode = 1 if getattr(settings, "solver_mode", "COLORING") == 'ATOMIC' else 0
-        sim.set_solver_mode(s_mode)
-    if hasattr(sim, "set_workgroup_size"):
-        wg_size = int(getattr(settings, "workgroup_size", "32"))
-        sim.set_workgroup_size(wg_size)
+    # 転送最適化フラグ (物理外のためSimConfig対象外、従来通り毎フレーム同期)
     if hasattr(sim, "set_enable_compact_readback"):
         sim.set_enable_compact_readback(getattr(settings, "enable_compact_readback", True))
-
-    # 5.7. 縫合パラメータ (剛性・密着ロック)
-    if hasattr(sim, "set_sewing_stiffness"):
-        sim.set_sewing_stiffness(getattr(settings, "sewing_stiffness", 10000.0))
-    if hasattr(sim, "set_enable_sewing_lock"):
-        sim.set_enable_sewing_lock(getattr(settings, "enable_sewing_lock", True))
-
-    # 5.8. 縫合優先モード (工程フェーズ制御: 測定値に基づきRust側で重力スケールを適用)
-    if hasattr(sim, "set_sewing_priority_options"):
-        try:
-            sim.set_sewing_priority_options(
-                bool(getattr(settings, "enable_sewing_priority", False)),
-                float(getattr(settings, "sewing_priority_threshold", 0.9)),
-                float(getattr(settings, "sewing_priority_merge_dist", 0.005)),
-                int(getattr(settings, "sewing_priority_ramp_frames", 3)),
-                int(getattr(settings, "sewing_priority_max_frames", 600)),
-            )
-        except (ValueError, TypeError):
-            pass
 
     # 6. 伸縮グループ (Elastic Bands / Edge Scaling)
     sync_elastic_groups(sim, obj)

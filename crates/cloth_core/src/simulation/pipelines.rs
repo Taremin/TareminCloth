@@ -216,7 +216,7 @@ pub fn build_simulation_resources(
     let sew_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth Sewing Constraint Buffer"),
         contents: sew_contents,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     });
 
     // 動的ピンバッファ (範囲グラブ等の多頂点ピンに備えて余裕を持たせる。8192×32B = 256KB)
@@ -327,7 +327,9 @@ pub fn build_simulation_resources(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: wgpu::TextureFormat::Rg16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let bone_sdf_texture_view = bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1003,33 +1005,35 @@ pub fn build_simulation_resources(
     });
 
     // 接触候補ペアキャッシュ用バッファ & リソース (Active Pair Caching)
-    // 物理確保は最大65536(各約1MB)に据え置き、論理上限は頂点数連動でパラメータ制御。再確保なしで飽和回避。
-    let phys_max_vt_pairs = 65536u32;
-    let phys_max_ee_pairs = 65536u32;
-    let max_vt_pairs = (num_vertices * 8).clamp(8192, phys_max_vt_pairs);
-    let max_ee_pairs = (num_vertices * 8).clamp(8192, phys_max_ee_pairs);
-    let vt_buffer_size = ((phys_max_vt_pairs as usize) * std::mem::size_of::<GpuVtPair>()).max(64) as u64;
-    let ee_buffer_size = ((phys_max_ee_pairs as usize) * std::mem::size_of::<GpuEePair>()).max(64) as u64;
+    // 頂点メジャー配置: 論理 N*quota をコンパクト配置、物理確保は N*QUOTA_MAX(8)。
+    // 収集時に毎フレーム全論理範囲を書き直すため quota 変更時も整合する。
+    use super::PAIR_QUOTA_MAX;
+    let phys_slots = ((num_vertices * PAIR_QUOTA_MAX).max(64)) as usize;
+    // 初期予算 (with_options の既定値と一致。初回 write_* で上書きされる)
+    let max_vt_pairs = (num_vertices * 8).clamp(8192, 262144);
+    let max_ee_pairs = (num_vertices * 8).clamp(8192, 262144);
+    let vt_buffer_size = (phys_slots * std::mem::size_of::<GpuVtPair>()) as u64;
+    let ee_buffer_size = (phys_slots * std::mem::size_of::<GpuEePair>()) as u64;
 
     let active_vt_pairs_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Active VT Pairs Buffer"),
         size: vt_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
     let active_ee_pairs_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Active EE Pairs Buffer"),
         size: ee_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
     let initial_counters = PairCounters {
         vt_count: 0,
         ee_count: 0,
-        _pad0: 0,
-        _pad1: 0,
+        vt_dropped: 0,
+        ee_dropped: 0,
     };
     let pair_counters_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Pair Counters Buffer"),
@@ -1049,7 +1053,8 @@ pub fn build_simulation_resources(
         dt_frame: 1.0 / 60.0,
         velocity_horizon_scale: 1.3,
         max_horizon: 0.02,
-        _pad0: 0,
+        quota_vt: PAIR_QUOTA_MAX,
+        quota_ee: PAIR_QUOTA_MAX,
     };
     let pair_collect_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Pair Collect Params Buffer"),
@@ -1059,8 +1064,8 @@ pub fn build_simulation_resources(
 
     let pair_solve_params = PairSolveParams {
         num_vertices,
-        max_vt_pairs,
-        max_ee_pairs,
+        max_vt_pairs: num_vertices * PAIR_QUOTA_MAX,
+        max_ee_pairs: num_vertices * PAIR_QUOTA_MAX,
         enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
     };
     let pair_solve_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

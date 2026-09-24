@@ -181,44 +181,32 @@ def extract_bone_sdf_data(scene=None) -> Tuple[Optional[Dict[str, Any]], List[Di
 
 
 def extract_self_collision_data(settings) -> Optional[Dict[str, Any]]:
-    """自己衝突オプションを抽出する"""
+    """自己衝突オプションを抽出する (engine.simconfig.collect_sim_config が正本)"""
     if not settings:
         return None
 
-    mode_str = getattr(settings, "coupled_self_collision_mode", "RELAXATION")
-    if mode_str == "OFF":
-        mode_int = 0
-        relax_iters = 0
-    elif mode_str == "FULL_COUPLED":
-        mode_int = 3
-        relax_iters = int(getattr(settings, "post_collision_relaxation_iters", 1))
-        if relax_iters == 0:
-            relax_iters = 1
-    else:
-        mode_int = 1
-        relax_iters = int(getattr(settings, "post_collision_relaxation_iters", 2))
-        if relax_iters == 0:
-            relax_iters = 2
-
+    from .simconfig import collect_sim_config
+    cfg = collect_sim_config(settings)
     return {
-        "enabled": bool(getattr(settings, "enable_self_collision", False)),
-        "coupled_mode": mode_int,
-        "post_relaxation_iters": relax_iters,
-        "relief_factor": float(getattr(settings, "self_collision_relief_factor", 0.2)),
-        "max_displacement_ratio": float(getattr(settings, "self_collision_max_displacement_ratio", 0.2)),
-        "exclude_neighbors": bool(getattr(settings, "self_collision_exclude_neighbors", True)),
-        "enable_normal_untangling": bool(getattr(settings, "enable_normal_untangling", True)),
-        "substep_interval": int(getattr(settings, "self_collision_substep_interval", 1)),
-        "enable_edge_collision": bool(getattr(settings, "enable_edge_collision", False)),
-        "edge_margin_scale": float(getattr(settings, "edge_margin_scale", 1.0)),
-        "edge_margin_offset": float(getattr(settings, "edge_margin_offset", 0.0)),
-        "enable_pair_cache": bool(getattr(settings, "enable_pair_cache", False)),
-        "pair_cache_margin_mode": 0 if getattr(settings, "pair_cache_margin_mode", "AUTO") == "FIXED" else 1,
-        "pair_cache_safety_margin": float(getattr(settings, "pair_cache_safety_margin", 0.005)),
-        "pair_cache_horizon_scale": float(getattr(settings, "pair_cache_horizon_scale", 1.3)),
-        "pair_cache_max_horizon": float(getattr(settings, "pair_cache_max_horizon", 0.02)),
-        "pair_cache_max_pairs": int(getattr(settings, "pair_cache_max_pairs", 32768)),
-        "enable_pair_cache_final_fallback": bool(getattr(settings, "enable_pair_cache_final_fallback", True)),
+        "enabled": bool(cfg["enable_self_collision"]),
+        "coupled_mode": int(cfg["coupled_mode"]),
+        "post_relaxation_iters": int(cfg["post_relaxation_iters"]),
+        "relief_factor": float(cfg["relief_factor"]),
+        "max_displacement_ratio": float(cfg["max_displacement_ratio"]),
+        "max_iterations": int(cfg["self_collision_max_iterations"]),
+        "exclude_neighbors": bool(cfg["exclude_neighbors"]),
+        "enable_normal_untangling": bool(cfg["enable_normal_untangling"]),
+        "substep_interval": int(cfg["substep_interval"]),
+        "enable_edge_collision": bool(cfg["enable_edge_collision"]),
+        "edge_margin_scale": float(cfg["edge_margin_scale"]),
+        "edge_margin_offset": float(cfg["edge_margin_offset"]),
+        "enable_pair_cache": bool(cfg["enable_pair_cache"]),
+        "pair_cache_margin_mode": int(cfg["pair_margin_mode"]),
+        "pair_cache_safety_margin": float(cfg["pair_safety_margin"]),
+        "pair_cache_horizon_scale": float(cfg["pair_horizon_scale"]),
+        "pair_cache_max_horizon": float(cfg["pair_max_horizon"]),
+        "pair_cache_max_pairs": int(cfg["pair_max_pairs"]),
+        "enable_pair_cache_final_fallback": bool(cfg["enable_pair_final_fallback"]),
     }
 
 
@@ -399,15 +387,13 @@ class ClothGuiClient:
         sewing_springs = cloth_data.sewing_edges.tolist() if cloth_data.sewing_edges is not None else None
         inv_masses = cloth_data.inv_masses.tolist()
 
-        # 重力ベクトル & 重力倍率
-        scale = float(getattr(settings, "gravity", 1.0)) if settings else 1.0
-        gravity = [0.0, 0.0, -9.81 * scale]
-        if scene and getattr(scene, "use_gravity", True):
-            sg = scene.gravity
-            gravity = [float(sg.x * scale), float(sg.y * scale), float(sg.z * scale)]
-        elif scene:
-            gravity = [0.0, 0.0, 0.0]
-            scale = 0.0
+        # 全物理パラメータ収集 (単一経路: engine.simconfig)
+        from .simconfig import collect_sim_config
+        cfg = collect_sim_config(settings, scene) if settings else {}
+
+        # 重力ベクトル & 重力倍率 (コレクタ算出値を使用)
+        gravity = [float(v) for v in cfg.get("gravity", [0.0, 0.0, -9.81])]
+        scale = float(cfg.get("gravity_scale", 1.0))
 
         # コライダー抽出
         colliders, mesh_triangles = extract_scene_colliders(scene)
@@ -434,26 +420,28 @@ class ClothGuiClient:
                 "inv_masses": inv_masses,
                 "layer_id": int(getattr(settings, "layer_id", 0)) if settings else 0,
                 "thickness": float(getattr(settings, "thickness", 0.005)) if settings else 0.005,
-                "stiffness": float(getattr(settings, "tension_stiffness", 100.0)) if settings else 100.0,
-                "compression_stiffness": float(getattr(settings, "compression_stiffness", 100.0)) if settings else 100.0,
-                "shear_stiffness": float(getattr(settings, "shear_stiffness", 50.0)) if settings else 50.0,
-                "bending_stiffness": float(getattr(settings, "bending_stiffness", 1.0)) if settings else 1.0,
-                "air_damping": float(getattr(settings, "air_damping", 0.01)) if settings else 0.01,
-                "tension_damping": float(getattr(settings, "tension_damping", 0.0)) if settings else 0.0,
-                "compression_damping": float(getattr(settings, "compression_damping", 0.0)) if settings else 0.0,
-                "shear_damping": float(getattr(settings, "shear_damping", 0.0)) if settings else 0.0,
-                "bending_damping": float(getattr(settings, "bending_damping", 0.0)) if settings else 0.0,
+                "stiffness": float(cfg.get("tension_stiffness", 100.0)),
+                "compression_stiffness": float(cfg.get("compression_stiffness", 100.0)),
+                "shear_stiffness": float(cfg.get("shear_stiffness", 50.0)),
+                "bending_stiffness": float(cfg.get("bending_stiffness", 1.0)),
+                "air_damping": float(cfg.get("damping", 0.01)),
+                "tension_damping": float(cfg.get("tension_damping", 0.0)),
+                "compression_damping": float(cfg.get("compression_damping", 0.0)),
+                "shear_damping": float(cfg.get("shear_damping", 0.0)),
+                "bending_damping": float(cfg.get("bending_damping", 0.0)),
                 "gravity": gravity,
                 "gravity_scale": scale,
-                "sewing_shrink_speed": float(getattr(settings, "sewing_shrink_speed", 0.5)) if settings else 0.5,
-                "sewing_priority_enabled": bool(getattr(settings, "enable_sewing_priority", False)) if settings else False,
-                "sewing_priority_threshold": float(getattr(settings, "sewing_priority_threshold", 0.9)) if settings else 0.9,
-                "sewing_priority_merge_dist": float(getattr(settings, "sewing_priority_merge_dist", 0.005)) if settings else 0.005,
-                "sewing_priority_ramp_frames": int(getattr(settings, "sewing_priority_ramp_frames", 3)) if settings else 3,
-                "sewing_priority_max_frames": int(getattr(settings, "sewing_priority_max_frames", 600)) if settings else 600,
-                "workgroup_size": int(getattr(settings, "workgroup_size", "32")) if settings else 32,
-                "solver_mode": 1 if getattr(settings, "solver_mode", "COLORING") == 'ATOMIC' else 0,
-                "solver_iterations": int(getattr(settings, "solver_iterations", 10)) if settings else 10,
+                "sewing_shrink_speed": float(cfg.get("sewing_shrink_speed", 0.5)),
+                "sewing_stiffness": float(cfg.get("sewing_stiffness", 10000.0)),
+                "enable_sewing_lock": bool(cfg.get("enable_sewing_lock", True)),
+                "sewing_priority_enabled": bool(cfg.get("sewing_priority_enabled", False)),
+                "sewing_priority_threshold": float(cfg.get("sewing_priority_threshold", 0.9)),
+                "sewing_priority_merge_dist": float(cfg.get("sewing_priority_merge_dist", 0.005)),
+                "sewing_priority_ramp_frames": int(cfg.get("sewing_priority_ramp_frames", 3)),
+                "sewing_priority_max_frames": int(cfg.get("sewing_priority_max_frames", 600)),
+                "workgroup_size": int(cfg.get("workgroup_size", 32)),
+                "solver_mode": int(cfg.get("solver_mode", 0)),
+                "solver_iterations": int(cfg.get("solver_iterations", 10)),
                 "substeps": int(getattr(settings, "substeps", 20)) if settings else 20,
                 "fps": float(scene.render.fps) if scene and hasattr(scene, "render") else 60.0,
                 "self_collision": self_col,
@@ -656,37 +644,27 @@ class ClothGuiClient:
         if not settings:
             return False
 
-        # 重力ベクトル算出 (シーン重力 × オブジェクト重力倍率)
-        if scene is not None:
-            if getattr(scene, "use_gravity", True):
-                sg = scene.gravity
-                scale = float(getattr(settings, "gravity", 1.0))
-                gravity_vec = [float(sg.x * scale), float(sg.y * scale), float(sg.z * scale)]
-            else:
-                scale = 0.0
-                gravity_vec = [0.0, 0.0, 0.0]
-        else:
-            scale = float(getattr(settings, "gravity", 1.0))
-            gravity_vec = [0.0, 0.0, -9.81 * scale]
+        from .simconfig import collect_sim_config
+        cfg = collect_sim_config(settings, scene)
 
         params = {
-            "gravity": gravity_vec,
-            "gravity_scale": scale,
-            "air_damping": float(getattr(settings, "air_damping", 1.0)),
-            "tension_damping": float(getattr(settings, "tension_damping", 5.0)),
-            "compression_damping": float(getattr(settings, "compression_damping", 5.0)),
-            "shear_damping": float(getattr(settings, "shear_damping", 5.0)),
-            "bending_damping": float(getattr(settings, "bending_damping", 0.5)),
-            "stiffness": float(getattr(settings, "tension_stiffness", 1000.0)),
-            "compression_stiffness": float(getattr(settings, "compression_stiffness", 100.0)),
-            "shear_stiffness": float(getattr(settings, "shear_stiffness", 100.0)),
-            "bending_stiffness": float(getattr(settings, "bending_stiffness", 10.0)),
-            "solver_iterations": int(getattr(settings, "solver_iterations", 2)),
-            "sewing_priority_enabled": bool(getattr(settings, "enable_sewing_priority", False)),
-            "sewing_priority_threshold": float(getattr(settings, "sewing_priority_threshold", 0.9)),
-            "sewing_priority_merge_dist": float(getattr(settings, "sewing_priority_merge_dist", 0.005)),
-            "sewing_priority_ramp_frames": int(getattr(settings, "sewing_priority_ramp_frames", 3)),
-            "sewing_priority_max_frames": int(getattr(settings, "sewing_priority_max_frames", 600)),
+            "gravity": [float(v) for v in cfg["gravity"]],
+            "gravity_scale": float(cfg["gravity_scale"]),
+            "air_damping": float(cfg["damping"]),
+            "tension_damping": float(cfg["tension_damping"]),
+            "compression_damping": float(cfg["compression_damping"]),
+            "shear_damping": float(cfg["shear_damping"]),
+            "bending_damping": float(cfg["bending_damping"]),
+            "stiffness": float(cfg["tension_stiffness"]),
+            "compression_stiffness": float(cfg["compression_stiffness"]),
+            "shear_stiffness": float(cfg["shear_stiffness"]),
+            "bending_stiffness": float(cfg["bending_stiffness"]),
+            "solver_iterations": int(cfg["solver_iterations"]),
+            "sewing_priority_enabled": bool(cfg["sewing_priority_enabled"]),
+            "sewing_priority_threshold": float(cfg["sewing_priority_threshold"]),
+            "sewing_priority_merge_dist": float(cfg["sewing_priority_merge_dist"]),
+            "sewing_priority_ramp_frames": int(cfg["sewing_priority_ramp_frames"]),
+            "sewing_priority_max_frames": int(cfg["sewing_priority_max_frames"]),
         }
 
         # 差分検知: 前回送信したパラメータと完全一致している場合はスキップ

@@ -106,6 +106,16 @@ python -m unittest tests/test_issue_f71.py
 | `check-intersections` | 指定フレームの自己交差三角形ペアを検出 | `python -m taremin_cloth.log_tools check-intersections input.jsonl.gz -f 71` |
 | `diff` | 2つのシミュレーションログ間で頂点位置の差分・誤差を比較 | `python -m taremin_cloth.log_tools diff log1.jsonl.gz log2.jsonl.gz --tolerance 1.0` |
 | `export-obj` | 指定フレームをOBJ形式でエクスポート | `python -m taremin_cloth.log_tools export-obj input.jsonl.gz -f 71 -o f71.obj` |
+| `watch` | 条件付きブレーク付きリプレイで最初のHitフレームを特定し前後を切り出す | `python -m taremin_cloth.log_tools watch input.jsonl.gz --stop-on "disp>5,vt_sat" -o hit.jsonl.gz` |
+| `audit` | cache ON/OFFの2本ログからPairCache見逃しを定量化 | `python -m taremin_cloth.log_tools audit cache.jsonl.gz direct.jsonl.gz --tolerance 1.0` |
+| `audit-pairs` | GPU収集ペアとCPU真値のカバレッジ分類 (hit/stale/horizon/other/飽和) | `python -m taremin_cloth.log_tools audit-pairs input.jsonl.gz -f 71` |
+| `audit-cache` | 同一ログのON/OFF再現で貫通起因を判定 (再記録不要) | `python -m taremin_cloth.log_tools audit-cache input.jsonl.gz -f 71 --lookback 3` |
+
+> [!TIP]
+> **スパース記録 (2階層ロギング)**: `sim.set_debug_recording_options(full_stride=5, ring_size=3, lookahead=2, enable_triggers=True)` で間引きフル保存+トリガー時文脈復元。スタブ区間は座標なし (`inspect` はstats表示、`render/check/export-obj` は近傍フルを案内、`replay_range/replay_until` は入力連続性を保ちフル区間のみ比較)。スパース形式のファイルは `version: 3` で識別される。
+>
+> [!TIP]
+> **grab解放後の残存貫通の切り分け**: `watch --stop-on intersections --require-release --persist 5` で解放後の持続貫通を特定し、`audit-cache` でキャッシュ起因かを判定する (grab中の瞬間貫通は除外される)。
 
 ---
 

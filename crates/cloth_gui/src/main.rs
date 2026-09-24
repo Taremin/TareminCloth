@@ -105,8 +105,8 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                         data.shear_stiffness,
                         data.bending_stiffness,
                         data.sewing_shrink_speed,
-                        None,
-                        None,
+                        Some(data.sewing_stiffness),
+                        Some(data.enable_sewing_lock),
                     );
 
 
@@ -251,51 +251,51 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
 }
 
 fn apply_simulation_parameters(sim: &mut GpuClothSimulator, data: &protocol::SceneInitData) {
-    // 剛性4種
-    sim.set_stiffness_all(
-        data.stiffness,
-        data.compression_stiffness,
-        data.shear_stiffness,
-        data.bending_stiffness,
-    );
-    // 減衰
-    sim.set_damping(data.air_damping);
-    sim.set_damping_all(
-        data.tension_damping,
-        data.compression_damping,
-        data.shear_damping,
-        data.bending_damping,
-    );
-    // 重力
-    sim.set_gravity(data.gravity[0], data.gravity[1], data.gravity[2]);
-    // ソルバー反復回数
-    sim.solver_iterations = data.solver_iterations;
-
-    // 自己衝突オプション
+    // SimConfig一本化: InitScene受信値を正本構造体に写像して一括適用する。
+    // 個別setterの手列挙は行わない (新パラメータはここへの1行追加で伝播する)。
+    let mut cfg = cloth_core::config::SimConfig::default();
+    cfg.gravity = data.gravity;
+    cfg.damping = data.air_damping;
+    cfg.tension_damping = data.tension_damping;
+    cfg.compression_damping = data.compression_damping;
+    cfg.shear_damping = data.shear_damping;
+    cfg.bending_damping = data.bending_damping;
+    cfg.tension_stiffness = data.stiffness;
+    cfg.compression_stiffness = data.compression_stiffness;
+    cfg.shear_stiffness = data.shear_stiffness;
+    cfg.bending_stiffness = data.bending_stiffness;
+    cfg.solver_iterations = data.solver_iterations;
+    cfg.solver_mode = data.solver_mode;
+    cfg.workgroup_size = data.workgroup_size;
+    cfg.sewing_stiffness = data.sewing_stiffness;
+    cfg.enable_sewing_lock = data.enable_sewing_lock;
+    cfg.sewing_priority_enabled = data.sewing_priority_enabled;
+    cfg.sewing_priority_threshold = data.sewing_priority_threshold;
+    cfg.sewing_priority_merge_dist = data.sewing_priority_merge_dist;
+    cfg.sewing_priority_ramp_frames = data.sewing_priority_ramp_frames;
+    cfg.sewing_priority_max_frames = data.sewing_priority_max_frames;
     if let Some(ref sc) = data.self_collision {
-        sim.set_enable_self_collision(sc.enabled);
-        sim.set_self_collision_options(
-            sc.relief_factor,
-            sc.max_displacement_ratio,
-            sc.exclude_neighbors,
-            sc.enable_normal_untangling,
-            256,
-        );
-        sim.set_coupled_self_collision_options(sc.coupled_mode, sc.post_relaxation_iters);
-        sim.set_enable_edge_collision(sc.enable_edge_collision);
-        sim.set_edge_margin_scale(sc.edge_margin_scale);
-        sim.set_edge_margin_offset(sc.edge_margin_offset);
-        sim.set_enable_pair_cache(sc.enable_pair_cache);
-        sim.set_pair_cache_options(
-            sc.pair_cache_max_pairs,
-            sc.pair_cache_max_pairs,
-            sc.pair_cache_margin_mode,
-            sc.pair_cache_safety_margin,
-            sc.pair_cache_horizon_scale,
-            sc.pair_cache_max_horizon,
-        );
-        sim.set_enable_pair_cache_final_fallback(sc.enable_pair_cache_final_fallback);
+        cfg.enable_self_collision = sc.enabled;
+        cfg.relief_factor = sc.relief_factor;
+        cfg.max_displacement_ratio = sc.max_displacement_ratio;
+        cfg.exclude_neighbors = sc.exclude_neighbors;
+        cfg.enable_normal_untangling = sc.enable_normal_untangling;
+        cfg.self_collision_max_iterations = sc.max_iterations;
+        cfg.coupled_mode = sc.coupled_mode;
+        cfg.post_relaxation_iters = sc.post_relaxation_iters;
+        cfg.substep_interval = sc.substep_interval;
+        cfg.enable_pair_cache = sc.enable_pair_cache;
+        cfg.pair_margin_mode = sc.pair_cache_margin_mode;
+        cfg.pair_safety_margin = sc.pair_cache_safety_margin;
+        cfg.pair_horizon_scale = sc.pair_cache_horizon_scale;
+        cfg.pair_max_horizon = sc.pair_cache_max_horizon;
+        cfg.pair_max_pairs = sc.pair_cache_max_pairs;
+        cfg.enable_pair_final_fallback = sc.enable_pair_cache_final_fallback;
+        cfg.enable_edge_collision = sc.enable_edge_collision;
+        cfg.edge_margin_scale = sc.edge_margin_scale;
+        cfg.edge_margin_offset = sc.edge_margin_offset;
     }
+    sim.apply_config(&cfg);
 
     // 伸縮グループ
     if let Some(ref eb) = data.elastic_bands {

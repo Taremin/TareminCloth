@@ -44,10 +44,18 @@ def cmd_inspect(args: argparse.Namespace) -> None:
     print(f" Object: {meta.get('object_name')} | Verts: {meta.get('num_vertices')} | Faces: {meta.get('num_faces')}")
     print(f" Gravity: {meta.get('gravity')} | Thickness: {meta.get('thickness')} | Damping: {meta.get('damping')}")
     print(f" SelfCollision: {meta.get('enable_self_collision')} (relief={meta.get('self_collision_relief_factor')})")
+    cfg = meta.get("config") if isinstance(meta.get("config"), dict) else None
+    if cfg is not None:
+        print(f" SimConfig: coupled={cfg.get('coupled_mode')} interval={cfg.get('substep_interval')} "
+              f"pair_cache={cfg.get('enable_pair_cache')} max_pairs={cfg.get('pair_max_pairs')}")
+    else:
+        print(f" SimConfig: (旧ログ: configなし、個別フィールドのみ)")
     print(f"--------------------------------------------------")
 
     prev_pos = None
+    prev_hash = None
     frame_count = 0
+    full_count = 0
     anomalies = []
     max_overall_disp = 0.0
     max_disp_frame = 0
@@ -55,17 +63,33 @@ def cmd_inspect(args: argparse.Namespace) -> None:
     for frame in replayer.iter_frames(log_path):
         frame_count += 1
         f_idx = frame["frame_index"]
-        pos = np.array(frame["positions"], dtype=np.float32).reshape((-1, 3))
         stats = frame.get("stats", {})
+        has_full = replayer.frame_has_positions(frame)
+        if has_full:
+            full_count += 1
+            pos = np.array(frame["positions"], dtype=np.float32).reshape((-1, 3))
+        else:
+            pos = None
 
         has_nan = stats.get("has_nan_or_inf", False)
         max_vel = stats.get("max_velocity", 0.0)
+        vt_sat = bool(stats.get("vt_saturated", False))
+        vt_c = int(stats.get("vt_count", 0))
+        ee_c = int(stats.get("ee_count", 0))
+        strain = float(stats.get("max_strain", 0.0))
+        chash = stats.get("config_hash", 0)
+        hash_changed = prev_hash is not None and chash != 0 and prev_hash != 0 and chash != prev_hash
 
-        # 変位の計算
+        # 変位の計算 (スタブはstatsの記録値を採用)
         disp_mm = 0.0
-        if prev_pos is not None:
+        if pos is not None and prev_pos is not None and pos.shape == prev_pos.shape:
             disps = np.linalg.norm(pos - prev_pos, axis=1) * 1000.0  # mm
             disp_mm = float(np.max(disps))
+            if disp_mm > max_overall_disp:
+                max_overall_disp = disp_mm
+                max_disp_frame = f_idx
+        elif pos is None:
+            disp_mm = float(stats.get("max_displacement", 0.0)) * 1000.0
             if disp_mm > max_overall_disp:
                 max_overall_disp = disp_mm
                 max_disp_frame = f_idx
@@ -76,16 +100,25 @@ def cmd_inspect(args: argparse.Namespace) -> None:
         num_pins = len(frame.get("pins", []))
         num_cols = len(frame.get("colliders", []))
 
-        if has_nan or is_spike or is_high_vel:
+        if has_nan or is_spike or is_high_vel or vt_sat or hash_changed:
             flags = []
             if has_nan: flags.append("NaN/Inf")
             if is_spike: flags.append(f"DispSpike({disp_mm:.1f}mm)")
             if is_high_vel: flags.append(f"HighVel({max_vel:.2f}m/s)")
+            if vt_sat: flags.append(f"PairSat(vt={vt_c},ee={ee_c})")
+            if strain > 0.5: flags.append(f"Strain({strain:.2f})")
+            if hash_changed: flags.append("ConfigChanged")
+            if not has_full: flags.append("stub")
             anomalies.append((f_idx, ", ".join(flags), num_pins, num_cols))
 
-        prev_pos = pos
+        if pos is not None:
+            prev_pos = pos
+        if chash != 0:
+            prev_hash = chash
 
-    print(f" Total Frames: {frame_count}")
+    print(f" Total Frames: {frame_count} (full: {full_count}, stubs: {frame_count - full_count})")
+    if frame_count != full_count:
+        print(f" Sparse log: スタブ区間は座標なし (render/check/audit時は近傍フルを使用してください)")
     print(f" Max Displacement: {max_overall_disp:.1f} mm (at Frame {max_disp_frame})")
 
     if anomalies:
@@ -155,6 +188,16 @@ def cmd_make_test(args: argparse.Namespace) -> None:
         output=slice_log_path
     )
     cmd_slice(args_slice)
+
+    # スタブ警告
+    try:
+        total, full = replayer.count_full_frames(slice_log_path)
+        if total != full:
+            print(f"注意: スライス内にスタブ {total - full}/{total} 件が含まれます。"
+                  f"再現はフル区間のみ比較します。Target Frame {target_f} がスタブの場合は"
+                  f"近傍フル {replayer.nearest_full_frame(slice_log_path, target_f)} を使用してください。")
+    except Exception:
+        pass
 
     # unittest スクリプトの生成
     template = f'''"""
@@ -291,6 +334,18 @@ def cmd_render(args: argparse.Namespace) -> None:
         print(f"エラー: 指定されたフレーム {target_frames[:5]}... がログに見つかりません（利用可能: 0〜{max_avail}）。")
         sys.exit(1)
 
+    # スタブ除外 (座標なしフレームは描画不可)
+    render_frames = [f_idx for f_idx in valid_frames if replayer.frame_has_positions(available_frames[f_idx])]
+    skipped = [f_idx for f_idx in valid_frames if f_idx not in render_frames]
+    if skipped:
+        near = replayer.nearest_full_frame(log_path, skipped[0])
+        print(f"注意: スタブ {len(skipped)} 件を除外します (例: Frame {skipped[0]}、近傍フル: Frame {near})。")
+    if not render_frames:
+        near = replayer.nearest_full_frame(log_path, valid_frames[0])
+        print(f"エラー: 指定フレームはすべてスタブ (座標なし) です。近傍フル: Frame {near}。full_stride=1で再記録してください。")
+        sys.exit(1)
+    valid_frames = render_frames
+
     ext = os.path.splitext(out_path)[1].lower()
     fmt = (getattr(args, "format", "") or "").lower()
     is_animation = fmt in ("apng", "gif") or ext in (".gif",) or (fmt == "png" and len(valid_frames) > 1 and "%" not in out_path)
@@ -410,14 +465,20 @@ def cmd_render_coloring(args: argparse.Namespace) -> None:
     faces = np.array(meta.get("faces", []), dtype=np.uint32)
 
     frame = replayer.get_frame(log_path, args.frame)
-    if frame is None:
-        # 見つからない場合は最初のフレームを使用
-        for f in replayer.iter_frames(log_path):
-            frame = f
-            break
+    if frame is None or not replayer.frame_has_positions(frame):
+        # スタブ時は近傍フルにフォールバック
+        near = replayer.nearest_full_frame(log_path, args.frame)
+        if near is not None:
+            print(f"注意: Frame {args.frame} はスタブのため近傍フル Frame {near} を使用します。")
+            frame = replayer.get_frame(log_path, near)
+        if frame is None or not replayer.frame_has_positions(frame):
+            for f in replayer.iter_frames(log_path):
+                if replayer.frame_has_positions(f):
+                    frame = f
+                    break
 
-    if frame is None:
-        print("エラー: ログ内に有効なフレームが見つかりません。")
+    if frame is None or not replayer.frame_has_positions(frame):
+        print("エラー: ログ内にフル座標フレームが見つかりません。")
         sys.exit(1)
 
     positions = np.array(frame["positions"], dtype=np.float32).reshape((-1, 3))
@@ -521,6 +582,10 @@ def cmd_check_intersections(args: argparse.Namespace) -> None:
     if frame is None:
         print(f"エラー: Frame {target_f} がログに見つかりません。")
         sys.exit(1)
+    if not replayer.frame_has_positions(frame):
+        near = replayer.nearest_full_frame(log_path, target_f)
+        print(f"エラー: Frame {target_f} はスタブ (座標なし) です。近傍フル: Frame {near}。")
+        sys.exit(1)
 
     pos = np.array(frame["positions"], dtype=np.float32).reshape((-1, 3))
     pairs = analysis.find_triangle_intersections(pos, faces)
@@ -545,6 +610,10 @@ def cmd_export_obj(args: argparse.Namespace) -> None:
 
     if frame is None:
         print(f"エラー: Frame {target_f} がログに見つかりません。")
+        sys.exit(1)
+    if not replayer.frame_has_positions(frame):
+        near = replayer.nearest_full_frame(log_path, target_f)
+        print(f"エラー: Frame {target_f} はスタブ (座標なし) です。近傍フル: Frame {near}。")
         sys.exit(1)
 
     pos = np.array(frame["positions"], dtype=np.float32).reshape((-1, 3))
@@ -577,13 +646,23 @@ def cmd_diff(args: argparse.Namespace) -> None:
         print("エラー: 共通するフレームが存在しません。")
         sys.exit(1)
 
+    # スタブ除外 (両方フルなフレームのみ比較)
+    cmp_frames = [i for i in common_frames
+                  if replayer.frame_has_positions(frames1[i]) and replayer.frame_has_positions(frames2[i])]
+    skipped = len(common_frames) - len(cmp_frames)
+    if skipped:
+        print(f"注意: スタブ {skipped} 件を除外して比較します。")
+    if not cmp_frames:
+        print("エラー: 比較可能なフルフレームが存在しません。")
+        sys.exit(1)
+
     print(f"{'Frame':<8} | {'Max Diff (mm)':<15} | {'Mean Diff (mm)':<15} | {'Status':<10}")
     print("-" * 55)
 
     max_overall_diff = 0.0
     exceeded_count = 0
 
-    for f_idx in common_frames:
+    for f_idx in cmp_frames:
         p1 = np.array(frames1[f_idx]["positions"], dtype=np.float32).reshape((-1, 3))
         p2 = np.array(frames2[f_idx]["positions"], dtype=np.float32).reshape((-1, 3))
 
@@ -606,12 +685,289 @@ def cmd_diff(args: argparse.Namespace) -> None:
         print(f"F{f_idx:<7} | {max_d:12.4f} mm | {mean_d:12.4f} mm | {status}")
 
     print("-" * 55)
-    print(f"比較結果: 全 {len(common_frames)} フレーム中 {exceeded_count} フレームで許容誤差 ({tol} mm) を超過")
+    print(f"比較結果: 全 {len(cmp_frames)} フレーム中 {exceeded_count} フレームで許容誤差 ({tol} mm) を超過")
     print(f"最大誤差: {max_overall_diff:.4f} mm")
     if exceeded_count == 0:
         print("[+] 両ログは完全に許容誤差内で一致しています。")
     else:
         print("[!] 挙動に有意な差分が検出されました。")
+
+
+def cmd_watch(args: argparse.Namespace) -> None:
+    """条件付きブレークポイント付きリプレイで最初のHitフレームを特定する"""
+    log_path = args.log_file
+    meta = replayer.read_metadata(log_path)
+    faces = np.array(meta.get("faces", []), dtype=np.uint32)
+    rp = replayer.ClothReplayer(log_path)
+
+    # 停止条件の解釈: "disp>5,intersections,vt_sat,vert:123" 形式
+    spec = (args.stop_on or "disp>5").strip()
+    disp_thr = None
+    want_isect = False
+    want_sat = False
+    want_config = False
+    want_release = False
+    persist_spec = None
+    watch_verts: List[int] = []
+    for tok in spec.split(","):
+        tok = tok.strip().lower()
+        if tok.startswith("disp>"):
+            try:
+                disp_thr = float(tok.split(">", 1)[1])
+            except ValueError:
+                pass
+        elif tok in ("intersections", "isect", "penetration"):
+            want_isect = True
+        elif tok in ("vt_sat", "saturated", "pair_sat"):
+            want_sat = True
+        elif tok in ("config", "param", "params", "config_changed"):
+            want_config = True
+        elif tok in ("release", "released", "after-release"):
+            want_release = True
+        elif tok.startswith("persist:") or tok.startswith("persist>"):
+            try:
+                persist_spec = int(tok.split(":", 1)[1] if ":" in tok else tok.split(">", 1)[1])
+            except ValueError:
+                pass
+        elif tok.startswith("vert:"):
+            try:
+                watch_verts.extend(int(v) for v in tok.split(":", 1)[1].split("+") if v.strip() != "")
+            except ValueError:
+                pass
+    if args.watch_verts:
+        watch_verts.extend(int(v) for v in args.watch_verts.split(",") if v.strip() != "")
+    if args.vt_sat:
+        want_sat = True
+    if args.intersections:
+        want_isect = True
+    if getattr(args, "config_changed", False):
+        want_config = True
+    if getattr(args, "require_release", False):
+        want_release = True
+    if args.disp is not None:
+        disp_thr = float(args.disp)
+
+    pred = replayer.build_stop_predicate(
+        disp_mm=disp_thr,
+        intersections=want_isect,
+        faces=faces if want_isect else None,
+        vt_saturated=want_sat,
+        watch_verts=watch_verts or None,
+        watch_vert_disp_mm=float(args.watch_disp_mm),
+        max_diff_m=float(args.max_diff_mm) / 1000.0 if args.max_diff_mm is not None else None,
+        config_changed=want_config,
+    )
+    # リリースゲート＋持続条件でラップ (既定 persist=1・ゲートなしは従来動作と同一)
+    persist = int(getattr(args, "persist", 1) or 1)
+    if persist_spec is not None:
+        persist = persist_spec
+    persist = max(1, persist)
+    require_release = bool(getattr(args, "require_release", False)) or want_release
+    pred = replayer.build_release_persist_predicate(
+        pred, persist=persist, require_release=require_release)
+
+    # end未指定時はログ末尾まで
+    end_f = args.end
+    if end_f is None:
+        end_f = -1
+        for f in replayer.iter_frames(log_path):
+            end_f = max(end_f, int(f.get("frame_index", 0)))
+
+    hit = rp.replay_until(
+        start_frame_idx=int(args.start),
+        end_frame_idx=int(end_f),
+        stop_on=pred,
+        stride=int(args.stride),
+    )
+    if hit is None:
+        print(f"[watch] No hit: {spec} (frames {args.start}..{end_f})")
+        return
+    f_idx = int(hit["frame_index"])
+    print(f"[watch] HIT Frame {f_idx}: {hit.get('reason', '')}")
+    try:
+        rel = getattr(pred, "state", {}).get("release_frame")
+        if rel is not None:
+            print(f"  release detected at Frame {rel}")
+    except Exception:
+        pass
+    print(f"  max_disp={hit.get('max_disp_mm', 0.0):.2f}mm max_diff={hit.get('max_diff', 0.0):.6f}m "
+          f"vt={hit.get('vt_count')} ee={hit.get('ee_count')} saturated={hit.get('vt_saturated')}")
+    if args.output:
+        lookback = int(args.lookback)
+        s = max(int(args.start), f_idx - lookback)
+        e = f_idx + int(args.lookahead)
+        args_slice = argparse.Namespace(log_file=log_path, start=s, end=e, output=args.output)
+        cmd_slice(args_slice)
+
+
+def cmd_audit_pairs(args: argparse.Namespace) -> None:
+    """指定フレームのペアカバレッジ監査 (GPU収集 vs CPUグラウンドトゥルース)"""
+    log_path = args.log_file
+    target_f = args.frame
+    try:
+        from . import pair_audit as pa
+    except ImportError:
+        from taremin_cloth import pair_audit as pa  # type: ignore
+
+    meta = replayer.read_metadata(log_path)
+    faces = np.array(meta.get("faces", []), dtype=np.uint32)
+    # トポロジー系は original_edges (せん断対角なし) を優先
+    raw_edges = meta.get("original_edges") or meta.get("edges", [])
+    edges = np.array(raw_edges, dtype=np.uint32)
+    raw_rest = meta.get("original_rest_lengths") or meta.get("initial_rest_lengths")
+    if len(raw_edges) == (len(raw_rest) if raw_rest else -1):
+        rest_arr = np.array(raw_rest, dtype=np.float64)
+    else:
+        rest_arr = None
+    if len(faces) == 0 or len(edges) == 0:
+        print("エラー: ログに面/辺トポロジーが含まれていません。")
+        sys.exit(1)
+
+    f_prev = replayer.get_frame(log_path, target_f - 1)
+    f_curr = replayer.get_frame(log_path, target_f)
+    if f_prev is None or f_curr is None:
+        print(f"エラー: Frame {target_f - 1} または {target_f} がログに見つかりません。")
+        sys.exit(1)
+    if not replayer.frame_has_positions(f_prev) or not replayer.frame_has_positions(f_curr):
+        print("エラー: 対象区間にスタブが含まれます。フル区間で実行してください。")
+        sys.exit(1)
+
+    cfg = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+    thickness = float(meta.get("thickness", 0.005))
+    safety = float(cfg.get("pair_safety_margin", meta.get("pair_cache_safety_margin", 0.005)))
+    hscale = float(cfg.get("pair_horizon_scale", meta.get("pair_cache_horizon_scale", 1.3)))
+    hmax = float(cfg.get("pair_max_horizon", meta.get("pair_cache_max_horizon", 0.02)))
+    margin_mode = int(cfg.get("pair_margin_mode", 1 if meta.get("pair_cache_margin_mode", "AUTO") != "FIXED" else 0))
+    if isinstance(meta.get("pair_cache_margin_mode"), int):
+        margin_mode = int(meta.get("pair_cache_margin_mode", 1))
+    max_pairs = int(cfg.get("pair_max_pairs", meta.get("pair_cache_max_pairs", 65536)))
+
+    print(f"フレーム {target_f - 1} -> {target_f} をリプレイしてペアを読戻しています...")
+    rp = replayer.ClothReplayer(log_path)
+    rp.replay_range(target_f - 1, target_f, compare=False, force_enable_pair_cache=True)
+    pairs = rp.get_active_pairs()
+
+    prev_pos = np.array(f_prev["positions"], dtype=np.float64).reshape((-1, 3))
+    prev_vel = np.array(f_prev.get("velocities", []), dtype=np.float64).reshape((-1, 3)) \
+        if len(f_prev.get("velocities", [])) > 0 else None
+    curr_pos = np.array(f_curr["positions"], dtype=np.float64).reshape((-1, 3))
+
+    rep = pa.audit_frame(
+        prev_pos, prev_vel, curr_pos,
+        pairs["vt_pairs"], pairs["ee_pairs"],
+        pairs["vt_count"], pairs["ee_count"],
+        faces, edges, rest_arr, thickness, safety, hscale, hmax,
+        margin_mode, float(f_curr.get("dt", 1.0 / 60.0)), max_pairs, max_pairs,
+    )
+    print(pa.format_report(rep))
+
+
+def cmd_audit_cache(args: argparse.Namespace) -> None:
+    """同一ログをキャッシュON/OFFで再現し、貫通の起因を判定する。
+
+    grab解放後の残存貫通がペアキャッシュ起因かを、2通りの再現の交差数で
+    切り分ける (新規ログ記録は不要)。
+    """
+    log_path = args.log_file
+    target_f = args.frame
+    lookback = max(1, int(getattr(args, "lookback", 3) or 3))
+    start_f = max(0, target_f - lookback)
+    try:
+        from . import pair_audit as pa
+        from . import analysis as ana
+    except ImportError:
+        from taremin_cloth import pair_audit as pa  # type: ignore
+        from taremin_cloth import analysis as ana  # type: ignore
+
+    meta = replayer.read_metadata(log_path)
+    faces = np.array(meta.get("faces", []), dtype=np.uint32)
+    if len(faces) == 0:
+        print("エラー: ログに面トポロジーが含まれていません。")
+        sys.exit(1)
+
+    f_target = replayer.get_frame(log_path, target_f)
+    if f_target is None or not replayer.frame_has_positions(f_target):
+        print(f"エラー: Frame {target_f} がフル座標で存在しません。")
+        sys.exit(1)
+    log_pos = np.array(f_target["positions"], dtype=np.float32).reshape((-1, 3))
+    n_log = len(ana.find_triangle_intersections(log_pos, faces))
+
+    outcomes = {}
+    drifts = {}
+    for label, force in (("ON", True), ("OFF", False)):
+        rp = replayer.ClothReplayer(log_path)
+        results = rp.replay_range(start_f, target_f, compare=True,
+                                  force_pair_cache=force)
+        if not results:
+            print(f"エラー: {label} 再現が空でした。")
+            sys.exit(1)
+        sim_pos = results[-1]["positions"]
+        outcomes[label] = len(ana.find_triangle_intersections(sim_pos, faces))
+        cmp_diffs = [r["max_diff"] for r in results if r.get("compared")]
+        drifts[label] = max(cmp_diffs) if cmp_diffs else float("nan")
+
+    verdict, message = pa.attribute_penetration(n_log, outcomes["ON"], outcomes["OFF"])
+    print(f"Frame {target_f} (from F{start_f}): "
+          f"log={n_log} cacheON={outcomes['ON']} cacheOFF={outcomes['OFF']}")
+    print(f"replay drift: ON={drifts['ON'] * 1000:.1f}mm OFF={drifts['OFF'] * 1000:.1f}mm "
+          f"(vs log)")
+    worst_drift = max(d for d in drifts.values() if d == d)
+    if worst_drift > 0.05:
+        print(f"注意: 再現ドリフトが大きいため ({worst_drift * 1000:.0f}mm)、"
+              f"本判定の信頼性は低いです。交差の有無・分布の質的比較を併用してください。")
+    print(f"verdict: {verdict} ({message})")
+    if verdict == "cache-attributable":
+        print("次手順: audit-pairs で miss 分類 (horizon/飽和) を特定してください。")
+
+
+def cmd_audit(args: argparse.Namespace) -> None:
+    """cacheログとdirectログの差分からPairCacheの見逃し率を定量化する"""
+    log_cache = args.log_cache
+    log_direct = args.log_direct
+    tol = float(args.tolerance)
+    meta_c = replayer.read_metadata(log_cache)
+    faces = np.array(meta_c.get("faces", []), dtype=np.uint32)
+    frames_c = {f["frame_index"]: f for f in replayer.iter_frames(log_cache)}
+    frames_d = {f["frame_index"]: f for f in replayer.iter_frames(log_direct)}
+    common = sorted(set(frames_c.keys()) & set(frames_d.keys()))
+    if not common:
+        print("エラー: 共通フレームが存在しません。")
+        sys.exit(1)
+    cmp_frames = [i for i in common
+                  if replayer.frame_has_positions(frames_c[i]) and replayer.frame_has_positions(frames_d[i])]
+    skipped = len(common) - len(cmp_frames)
+    if skipped:
+        print(f"注意: スタブ {skipped} 件を除外して監査します。")
+    if not cmp_frames:
+        print("エラー: 監査可能なフルフレームが存在しません。")
+        sys.exit(1)
+    try:
+        from . import analysis as ana
+    except ImportError:
+        from taremin_cloth import analysis as ana  # type: ignore
+    print(f"{'Frame':<8} | {'Cache-Direct(mm)':<16} | {'CacheIsect':<10} | {'DirectIsect':<11} | Status")
+    print("-" * 70)
+    exceeded = 0
+    for f_idx in cmp_frames:
+        pc = np.array(frames_c[f_idx]["positions"], dtype=np.float32).reshape((-1, 3))
+        pd = np.array(frames_d[f_idx]["positions"], dtype=np.float32).reshape((-1, 3))
+        max_d = float(np.max(np.linalg.norm(pc - pd, axis=1)) * 1000.0)
+        # 交差数は重いためサンプリング: --with-intersections時のみ
+        if args.with_intersections:
+            ic = len(ana.find_triangle_intersections(pc, faces))
+            ide = len(ana.find_triangle_intersections(pd, faces))
+        else:
+            ic = ide = -1
+        st = "OK" if max_d <= tol else "EXCEEDED"
+        if st == "EXCEEDED":
+            exceeded += 1
+        if args.with_intersections:
+            print(f"F{f_idx:<7} | {max_d:12.4f} mm | {ic:<10d} | {ide:<11d} | {st}")
+        else:
+            print(f"F{f_idx:<7} | {max_d:12.4f} mm | {'-':<10} | {'-':<11} | {st}")
+    print("-" * 70)
+    print(f"audit結果: 全 {len(cmp_frames)} フレーム中 {exceeded} フレームで許容誤差 ({tol} mm) を超過")
+    print("使い方: 同一開始状態から pair_cache ON/OFF の2本を記録し、本コマンドでmiss率を測定してください。")
 
 
 def main() -> None:
@@ -693,6 +1049,50 @@ def main() -> None:
     p_diff.add_argument("log2", help="比較対象ログファイル (.jsonl.gz)")
     p_diff.add_argument("--tolerance", "-t", type=float, default=1.0, help="許容変位閾値 (mm, デフォルト: 1.0)")
     p_diff.set_defaults(func=cmd_diff)
+
+    # 9. watch (条件付きブレークポイント)
+    p_watch = subparsers.add_parser("watch", help="条件付きブレーク付きリプレイでHitフレームを特定")
+    p_watch.add_argument("log_file", help="対象ログファイル (.jsonl.gz)")
+    p_watch.add_argument("--stop-on", default="disp>5", help="停止条件 (例: 'disp>5,intersections,vt_sat,vert:123')")
+    p_watch.add_argument("--start", type=int, default=0, help="開始フレーム")
+    p_watch.add_argument("--end", type=int, default=None, help="終了フレーム (省略時は末尾)")
+    p_watch.add_argument("--stride", type=int, default=1, help="述語評価間隔")
+    p_watch.add_argument("--disp", type=float, default=None, help="変位閾値mm (stop-onより優先)")
+    p_watch.add_argument("--intersections", action="store_true", help="貫通発生で停止")
+    p_watch.add_argument("--vt-sat", action="store_true", help="Pair飽和で停止")
+    p_watch.add_argument("--config-changed", action="store_true", help="設定変更フレームで停止")
+    p_watch.add_argument("--require-release", action="store_true",
+                         help="ピン数減少 (grab解放) 検出後にアーム (解放後残存の検出用)")
+    p_watch.add_argument("--persist", type=int, default=1,
+                         help="アーム後に条件が連続成立すべきフレーム数 (既定1)")
+    p_watch.add_argument("--watch-verts", type=str, default=None, help="注目頂点ID (例: '123,456')")
+    p_watch.add_argument("--watch-disp-mm", type=float, default=2.0, help="注目頂点の変位閾値mm")
+    p_watch.add_argument("--max-diff-mm", type=float, default=None, help="再現乖離が閾値超で停止 (mm)")
+    p_watch.add_argument("--lookback", type=int, default=3, help="Hit時に切り出す前フレーム数")
+    p_watch.add_argument("--lookahead", type=int, default=2, help="Hit時に切り出す後フレーム数")
+    p_watch.add_argument("--output", "-o", default=None, help="Hit前後の極小ログ出力先 (.jsonl.gz)")
+    p_watch.set_defaults(func=cmd_watch)
+
+    # 10. audit (PairCache精度監査)
+    p_audit = subparsers.add_parser("audit", help="cache/directの2本ログから見逃し率を定量化")
+    p_audit.add_argument("log_cache", help="PairCache ONログ (.jsonl.gz)")
+    p_audit.add_argument("log_direct", help="PairCache OFF(直進)ログ (.jsonl.gz)")
+    p_audit.add_argument("--tolerance", "-t", type=float, default=1.0, help="許容変位閾値 (mm)")
+    p_audit.add_argument("--with-intersections", action="store_true", help="交差数も比較 (低速)")
+    p_audit.set_defaults(func=cmd_audit)
+
+    # 11. audit-pairs (ペアカバレッジ監査)
+    p_audit_pairs = subparsers.add_parser("audit-pairs", help="GPU収集ペアとCPU真値のカバレッジ分類")
+    p_audit_pairs.add_argument("log_file", help="対象ログファイル (.jsonl.gz)")
+    p_audit_pairs.add_argument("--frame", "-f", type=int, required=True, help="監査フレーム番号 (前フレームからリプレイ)")
+    p_audit_pairs.set_defaults(func=cmd_audit_pairs)
+
+    # 12. audit-cache (キャッシュ起因判定)
+    p_audit_cache = subparsers.add_parser("audit-cache", help="同一ログのON/OFF再現で貫通起因を判定")
+    p_audit_cache.add_argument("log_file", help="対象ログファイル (.jsonl.gz)")
+    p_audit_cache.add_argument("--frame", "-f", type=int, required=True, help="判定フレーム番号")
+    p_audit_cache.add_argument("--lookback", type=int, default=3, help="何フレーム前から再現するか")
+    p_audit_cache.set_defaults(func=cmd_audit_cache)
 
 
     args = parser.parse_args()

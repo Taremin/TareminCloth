@@ -420,6 +420,48 @@ impl GpuClothSimulator {
         result
     }
 
+    /// 縫合拘束の現在自然長 (GPU側の進行値) を読戻す。空の場合は空ベクトル。
+    /// デバッグ記録専用のブロッキング読戻し。順序はGPUバッファ順 (ソート済み)。
+    pub fn read_sewing_current_rest_lengths(&self) -> Vec<f32> {
+        use crate::mesh::GpuSewingConstraint;
+        if self.num_sewing_constraints == 0 {
+            return Vec::new();
+        }
+        let size =
+            (self.num_sewing_constraints as u64) * std::mem::size_of::<GpuSewingConstraint>() as u64;
+        let data = self.read_storage_buffer(&self.sew_buffer, size);
+        bytemuck::cast_slice::<u8, GpuSewingConstraint>(&data)
+            .iter()
+            .map(|c| c.current_rest_len)
+            .collect()
+    }
+
+    /// 縫合拘束の現在自然長を復元する (GPUバッファ順の配列)。
+    /// 要素数が一致しない場合は何もしない。
+    pub fn set_sewing_current_rest_lengths(&mut self, values: &[f32]) {
+        use crate::mesh::GpuSewingConstraint;
+        if values.len() != self.num_sewing_constraints as usize || values.is_empty() {
+            return;
+        }
+        let size = (values.len() * std::mem::size_of::<GpuSewingConstraint>()) as u64;
+        let data = self.read_storage_buffer(&self.sew_buffer, size);
+        let mut constraints: Vec<GpuSewingConstraint> =
+            bytemuck::cast_slice::<u8, GpuSewingConstraint>(&data).to_vec();
+        if constraints.len() != values.len() {
+            return;
+        }
+        for (c, &v) in constraints.iter_mut().zip(values) {
+            if v.is_finite() && v >= 0.0 {
+                c.current_rest_len = v;
+            }
+        }
+        self.context.queue.write_buffer(
+            &self.sew_buffer,
+            0,
+            bytemuck::cast_slice(&constraints),
+        );
+    }
+
     /// 頂点座標および速度ベクトルをGPUバッファに直接書き込み、シミュレーション状態を任意フレームの状態へ復元する
     pub fn set_positions_and_velocities(
         &mut self,
@@ -531,43 +573,101 @@ impl GpuClothSimulator {
     /// ペアキャッシュ統計を取得する (vt_count, ee_count, max_vt, max_ee)。
     /// デバッグ・飽和検出専用のブロッキング読戻し。毎フレーム呼び出しは避けること。
     pub fn get_pair_cache_stats(&self) -> (u32, u32, u32, u32) {
+        let (vt_count, ee_count) = self.read_pair_counters();
+        (
+            vt_count,
+            ee_count,
+            self.pair_cache_max_vt_pairs,
+            self.pair_cache_max_ee_pairs,
+        )
+    }
+
+    /// ペアカウンタのみを読戻す (内部用)
+    fn read_pair_counters(&self) -> (u32, u32) {
         use crate::mesh::PairCounters;
         let size = std::mem::size_of::<PairCounters>() as u64;
+        let data = self.read_storage_buffer(&self.pair_counters_buffer, size);
+        let counters: &[PairCounters] = bytemuck::cast_slice(&data);
+        if counters.is_empty() {
+            (0, 0)
+        } else {
+            (counters[0].vt_count, counters[0].ee_count)
+        }
+    }
+
+    /// ストレージバッファの先頭 size バイトをブロッキング読戻す (内部用)
+    fn read_storage_buffer(&self, src: &wgpu::Buffer, size: u64) -> Vec<u8> {
         let staging = self.context.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Pair Counters Staging"),
-            size,
+            label: Some("Debug Readback Staging"),
+            size: size.max(4),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
-                label: Some("Read Pair Counters Encoder"),
+                label: Some("Debug Readback Encoder"),
             },
         );
-        encoder.copy_buffer_to_buffer(&self.pair_counters_buffer, 0, &staging, 0, size);
+        if size > 0 {
+            encoder.copy_buffer_to_buffer(src, 0, &staging, 0, size);
+        }
         self.context.queue.submit(Some(encoder.finish()));
 
-        let slice = staging.slice(..size);
+        let slice = staging.slice(..size.max(4));
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
         slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
         self.context.device.poll(wgpu::Maintain::Wait);
         pollster::block_on(receiver.receive()).unwrap().unwrap();
 
         let data = slice.get_mapped_range();
-        let counters: &[PairCounters] = bytemuck::cast_slice(&data);
-        let out = if counters.is_empty() {
-            (0, 0, self.pair_cache_max_vt_pairs, self.pair_cache_max_ee_pairs)
-        } else {
-            (
-                counters[0].vt_count,
-                counters[0].ee_count,
-                self.pair_cache_max_vt_pairs,
-                self.pair_cache_max_ee_pairs,
-            )
-        };
+        let out = data[..size.min(data.len() as u64) as usize].to_vec();
         drop(data);
         staging.unmap();
         out
+    }
+
+    /// 収集中のアクティブペア一覧を読戻す (vt_count, ee_count, vt_pairs, ee_pairs)。
+    ///
+    /// vt/ee_count は受理候補総数 (枠超過分を含む)。pairs は頂点メジャー配置の
+    /// 有効ペア (センチネル除外) のみ。各ペアは4頂点ID。
+    /// デバッグ専用のブロッキング読戻し。毎フレーム呼び出しは避け、
+    /// watchヒット時や監査サンプリングなどに限定すること。
+    pub fn get_active_pairs(&self) -> (u32, u32, Vec<[u32; 4]>, Vec<[u32; 4]>) {
+        use crate::mesh::{GpuEePair, GpuVtPair};
+        const SENTINEL: u32 = 0xFFFFFFFF;
+        let (vt_count, ee_count) = self.read_pair_counters();
+        let qvt = self.pair_cache_quota_vt.clamp(1, super::PAIR_QUOTA_MAX);
+        let qee = self.pair_cache_quota_ee.clamp(1, super::PAIR_QUOTA_MAX);
+        let vt_slots = (self.num_vertices * qvt) as usize;
+        let ee_slots = (self.num_vertices * qee) as usize;
+
+        let vt_pairs = if vt_slots == 0 {
+            Vec::new()
+        } else {
+            let raw = self.read_storage_buffer(
+                &self.active_vt_pairs_buffer,
+                (vt_slots * std::mem::size_of::<GpuVtPair>()) as u64,
+            );
+            bytemuck::cast_slice::<u8, GpuVtPair>(&raw)
+                .iter()
+                .filter(|p| p.vert_i != SENTINEL)
+                .map(|p| [p.vert_i, p.vert_j, p.v0, p.v1])
+                .collect()
+        };
+        let ee_pairs = if ee_slots == 0 {
+            Vec::new()
+        } else {
+            let raw = self.read_storage_buffer(
+                &self.active_ee_pairs_buffer,
+                (ee_slots * std::mem::size_of::<GpuEePair>()) as u64,
+            );
+            bytemuck::cast_slice::<u8, GpuEePair>(&raw)
+                .iter()
+                .filter(|p| p.v_i != SENTINEL)
+                .map(|p| [p.v_i, p.v_ui, p.v_j, p.v_vj])
+                .collect()
+        };
+        (vt_count, ee_count, vt_pairs, ee_pairs)
     }
 
     /// シミュレーションを 1 フレーム進め、計算結果座標をGPU内部のリングバッファに保存する。
@@ -766,14 +866,13 @@ impl GpuClothSimulator {
             }
 
             // Step C: ナローフェーズ (収集されたペアのみピンポイント解決)
-            // シェーダー内で `pair_idx >= total_pairs` により早期リターンするため、
-            // 不安定で TDR のリスクがある間接ディスパッチ（DispatchIndirect）を避け、
-            // 頂点数に応じた安全な上限ワークグループ数で直接ディスパッチする。
-            // 論理上限は頂点数連動 (P2)。物理上限65536に対応し1024WGまで許容。
-            let max_logical = self.pair_cache_max_vt_pairs.max(self.pair_cache_max_ee_pairs);
-            let max_possible_pairs = (self.num_vertices * 16).clamp(64, max_logical.max(8192).min(65536));
-            let vt_workgroups = ((max_possible_pairs + 63) / 64).min(1024);
-            let ee_workgroups = ((max_possible_pairs + 63) / 64).min(1024);
+            // 頂点メジャー固定スロット配置 (N*quota) を直接ディスパッチする。
+            // 未使用枠はセンチネルで早期リターンするため、間接ディスパッチ
+            // (DispatchIndirect) を避けた直接ディスパッチで足りる。
+            let vt_slots = self.num_vertices * self.pair_cache_quota_vt.clamp(1, super::PAIR_QUOTA_MAX);
+            let ee_slots = self.num_vertices * self.pair_cache_quota_ee.clamp(1, super::PAIR_QUOTA_MAX);
+            let vt_workgroups = ((vt_slots + 63) / 64).max(1);
+            let ee_workgroups = ((ee_slots + 63) / 64).max(1);
 
             {
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

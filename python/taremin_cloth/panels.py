@@ -617,6 +617,31 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
                 self_sub.prop(settings, "pair_cache_horizon_scale", text=i18n.trans("Horizon Scale"))
                 self_sub.prop(settings, "pair_cache_max_horizon", text=i18n.trans("Max Horizon"))
                 self_sub.prop(settings, "pair_cache_max_pairs", text=i18n.trans("Max Pairs"))
+                # 実効枠数 (予算÷頂点数) の表示
+                try:
+                    _n_verts = len(obj.data.vertices) if obj and obj.type == 'MESH' and obj.data else 0
+                except Exception:
+                    _n_verts = 0
+                if _n_verts > 0:
+                    try:
+                        _quota = max(1, min(8, int(settings.pair_cache_max_pairs) // _n_verts))
+                    except (TypeError, ValueError):
+                        _quota = 1
+                    self_sub.label(
+                        text=i18n.trans(f"Effective Quota: {_quota} pairs/vert ({_n_verts} verts)"),
+                        icon='INFO')
+                    # 物理確保量 (N×8スロット×16B×VT/EE2本)
+                    try:
+                        _mem_mb = _n_verts * 8 * 16 * 2 / (1024.0 * 1024.0)
+                        if _mem_mb >= 1.0:
+                            _mem_str = f"{_mem_mb:.1f} MB"
+                        else:
+                            _mem_str = f"{_mem_mb * 1024.0:.0f} KB"
+                    except Exception:
+                        _mem_str = "?"
+                    self_sub.label(
+                        text=i18n.trans(f"Pair Buffers (VRAM): {_mem_str}"),
+                        icon='MEMORY')
                 self_sub.prop(settings, "enable_pair_cache_final_fallback", text=i18n.trans("Final Fallback"))
         l_col.separator()
         l_col.prop(settings, "layer_id")
