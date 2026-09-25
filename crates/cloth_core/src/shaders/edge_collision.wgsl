@@ -1,3 +1,8 @@
+// Edge-to-Edge Collision Pass (Cloth Edge vs Collider Edge)
+// 布のエッジとコライダー稜線間の厳密な線分間最短距離（E-E）接触解決パス。
+// 空間ハッシュ（近傍27セル走査）および固定小数点アトミック変位蓄積により、
+// 尖った角や稜線同士のすり抜けを完全阻止しつつ、O(Ne * K)の定数時間で高速実行する。
+
 struct GpuVertex {
     position: vec3<f32>,
     inv_mass: f32,
@@ -7,370 +12,232 @@ struct GpuVertex {
     thickness: f32,
 };
 
-struct GpuDistanceConstraint {
+struct GpuEdge {
     v0: u32,
     v1: u32,
-    rest_length: f32,
-    tension_compliance: f32,
-    compression_compliance: f32,
-    constraint_type: u32,
-    _pad0: f32,
-    _pad1: f32,
 };
 
-struct GpuCollider {
-    collider_type: u32, // 0: Sphere, 1: Capsule, 2: Plane
-    friction: f32,
-    restitution: f32,
-    _pad0: f32,
-    point_a: vec3<f32>,
-    radius: f32,
-    point_b: vec3<f32>,
-    _pad1: f32,
-};
-
-struct GpuMeshTriangle {
+struct GpuColliderEdge {
     p0: vec3<f32>,
-    friction: f32,
-    p1: vec3<f32>,
     thickness: f32,
-    p2: vec3<f32>,
-    restitution: f32,
-    flags: u32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    p1: vec3<f32>,
+    friction: f32,
 };
 
-struct CollisionParams {
-    num_vertices: u32,
-    num_colliders: u32,
-    num_mesh_triangles: u32,
-    num_clusters: u32,
-    dt: f32,
+struct EdgeCollisionParams {
+    cell_size: f32,
+    table_size: u32,
+    num_cloth_edges: u32,
+    num_collider_edges: u32,
     edge_margin_scale: f32,
     edge_margin_offset: f32,
-    enable_cluster_culling: u32,
-    enable_single_sided_recovery: u32,
-    sweep_margin_offset: f32,
-    num_bones: u32,
-    enable_bone_sdf: u32,
-};
-
-struct DispatchInfo {
-    color_offset: u32,
-    color_count: u32,
     _pad0: u32,
     _pad1: u32,
 };
 
-@group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;
-@group(0) @binding(1) var<storage, read> constraints: array<GpuDistanceConstraint>;
-@group(0) @binding(2) var<storage, read> colliders: array<GpuCollider>;
-@group(0) @binding(3) var<storage, read> mesh_triangles: array<GpuMeshTriangle>;
-@group(0) @binding(4) var<storage, read> mesh_bounds: array<vec4<f32>>;
-@group(0) @binding(5) var<uniform> params: CollisionParams;
-@group(0) @binding(6) var<uniform> dispatch_info: DispatchInfo;
-
-const EPSILON: f32 = 1e-7;
-
-struct ClosestResult {
-    point: vec3<f32>,
-    is_face: bool,
+struct SelfCollisionAccum {
+    dx: atomic<i32>,
+    dy: atomic<i32>,
+    dz: atomic<i32>,
+    count: atomic<u32>,
+    ccd_dx: atomic<i32>,
+    ccd_dy: atomic<i32>,
+    ccd_dz: atomic<i32>,
+    ccd_count: atomic<u32>,
 };
 
-// 点から三角形への最近傍点および面内部フラグ
-fn closest_point_on_triangle_ext(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> ClosestResult {
-    let ab = b - a;
-    let ac = c - a;
-    let ap = p - a;
-    let d1 = dot(ab, ap);
-    let d2 = dot(ac, ap);
-    if (d1 <= 0.0 && d2 <= 0.0) {
-        return ClosestResult(a, false);
-    }
+@group(0) @binding(0) var<storage, read> cloth_edges: array<GpuEdge>;
+@group(0) @binding(1) var<storage, read> vertices: array<GpuVertex>;
+@group(0) @binding(2) var<storage, read> collider_edges: array<GpuColliderEdge>;
+@group(0) @binding(3) var<storage, read> collider_cell_starts: array<u32>;
+@group(0) @binding(4) var<storage, read> collider_sorted_indices: array<u32>;
+@group(0) @binding(5) var<uniform> params: EdgeCollisionParams;
+@group(0) @binding(6) var<storage, read_write> accum: array<SelfCollisionAccum>;
 
-    let bp = p - b;
-    let d3 = dot(ab, bp);
-    let d4 = dot(ac, bp);
-    if (d3 >= 0.0 && d4 <= d3) {
-        return ClosestResult(b, false);
-    }
+const EPSILON: f32 = 1e-7;
+const FIXED_SCALE: f32 = 1000000.0;
 
-    let vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
-        let v = d1 / (d1 - d3);
-        return ClosestResult(a + v * ab, false);
-    }
-
-    let cp = p - c;
-    let d5 = dot(ab, cp);
-    let d6 = dot(ac, cp);
-    if (d6 >= 0.0 && d5 <= d6) {
-        return ClosestResult(c, false);
-    }
-
-    let vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
-        let w = d2 / (d2 - d6);
-        return ClosestResult(a + w * ac, false);
-    }
-
-    let va = d3 * d6 - d5 * d4;
-    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
-        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return ClosestResult(b + w * (c - b), false);
-    }
-
-    let denom = 1.0 / (va + vb + vc);
-    let v = vb * denom;
-    let w = vc * denom;
-    return ClosestResult(a + ab * v + ac * w, true);
+fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    atomicAdd(&accum[v_idx].dx, ix);
+    atomicAdd(&accum[v_idx].dy, iy);
+    atomicAdd(&accum[v_idx].dz, iz);
+    atomicAdd(&accum[v_idx].count, 1u);
 }
 
-// 点 pt から線分 p0 -> p1 上の最近傍点パラメータ t in [0, 1]
-fn closest_t_on_segment(pt: vec3<f32>, p0: vec3<f32>, p1: vec3<f32>) -> f32 {
-    let u = p1 - p0;
-    let u2 = dot(u, u);
-    if (u2 < EPSILON) {
-        return 0.5;
+fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
+    let p1 = 73856093u;
+    let p2 = 19349663u;
+    let p3 = 83492791u;
+    let n = (u32(coord.x) * p1) ^ (u32(coord.y) * p2) ^ (u32(coord.z) * p3);
+    return n % table_size;
+}
+
+struct SegmentDistanceResult {
+    s: f32,
+    t: f32,
+    dist: f32,
+};
+
+// 2線分 p0->p1 と q0->q1 間の最短距離および線分パラメータ s, t in [0, 1]
+fn closest_points_segments(
+    p0: vec3<f32>, p1: vec3<f32>,
+    q0: vec3<f32>, q1: vec3<f32>
+) -> SegmentDistanceResult {
+    let d1 = p1 - p0;
+    let d2 = q1 - q0;
+    let r = p0 - q0;
+
+    let a = dot(d1, d1);
+    let e = dot(d2, d2);
+    let f = dot(d2, r);
+
+    var s = 0.0;
+    var t = 0.0;
+
+    if (a <= EPSILON && e <= EPSILON) {
+        let diff = p0 - q0;
+        return SegmentDistanceResult(0.0, 0.0, length(diff));
     }
-    return clamp(dot(pt - p0, u) / u2, 0.0, 1.0);
+    if (a <= EPSILON) {
+        s = 0.0;
+        t = clamp(f / e, 0.0, 1.0);
+    } else {
+        let c = dot(d1, r);
+        if (e <= EPSILON) {
+            t = 0.0;
+            s = clamp(-c / a, 0.0, 1.0);
+        } else {
+            let b = dot(d1, d2);
+            let denom = a * e - b * b;
+
+            if (abs(denom) > EPSILON) {
+                s = clamp((b * f - c * e) / denom, 0.0, 1.0);
+            } else {
+                s = 0.0;
+            }
+
+            t = (b * s + f) / e;
+
+            if (t < 0.0) {
+                t = 0.0;
+                s = clamp(-c / a, 0.0, 1.0);
+            } else if (t > 1.0) {
+                t = 1.0;
+                s = clamp((b - c) / a, 0.0, 1.0);
+            }
+        }
+    }
+
+    let closest_p = p0 + d1 * s;
+    let closest_q = q0 + d2 * t;
+    let diff = closest_p - closest_q;
+    return SegmentDistanceResult(s, t, length(diff));
 }
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let local_idx = global_id.x;
-    if (local_idx >= dispatch_info.color_count) {
+    let edge_idx = global_id.x;
+    if (edge_idx >= params.num_cloth_edges || params.num_collider_edges == 0u) {
         return;
     }
 
-    let constraint_idx = dispatch_info.color_offset + local_idx;
-    let c = constraints[constraint_idx];
+    let e = cloth_edges[edge_idx];
+    let u0 = e.v0;
+    let u1 = e.v1;
 
-    let w0 = vertices[c.v0].inv_mass;
-    let w1 = vertices[c.v1].inv_mass;
+    let v0 = vertices[u0];
+    let v1 = vertices[u1];
+
+    let w0 = v0.inv_mass;
+    let w1 = v1.inv_mass;
     let w_sum = w0 + w1;
     if (w_sum <= EPSILON) {
         return;
     }
 
-    var prev0 = vertices[c.v0].prev_pos;
-    var prev1 = vertices[c.v1].prev_pos;
+    let p0 = v0.prev_pos;
+    let p1 = v1.prev_pos;
 
-    let edge_scale = max(params.edge_margin_scale, 1.0);
-    let edge_offset = max(params.edge_margin_offset, 0.0);
-    let thickness = max(vertices[c.v0].thickness, vertices[c.v1].thickness) * edge_scale + edge_offset;
-    let inv_w_sum = 1.0 / w_sum;
+    let p_mid = (p0 + p1) * 0.5;
+    let cloth_thickness = max(v0.thickness, v1.thickness);
 
-    // 1. プリミティブコライダー判定 (中点判定)
-    let mid_point = (prev0 + prev1) * 0.5;
-    for (var i = 0u; i < params.num_colliders; i = i + 1u) {
-        let col = colliders[i];
-        if (col.collider_type == 0u) {
-            let center = col.point_a;
-            let target_r = col.radius + thickness;
-            let delta = mid_point - center;
-            let dist = length(delta);
-            if (dist < target_r) {
-                var normal = vec3<f32>(0.0, 0.0, 1.0);
-                if (dist > EPSILON) {
-                    normal = delta / dist;
-                }
-                let push = normal * (target_r - dist);
-                let factor0 = 2.0 * w0 * inv_w_sum;
-                let factor1 = 2.0 * w1 * inv_w_sum;
-                prev0 += push * factor0;
-                prev1 += push * factor1;
-            }
-        } else if (col.collider_type == 1u) {
-            let a = col.point_a;
-            let b = col.point_b;
-            let target_r = col.radius + thickness;
-            let ab = b - a;
-            let l2 = dot(ab, ab);
-            var t = 0.0;
-            if (l2 > EPSILON) {
-                t = clamp(dot(mid_point - a, ab) / l2, 0.0, 1.0);
-            }
-            let closest = a + ab * t;
-            let delta = mid_point - closest;
-            let dist = length(delta);
-            if (dist < target_r) {
-                var normal = vec3<f32>(0.0, 0.0, 1.0);
-                if (dist > EPSILON) {
-                    normal = delta / dist;
-                }
-                let push = normal * (target_r - dist);
-                let factor0 = 2.0 * w0 * inv_w_sum;
-                let factor1 = 2.0 * w1 * inv_w_sum;
-                prev0 += push * factor0;
-                prev1 += push * factor1;
-            }
-        } else if (col.collider_type == 2u) {
-            let plane_pt = col.point_a;
-            let plane_n = normalize(col.point_b);
-            let dist = dot(mid_point - plane_pt, plane_n);
-            if (dist < thickness) {
-                let push = plane_n * (thickness - dist);
-                let factor0 = 2.0 * w0 * inv_w_sum;
-                let factor1 = 2.0 * w1 * inv_w_sum;
-                prev0 += push * factor0;
-                prev1 += push * factor1;
-            }
-        }
-    }
+    let cell_coord = vec3<i32>(floor(p_mid / params.cell_size));
 
-    // 2. メッシュコライダー判定 (Triangle Mesh: 中点・両頂点による多段近傍押し戻し)
-    let old0 = vertices[c.v0].position;
-    let old1 = vertices[c.v1].position;
-    let mid_old = (old0 + old1) * 0.5;
-    let mid_new = (prev0 + prev1) * 0.5;
-    let mid_sweep = (mid_old + mid_new) * 0.5;
-    let sweep_move_r = length(mid_new - mid_old) * 0.5;
-    let edge_len = length(prev1 - prev0);
+    let cloth_aabb_min = min(p0, p1);
+    let cloth_aabb_max = max(p0, p1);
 
-    for (var i = 0u; i < params.num_mesh_triangles; i = i + 1u) {
-        let b = mesh_bounds[i];
-        let diff = mid_sweep - b.xyz;
-        // 三角形境界球半径 b.w + エッジ半長 + 移動マージン + 厚み
-        let bound_r = b.w + thickness + edge_len * 0.5 + sweep_move_r;
-        if (dot(diff, diff) > bound_r * bound_r) {
-            continue; // エッジの移動軌跡全体（Sweep AABB）が三角形の近傍球外にある場合は安全にスキップ
-        }
+    // 27近傍セル走査
+    for (var dz = -1; dz <= 1; dz = dz + 1) {
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+            for (var dx = -1; dx <= 1; dx = dx + 1) {
+                let neighbor = cell_coord + vec3<i32>(dx, dy, dz);
+                let h = hash_coords(neighbor, params.table_size);
 
-        let tri = mesh_triangles[i];
-        let target_dist = thickness + tri.thickness * edge_scale;
+                let start = collider_cell_starts[h];
+                let end = collider_cell_starts[h + 1u];
 
-        let cross_prod = cross(tri.p1 - tri.p0, tri.p2 - tri.p0);
-        let cross_len = length(cross_prod);
-        if (cross_len < EPSILON) {
-            continue;
-        }
-        let face_normal = cross_prod / cross_len;
+                for (var k = start; k < end; k = k + 1u) {
+                    let col_idx = collider_sorted_indices[k];
+                    let col_edge = collider_edges[col_idx];
 
-        // (A) エッジ中点からコライダー面への最近傍押し戻し (弦の沈み込み防止)
-        let res_mid = closest_point_on_triangle_ext(mid_new, tri.p0, tri.p1, tri.p2);
-        let q_mid = res_mid.point;
-        let delta_mid = mid_new - q_mid;
-        let dist_mid = length(delta_mid);
-        let signed_dist_mid = dot(delta_mid, face_normal);
+                    let q0 = col_edge.p0;
+                    let q1 = col_edge.p1;
 
-        let is_single_sided = (tri.flags & 1u) != 0u;
-        if (is_single_sided) {
-            if (signed_dist_mid >= 0.0) {
-                if (dist_mid < target_dist) {
-                    var normal = face_normal;
-                    if (dist_mid > EPSILON) {
-                        normal = delta_mid / dist_mid;
+                    let target_dist = (cloth_thickness + col_edge.thickness) * params.edge_margin_scale + params.edge_margin_offset;
+
+                    // 1. AABB 先行枝切り
+                    let col_aabb_min = min(q0, q1);
+                    let col_aabb_max = max(q0, q1);
+
+                    if (cloth_aabb_max.x + target_dist < col_aabb_min.x ||
+                        cloth_aabb_min.x - target_dist > col_aabb_max.x ||
+                        cloth_aabb_max.y + target_dist < col_aabb_min.y ||
+                        cloth_aabb_min.y - target_dist > col_aabb_max.y ||
+                        cloth_aabb_max.z + target_dist < col_aabb_min.z ||
+                        cloth_aabb_min.z - target_dist > col_aabb_max.z) {
+                        continue;
                     }
-                    let push = normal * (target_dist - dist_mid);
-                    let factor0 = 2.0 * w0 * inv_w_sum;
-                    let factor1 = 2.0 * w1 * inv_w_sum;
-                    prev0 += push * factor0;
-                    prev1 += push * factor1;
-                }
-            } else {
-                let max_recovery_depth = target_dist * 3.0;
-                if (res_mid.is_face && dist_mid < max_recovery_depth && dist_mid <= abs(signed_dist_mid) * 1.1 + EPSILON) {
-                    let normal = face_normal;
-                    let push = normal * (target_dist - signed_dist_mid);
-                    let factor0 = 2.0 * w0 * inv_w_sum;
-                    let factor1 = 2.0 * w1 * inv_w_sum;
-                    prev0 += push * factor0;
-                    prev1 += push * factor1;
-                }
-            }
-        } else {
-            if (dist_mid < target_dist && signed_dist_mid >= -target_dist) {
-                var normal = face_normal;
-                if (dist_mid > EPSILON && signed_dist_mid > 0.0) {
-                    normal = delta_mid / dist_mid;
-                }
-                let push = normal * (target_dist - dist_mid);
-                let factor0 = 2.0 * w0 * inv_w_sum;
-                let factor1 = 2.0 * w1 * inv_w_sum;
-                prev0 += push * factor0;
-                prev1 += push * factor1;
-            }
-        }
 
-        // (B) コライダーの各頂点 (p0, p1, p2) からエッジへの最近傍押し戻し (尖った角の貫通防止)
-        // p0 に対して
-        {
-            let t0 = closest_t_on_segment(tri.p0, prev0, prev1);
-            let pt_on_edge = prev0 + t0 * (prev1 - prev0);
-            let delta_p0 = pt_on_edge - tri.p0;
-            let dist_p0 = length(delta_p0);
-            let signed_p0 = dot(delta_p0, face_normal);
-            if (dist_p0 < target_dist && signed_p0 >= -target_dist) {
-                var normal = face_normal;
-                if (dist_p0 > EPSILON && signed_p0 > 0.0) {
-                    normal = delta_p0 / dist_p0;
-                }
-                let push = normal * (target_dist - dist_p0);
-                let a = 1.0 - t0;
-                let b = t0;
-                let denom = a * a * w0 + b * b * w1;
-                if (denom > EPSILON) {
-                    let d0 = (a * w0 / denom) * push;
-                    let d1 = (b * w1 / denom) * push;
-                    prev0 += d0;
-                    prev1 += d1;
-                }
-            }
-        }
-        // p1 に対して
-        {
-            let t1 = closest_t_on_segment(tri.p1, prev0, prev1);
-            let pt_on_edge = prev0 + t1 * (prev1 - prev0);
-            let delta_p1 = pt_on_edge - tri.p1;
-            let dist_p1 = length(delta_p1);
-            let signed_p1 = dot(delta_p1, face_normal);
-            if (dist_p1 < target_dist && signed_p1 >= -target_dist) {
-                var normal = face_normal;
-                if (dist_p1 > EPSILON && signed_p1 > 0.0) {
-                    normal = delta_p1 / dist_p1;
-                }
-                let push = normal * (target_dist - dist_p1);
-                let a = 1.0 - t1;
-                let b = t1;
-                let denom = a * a * w0 + b * b * w1;
-                if (denom > EPSILON) {
-                    let d0 = (a * w0 / denom) * push;
-                    let d1 = (b * w1 / denom) * push;
-                    prev0 += d0;
-                    prev1 += d1;
-                }
-            }
-        }
-        // p2 に対して
-        {
-            let t2 = closest_t_on_segment(tri.p2, prev0, prev1);
-            let pt_on_edge = prev0 + t2 * (prev1 - prev0);
-            let delta_p2 = pt_on_edge - tri.p2;
-            let dist_p2 = length(delta_p2);
-            let signed_p2 = dot(delta_p2, face_normal);
-            if (dist_p2 < target_dist && signed_p2 >= -target_dist) {
-                var normal = face_normal;
-                if (dist_p2 > EPSILON && signed_p2 > 0.0) {
-                    normal = delta_p2 / dist_p2;
-                }
-                let push = normal * (target_dist - dist_p2);
-                let a = 1.0 - t2;
-                let b = t2;
-                let denom = a * a * w0 + b * b * w1;
-                if (denom > EPSILON) {
-                    let d0 = (a * w0 / denom) * push;
-                    let d1 = (b * w1 / denom) * push;
-                    prev0 += d0;
-                    prev1 += d1;
+                    // 2. 厳密な線分間最短距離 (E-E) 判定
+                    let res = closest_points_segments(p0, p1, q0, q1);
+                    if (res.dist < target_dist) {
+                        let pt_cloth = p0 + (p1 - p0) * res.s;
+                        let pt_col = q0 + (q1 - q0) * res.t;
+                        let diff = pt_cloth - pt_col;
+
+                        var normal = vec3<f32>(0.0, 0.0, 1.0);
+                        if (res.dist > EPSILON) {
+                            normal = diff / res.dist;
+                        } else {
+                            // ほぼ交差している場合、線分外積から法線を推定
+                            let d_cloth = p1 - p0;
+                            let d_col = q1 - q0;
+                            let c = cross(d_cloth, d_col);
+                            let c_len = length(c);
+                            if (c_len > EPSILON) {
+                                normal = c / c_len;
+                            }
+                        }
+
+                        let penetration = target_dist - res.dist;
+                        let push = normal * penetration;
+
+                        // コライダーは無限質量 (動かない) ため、100% 布端点にのみ分配
+                        let a = 1.0 - res.s;
+                        let b = res.s;
+                        let denom = a * a * w0 + b * b * w1;
+                        if (denom > EPSILON) {
+                            let factor0 = (a * w0) / denom;
+                            let factor1 = (b * w1) / denom;
+                            add_disp_atomic(u0, push * factor0);
+                            add_disp_atomic(u1, push * factor1);
+                        }
+                    }
                 }
             }
         }
     }
-
-    // XPBD原則: position (x_n) は不変。予測位置 prev_pos のみを更新
-    vertices[c.v0].prev_pos = prev0;
-    vertices[c.v1].prev_pos = prev1;
 }

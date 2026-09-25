@@ -4,11 +4,11 @@ use wgpu::util::DeviceExt;
 
 use crate::context::GpuContext;
 use crate::mesh::{
-    ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuEdge, GpuMeshTriangle,
-    GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams, SimParams,
-    GpuVtPair, GpuEePair, PairCollectParams, PairCounters, PairSolveParams,
+    ClothMesh, EdgeCollisionParams, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuEdge,
+    GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex, SelfCollisionParams,
+    SimParams, GpuVtPair, GpuEePair, PairCollectParams, PairCounters, PairSolveParams,
 };
-use crate::spatial_hash::{GpuSpatialHash, GpuEdgeSpatialHash};
+use crate::spatial_hash::{GpuSpatialHash, GpuEdgeSpatialHash, GpuColliderEdgeSpatialHash};
 use super::pipeline_cache::{get_or_create_shared, SharedPipelines};
 use super::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, NormalParams, PinParams,
@@ -87,7 +87,9 @@ pub struct SimulationResources {
     pub sewing_bind_groups: Vec<wgpu::BindGroup>,
     pub sew_shrink_bind_group: wgpu::BindGroup,
     pub update_vel_bind_group: wgpu::BindGroup,
-    pub edge_collision_bind_groups: Vec<wgpu::BindGroup>,
+    pub collider_edge_hash: GpuColliderEdgeSpatialHash,
+    pub edge_collision_params_buffer: wgpu::Buffer,
+    pub edge_collision_bind_group: wgpu::BindGroup,
     pub self_collision_relief_factor: f32,
     pub self_collision_max_displacement_ratio: f32,
     pub self_collision_exclude_neighbors: bool,
@@ -653,57 +655,6 @@ pub fn build_simulation_resources(
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: dist_lambda_buffer.as_entire_binding(),
-                },
-            ],
-        }));
-    }
-
-    // エッジコライダー拘束バインドグループ
-    let mut edge_collision_bind_groups = Vec::new();
-    for (offset, &count) in mesh.dist_color_offsets.iter().zip(&mesh.dist_color_counts) {
-        let info = DispatchInfo {
-            color_offset: *offset,
-            color_count: count,
-            _pad0: 0,
-            _pad1: 0,
-        };
-        let info_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Edge Collision DispatchInfo Buffer"),
-            contents: bytemuck::bytes_of(&info),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-        edge_collision_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Edge Collision Bind Group"),
-            layout: &shared.edge_collision_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: dist_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: collider_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: mesh_triangles_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: mesh_bounds_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: collider_params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: info_buf.as_entire_binding(),
                 },
             ],
         }));
@@ -1332,6 +1283,60 @@ pub fn build_simulation_resources(
         ],
     });
 
+    // コライダーエッジ空間ハッシュおよびエッジコライダー拘束バインドグループ
+    let collider_edge_hash = GpuColliderEdgeSpatialHash::new_empty(context, cell_size, crate::spatial_hash::DEFAULT_HASH_TABLE_SIZE);
+
+    let edge_collision_params = EdgeCollisionParams {
+        cell_size,
+        table_size: crate::spatial_hash::DEFAULT_HASH_TABLE_SIZE,
+        num_cloth_edges: mesh.edges.len() as u32,
+        num_collider_edges: 0,
+        edge_margin_scale: 1.0,
+        edge_margin_offset: 0.0,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let edge_collision_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Edge Collision Params Buffer"),
+        contents: bytemuck::bytes_of(&edge_collision_params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let edge_collision_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Edge Collision Bind Group"),
+        layout: &shared.edge_collision_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: edge_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: vertex_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: collider_edge_hash.collider_edges_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: collider_edge_hash.cell_starts_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: collider_edge_hash.sorted_indices_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: edge_collision_params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: self_collision_accum_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
     let bind_groups_ms = t_bindgroups.elapsed().as_secs_f32() * 1000.0;
     let build_timings = vec![
         ("shared_cache_ms".to_string(), shared_ms),
@@ -1409,7 +1414,9 @@ pub fn build_simulation_resources(
         sewing_bind_groups,
         sew_shrink_bind_group,
         update_vel_bind_group,
-        edge_collision_bind_groups,
+        collider_edge_hash,
+        edge_collision_params_buffer,
+        edge_collision_bind_group,
         self_collision_relief_factor,
         self_collision_max_displacement_ratio,
         self_collision_exclude_neighbors,

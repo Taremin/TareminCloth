@@ -274,13 +274,13 @@ impl SharedPipelines {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Edge Collision Bind Group Layout"),
                 entries: &[
-                    storage_rw,
+                    storage_ro(0),
                     storage_ro(1),
                     storage_ro(2),
                     storage_ro(3),
                     storage_ro(4),
                     uniform_entry(5),
-                    uniform_entry(6),
+                    storage_rw_at(6),
                 ],
             });
         let update_vel_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

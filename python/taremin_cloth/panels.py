@@ -589,9 +589,11 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
         box_col = layout.box()
         box_col.label(text=i18n.trans("Collider Interaction"), icon='PHYSICS')
         c_col = box_col.column(align=True)
-        c_col.prop(settings, "enable_edge_collision")
+        c_col.label(text=i18n.trans("Mesh Collider"), icon='MESH_DATA')
+        col_mesh = c_col.column(align=True)
+        col_mesh.prop(settings, "enable_edge_collision", text=i18n.trans("Edge-to-Edge Contact"))
         if settings.enable_edge_collision:
-            edge_sub = c_col.column(align=True)
+            edge_sub = col_mesh.column(align=True)
             edge_sub.prop(settings, "edge_margin_scale", text=i18n.trans("Margin Scale"))
             edge_sub.prop(settings, "edge_margin_offset", text=i18n.trans("Margin Offset"))
 

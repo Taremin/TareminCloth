@@ -686,4 +686,68 @@ mod tests {
         assert_eq!((r, s, lat), (1.0, 1.0, true));
     }
 
+    #[test]
+    fn test_edge_collision_ee_pipeline() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 水平な布エッジ (X軸方向: [-0.5, 0.0, 0.0] -> [0.5, 0.0, 0.0])
+        let positions = vec![
+            [-0.5, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+        ];
+        let edges = vec![[0, 1]];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.02, // 厚み 20mm
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_edge_collision(true);
+
+        // Y軸方向のコライダーエッジを持つ三角形メッシュを追加
+        // 直下 (Z = -0.01) に十字交差するよう配置
+        let tri = GpuMeshTriangle {
+            p0: [0.0, -0.5, -0.01],
+            friction: 0.1,
+            p1: [0.0, 0.5, -0.01],
+            thickness: 0.02,
+            p2: [0.5, 0.0, -0.01],
+            restitution: 0.0,
+            flags: 0,
+            _pad: [0.0; 3],
+        };
+        sim.set_mesh_triangles(&[tri]);
+
+        // コライダー稜線が抽出され、空間ハッシュに登録されていることを確認
+        assert_eq!(sim.collider_edge_hash.num_edges, 3);
+
+        // 重力を切って純粋なエッジ押し出しを検証
+        sim.gravity = [0.0, 0.0, 0.0];
+
+        // 1ステップ実行
+        sim.step(0.016, 5);
+
+        let verts = sim.read_vertices();
+        // 布エッジの中点がコライダーエッジから離れる方向 (Z+) に押し出されていることを確認
+        let mid_z = (verts[0].position[2] + verts[1].position[2]) * 0.5;
+        assert!(mid_z > 0.0, "エッジ同士の接触により布がZ+方向に押し出されるべき (mid_z = {})", mid_z);
+    }
 }
+

@@ -516,8 +516,8 @@ class TareminClothObjectSettings(PropertyGroup):
         max=8,
     )
     enable_edge_collision: BoolProperty(
-        name="Edge-Collider Collision",
-        description="Enable detailed edge-collider contact detection",
+        name="Edge-to-Edge Contact",
+        description="Enable detailed edge-to-edge contact detection for Mesh Colliders (prevents tunneling through sharp edges)",
         default=False,
     )
     edge_margin_scale: FloatProperty(

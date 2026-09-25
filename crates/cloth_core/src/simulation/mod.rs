@@ -14,10 +14,11 @@ use std::sync::Arc;
 use crate::context::GpuContext;
 use crate::debug_recorder::SimulationDebugRecorder;
 use crate::mesh::{
-    ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle,
-    GpuPinConstraint, GpuSewingConstraint, GpuVertex, SelfCollisionParams,
+    extract_collider_edges, ClothMesh, EdgeCollisionParams, GpuBendingConstraint, GpuCollider,
+    GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint,
+    GpuVertex, SelfCollisionParams,
 };
-use crate::spatial_hash::{GpuSpatialHash, GpuEdgeSpatialHash};
+use crate::spatial_hash::{GpuColliderEdgeSpatialHash, GpuEdgeSpatialHash, GpuSpatialHash};
 use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
 pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
@@ -247,7 +248,9 @@ pub struct GpuClothSimulator {
     pub post_collision_relaxation_iters: u32,
     pub self_collision_substep_interval: u32,
     pub self_collision_ee_substep_interval: u32,
-    pub(crate) edge_collision_bind_groups: Vec<wgpu::BindGroup>,
+    pub(crate) collider_edge_hash: GpuColliderEdgeSpatialHash,
+    pub(crate) edge_collision_params_buffer: wgpu::Buffer,
+    pub(crate) edge_collision_bind_group: wgpu::BindGroup,
 
     pub sewing_stiffness: f32,
     pub enable_sewing_lock: bool,
@@ -476,7 +479,9 @@ impl GpuClothSimulator {
             enable_collider_cluster_culling: false,
             enable_single_sided_recovery: true,
             collider_sweep_margin_offset: 0.05,
-            edge_collision_bind_groups: res.edge_collision_bind_groups,
+            collider_edge_hash: res.collider_edge_hash,
+            edge_collision_params_buffer: res.edge_collision_params_buffer,
+            edge_collision_bind_group: res.edge_collision_bind_group,
             sewing_stiffness: 10000.0,
             enable_sewing_lock: true,
             areal_density: 0.15,
@@ -699,11 +704,13 @@ impl GpuClothSimulator {
     /// エッジ詳細接触マージン倍率を設定する (1.0 = 標準, 1.2〜1.5 = 安全マージン付き)
     pub fn set_edge_margin_scale(&mut self, scale: f32) {
         self.edge_margin_scale = scale.max(1.0);
+        self.update_edge_collision_params();
     }
 
     /// エッジ詳細接触マージン固定加算値を設定する (m単位, 0.0 = 加算なし, 0.005 = 5mm安全クリアランス)
     pub fn set_edge_margin_offset(&mut self, offset: f32) {
         self.edge_margin_offset = offset.max(0.0);
+        self.update_edge_collision_params();
     }
 
     /// エッジ詳細接触判定の有効/無効を設定する。
@@ -1902,6 +1909,61 @@ impl GpuClothSimulator {
             ],
         });
     }
+
+    fn recreate_edge_collision_bind_group(&mut self) {
+        self.edge_collision_bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Edge Collision Bind Group (Recreated)"),
+            layout: &self.shared.edge_collision_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.edge_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.collider_edge_hash.collider_edges_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.collider_edge_hash.cell_starts_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.collider_edge_hash.sorted_indices_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.edge_collision_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.self_collision_accum_buffer.as_entire_binding(),
+                },
+            ],
+        });
+    }
+
+    fn update_edge_collision_params(&self) {
+        let edge_params = EdgeCollisionParams {
+            cell_size: self.collider_edge_hash.cell_size,
+            table_size: self.collider_edge_hash.table_size,
+            num_cloth_edges: self.num_edges,
+            num_collider_edges: self.collider_edge_hash.num_edges,
+            edge_margin_scale: self.edge_margin_scale,
+            edge_margin_offset: self.edge_margin_offset,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.context.queue.write_buffer(
+            &self.edge_collision_params_buffer,
+            0,
+            bytemuck::bytes_of(&edge_params),
+        );
+    }
     /// コライダー最適化およびリカバリーのオプションを設定する
     pub fn set_collider_options(
         &mut self,
@@ -1915,7 +1977,7 @@ impl GpuClothSimulator {
         self.upload_colliders();
     }
 
-    pub(crate) fn upload_colliders(&self) {
+    pub(crate) fn upload_colliders(&mut self) {
         let num_colliders = self.colliders.len() as u32;
         if num_colliders > 0 {
             self.context.queue.write_buffer(
@@ -1982,6 +2044,21 @@ impl GpuClothSimulator {
                 );
             }
         }
+
+        // コライダー稜線の一意抽出および空間ハッシュの構築・更新
+        let collider_edges = extract_collider_edges(&self.mesh_triangles);
+        let old_edges_buf_size = self.collider_edge_hash.collider_edges_buffer.size();
+        let old_indices_buf_size = self.collider_edge_hash.sorted_indices_buffer.size();
+
+        self.collider_edge_hash.upload(&self.context, &collider_edges);
+
+        if self.collider_edge_hash.collider_edges_buffer.size() != old_edges_buf_size
+            || self.collider_edge_hash.sorted_indices_buffer.size() != old_indices_buf_size
+        {
+            self.recreate_edge_collision_bind_group();
+        }
+
+        self.update_edge_collision_params();
 
         let num_clusters = if num_mesh_triangles > 0 { (num_mesh_triangles + 15) / 16 } else { 0 };
         let params = CollisionParams {

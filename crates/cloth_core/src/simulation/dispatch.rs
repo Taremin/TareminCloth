@@ -184,25 +184,33 @@ impl GpuClothSimulator {
         // =========================================================================
         // 6. エッジコライダー詳細衝突 & 自己衝突パス
         // =========================================================================
-        // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突)
-        if has_colliders && self.enable_edge_collision {
+        // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突: 全布エッジ単一ディスパッチ)
+        let ran_edge_collision = has_colliders && self.enable_edge_collision && self.num_edges > 0;
+        if ran_edge_collision {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Edge Collision Pass"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(self.shared.ensure_edge());
-            for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
-                if count > 0 {
-                    cpass.set_bind_group(0, &self.edge_collision_bind_groups[color_idx], &[]);
-                    cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
-                }
-            }
+            cpass.set_bind_group(0, &self.edge_collision_bind_group, &[]);
+            let edge_workgroups = (self.num_edges + wg_size - 1) / wg_size;
+            cpass.dispatch_workgroups(edge_workgroups, 1, 1);
         }
 
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
-        if should_solve_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
+        let ran_outer_self_collision = should_solve_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1);
+        if ran_outer_self_collision {
             let need_rebuild = sub_idx == 0;
             self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild, is_last_substep, should_run_ee);
+        } else if ran_edge_collision {
+            // 自己衝突が走らない場合は、エッジ衝突で蓄積された変位を適用してアキュムレータをクリア
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Edge Collision Apply Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
+            cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)

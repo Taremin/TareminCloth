@@ -11,7 +11,7 @@ struct SpatialHashParams {
     cell_size: f32,
     table_size: u32,
     num_vertices: u32,
-    _pad: u32,
+    num_blocks: u32,
 };
 
 @group(0) @binding(0) var<storage, read> vertices: array<GpuVertex>;

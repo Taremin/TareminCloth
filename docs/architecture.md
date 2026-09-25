@@ -266,22 +266,50 @@ pub struct GpuMeshTriangle {
 // - bit 0 (0x1): is_single_sided (1=片面メッシュ, 0=両面メッシュ)
 // - bit 1 (0x2): recovery_disabled (1=片面裏抜け復帰無効, 0=復帰有効[デフォルト])
 
-// 自己衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write, 32 bytes/vert)
+// コライダー稜線データ (GPU Buffer: Read-Only, 32 bytes)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuColliderEdge {
+    pub p0: [f32; 3],        // 始点ワールド座標
+    pub thickness: f32,      // コライダー表面厚み (m)
+    pub p1: [f32; 3],        // 終点ワールド座標
+    pub friction: f32,       // 摩擦係数
+}
+
+// エッジ衝突パラメータ (GPU Uniform Buffer: Read-Only, 32 bytes)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EdgeCollisionParams {
+    pub cell_size: f32,          // 空間ハッシュセル幅
+    pub table_size: u32,         // ハッシュテーブルサイズ
+    pub num_cloth_edges: u32,    // 布エッジ総数
+    pub num_collider_edges: u32, // コライダーエッジ総数
+    pub edge_margin_scale: f32,  // エッジマージン倍率
+    pub edge_margin_offset: f32, // エッジマージン固定加算 (m)
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+// 自己衝突・エッジ衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write, 32 bytes/vert)
 // WGSL: struct SelfCollisionAccum {
 //     dx: atomic<i32>, dy: atomic<i32>, dz: atomic<i32>, count: atomic<u32>,        // 近接反発ペナルティ変位
 //     ccd_dx: atomic<i32>, ccd_dy: atomic<i32>, ccd_dz: atomic<i32>, ccd_count: atomic<u32>, // CCDハード変位 (100%適用)
 // }
-// 固定小数点 10^6 スケール (1μm 分解能) により、データ競合なしに対称な作用・反作用を蓄積
+// 固定小数点 10^6 スケール (1μm 分解能) により、データ競合なしに対称な作用・反作用（およびエッジ衝突変位）を蓄積
 
-// 空間ハッシュバッファ (Counting Sort 6相, GPU Storage Buffer: Read/Write)
-// - GpuSpatialHash (頂点用):
+// 空間ハッシュバッファ (GPU Storage Buffer: Read/Write)
+// - GpuSpatialHash (頂点用, GPU 6相 Counting Sort):
 //   - cell_counts: array<atomic<u32>, TABLE_SIZE> (セル毎頂点数)
 //   - cell_offsets: array<u32, TABLE_SIZE>        (Prefix Sum オフセット)
 //   - sorted_indices: array<u32, N>              (セル順にソートされた頂点インデックス)
-// - GpuEdgeSpatialHash (エッジ用):
+// - GpuEdgeSpatialHash (布エッジ用, GPU 6相 Counting Sort):
 //   - cell_counts: array<atomic<u32>, TABLE_SIZE> (セル毎エッジ数)
 //   - cell_offsets: array<u32, TABLE_SIZE>        (Prefix Sum オフセット)
 //   - sorted_edge_indices: array<u32, NUM_EDGES> (セル順にソートされたエッジインデックス)
+// - GpuColliderEdgeSpatialHash (コライダーエッジ用, CPU Counting Sort 構築):
+//   - cell_starts: array<u32, TABLE_SIZE + 1>    (各セルの開始インデックス)
+//   - sorted_indices: array<u32, NUM_COLLIDER_EDGES> (セル順コライダーエッジインデックス)
+//   - collider_edges: array<GpuColliderEdge, NUM_COLLIDER_EDGES> (コライダー稜線本体)
 ```
 
 ---

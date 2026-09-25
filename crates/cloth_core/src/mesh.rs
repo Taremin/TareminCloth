@@ -88,6 +88,28 @@ pub struct GpuMeshTriangle {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuColliderEdge {
+    pub p0: [f32; 3],
+    pub thickness: f32,
+    pub p1: [f32; 3],
+    pub friction: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EdgeCollisionParams {
+    pub cell_size: f32,
+    pub table_size: u32,
+    pub num_cloth_edges: u32,
+    pub num_collider_edges: u32,
+    pub edge_margin_scale: f32,
+    pub edge_margin_offset: f32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimParams {
     pub gravity: [f32; 4], // [gx, gy, gz, dt]
     pub damping: f32,
@@ -895,6 +917,44 @@ impl ClothMesh {
     }
 }
 
+fn canonical_edge_key(a: [f32; 3], b: [f32; 3]) -> ([u32; 3], [u32; 3]) {
+    let a_bits = [a[0].to_bits(), a[1].to_bits(), a[2].to_bits()];
+    let b_bits = [b[0].to_bits(), b[1].to_bits(), b[2].to_bits()];
+    if a_bits < b_bits {
+        (a_bits, b_bits)
+    } else {
+        (b_bits, a_bits)
+    }
+}
+
+/// メッシュコライダーの三角形群から重複のない稜線（エッジ）リストを一意に抽出する
+pub fn extract_collider_edges(triangles: &[GpuMeshTriangle]) -> Vec<GpuColliderEdge> {
+    let mut edge_map = HashMap::new();
+    for t in triangles {
+        let edges = [
+            (t.p0, t.p1),
+            (t.p1, t.p2),
+            (t.p2, t.p0),
+        ];
+        for (a, b) in edges {
+            let key = canonical_edge_key(a, b);
+            edge_map
+                .entry(key)
+                .and_modify(|e: &mut GpuColliderEdge| {
+                    e.thickness = e.thickness.max(t.thickness);
+                    e.friction = (e.friction + t.friction) * 0.5;
+                })
+                .or_insert(GpuColliderEdge {
+                    p0: a,
+                    thickness: t.thickness,
+                    p1: b,
+                    friction: t.friction,
+                });
+        }
+    }
+    edge_map.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1145,5 +1205,40 @@ mod tests {
         // 面なし・密度ゼロは有限値を返す (ゼロ除算なし)
         let bare = super::areal_inv_masses(&positions, None, None, 0.15);
         assert!(bare.iter().all(|&w| w.is_finite() && w > 0.0));
+    }
+
+    #[test]
+    fn test_extract_collider_edges() {
+        // 2つの三角形 (0,1,2) と (2,1,3) が辺 (1,2) を共有
+        let tri1 = GpuMeshTriangle {
+            p0: [0.0, 0.0, 0.0],
+            friction: 0.3,
+            p1: [1.0, 0.0, 0.0],
+            thickness: 0.01,
+            p2: [0.0, 1.0, 0.0],
+            restitution: 0.0,
+            flags: 0,
+            _pad: [0.0; 3],
+        };
+        let tri2 = GpuMeshTriangle {
+            p0: [0.0, 1.0, 0.0],
+            friction: 0.5,
+            p1: [1.0, 0.0, 0.0],
+            thickness: 0.02,
+            p2: [1.0, 1.0, 0.0],
+            restitution: 0.0,
+            flags: 0,
+            _pad: [0.0; 3],
+        };
+        let edges = super::extract_collider_edges(&[tri1, tri2]);
+        // 6辺のうち共有辺が1本あるため、一意エッジは 5 本
+        assert_eq!(edges.len(), 5);
+        // 共有辺の厚みは max(0.01, 0.02) = 0.02 であること
+        let shared = edges.iter().find(|e| {
+            (e.p0 == [1.0, 0.0, 0.0] && e.p1 == [0.0, 1.0, 0.0])
+                || (e.p0 == [0.0, 1.0, 0.0] && e.p1 == [1.0, 0.0, 0.0])
+        });
+        assert!(shared.is_some());
+        assert_eq!(shared.unwrap().thickness, 0.02);
     }
 }

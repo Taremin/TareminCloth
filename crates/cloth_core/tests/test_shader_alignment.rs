@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 
 use cloth_core::mesh::{
-    GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuEdge, GpuMeshTriangle, GpuPinConstraint,
-    GpuSewingConstraint, GpuStarPair, GpuVertex, PairCollectParams, PairCounters, PairSolveParams,
-    SelfCollisionParams, SimParams,
+    EdgeCollisionParams, GpuBendingConstraint, GpuCollider, GpuColliderEdge, GpuDistanceConstraint,
+    GpuEdge, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex,
+    PairCollectParams, PairCounters, PairSolveParams, SelfCollisionParams, SimParams,
 };
 use cloth_core::simulation::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
@@ -88,6 +88,8 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("self_collision_collect_pairs.wgsl", include_str!("../src/shaders/self_collision_collect_pairs.wgsl")),
     ("self_collision_solve_vt.wgsl", include_str!("../src/shaders/self_collision_solve_vt.wgsl")),
     ("self_collision_solve_ee.wgsl", include_str!("../src/shaders/self_collision_solve_ee.wgsl")),
+    ("self_collision_ee_direct.wgsl", include_str!("../src/shaders/self_collision_ee_direct.wgsl")),
+    ("spatial_grid_sort_edges.wgsl", include_str!("../src/shaders/spatial_grid_sort_edges.wgsl")),
 ];
 
 macro_rules! check_member {
@@ -407,6 +409,24 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, GpuBakeMeshTriangle, _pad2);
             check_member!(filename, s, GpuBakeMeshTriangle, normal);
             check_member!(filename, s, GpuBakeMeshTriangle, _pad3);
+        }
+
+        if let Some(s) = structs.get("GpuColliderEdge") {
+            check_struct_size!(filename, s, GpuColliderEdge);
+            check_member!(filename, s, GpuColliderEdge, p0);
+            check_member!(filename, s, GpuColliderEdge, thickness);
+            check_member!(filename, s, GpuColliderEdge, p1);
+            check_member!(filename, s, GpuColliderEdge, friction);
+        }
+
+        if let Some(s) = structs.get("EdgeCollisionParams") {
+            check_struct_size!(filename, s, EdgeCollisionParams);
+            check_member!(filename, s, EdgeCollisionParams, cell_size);
+            check_member!(filename, s, EdgeCollisionParams, table_size);
+            check_member!(filename, s, EdgeCollisionParams, num_cloth_edges);
+            check_member!(filename, s, EdgeCollisionParams, num_collider_edges);
+            check_member!(filename, s, EdgeCollisionParams, edge_margin_scale);
+            check_member!(filename, s, EdgeCollisionParams, edge_margin_offset);
         }
     }
 }
