@@ -81,6 +81,11 @@ impl GpuClothSimulator {
                 && (self.self_collision_substep_interval <= 1
                     || sub_idx % self.self_collision_substep_interval == 0
                     || is_last_substep);
+            let should_run_ee = match self.self_collision_ee_substep_interval {
+                0 => false,
+                1 => true,
+                interval => (sub_idx % interval == 0) || is_last_substep,
+            };
 
             // XPBDラムダの零化 (サブステップ毎。反復ループ内では蓄積する)
             encoder.clear_buffer(&self.dist_lambda_buffer, 0, None);
@@ -161,7 +166,7 @@ impl GpuClothSimulator {
                 // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
                 if should_solve_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
                     let need_rebuild = sub_idx == 0;
-                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild, is_last_substep);
+                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild, is_last_substep, should_run_ee);
                 }
             }
 
@@ -197,7 +202,7 @@ impl GpuClothSimulator {
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
         if should_solve_self_collision && (self.coupled_self_collision_mode == 0 || self.coupled_self_collision_mode == 1) {
             let need_rebuild = sub_idx == 0;
-            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild, is_last_substep);
+            self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild, is_last_substep, should_run_ee);
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
@@ -857,10 +862,11 @@ impl GpuClothSimulator {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         vert_workgroups: u32,
-        _wg_size: u32,
+        wg_size: u32,
         prefix: &str,
         need_rebuild: bool,
         is_last_substep: bool,
+        enable_ee: bool,
     ) {
         // 1. Compute Normals Pass (P4: 法線展開処理が無効の場合は省略する。
         // 法線バッファの読み手は自己衝突シェーダーの展開分岐のみであり、
@@ -885,6 +891,10 @@ impl GpuClothSimulator {
         if !self.enable_pair_cache || need_rebuild || force_direct {
             // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
             self.spatial_hash.dispatch_build(encoder, self.num_vertices, self.shared.ensure_hash(), &self.profiler);
+
+            if enable_ee && self.num_edges > 0 && (!self.enable_pair_cache || force_direct) {
+                self.edge_spatial_hash.dispatch_build(encoder, self.num_edges, self.shared.ensure_edge_hash(), &self.profiler);
+            }
         }
 
         if self.enable_pair_cache && !force_direct {
@@ -929,7 +939,7 @@ impl GpuClothSimulator {
                 cpass.dispatch_workgroups(vt_workgroups, 1, 1);
             }
 
-            {
+            if enable_ee {
                 // E-E ペア解決
                 let ts_ee = self.profiler.enter("pair_ee");
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -954,7 +964,7 @@ impl GpuClothSimulator {
             }
         } else {
             // 従来のダイレクト走査方式
-            // 4. Self Collision Pass (Solve)
+            // 4-a. Self Collision Pass (Solve V-T / V-V)
             {
                 let ts = self.profiler.enter("sc_solve");
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -964,6 +974,19 @@ impl GpuClothSimulator {
                 cpass.set_pipeline(&self.shared.ensure_self_collision().solve);
                 cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            }
+
+            // 4-b. Self Collision Pass (Solve Edge-Edge)
+            if enable_ee && self.num_edges > 0 {
+                let ts = self.profiler.enter("sc_solve_ee");
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Self Collision EE Pass")),
+                    timestamp_writes: self.profiler.writes(ts),
+                });
+                cpass.set_pipeline(&self.shared.ensure_self_collision().solve_ee);
+                cpass.set_bind_group(0, &self.self_collision_ee_bind_group, &[]);
+                let edge_workgroups = (self.num_edges + wg_size - 1) / wg_size;
+                cpass.dispatch_workgroups(edge_workgroups, 1, 1);
             }
 
             // 5. Self Collision Apply Pass

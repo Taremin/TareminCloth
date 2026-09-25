@@ -245,6 +245,7 @@
   "Dynamically mesh only bent joints for speedup": "屈曲した関節のみ動的にメッシュ化し高速化",
   "ERROR": "エラー",
   "Easing": "イージング",
+  "EE Substep Interval": "エッジ衝突間隔",
   "Edge Indices": "エッジインデックス",
   "Edge Margin Scale": "エッジマージン倍率",
   "Edge-Collider Collision": "エッジ・コライダー衝突",

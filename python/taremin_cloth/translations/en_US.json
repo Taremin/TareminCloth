@@ -245,6 +245,7 @@
   "Dynamically mesh only bent joints for speedup": "Dynamically mesh only bent joints for speedup",
   "ERROR": "ERROR",
   "Easing": "Easing",
+  "EE Substep Interval": "EE Substep Interval",
   "Edge Indices": "Edge Indices",
   "Edge Margin Scale": "Edge Margin Scale",
   "Edge-Collider Collision": "Edge-Collider Collision",

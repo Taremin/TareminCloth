@@ -217,3 +217,207 @@ impl GpuSpatialHash {
         }
     }
 }
+
+pub struct GpuEdgeSpatialHash {
+    pub cell_starts_buffer: wgpu::Buffer,
+    pub sorted_indices_buffer: wgpu::Buffer,
+    pub cell_counts_buffer: wgpu::Buffer,
+    pub cell_currents_buffer: wgpu::Buffer,
+    pub block_sums_buffer: wgpu::Buffer,
+    pub params_buffer: wgpu::Buffer,
+
+    pub grid_bind_group: wgpu::BindGroup,
+    pub table_size: u32,
+    pub cell_size: f32,
+}
+
+impl GpuEdgeSpatialHash {
+    pub fn new(
+        context: &Arc<GpuContext>,
+        edge_hash_bgl: &wgpu::BindGroupLayout,
+        edge_buffer: &wgpu::Buffer,
+        vertex_buffer: &wgpu::Buffer,
+        num_edges: u32,
+        cell_size: f32,
+        table_size: u32,
+    ) -> Self {
+        let device = &context.device;
+        let num_blocks = (table_size + 255) / 256;
+
+        let cell_counts_init = vec![0u32; table_size as usize];
+        let cell_counts_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("EdgeSpatialGrid Cell Counts Buffer"),
+            contents: bytemuck::cast_slice(&cell_counts_init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let cell_starts_init = vec![0u32; (table_size + 1) as usize];
+        let cell_starts_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("EdgeSpatialGrid Cell Starts Buffer"),
+            contents: bytemuck::cast_slice(&cell_starts_init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let cell_currents_init = vec![0u32; table_size as usize];
+        let cell_currents_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("EdgeSpatialGrid Cell Currents Buffer"),
+            contents: bytemuck::cast_slice(&cell_currents_init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sorted_indices_init = vec![0u32; num_edges.max(1) as usize];
+        let sorted_indices_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("EdgeSpatialGrid Sorted Indices Buffer"),
+            contents: bytemuck::cast_slice(&sorted_indices_init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let block_sums_init = vec![0u32; num_blocks.max(1) as usize];
+        let block_sums_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("EdgeSpatialGrid Block Sums Buffer"),
+            contents: bytemuck::cast_slice(&block_sums_init),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let params = SpatialHashParams {
+            cell_size,
+            table_size,
+            num_vertices: num_edges,
+            num_blocks,
+        };
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("EdgeSpatialGrid Params Buffer"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("EdgeSpatialGrid Sort BG"),
+            layout: edge_hash_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: edge_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: cell_counts_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cell_starts_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: cell_currents_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: sorted_indices_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: block_sums_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Self {
+            cell_starts_buffer,
+            sorted_indices_buffer,
+            cell_counts_buffer,
+            cell_currents_buffer,
+            block_sums_buffer,
+            params_buffer,
+            grid_bind_group,
+            table_size,
+            cell_size,
+        }
+    }
+
+    pub fn dispatch_build(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        num_edges: u32,
+        hash: &HashPipelines,
+        prof: &crate::simulation::profile::GpuProfiler,
+    ) {
+        let num_blocks = (self.table_size + 255) / 256;
+        let edge_workgroups = (num_edges + 255) / 256;
+
+        // 1. カウンタクリア
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("EdgeSpatialGrid Clear Pass"),
+                timestamp_writes: prof.writes(prof.enter("edge_hash_clear")),
+            });
+            cpass.set_pipeline(&hash.clear);
+            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.dispatch_workgroups(num_blocks, 1, 1);
+        }
+
+        // 2. エッジセルカウント
+        if num_edges > 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("EdgeSpatialGrid Count Pass"),
+                timestamp_writes: prof.writes(prof.enter("edge_hash_count")),
+            });
+            cpass.set_pipeline(&hash.count);
+            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+        }
+
+        // 3. ブロック内 Prefix Sum
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("EdgeSpatialGrid Scan Blocks Pass"),
+                timestamp_writes: prof.writes(prof.enter("edge_hash_scan")),
+            });
+            cpass.set_pipeline(&hash.scan_blocks);
+            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.dispatch_workgroups(num_blocks, 1, 1);
+        }
+
+        // 4. トップレベル Prefix Sum (block_sums)
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("EdgeSpatialGrid Scan Top Pass"),
+                timestamp_writes: prof.writes(prof.enter("edge_hash_top")),
+            });
+            cpass.set_pipeline(&hash.scan_top);
+            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // 5. ブロックオフセット加算 (最終 cell_starts 作成)
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("EdgeSpatialGrid Add Offsets Pass"),
+                timestamp_writes: prof.writes(prof.enter("edge_hash_add")),
+            });
+            cpass.set_pipeline(&hash.add_offsets);
+            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.dispatch_workgroups(num_blocks, 1, 1);
+        }
+
+        // 6. エッジインデックスのスキャッター配置
+        if num_edges > 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("EdgeSpatialGrid Scatter Pass"),
+                timestamp_writes: prof.writes(prof.enter("edge_hash_scatter")),
+            });
+            cpass.set_pipeline(&hash.scatter);
+            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+        }
+    }
+}
+

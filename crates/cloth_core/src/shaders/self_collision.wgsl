@@ -16,14 +16,14 @@ struct SelfCollisionParams {
     cell_size: f32,
     table_size: u32,
     num_vertices: u32,
-    _pad0: u32,
+    num_edges: u32,
     relief_factor: f32,
     max_displacement_ratio: f32,
     enable_relief: u32,
     enable_normal_untangling: u32,
     exclude_neighbors: u32,
     max_search_iterations: u32,
-    _pad2: u32,
+    enable_ee: u32,
     _pad3: u32,
 };
 
@@ -254,6 +254,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x_old_i = v_i.position; // サブステップ開始時の確定位置
     let p_i = v_i.prev_pos;     // 現在の予測位置
     let thick_i = v_i.thickness;
+    let local_len_i = local_edge_lengths[index];
 
     let cell = vec3<i32>(floor(p_i / params.cell_size));
 
@@ -276,17 +277,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                 for (var k = cell_start; k < cell_end; k = k + 1u) {
                     let j = sorted_indices[k];
+                    if (j == index) {
+                        continue;
+                    }
+
                     let v_j = vertices[j];
                     let p_j = v_j.prev_pos;
 
                     // 枝切り: ハッシュ値が同じでも実際の空間セルが異なる場合はスキップ（ハッシュ衝突排除）
                     let j_cell = vec3<i32>(floor(p_j / params.cell_size));
-                    if (all(j_cell == neighbor_cell) && index != j) {
+                    if (all(j_cell == neighbor_cell)) {
                         let delta_vv = p_i - p_j;
                         let dist_sq_vv = dot(delta_vv, delta_vv);
 
                         let thick_j = v_j.thickness;
-                        let local_len_i = local_edge_lengths[index];
                         let local_len_j = local_edge_lengths[j];
                         let min_dist = thick_i + thick_j;
                         let edge_margin = min(local_len_i, local_len_j) * 0.06;
@@ -389,6 +393,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let v_v1 = vertices[v1];
                                             let p_v0 = v_v0.prev_pos;
                                             let p_v1 = v_v1.prev_pos;
+
+                                            // 【重複排除 1】三角形 (j, v0, v1) のセル内局所代表制約 (Local Canonical Triangle)
+                                            // 自頂点 index の走査セル (27近傍) 内に存在する頂点群の中で最小の頂点のみが代表して評価する。
+                                            // これにより同一面に対するCCD・点面最短距離の重複計算が 1/3 に激減し、かつ境界面も脱落ゼロ。
+                                            let v0_in_sweep = all(abs(vec3<i32>(floor(p_v0 / params.cell_size)) - cell) <= vec3<i32>(1));
+                                            let v1_in_sweep = all(abs(vec3<i32>(floor(p_v1 / params.cell_size)) - cell) <= vec3<i32>(1));
+                                            if ((v0_in_sweep && j > v0) || (v1_in_sweep && j > v1)) {
+                                                continue;
+                                            }
+
                                             let p_v0_old = v_v0.position;
                                             let p_v1_old = v_v1.position;
 
@@ -399,8 +413,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             // 相手の移動を考慮した相対始点（トンネリング検知用）
                                             let rel_old_i = x_old_i - tri_move;
 
+                                            // 【早期枝切り 2-A】V-T 掃引 AABB 判定 (Sweep AABB Early Exit)
+                                            // 点 i の相対移動軌道 [rel_old_i, p_i] の AABB と三角形 (p_j, p_v0, p_v1) の AABB を比較。
+                                            // 分離軸定理により AABB が重なっていない場合、CCD および最短距離接触は幾何学的に 100% 発生し得ない。
+                                            let sweep_pt_min = min(rel_old_i, p_i) - vec3<f32>(effective_thick);
+                                            let sweep_pt_max = max(rel_old_i, p_i) + vec3<f32>(effective_thick);
+                                            let tri_aabb_min = min(min(p_j, p_v0), p_v1);
+                                            let tri_aabb_max = max(max(p_j, p_v0), p_v1);
+
+                                            if (any(sweep_pt_min > tri_aabb_max) || any(sweep_pt_max < tri_aabb_min)) {
+                                                continue;
+                                            }
+
+                                            let move_vec = p_i - rel_old_i;
+                                            let move_sq = dot(move_vec, move_vec);
+
                                             // A) 軌道トポロジー貫通遮断 (CCD)
-                                            let ccd_hit = intersect_segment_triangle(rel_old_i, p_i, p_j, p_v0, p_v1);
+                                            // 相対移動量が極小（静止または微小変位）の場合はトンネリングが発生し得ないため、
+                                            // 重厚な Möller-Trumbore 判定をスキップして直接 B の幾何反発へ直行する。
+                                            var ccd_hit = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+                                            if (move_sq > 1e-8) {
+                                                ccd_hit = intersect_segment_triangle(rel_old_i, p_i, p_j, p_v0, p_v1);
+                                            }
+
                                             if (ccd_hit.x > 0.5) {
                                                 let t = ccd_hit.y;
                                                 var push_disp = vec3<f32>(0.0);
@@ -409,8 +444,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 }
 
                                                 // 面の手前への安全クリアランス
-                                                let move_vec = p_i - rel_old_i;
-                                                let move_len = length(move_vec);
+                                                let move_len = sqrt(move_sq);
                                                 let margin_t = min(effective_thick / max(move_len, 1e-4), 0.3);
                                                 let t_safe = max(0.0, t - margin_t);
                                                 let p_safe = rel_old_i + t_safe * move_vec;
@@ -467,103 +501,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                     }
                                 }
 
-                                // ==========================================
-                                // 3. Edge-Edge (辺 対 辺) 幾何反発 (対称アトミック分配)
-                                // ==========================================
-                                // 【早期枝切り 3】E-E 接触可能半径
-                                let ee_bound = effective_thick + (local_len_i + local_len_j) * 1.3;
-                                if (dist_sq_vv <= ee_bound * ee_bound) {
-                                    let adj_i_start = adj_offsets[index];
-                                    let adj_i_end = adj_offsets[index + 1u];
-                                    let adj_j_start = adj_offsets[j];
-                                    let adj_j_end = adj_offsets[j + 1u];
 
-                                    let num_edges_i = min(adj_i_end - adj_i_start, 8u);
-                                    let num_edges_j = min(adj_j_end - adj_j_start, 8u);
-
-                                    for (var ei = 0u; ei < num_edges_i; ei = ei + 1u) {
-                                        let ui = adj_indices[adj_i_start + ei];
-                                        let v_ui = vertices[ui];
-                                        let p_ui = v_ui.prev_pos;
-
-                                        for (var ej = 0u; ej < num_edges_j; ej = ej + 1u) {
-                                            let vj = adj_indices[adj_j_start + ej];
-                                            if (ui != j && ui != vj && index != vj) {
-                                                let v_vj = vertices[vj];
-                                                let p_vj = v_vj.prev_pos;
-                                                let p_vj_old = v_vj.position;
-
-                                                let edge_j_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
-                                                // 相手エッジがピンの場合は自エッジ側が必ず処理。両方が動的エッジなら index < j で重複排除
-                                                if (!is_pinned_i && (edge_j_has_pin || index < j)) {
-                                                    let st = closest_points_segments(p_i, p_ui, p_j, p_vj);
-                                                    let pt1 = p_i + st.x * (p_ui - p_i);
-                                                    let pt2 = p_j + st.y * (p_vj - p_j);
-
-                                                    let delta_ee = pt1 - pt2;
-                                                    let dist_ee = length(delta_ee);
-
-                                                    let is_untangling_ee = (params.enable_normal_untangling != 0u)
-                                                        && (v_i.layer_id > v_j.layer_id)
-                                                        && (dot(delta_ee, normals[j].xyz) < 0.0);
-
-                                                    if (!is_untangling_ee && dist_ee < effective_thick && dist_ee > EPSILON) {
-                                                        let n_ee = delta_ee / dist_ee;
-                                                        let pen_ee = effective_thick - dist_ee;
-                                                        let s = st.x;
-                                                        let t = st.y;
-
-                                                        let edge_i_has_pin = (v_i.inv_mass <= 0.0) || (v_ui.inv_mass <= 0.0);
-
-                                                        if (edge_j_has_pin) {
-                                                            let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
-                                                            let col_disp = n_ee * (pen_ee * (1.0 - s)) + edge_move * (1.0 - s) * 0.5;
-                                                            add_ccd_atomic(index, col_disp);
-                                                            if (v_ui.inv_mass > 0.0) {
-                                                                let col_disp_ui = n_ee * (pen_ee * s) + edge_move * s * 0.5;
-                                                                add_ccd_atomic(ui, col_disp_ui);
-                                                            }
-                                                        } else if (edge_i_has_pin) {
-                                                            let edge_move = ((p_i - x_old_i) + (p_ui - v_ui.position)) * 0.5;
-                                                            let col_disp = -n_ee * (pen_ee * (1.0 - t)) + edge_move * (1.0 - t) * 0.5;
-                                                            add_ccd_atomic(j, col_disp);
-                                                            if (v_vj.inv_mass > 0.0) {
-                                                                let col_disp_vj = -n_ee * (pen_ee * t) + edge_move * t * 0.5;
-                                                                add_ccd_atomic(vj, col_disp_vj);
-                                                            }
-                                                        } else {
-                                                            let w_i = v_i.inv_mass;
-                                                            let w_ui = v_ui.inv_mass;
-                                                            let w_j = v_j.inv_mass;
-                                                            let w_vj = v_vj.inv_mass;
-                                                            let w_e1 = (1.0 - s) * (1.0 - s) * w_i + s * s * w_ui;
-                                                            let w_e2 = (1.0 - t) * (1.0 - t) * w_j + t * t * w_vj;
-                                                            let w_tot = w_e1 + w_e2;
-
-                                                            if (w_tot > EPSILON) {
-                                                                let total_disp = n_ee * (pen_ee * 0.6);
-                                                                // エッジ1（自側）
-                                                                if (w_i > 0.0) {
-                                                                    add_disp_atomic(index, total_disp * ((1.0 - s) * w_i / w_tot));
-                                                                }
-                                                                if (w_ui > 0.0) {
-                                                                    add_disp_atomic(ui, total_disp * (s * w_ui / w_tot));
-                                                                }
-                                                                // エッジ2（相手側、反作用）
-                                                                if (w_j > 0.0) {
-                                                                    add_disp_atomic(j, -total_disp * ((1.0 - t) * w_j / w_tot));
-                                                                }
-                                                                if (v_vj.inv_mass > 0.0) {
-                                                                    add_disp_atomic(vj, -total_disp * (t * w_vj / w_tot));
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
                             }
                         }
                     }

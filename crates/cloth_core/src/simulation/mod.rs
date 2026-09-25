@@ -17,7 +17,7 @@ use crate::mesh::{
     ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle,
     GpuPinConstraint, GpuSewingConstraint, GpuVertex, SelfCollisionParams,
 };
-use crate::spatial_hash::GpuSpatialHash;
+use crate::spatial_hash::{GpuSpatialHash, GpuEdgeSpatialHash};
 use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
 pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
@@ -168,11 +168,19 @@ pub struct GpuClothSimulator {
 
     // 自己・レイヤー衝突 & 貫通解消 (Untangling) 用
     pub(crate) spatial_hash: GpuSpatialHash,
+    pub(crate) edge_spatial_hash: GpuEdgeSpatialHash,
     pub(crate) self_collision_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
+    pub(crate) self_collision_bind_group_ee_off: wgpu::BindGroup,
+    pub(crate) self_collision_ee_bind_group: wgpu::BindGroup,
     pub(crate) self_collision_params_buffer: wgpu::Buffer,
+    pub(crate) self_collision_params_buffer_ee_off: wgpu::Buffer,
     #[allow(dead_code)]
     pub(crate) self_collision_accum_buffer: wgpu::Buffer,
     pub(crate) self_collision_apply_bind_group: wgpu::BindGroup,
+    pub num_edges: u32,
+    #[allow(dead_code)]
+    pub(crate) edge_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     pub(crate) normals_buffer: wgpu::Buffer,
     #[allow(dead_code)]
@@ -238,6 +246,7 @@ pub struct GpuClothSimulator {
     pub coupled_self_collision_mode: u32,
     pub post_collision_relaxation_iters: u32,
     pub self_collision_substep_interval: u32,
+    pub self_collision_ee_substep_interval: u32,
     pub(crate) edge_collision_bind_groups: Vec<wgpu::BindGroup>,
 
     pub sewing_stiffness: f32,
@@ -398,10 +407,16 @@ impl GpuClothSimulator {
             active_dirty_bone_indices: None,
             dynamic_sdf_initial_baked: false,
             spatial_hash: res.spatial_hash,
+            edge_spatial_hash: res.edge_spatial_hash,
             self_collision_bind_group: res.self_collision_bind_group,
+            self_collision_bind_group_ee_off: res.self_collision_bind_group_ee_off,
+            self_collision_ee_bind_group: res.self_collision_ee_bind_group,
             self_collision_params_buffer: res.self_collision_params_buffer,
+            self_collision_params_buffer_ee_off: res.self_collision_params_buffer_ee_off,
             self_collision_accum_buffer: res.self_collision_accum_buffer,
             self_collision_apply_bind_group: res.self_collision_apply_bind_group,
+            num_edges: res.num_edges,
+            edge_buffer: res.edge_buffer,
             normals_buffer: res.normals_buffer,
             local_edge_lengths_buffer: res.local_edge_lengths_buffer,
             adj_offsets_buffer: res.adj_offsets_buffer,
@@ -453,6 +468,7 @@ impl GpuClothSimulator {
             coupled_self_collision_mode: 0,
             post_collision_relaxation_iters: 1,
             self_collision_substep_interval: 1,
+            self_collision_ee_substep_interval: 1,
             enable_normal_untangling: res.enable_normal_untangling,
             enable_edge_collision: false,
             edge_margin_scale: 1.0,
@@ -617,23 +633,30 @@ impl GpuClothSimulator {
         self.enable_normal_untangling = enable_normal_untangling;
         self.self_collision_max_iterations = max_iterations;
 
-        let params = SelfCollisionParams {
+        let mut params = SelfCollisionParams {
             cell_size: self.spatial_hash.cell_size,
             table_size: self.spatial_hash.table_size,
             num_vertices: self.num_vertices,
-            _pad0: 0,
+            num_edges: self.num_edges,
             relief_factor,
             max_displacement_ratio,
             enable_relief: if relief_factor < 0.999 { 1 } else { 0 },
             enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
             exclude_neighbors: if exclude_neighbors { 1 } else { 0 },
             max_search_iterations: max_iterations,
-            _pad2: 0,
+            enable_ee: 1,
             _pad3: 0,
         };
 
         self.context.queue.write_buffer(
             &self.self_collision_params_buffer,
+            0,
+            bytemuck::bytes_of(&params),
+        );
+
+        params.enable_ee = 0;
+        self.context.queue.write_buffer(
+            &self.self_collision_params_buffer_ee_off,
             0,
             bytemuck::bytes_of(&params),
         );
@@ -728,6 +751,16 @@ impl GpuClothSimulator {
     /// 自己衝突判定を実行するサブステップ間隔を取得する
     pub fn self_collision_substep_interval(&self) -> u32 {
         self.self_collision_substep_interval
+    }
+
+    /// エッジ対エッジ自己衝突判定を実行するサブステップ間隔を設定する (0: 無効, 1: 毎サブステップ, 2: 2サブステップ毎)
+    pub fn set_self_collision_ee_substep_interval(&mut self, interval: u32) {
+        self.self_collision_ee_substep_interval = interval;
+    }
+
+    /// エッジ対エッジ自己衝突判定を実行するサブステップ間隔を取得する
+    pub fn self_collision_ee_substep_interval(&self) -> u32 {
+        self.self_collision_ee_substep_interval
     }
 
     /// 拘束解決の反復回数を設定する (1 サブステップあたり)

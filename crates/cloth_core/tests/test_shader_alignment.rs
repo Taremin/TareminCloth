@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 
 use cloth_core::mesh::{
-    GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint,
+    GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuEdge, GpuMeshTriangle, GpuPinConstraint,
     GpuSewingConstraint, GpuStarPair, GpuVertex, PairCollectParams, PairCounters, PairSolveParams,
     SelfCollisionParams, SimParams,
 };
@@ -215,11 +215,18 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, GpuBoneTransform, inv_world_matrix);
         }
 
+        if let Some(s) = structs.get("GpuEdge") {
+            check_struct_size!(filename, s, GpuEdge);
+            check_member!(filename, s, GpuEdge, v0);
+            check_member!(filename, s, GpuEdge, v1);
+        }
+
         if let Some(s) = structs.get("SelfCollisionParams") {
             check_struct_size!(filename, s, SelfCollisionParams);
             check_member!(filename, s, SelfCollisionParams, cell_size);
             check_member!(filename, s, SelfCollisionParams, table_size);
             check_member!(filename, s, SelfCollisionParams, num_vertices);
+            check_member!(filename, s, SelfCollisionParams, num_edges);
             check_member!(filename, s, SelfCollisionParams, relief_factor);
             check_member!(filename, s, SelfCollisionParams, max_displacement_ratio);
             check_member!(filename, s, SelfCollisionParams, enable_relief);

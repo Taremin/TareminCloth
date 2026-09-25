@@ -81,6 +81,8 @@ pub struct SimConfig {
     pub post_relaxation_iters: u32,
     #[serde(default = "d_substep_interval")]
     pub substep_interval: u32,
+    #[serde(default = "d_substep_interval")]
+    pub ee_substep_interval: u32,
     #[serde(default)]
     pub enable_pair_cache: bool,
     #[serde(default = "d_margin_mode")]
@@ -145,6 +147,7 @@ impl Default for SimConfig {
             coupled_mode: 0,
             post_relaxation_iters: 1,
             substep_interval: 1,
+            ee_substep_interval: 1,
             enable_pair_cache: false,
             pair_margin_mode: d_margin_mode(),
             pair_safety_margin: d_safety_margin(),

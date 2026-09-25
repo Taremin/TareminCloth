@@ -614,6 +614,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
             if settings.coupled_self_collision_mode != 'OFF':
                 self_sub.prop(settings, "post_collision_relaxation_iters", text=i18n.trans("Relax Steps"))
             self_sub.prop(settings, "self_collision_substep_interval", text=i18n.trans("Substep Interval"))
+            self_sub.prop(settings, "self_collision_ee_substep_interval", text=i18n.trans("EE Substep Interval"))
             self_sub.prop(settings, "enable_pair_cache", text=i18n.trans("Active Pair Cache (Fast)"))
             if settings.enable_pair_cache:
                 self_sub.prop(settings, "pair_cache_margin_mode", text=i18n.trans("Pair Margin Mode"))

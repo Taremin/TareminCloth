@@ -95,6 +95,45 @@ class TestSubstepDecoupling(unittest.TestCase):
                 free_verts_z = pos_3d[6:, 2]  # ピン留め行以外のz座標
                 self.assertTrue((free_verts_z < 0.0).all(), "自由頂点が重力方向に変位していません")
 
+    def test_ee_interval_getter_setter(self):
+        """エッジ対エッジ衝突サブステップ間隔のgetter/setterの動作テスト"""
+        positions, edges, faces, inv_masses = self.create_test_cloth()
+        sim = self.core.ClothSimulator(positions, edges, faces, inv_masses)
+
+        # デフォルト値は 1
+        self.assertEqual(sim.get_self_collision_ee_substep_interval(), 1)
+
+        # 0 (無効) に設定
+        sim.set_self_collision_ee_substep_interval(0)
+        self.assertEqual(sim.get_self_collision_ee_substep_interval(), 0)
+
+        # 2 に設定
+        sim.set_self_collision_ee_substep_interval(2)
+        self.assertEqual(sim.get_self_collision_ee_substep_interval(), 2)
+
+    def test_simulation_step_with_ee_interval(self):
+        """ee_interval=0, 1, 2 でシミュレーションが正常にステップ進行することの検証"""
+        positions, edges, faces, inv_masses = self.create_test_cloth(nx=6, ny=6)
+
+        for ee_interval in [0, 1, 2]:
+            with self.subTest(ee_interval=ee_interval):
+                sim = self.core.ClothSimulator(positions, edges, faces, inv_masses)
+                sim.set_self_collision_ee_substep_interval(ee_interval)
+                sim.set_enable_self_collision(True)
+
+                out_pos = np.zeros(len(positions) * 3, dtype=np.float32)
+
+                for _ in range(10):
+                    sim.step(1.0 / 60.0, 10)
+                    sim.get_positions(out_pos)
+
+                    self.assertFalse(np.isnan(out_pos).any(), f"ee_interval={ee_interval} で NaN が発生しました")
+                    self.assertFalse(np.isinf(out_pos).any(), f"ee_interval={ee_interval} で Inf が発生しました")
+
+                pos_3d = out_pos.reshape(-1, 3)
+                free_verts_z = pos_3d[6:, 2]
+                self.assertTrue((free_verts_z < 0.0).all(), "自由頂点が重力方向に変位していません")
+
 
 if __name__ == "__main__":
     unittest.main()

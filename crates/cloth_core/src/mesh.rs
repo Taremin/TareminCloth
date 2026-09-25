@@ -113,14 +113,14 @@ pub struct SelfCollisionParams {
     pub cell_size: f32,
     pub table_size: u32,
     pub num_vertices: u32,
-    pub _pad0: u32,
+    pub num_edges: u32,
     pub relief_factor: f32,
     pub max_displacement_ratio: f32,
     pub enable_relief: u32,
     pub enable_normal_untangling: u32,
     pub exclude_neighbors: u32,
     pub max_search_iterations: u32,
-    pub _pad2: u32,
+    pub enable_ee: u32,
     pub _pad3: u32,
 }
 
@@ -181,6 +181,13 @@ pub struct PairSolveParams {
     pub max_vt_pairs: u32,
     pub max_ee_pairs: u32,
     pub enable_normal_untangling: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuEdge {
+    pub v0: u32,
+    pub v1: u32,
 }
 
 #[repr(C)]
@@ -273,7 +280,10 @@ pub struct ClothMesh {
     pub star_offsets: Vec<u32>,
     pub star_indices: Vec<GpuStarPair>,
     pub triangles: Vec<GpuTriangle>,
+    pub edges: Vec<GpuEdge>,
     pub island_ids: Vec<u32>,
+    pub mean_edge_length: f32,
+    pub max_edge_length: f32,
 }
 
 impl ClothMesh {
@@ -625,6 +635,9 @@ impl ClothMesh {
         let mut adj_lists = vec![Vec::new(); n_verts];
         let mut edge_len_sums = vec![0.0f32; n_verts];
         let mut edge_counts = vec![0u32; n_verts];
+        let mut total_edge_len = 0.0f32;
+        let mut max_edge_len = 0.0f32;
+        let mut valid_edge_count = 0u32;
 
         for &[v0, v1] in edges {
             if (v0 as usize) < n_verts && (v1 as usize) < n_verts && v0 != v1 {
@@ -635,6 +648,12 @@ impl ClothMesh {
                 let dz = p0[2] - p1[2];
                 let len = (dx * dx + dy * dy + dz * dz).sqrt();
 
+                total_edge_len += len;
+                if len > max_edge_len {
+                    max_edge_len = len;
+                }
+                valid_edge_count += 1;
+
                 adj_lists[v0 as usize].push(v1);
                 adj_lists[v1 as usize].push(v0);
                 edge_len_sums[v0 as usize] += len;
@@ -643,6 +662,13 @@ impl ClothMesh {
                 edge_counts[v1 as usize] += 1;
             }
         }
+
+        let mean_edge_length = if valid_edge_count > 0 {
+            total_edge_len / valid_edge_count as f32
+        } else {
+            0.0
+        };
+        let max_edge_length = max_edge_len;
 
         // 縫合エッジ（sewing_springs）で結ばれた頂点ペアのトポロジー同一視（ホップ数0換算・完全縮約グラフ）
         // 縫合ペア (v0, v1) を同一結節点（縮約頂点）とみなし、完成形メッシュと同一の
@@ -828,6 +854,17 @@ impl ClothMesh {
             }
         }
 
+        let mut gpu_edges = Vec::new();
+        let mut edge_set = std::collections::HashSet::new();
+        for &[v0, v1] in edges {
+            if (v0 as usize) < n_verts && (v1 as usize) < n_verts && v0 != v1 {
+                let (e0, e1) = (v0.min(v1), v0.max(v1));
+                if edge_set.insert((e0, e1)) {
+                    gpu_edges.push(GpuEdge { v0: e0, v1: e1 });
+                }
+            }
+        }
+
         Self {
             vertices,
             distance_constraints: sorted_dist,
@@ -850,7 +887,10 @@ impl ClothMesh {
             star_offsets,
             star_indices,
             triangles: triangles_vec,
+            edges: gpu_edges,
             island_ids,
+            mean_edge_length,
+            max_edge_length,
         }
     }
 }

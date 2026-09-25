@@ -128,6 +128,7 @@ class TestConfigParity(unittest.TestCase):
             "set_self_collision_options": ["relief_factor", "max_displacement_ratio"],
             "set_coupled_self_collision_options": ["coupled_mode", "post_relaxation_iters"],
             "set_self_collision_substep_interval": ["substep_interval"],
+            "set_self_collision_ee_substep_interval": ["ee_substep_interval"],
             "set_enable_pair_cache": ["enable_pair_cache"],
             "set_pair_cache_options": ["pair_max_pairs", "pair_margin_mode"],
             "set_enable_pair_cache_final_fallback": ["enable_pair_final_fallback"],
@@ -138,6 +139,7 @@ class TestConfigParity(unittest.TestCase):
             "set_enable_sewing_lock": ["enable_sewing_lock"],
             "set_areal_density": ["areal_density"],
             "set_enable_compact_readback": [],  # 転送最適化のみで物理に無関係
+            "set_profiling_enabled": [],  # 計測プロファイル用で物理に無関係
         }
         missing = []
         for s in phys:

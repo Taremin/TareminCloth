@@ -22,14 +22,14 @@ struct SelfCollisionParams {
     cell_size: f32,
     table_size: u32,
     num_vertices: u32,
-    _pad0: u32,
+    num_edges: u32,
     relief_factor: f32,
     max_displacement_ratio: f32,
     enable_relief: u32,
     enable_normal_untangling: u32,
     exclude_neighbors: u32,
     max_search_iterations: u32,
-    _pad2: u32,
+    enable_ee: u32,
     _pad3: u32,
 };
 

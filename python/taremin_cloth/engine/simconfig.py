@@ -42,6 +42,7 @@ SIGNATURE_KEYS = (
     "coupled_mode",
     "post_relaxation_iters",
     "substep_interval",
+    "ee_substep_interval",
     "enable_pair_cache",
     "pair_margin_mode",
     "pair_safety_margin",
@@ -142,6 +143,7 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "coupled_mode": coupled_mode,
         "post_relaxation_iters": relax_iters,
         "substep_interval": max(1, _i(settings, "self_collision_substep_interval", 1)),
+        "ee_substep_interval": max(0, _i(settings, "self_collision_ee_substep_interval", 1)),
         "enable_pair_cache": bool(_get(settings, "enable_pair_cache", False)),
         "pair_margin_mode": 0 if _get(settings, "pair_cache_margin_mode", "AUTO") == "FIXED" else 1,
         "pair_safety_margin": _f(settings, "pair_cache_safety_margin", 0.005),
@@ -247,6 +249,8 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         )
     if hasattr(sim, "set_self_collision_substep_interval"):
         sim.set_self_collision_substep_interval(max(1, int(cfg.get("substep_interval", 1))))
+    if hasattr(sim, "set_self_collision_ee_substep_interval"):
+        sim.set_self_collision_ee_substep_interval(max(0, int(cfg.get("ee_substep_interval", 1))))
     if hasattr(sim, "set_enable_pair_cache"):
         sim.set_enable_pair_cache(bool(cfg.get("enable_pair_cache", False)))
     if hasattr(sim, "set_pair_cache_options"):

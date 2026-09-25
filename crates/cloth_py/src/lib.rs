@@ -1285,6 +1285,11 @@ impl ClothSimulator {
         self.simulator.set_self_collision_substep_interval(interval);
     }
 
+    /// エッジ対エッジ自己衝突判定を実行するサブステップ間隔を設定 (0: 無効, 1: 毎サブステップ, 2: 2サブステップ毎)
+    fn set_self_collision_ee_substep_interval(&mut self, interval: u32) {
+        self.simulator.set_self_collision_ee_substep_interval(interval);
+    }
+
     /// 診断用のGPU時刻計測の有効/無効を設定する。非対応環境では偽を返す
     fn set_profiling_enabled(&mut self, enable: bool) -> bool {
         self.simulator.set_profiling_enabled(enable)
@@ -1298,6 +1303,11 @@ impl ClothSimulator {
     /// 現在の自己衝突サブステップ間隔を取得
     fn get_self_collision_substep_interval(&self) -> u32 {
         self.simulator.self_collision_substep_interval()
+    }
+
+    /// 現在のエッジ対エッジ自己衝突サブステップ間隔を取得
+    fn get_self_collision_ee_substep_interval(&self) -> u32 {
+        self.simulator.self_collision_ee_substep_interval()
     }
 
     /// コンパクトリードバックの有効/無効を設定 (true: 12B/頂点, false: 48B/頂点)

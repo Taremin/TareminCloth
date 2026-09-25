@@ -63,6 +63,7 @@ pub struct PairPipelines {
 /// 遅延生成: 自己衝突ダイレクト走査用パイプライン群
 pub struct SelfCollisionPipelines {
     pub solve: wgpu::ComputePipeline,
+    pub solve_ee: wgpu::ComputePipeline,
     pub apply: wgpu::ComputePipeline,
     pub normals: wgpu::ComputePipeline,
 }
@@ -97,12 +98,14 @@ pub struct SharedPipelines {
     pub distance_atomic_bgl: wgpu::BindGroupLayout,
     pub extract_positions_bgl: wgpu::BindGroupLayout,
     pub self_collision_bgl: wgpu::BindGroupLayout,
+    pub self_collision_ee_bgl: wgpu::BindGroupLayout,
     pub self_collision_apply_bgl: wgpu::BindGroupLayout,
     pub compute_normals_bgl: wgpu::BindGroupLayout,
     pub pair_collect_bgl: wgpu::BindGroupLayout,
     pub pair_solve_vt_bgl: wgpu::BindGroupLayout,
     pub pair_solve_ee_bgl: wgpu::BindGroupLayout,
     pub hash_bgl: wgpu::BindGroupLayout,
+    pub edge_hash_bgl: wgpu::BindGroupLayout,
     pub sew_shrink_bgl: wgpu::BindGroupLayout,
 
     // --- 常時パイプライン (eager・8 本) ---
@@ -121,6 +124,7 @@ pub struct SharedPipelines {
     edge: OnceLock<wgpu::ComputePipeline>,
     self_collision: OnceLock<SelfCollisionPipelines>,
     hash: OnceLock<HashPipelines>,
+    edge_hash: OnceLock<HashPipelines>,
     sew_shrink: OnceLock<wgpu::ComputePipeline>,
 
     /// ビルド計測ログ (パイプライン名, ミリ秒)。eager + 遅延分を追記する。
@@ -313,6 +317,21 @@ impl SharedPipelines {
                     storage_ro(13),
                 ],
             });
+        let self_collision_ee_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Self Collision EE Bind Group Layout"),
+                entries: &[
+                    storage_ro(0),     // edges
+                    storage_ro(1),     // vertices
+                    storage_ro(2),     // edge_cell_starts
+                    storage_ro(3),     // edge_sorted_indices
+                    uniform_entry(4),  // params
+                    storage_ro(5),     // normals
+                    storage_ro(6),     // two_hop_offsets
+                    storage_ro(7),     // two_hop_indices
+                    storage_rw_at(8),  // accum
+                ],
+            });
         let self_collision_apply_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Self Collision Apply Bind Group Layout"),
@@ -384,6 +403,19 @@ impl SharedPipelines {
                 storage_rw_at(4),
                 storage_rw_at(5),
                 uniform_entry(6),
+            ],
+        });
+        let edge_hash_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Edge SpatialGrid Sort BGL"),
+            entries: &[
+                storage_ro(0),    // edges
+                storage_rw_at(1), // cell_counts
+                storage_rw_at(2), // cell_starts
+                storage_rw_at(3), // cell_currents
+                storage_rw_at(4), // sorted_indices
+                storage_rw_at(5), // block_sums
+                uniform_entry(6), // params
+                storage_ro(7),    // vertices
             ],
         });
         let sew_shrink_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -512,12 +544,14 @@ impl SharedPipelines {
             distance_atomic_bgl,
             extract_positions_bgl,
             self_collision_bgl,
+            self_collision_ee_bgl,
             self_collision_apply_bgl,
             compute_normals_bgl,
             pair_collect_bgl,
             pair_solve_vt_bgl,
             pair_solve_ee_bgl,
             hash_bgl,
+            edge_hash_bgl,
             sew_shrink_bgl,
             predict_pipeline,
             distance_pipeline,
@@ -532,6 +566,7 @@ impl SharedPipelines {
             edge: OnceLock::new(),
             self_collision: OnceLock::new(),
             hash: OnceLock::new(),
+            edge_hash: OnceLock::new(),
             sew_shrink: OnceLock::new(),
             timings,
             eager_ms,
@@ -660,10 +695,24 @@ impl SharedPipelines {
                 include_str!("../shaders/compute_normals.wgsl"),
                 wg,
             );
+            let solve_ee_shader = create_shader_with_wg_size(
+                device,
+                "Self Collision EE Shader",
+                include_str!("../shaders/self_collision_ee_direct.wgsl"),
+                wg,
+            );
             let solve_pl =
                 pipeline_layout(device, "Self Collision Pipeline Layout", &self.self_collision_bgl);
             let solve = timed(&self.timings, "self_collision", || {
                 compute_pipeline(device, "Self Collision Pipeline", &solve_pl, &solve_shader, "main")
+            });
+            let solve_ee_pl = pipeline_layout(
+                device,
+                "Self Collision EE Pipeline Layout",
+                &self.self_collision_ee_bgl,
+            );
+            let solve_ee = timed(&self.timings, "self_collision_ee", || {
+                compute_pipeline(device, "Self Collision EE Pipeline", &solve_ee_pl, &solve_ee_shader, "main")
             });
             let apply_pl = pipeline_layout(
                 device,
@@ -681,7 +730,7 @@ impl SharedPipelines {
             let normals = timed(&self.timings, "compute_normals", || {
                 compute_pipeline(device, "Compute Normals Pipeline", &normals_pl, &normals_shader, "main")
             });
-            SelfCollisionPipelines { solve, apply, normals }
+            SelfCollisionPipelines { solve, solve_ee, apply, normals }
         })
     }
 
@@ -713,6 +762,33 @@ impl SharedPipelines {
         })
     }
 
+    /// エッジ空間ハッシュ構築用パイプライン群を遅延生成・取得する。
+    pub fn ensure_edge_hash(&self) -> &HashPipelines {
+        self.edge_hash.get_or_init(|| {
+            let device = &self.context.device;
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Edge SpatialGrid Sort Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/spatial_grid_sort_edges.wgsl").into(),
+                ),
+            });
+            let pl = pipeline_layout(device, "Edge SpatialGrid Pipeline Layout", &self.edge_hash_bgl);
+            let entry = |name: &'static str, timing: &'static str, ep: &'static str| {
+                timed(&self.timings, timing, || {
+                    compute_pipeline(device, name, &pl, &shader, ep)
+                })
+            };
+            HashPipelines {
+                clear: entry("Edge SpatialGrid Clear Pipeline", "edge_hash_clear", "clear_counts"),
+                count: entry("Edge SpatialGrid Count Pipeline", "edge_hash_count", "count_edges"),
+                scan_blocks: entry("Edge SpatialGrid Scan Blocks Pipeline", "edge_hash_scan_blocks", "scan_blocks"),
+                scan_top: entry("Edge SpatialGrid Scan Top Pipeline", "edge_hash_scan_top", "scan_top"),
+                add_offsets: entry("Edge SpatialGrid Add Offsets Pipeline", "edge_hash_add_offsets", "add_offsets"),
+                scatter: entry("Edge SpatialGrid Scatter Pipeline", "edge_hash_scatter", "scatter_indices"),
+            }
+        })
+    }
+
     /// 遅延パイプラインのビルド済み名一覧 (診断用)
     pub fn lazy_built_names(&self) -> Vec<String> {
         let mut names = Vec::new();
@@ -730,6 +806,9 @@ impl SharedPipelines {
         }
         if self.hash.get().is_some() {
             names.push("hash".to_string());
+        }
+        if self.edge_hash.get().is_some() {
+            names.push("edge_hash".to_string());
         }
         if self.sew_shrink.get().is_some() {
             names.push("sew_shrink".to_string());
