@@ -103,6 +103,7 @@ pub struct SharedPipelines {
     pub pair_solve_vt_bgl: wgpu::BindGroupLayout,
     pub pair_solve_ee_bgl: wgpu::BindGroupLayout,
     pub hash_bgl: wgpu::BindGroupLayout,
+    pub sew_shrink_bgl: wgpu::BindGroupLayout,
 
     // --- 常時パイプライン (eager・8 本) ---
     pub predict_pipeline: wgpu::ComputePipeline,
@@ -120,6 +121,7 @@ pub struct SharedPipelines {
     edge: OnceLock<wgpu::ComputePipeline>,
     self_collision: OnceLock<SelfCollisionPipelines>,
     hash: OnceLock<HashPipelines>,
+    sew_shrink: OnceLock<wgpu::ComputePipeline>,
 
     /// ビルド計測ログ (パイプライン名, ミリ秒)。eager + 遅延分を追記する。
     timings: Mutex<Vec<(String, f32)>>,
@@ -225,11 +227,11 @@ impl SharedPipelines {
         });
         let constraint_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Constraint Bind Group Layout"),
-            entries: &[storage_rw, storage_ro(1), uniform_entry(2), uniform_entry(3)],
+            entries: &[storage_rw, storage_ro(1), uniform_entry(2), uniform_entry(3), storage_rw_at(4)],
         });
         let sewing_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sewing Bind Group Layout"),
-            entries: &[storage_rw, storage_rw_at(1), uniform_entry(2), uniform_entry(3)],
+            entries: &[storage_rw, storage_rw_at(1), uniform_entry(2), uniform_entry(3), storage_rw_at(4)],
         });
         let pin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Pin Bind Group Layout"),
@@ -284,7 +286,7 @@ impl SharedPipelines {
         let distance_atomic_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Distance Atomic Bind Group Layout"),
-                entries: &[storage_rw, storage_ro(1), uniform_entry(2), storage_rw_at(3)],
+                entries: &[storage_rw, storage_ro(1), uniform_entry(2), storage_rw_at(3), storage_rw_at(4)],
             });
         let extract_positions_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -383,6 +385,10 @@ impl SharedPipelines {
                 storage_rw_at(5),
                 uniform_entry(6),
             ],
+        });
+        let sew_shrink_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Sew Shrink BGL"),
+            entries: &[storage_rw, uniform_entry(1)],
         });
 
         // --- 常時シェーダ (eager・8 本) ---
@@ -512,6 +518,7 @@ impl SharedPipelines {
             pair_solve_vt_bgl,
             pair_solve_ee_bgl,
             hash_bgl,
+            sew_shrink_bgl,
             predict_pipeline,
             distance_pipeline,
             bending_pipeline,
@@ -525,6 +532,7 @@ impl SharedPipelines {
             edge: OnceLock::new(),
             self_collision: OnceLock::new(),
             hash: OnceLock::new(),
+            sew_shrink: OnceLock::new(),
             timings,
             eager_ms,
         }
@@ -592,6 +600,23 @@ impl SharedPipelines {
                 compute_pipeline(device, "Pair Solve EE Pipeline", &solve_ee_pl, &solve_ee_shader, "main")
             });
             PairPipelines { collect, solve_vt, solve_ee }
+        })
+    }
+
+    /// 縫合自然長の時間進行パスを遅延生成・取得する (縫合ありモデルのみ初回ヒッチ)。
+    pub fn ensure_sew_shrink(&self) -> &wgpu::ComputePipeline {
+        self.sew_shrink.get_or_init(|| {
+            let device = &self.context.device;
+            let shader = create_shader_with_wg_size(
+                device,
+                "Sew Shrink Shader",
+                include_str!("../shaders/sewing_shrink.wgsl"),
+                self.workgroup_size,
+            );
+            let pl = pipeline_layout(device, "Sew Shrink Pipeline Layout", &self.sew_shrink_bgl);
+            timed(&self.timings, "sew_shrink", || {
+                compute_pipeline(device, "Sew Shrink Pipeline", &pl, &shader, "main")
+            })
         })
     }
 
@@ -705,6 +730,9 @@ impl SharedPipelines {
         }
         if self.hash.get().is_some() {
             names.push("hash".to_string());
+        }
+        if self.sew_shrink.get().is_some() {
+            names.push("sew_shrink".to_string());
         }
         names
     }

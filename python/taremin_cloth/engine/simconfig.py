@@ -59,6 +59,7 @@ SIGNATURE_KEYS = (
     "sewing_priority_merge_dist",
     "sewing_priority_ramp_frames",
     "sewing_priority_max_frames",
+    "areal_density",
     "gravity_scale",
     "sewing_shrink_speed",
 )
@@ -158,6 +159,7 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "sewing_priority_merge_dist": _f(settings, "sewing_priority_merge_dist", 0.005),
         "sewing_priority_ramp_frames": _i(settings, "sewing_priority_ramp_frames", 3),
         "sewing_priority_max_frames": _i(settings, "sewing_priority_max_frames", 600),
+        "areal_density": _f(settings, "areal_density", 0.15),
         # 付帯キー (転送・署名専用、Rust apply時は除外)
         "gravity_scale": scale,
         "sewing_shrink_speed": _f(settings, "sewing_shrink_speed", 1.0),
@@ -274,6 +276,11 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         )
     if hasattr(sim, "set_sewing_stiffness"):
         sim.set_sewing_stiffness(float(cfg.get("sewing_stiffness", 10000.0)))
+    if hasattr(sim, "set_areal_density"):
+        try:
+            sim.set_areal_density(float(cfg.get("areal_density", 0.15)))
+        except (TypeError, ValueError):
+            pass
     if hasattr(sim, "set_enable_sewing_lock"):
         sim.set_enable_sewing_lock(bool(cfg.get("enable_sewing_lock", True)))
     if hasattr(sim, "set_sewing_priority_options"):

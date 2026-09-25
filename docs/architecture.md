@@ -130,10 +130,11 @@ sequenceDiagram
    - 動的空間ハッシュによりグリッドセルを構築し、自己衝突および多層布（マルチレイヤー）衝突候補を並列抽出。
 
 3. **拘束解消ループ (Constraint Projection Loop)**:
-   - **距離拘束 (Distance Constraints)**: グラフ彩色（Welsh-Powell法）により色グループごとにGPU完全並列で伸縮補正。
+   - **距離拘束 (Distance Constraints)**: グラフ彩色（Welsh-Powell法）により色グループごとにGPU完全並列で伸縮補正。拘束毎ラムダを反復跨ぎで蓄積する正規XPBD（サブステップ先頭で零化）のため、剛性は反復数に非依存。頂点質量は三角形面積から算出（kg）、剛性はバネ定数（N/m）。
+   - **長距離拘束 (Long-Range Constraints, オプション `enable_coarse_constraints`)**: 2ホップ先頂点間の距離拘束（`constraint_type=2`、頂点あたり最大4件）を細層と同一ループで解く2階層法の粗層。反復1回あたりの伝播距離を約2倍にし、長尺布の残留伸びを低減する。
    - **曲げ拘束 (Bending Constraints)**: 隣接2三角形の二面角（Dihedral Angle）に基づく曲率補正。
    - **固定・追従ピン拘束 (Pin & Attachment Constraints)**: 頂点グループウェイトおよびターゲット位置・ボーン追従。
-   - **縫合拘束 (Sewing Constraints)**: 型紙エッジ間を時間経過に伴い収縮（スプリング）させて衣服を仕立てる。縫合エッジペアはトポロジー近接判定においてUnion-Find完全縮約トポロジーグラフ（ホップ数0換算・結節点隣接の相互対称登録）として扱われ、自己衝突（2ホップ除外）との誤爆拮抗を物理的に排除する。また、収縮完了時の密着剛体ロックオプション（`lock_on_close`）をサポート。衣装組立工程向けに、指定割合の縫合が結合するまで重力を抑制する**縫合優先モード**（Rustコアのラッチ・ランプ状態機械＋ホスト側測定、WGSL変更なし）をオプション提供する。
+   - **縫合拘束 (Sewing Constraints)**: 型紙エッジ間を時間経過に伴い収縮（スプリング）させて衣服を仕立てる。自然長短縮はサブステップ毎1回の独立パス（`sewing_shrink.wgsl`）で時間進行し、反復数・自己衝突モードに非依存。縫合エッジペアはトポロジー近接判定においてUnion-Find完全縮約トポロジーグラフ（ホップ数0換算・結節点隣接の相互対称登録）として扱われ、自己衝突（2ホップ除外）との誤爆拮抗を物理的に排除する。また、収縮完了時の密着剛体ロックオプション（`lock_on_close`）をサポート。衣装組立工程向けに、指定割合の縫合が結合するまで重力を抑制する**縫合優先モード**（Rustコアのラッチ・ランプ状態機械＋ホスト側測定、WGSL変更なし）をオプション提供する。
    - **衝突拘束 (Collisions)**:
      - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。
      - **メッシュコライダー**: クラスタカリング付き三角パッチ衝突判定。
@@ -146,15 +147,17 @@ sequenceDiagram
           - **カウンタ (`PairCounters`)**: `vt/ee_count` は受理候補総数（枠超過分を含む）、`vt/ee_dropped` は枠不足破棄数。`get_pair_cache_stats()` の4値は従来通り（件数・予算上限）。
           - **時間的再利用（Amortization）**: 以降のサブステップ（`sub_idx > 0`）では空間ハッシュ構築および全頂点ペア収集パスをスキップ。フレームdtは `step()` 先頭で収集パラメータへ毎フレーム反映。
           - **最終サブステップフォールバック (`enable_pair_cache_final_fallback`, 既定ON)**: 最終サブステップのみ新鮮な空間ハッシュ構築＋直進フルSolveに置換し、速度確定前のトンネリングを遮断。追加コストは1構築+1フルSolve/frameに限定され、約1.8〜2.4倍の高速化を維持。
-          - **最終サブステップフォールバック (`enable_pair_cache_final_fallback`, 既定ON)**: 最終サブステップのみ新鮮な空間ハッシュ構築＋直進フルSolveに置換し、速度確定前のトンネリングを遮断。追加コストは1構築+1フルSolve/frameに限定され、約1.8〜2.4倍の高速化を維持。
         - **Apply パス (`self_collision_apply.wgsl`)**: 蓄積された変位を密度緩和・ステップクランプを適用して頂点座標へ反映し、アキュムレータをゼロクリア。
         - **協調収束設計 (Coupled Modes)**:
           - `RELAXATION` モード（推奨標準）: 自己衝突直後に距離拘束および縫合拘束を2反復再適用（Post-Relaxation）。エッジ過剰伸長を約5割抑制しつつ、距離拘束による縫合ペア引き戻しを完全に防ぎ、自己衝突ON時でも0.00mmの完全密着縫合を保証。実測153.2 FPSを維持。
           - `FULL_COUPLED` モード（高精度設定）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和（距離拘束＋縫合拘束）を適用してエッジ伸びを約7割抑制。
 
-4. **速度更新と位置確定 (Velocity Update & Commit)**:
-   $$v_i \leftarrow (p_i - x_i) / dt$$
-   $$x_i \leftarrow p_i$$
+4. **反復後確定 (Final Passes & Velocity Update & Commit)**:
+   - **Final Pin Pass**: 反復終了後にピン位置を確定する（Grab等の目標追従）。
+   - **Final Sewing Pass** (全モード共通): 速度確定の直前にもう一度だけ縫合解決を実行する。反復ループ内ではコライダー押し出しが縫合解決の後に実行されるため、身体上に載った縫合線は閉じた後に押し戻されて開いたままになる。直前で閉じ直してから速度を確定することで、自己衝突の有無にかかわらず同じ閉鎖結果になる。
+   - **速度更新と位置確定**:
+    $$v_i \leftarrow (p_i - x_i) / dt$$
+    $$x_i \leftarrow p_i$$
 
 ---
 
@@ -164,6 +167,7 @@ GPU構造体は、16バイト境界アライメント（WGSL仕様）に厳密�
 
 ```rust
 // 頂点データ (GPU Buffer: Read/Write)
+// inv_mass は三角形面積から算出した質量 (kg) の逆数。areal_density (kg/m2) から算出。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVertex {
@@ -176,14 +180,23 @@ pub struct GpuVertex {
 }
 
 // 距離拘束 (GPU Buffer: Read-Only)
+// コンプライアンスは物理単位 alpha = 1/k (k: N/m)。5000 N/m以上は 0.0 (完全非伸縮)。
+// constraint_type: 0=Stretch (引張/圧縮), 1=Shear, 2=Long-Range (2ホップ粗層)。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuDistanceConstraint {
     pub v0: u32,             // 頂点インデックス 0
     pub v1: u32,             // 頂点インデックス 1
     pub rest_length: f32,    // 自然長
-    pub compliance: f32,     // コンプライアンス (1 / 剛性)
+    pub tension_compliance: f32,    // 引張コンプライアンス
+    pub compression_compliance: f32,// 圧縮コンプライアンス
+    pub constraint_type: u32,
+    pub _pad0: f32,
+    pub _pad1: f32,
 }
+
+// XPBDラムダバッファ (GPU Storage Buffer: Read/Write, 拘束毎f32×3種)。
+// サブステップ先頭で零化し、反復ループ内では蓄積する (binding 4)。
 
 // 曲げ拘束 (GPU Buffer: Read-Only)
 #[repr(C)]

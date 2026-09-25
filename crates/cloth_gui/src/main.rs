@@ -90,7 +90,7 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                     let faces_opt = if !data.faces.is_empty() { Some(data.faces.as_slice()) } else { None };
                     let sew_opt = data.sewing_springs.as_deref();
 
-                    let mesh = ClothMesh::from_raw(
+                    let mesh = ClothMesh::from_raw_with_opts(
                         &data.positions,
                         &data.edges,
                         faces_opt,
@@ -107,6 +107,7 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                         data.sewing_shrink_speed,
                         Some(data.sewing_stiffness),
                         Some(data.enable_sewing_lock),
+                        data.enable_coarse_constraints,
                     );
 
 
@@ -269,6 +270,7 @@ fn apply_simulation_parameters(sim: &mut GpuClothSimulator, data: &protocol::Sce
     cfg.workgroup_size = data.workgroup_size;
     cfg.sewing_stiffness = data.sewing_stiffness;
     cfg.enable_sewing_lock = data.enable_sewing_lock;
+    cfg.areal_density = data.areal_density;
     cfg.sewing_priority_enabled = data.sewing_priority_enabled;
     cfg.sewing_priority_threshold = data.sewing_priority_threshold;
     cfg.sewing_priority_merge_dist = data.sewing_priority_merge_dist;

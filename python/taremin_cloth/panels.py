@@ -384,6 +384,8 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             row_thick = box_mat.row(align=True)
             row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
             row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+            row_dens = box_mat.row(align=True)
+            row_dens.prop(settings, "areal_density", text=i18n.trans("Areal Density"))
 
             # 4. 自己衝突 (Self Collision)
             box_sc = layout_params.box()
@@ -517,10 +519,12 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
         d_col.prop(settings, "shear_damping", slider=True)
         d_col.prop(settings, "bending_damping", slider=True)
 
-        # 物性厚み (Thickness)
+        # 物性厚み (Thickness)・面密度 (Areal Density)
         row_thick = layout.row(align=True)
         row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
         row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+        row_dens = layout.row(align=True)
+        row_dens.prop(settings, "areal_density", text=i18n.trans("Areal Density"))
 
 
 class TAREMIN_CLOTH_PT_forces(bpy.types.Panel):
@@ -648,6 +652,8 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
         row_thick = l_col.row(align=True)
         row_thick.prop(settings, "thickness")
         row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+        row_dens = l_col.row(align=True)
+        row_dens.prop(settings, "areal_density")
 
 
 class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):

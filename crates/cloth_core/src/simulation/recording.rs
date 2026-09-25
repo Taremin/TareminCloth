@@ -8,12 +8,12 @@ impl GpuClothSimulator {
         let stiffness = self
             .distance_constraints
             .first()
-            .map(|dc| compliance_to_stiffness(dc.tension_compliance, 1000.0))
+            .map(|dc| compliance_to_stiffness(dc.tension_compliance, 1.0))
             .unwrap_or(0.0);
         let bending_stiffness = self
             .bending_constraints
             .first()
-            .map(|bc| compliance_to_stiffness(bc.compliance, 100.0))
+            .map(|bc| compliance_to_stiffness(bc.compliance, 1.0))
             .unwrap_or(0.0);
         let thickness = self
             .initial_vertices
@@ -29,12 +29,12 @@ impl GpuClothSimulator {
         let compression_stiffness = self
             .distance_constraints
             .first()
-            .map(|dc| compliance_to_stiffness(dc.compression_compliance, 1000.0));
+            .map(|dc| compliance_to_stiffness(dc.compression_compliance, 1.0));
         let shear_stiffness = self
             .distance_constraints
             .iter()
             .find(|dc| dc.constraint_type == 1)
-            .map(|dc| compliance_to_stiffness(dc.tension_compliance, 1000.0));
+            .map(|dc| compliance_to_stiffness(dc.tension_compliance, 1.0));
 
         let metadata = SimulationMetadata {
             object_name: object_name.to_string(),
@@ -87,6 +87,8 @@ impl GpuClothSimulator {
                 .sewing_constraints
                 .first()
                 .map(|c| c.shrink_speed),
+            areal_density: self.areal_density,
+            enable_coarse_constraints: self.coarse_constraint_count > 0,
             config: Some(self.export_config()),
         };
 

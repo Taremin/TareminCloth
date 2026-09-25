@@ -41,9 +41,9 @@ struct SimParams {
 @group(0) @binding(3) var<uniform> params: SimParams;
 
 const EPSILON: f32 = 1e-7;
-// ピン基準コンプライアンス: 構造剛性 1000 相当 (mesh.rs の tension 換算と同オーダー)。
+// ピン基準コンプライアンス: 構造剛性 1000 N/m 相当 (mesh.rs の tension 換算と同オーダー)。
 // w=0.5 で布の構造拘束と同等に競合するよう基準化している。
-const PIN_COMPLIANCE_REF: f32 = 1e-6;
+const PIN_COMPLIANCE_REF: f32 = 1e-3;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {

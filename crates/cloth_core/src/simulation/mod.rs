@@ -89,6 +89,10 @@ pub struct GpuClothSimulator {
     #[allow(dead_code)]
     pub(crate) accum_buffer: wgpu::Buffer,
     pub(crate) distance_atomic_bind_group: wgpu::BindGroup,
+    /// XPBDラグランジュ乗数バッファ (拘束毎f32、サブステップ先頭で零化)
+    pub(crate) dist_lambda_buffer: wgpu::Buffer,
+    pub(crate) bend_lambda_buffer: wgpu::Buffer,
+    pub(crate) sew_lambda_buffer: wgpu::Buffer,
 
     // 共有パイプライン群 (プロセス全体でキャッシュ・メッシュ非依存)。
     // コンピュートパイプライン実体はここにのみ存在し、per-sim 側は
@@ -211,6 +215,7 @@ pub struct GpuClothSimulator {
     pub(crate) distance_bind_groups: Vec<wgpu::BindGroup>,
     pub(crate) bending_bind_groups: Vec<wgpu::BindGroup>,
     pub(crate) sewing_bind_groups: Vec<wgpu::BindGroup>,
+    pub(crate) sew_shrink_bind_group: wgpu::BindGroup,
     pub(crate) update_vel_bind_group: wgpu::BindGroup,
 
     pub solver_iterations: u32,
@@ -235,6 +240,11 @@ pub struct GpuClothSimulator {
 
     pub sewing_stiffness: f32,
     pub enable_sewing_lock: bool,
+    /// 布の面密度 (kg/m2)。三角形面積と掛けて頂点質量を算出する条件の記録・再現用。
+    /// 物理挙動自体は頂点逆質量バッファで決まり、本値は記録・署名用である。
+    pub areal_density: f32,
+    /// 長距離拘束 (constraint_type=2) の件数。メッシュ構築時のみ確定 (init-only)。
+    pub coarse_constraint_count: u32,
 
     // 縫合優先モード (Sewing Priority): 指定割合の縫合が結合するまで重力を抑制する工程フェーズ制御。
     // 測定はホスト側の既知座標から行い、本コアはラッチ・ランプ・スケール算出の状態機械のみを持つ
@@ -313,6 +323,9 @@ impl GpuClothSimulator {
             solver_mode,
             accum_buffer: res.accum_buffer,
             distance_atomic_bind_group: res.distance_atomic_bind_group,
+            dist_lambda_buffer: res.dist_lambda_buffer,
+            bend_lambda_buffer: res.bend_lambda_buffer,
+            sew_lambda_buffer: res.sew_lambda_buffer,
             shared: res.shared,
             build_timings: {
                 let mut t = Vec::with_capacity(res.build_timings.len() + 1);
@@ -397,6 +410,7 @@ impl GpuClothSimulator {
             distance_bind_groups: res.distance_bind_groups,
             bending_bind_groups: res.bending_bind_groups,
             sewing_bind_groups: res.sewing_bind_groups,
+            sew_shrink_bind_group: res.sew_shrink_bind_group,
             update_vel_bind_group: res.update_vel_bind_group,
 
             enable_pair_cache: false,
@@ -445,6 +459,8 @@ impl GpuClothSimulator {
             edge_collision_bind_groups: res.edge_collision_bind_groups,
             sewing_stiffness: 10000.0,
             enable_sewing_lock: true,
+            areal_density: 0.15,
+            coarse_constraint_count: mesh.coarse_constraint_count,
             sewing_priority_enabled: false,
             sewing_priority_threshold: 0.9,
             sewing_priority_merge_dist: 0.005,
@@ -725,7 +741,7 @@ impl GpuClothSimulator {
         let tension_comp = if tension_stiffness >= 5000.0 {
             0.0
         } else if tension_stiffness > 0.0 {
-            1.0 / (tension_stiffness * 1000.0)
+            1.0 / tension_stiffness
         } else {
             1e10
         };
@@ -733,7 +749,7 @@ impl GpuClothSimulator {
         let compression_comp = if compression_stiffness >= 5000.0 {
             0.0
         } else if compression_stiffness > 0.0 {
-            1.0 / (compression_stiffness * 1000.0)
+            1.0 / compression_stiffness
         } else {
             1e10
         };
@@ -741,7 +757,7 @@ impl GpuClothSimulator {
         let shear_comp = if shear_stiffness >= 5000.0 {
             0.0
         } else if shear_stiffness > 0.0 {
-            1.0 / (shear_stiffness * 1000.0)
+            1.0 / shear_stiffness
         } else {
             1e10
         };
@@ -764,7 +780,7 @@ impl GpuClothSimulator {
         }
 
         let bend_comp = if bending_stiffness > 0.0 {
-            1.0 / (bending_stiffness * 100.0)
+            1.0 / bending_stiffness
         } else {
             1e10
         };
@@ -782,6 +798,14 @@ impl GpuClothSimulator {
 
     pub fn set_sewing_stiffness(&mut self, stiffness: f32) {
         self.sewing_stiffness = stiffness.max(1.0);
+    }
+
+    /// 布の面密度 (kg/m2) を設定する。記録・署名用の値であり、
+    /// GPUバッファの書き換えは行わない (質量は頂点逆質量バッファで確定済み)。
+    pub fn set_areal_density(&mut self, density: f32) {
+        if density.is_finite() {
+            self.areal_density = density.clamp(0.0, 100.0);
+        }
     }
 
     /// 縫合完了時の密着ロック有効/無効を設定する

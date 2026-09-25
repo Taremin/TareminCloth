@@ -364,6 +364,18 @@ class TareminClothObjectSettings(PropertyGroup):
         max=0.1,
         unit='LENGTH',
     )
+    areal_density: FloatProperty(
+        name="Areal Density",
+        description="Fabric mass per unit area in kg/m2 (e.g. silk 0.05, cotton 0.15, denim 0.40). Used for area-weighted vertex masses",
+        default=0.15,
+        min=0.005,
+        max=5.0,
+    )
+    enable_coarse_constraints: BoolProperty(
+        name="Long-Range Constraints",
+        description="Add 2-hop long-range distance constraints (coarse level of the two-level solver) to reduce residual stretch on long cloth",
+        default=False,
+    )
     enable_self_collision: BoolProperty(
         name="Self Collision",
         description="Enable self and inter-layer collision using GPU spatial hash",

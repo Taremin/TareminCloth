@@ -53,6 +53,7 @@ impl GpuClothSimulator {
             edge_margin_offset: self.edge_margin_offset,
             sewing_stiffness: self.sewing_stiffness,
             enable_sewing_lock: self.enable_sewing_lock,
+            areal_density: self.areal_density,
             sewing_priority_enabled: self.sewing_priority_enabled,
             sewing_priority_threshold: self.sewing_priority_threshold,
             sewing_priority_merge_dist: self.sewing_priority_merge_dist,
@@ -73,13 +74,13 @@ impl GpuClothSimulator {
                 tension_c = Some((dc.tension_compliance, dc.compression_compliance));
             }
         }
-        let (t_t, t_c) = tension_c.unwrap_or((1.0 / (500.0 * 1000.0), 1.0 / (500.0 * 1000.0)));
-        let (s_t, _) = shear_c.unwrap_or((1.0 / (250.0 * 1000.0), 1.0 / (250.0 * 1000.0)));
-        let tension = compliance_to_stiffness(t_t, 1000.0);
-        let compression = compliance_to_stiffness(t_c, 1000.0);
-        let shear = compliance_to_stiffness(s_t, 1000.0);
+        let (t_t, t_c) = tension_c.unwrap_or((1.0 / 500.0, 1.0 / 500.0));
+        let (s_t, _) = shear_c.unwrap_or((1.0 / 250.0, 1.0 / 250.0));
+        let tension = compliance_to_stiffness(t_t, 1.0);
+        let compression = compliance_to_stiffness(t_c, 1.0);
+        let shear = compliance_to_stiffness(s_t, 1.0);
         let bending = if let Some(bc) = self.bending_constraints.first() {
-            compliance_to_stiffness(bc.compliance, 100.0)
+            compliance_to_stiffness(bc.compliance, 1.0)
         } else {
             5.0
         };
@@ -128,6 +129,7 @@ impl GpuClothSimulator {
         self.set_edge_margin_offset(c.edge_margin_offset);
         self.set_sewing_stiffness(c.sewing_stiffness);
         self.set_enable_sewing_lock(c.enable_sewing_lock);
+        self.set_areal_density(c.areal_density);
         self.set_sewing_priority_options(
             c.sewing_priority_enabled,
             c.sewing_priority_threshold,

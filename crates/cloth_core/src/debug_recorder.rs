@@ -167,6 +167,12 @@ pub struct SimulationMetadata {
     /// SimConfig一本化後の正本。旧個別フィールドは読み専用fallbackとして維持。
     #[serde(default)]
     pub config: Option<crate::config::SimConfig>,
+    /// 布の面密度 (kg/m2)。三角形面積と掛けて頂点質量を算出する条件。再現時は inv_masses 配列が正本。
+    #[serde(default = "default_areal_density")]
+    pub areal_density: f32,
+    /// 長距離拘束 (2ホップ) の有効化。再現時は同条件で再構築する (init-only)。
+    #[serde(default)]
+    pub enable_coarse_constraints: bool,
 }
 
 fn default_pair_margin_mode() -> u32 {
@@ -211,6 +217,10 @@ fn default_sewing_priority_max_frames() -> u32 {
 
 fn default_max_iterations() -> u32 {
     128
+}
+
+fn default_areal_density() -> f32 {
+    0.15
 }
 
 /// デバッグ記録の2階層化オプション (間引きフル保存 + トリガー時フラッシュ)
@@ -796,6 +806,8 @@ mod tests {
             sewing_priority_ramp_frames: 3,
             sewing_priority_max_frames: 600,
             config: None,
+            areal_density: 0.15,
+            enable_coarse_constraints: false,
         };
 
         recorder.start_recording(meta, Some(5));
@@ -921,6 +933,8 @@ mod tests {
             sewing_priority_ramp_frames: 3,
             sewing_priority_max_frames: 600,
             config: None,
+            areal_density: 0.15,
+            enable_coarse_constraints: false,
         }
     }
 

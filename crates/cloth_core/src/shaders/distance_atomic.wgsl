@@ -41,6 +41,8 @@ struct AtomicAccum {
 @group(0) @binding(1) var<storage, read> constraints: array<GpuDistanceConstraint>;
 @group(0) @binding(2) var<uniform> params: SimParams;
 @group(0) @binding(3) var<storage, read_write> accum: array<AtomicAccum>;
+// XPBDラグランジュ乗数 (拘束毎、サブステップ先頭で零化)
+@group(0) @binding(4) var<storage, read_write> lambdas: array<f32>;
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -85,7 +87,10 @@ fn solve_distance_atomic(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dt = params.gravity.w;
     let alpha = compliance / (dt * dt);
 
-    let delta_lambda = -c_val / (w_sum + alpha);
+    // 正規XPBD: ラムダを反復跨ぎで蓄積する (拘束スレッドが所有し競合なし)
+    let lambda = lambdas[constraint_idx];
+    let delta_lambda = (-c_val - alpha * lambda) / (w_sum + alpha);
+    lambdas[constraint_idx] = lambda + delta_lambda;
 
     let corr0 = w0 * delta_lambda * dir;
     let corr1 = -w1 * delta_lambda * dir;

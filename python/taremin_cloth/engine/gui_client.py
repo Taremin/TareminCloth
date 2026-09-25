@@ -420,6 +420,8 @@ class ClothGuiClient:
                 "inv_masses": inv_masses,
                 "layer_id": int(getattr(settings, "layer_id", 0)) if settings else 0,
                 "thickness": float(getattr(settings, "thickness", 0.005)) if settings else 0.005,
+                "areal_density": float(cfg.get("areal_density", 0.15)),
+                "enable_coarse_constraints": bool(getattr(settings, "enable_coarse_constraints", False)) if settings else False,
                 "stiffness": float(cfg.get("tension_stiffness", 100.0)),
                 "compression_stiffness": float(cfg.get("compression_stiffness", 100.0)),
                 "shear_stiffness": float(cfg.get("shear_stiffness", 50.0)),

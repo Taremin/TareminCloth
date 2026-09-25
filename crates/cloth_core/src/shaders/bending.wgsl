@@ -41,6 +41,8 @@ struct DispatchInfo {
 @group(0) @binding(1) var<storage, read> constraints: array<GpuBendingConstraint>;
 @group(0) @binding(2) var<uniform> params: SimParams;
 @group(0) @binding(3) var<uniform> dispatch_info: DispatchInfo;
+// XPBDラグランジュ乗数 (拘束毎、サブステップ先頭で零化)
+@group(0) @binding(4) var<storage, read_write> lambdas: array<f32>;
 
 const EPSILON: f32 = 1e-7;
 
@@ -82,7 +84,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let alpha = c.compliance / (dt * dt);
 
     let c_val = dist - c.rest_length;
-    let delta_lambda = -c_val / (w_sum + alpha);
+    // 正規XPBD: ラムダを反復跨ぎで蓄積する
+    let lambda = lambdas[constraint_idx];
+    let delta_lambda = (-c_val - alpha * lambda) / (w_sum + alpha);
+    lambdas[constraint_idx] = lambda + delta_lambda;
 
     let corr2 = w2 * delta_lambda * dir;
     let corr3 = -w3 * delta_lambda * dir;

@@ -53,6 +53,8 @@ class TestAdaptiveSubstep(unittest.TestCase):
 
     def test_smooth_step_reduction(self):
         """静止時にサブステップ数が急落せず、最大2ステップずつ滑らかに減少してmin_substepsに収束することを検証"""
+        # 無重力条件で減衰挙動を検証 (重力有効時はフロアにより基底段数を維持する)
+        self.cloth_obj.taremin_cloth.gravity = 0.0
         sim, coords = get_or_create_simulator(self.cloth_obj)
         _mesh_char_len_cache[self.cloth_obj.name] = 0.05
 
@@ -75,6 +77,7 @@ class TestAdaptiveSubstep(unittest.TestCase):
 
     def test_immediate_step_boost_on_rapid_motion(self):
         """急激な頂点変位が発生した際、FPS急落を防ぎながら滑らかにサブステップが引き上げられることを検証"""
+        self.cloth_obj.taremin_cloth.gravity = 0.0
         sim, coords = get_or_create_simulator(self.cloth_obj)
         _mesh_char_len_cache[self.cloth_obj.name] = 0.02  # cfl_margin = 0.01m
 
@@ -102,6 +105,7 @@ class TestAdaptiveSubstep(unittest.TestCase):
 
     def test_collider_motion_boosts_substeps(self):
         """布が静止していても、コライダーが高速移動した際にサブステップ数が引き上げられることを検証"""
+        self.cloth_obj.taremin_cloth.gravity = 0.0
         sim, coords = get_or_create_simulator(self.cloth_obj)
         _mesh_char_len_cache[self.cloth_obj.name] = 0.02
 
@@ -138,6 +142,19 @@ class TestAdaptiveSubstep(unittest.TestCase):
                 self.cloth_obj, coords, 1.0 / 60.0, scene=bpy.context.scene
             )
         self.assertEqual(step_after, 20)
+
+
+    def test_gravity_floor_holds_base_steps(self):
+        """重力有効時は静止しても基底段数を下回らないこと (静止伸びの防止)"""
+        self.cloth_obj.taremin_cloth.gravity = 1.0
+        sim, coords = get_or_create_simulator(self.cloth_obj)
+        _mesh_char_len_cache[self.cloth_obj.name] = 0.05
+
+        step1 = get_effective_substeps(self.cloth_obj, coords, 1.0 / 60.0)
+        self.assertEqual(step1, 20)
+        for _ in range(12):
+            last_step = get_effective_substeps(self.cloth_obj, coords, 1.0 / 60.0)
+        self.assertEqual(last_step, 20)
 
 
 if __name__ == "__main__":

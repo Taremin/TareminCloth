@@ -22,6 +22,7 @@ BUILTIN_FABRIC_PRESETS = {
         "bending_damping": 0.2,
         "air_damping": 1.5,
         "thickness": 0.002,
+        "areal_density": 0.05,
     },
     "Cotton (木綿)": {
         "tension_stiffness": 1500.0,
@@ -34,6 +35,7 @@ BUILTIN_FABRIC_PRESETS = {
         "bending_damping": 0.5,
         "air_damping": 1.0,
         "thickness": 0.005,
+        "areal_density": 0.15,
     },
     "Linen (麻)": {
         "tension_stiffness": 2000.0,
@@ -46,6 +48,7 @@ BUILTIN_FABRIC_PRESETS = {
         "bending_damping": 1.0,
         "air_damping": 1.0,
         "thickness": 0.006,
+        "areal_density": 0.20,
     },
     "Denim (デニム)": {
         "tension_stiffness": 4000.0,
@@ -58,6 +61,7 @@ BUILTIN_FABRIC_PRESETS = {
         "bending_damping": 2.0,
         "air_damping": 1.0,
         "thickness": 0.010,
+        "areal_density": 0.40,
     },
     "Leather (革)": {
         "tension_stiffness": 8000.0,
@@ -70,6 +74,7 @@ BUILTIN_FABRIC_PRESETS = {
         "bending_damping": 5.0,
         "air_damping": 0.8,
         "thickness": 0.015,
+        "areal_density": 1.00,
     },
     "Rubber (ゴム)": {
         "tension_stiffness": 400.0,
@@ -82,6 +87,7 @@ BUILTIN_FABRIC_PRESETS = {
         "bending_damping": 3.0,
         "air_damping": 0.5,
         "thickness": 0.008,
+        "areal_density": 0.30,
     },
 }
 

@@ -78,6 +78,71 @@ def get_pin_inv_masses(obj, settings=None, n_verts: Optional[int] = None) -> np.
     return inv_masses
 
 
+def compute_areal_inv_masses(
+    positions: np.ndarray,
+    faces: Optional[np.ndarray],
+    pin_weights: Optional[np.ndarray] = None,
+    areal_density: float = 0.15,
+    min_mass: float = 1e-9,
+) -> np.ndarray:
+    """面積に応じて分配した物理単位のインバースマス配列を計算する。
+
+    各三角形の面積に面密度 (kg/m2) を掛けた質量を3頂点へ等分配し、
+    ピンウェイト (1.0=完全固定) との積で逆質量を求める。
+    面を持たない孤立頂点は微小質量として扱い、ゼロ除算を防ぐ。
+    """
+    n_verts = len(positions)
+    masses = np.zeros(n_verts, dtype=np.float64)
+    if faces is not None and len(faces) > 0 and areal_density > 0.0:
+        tris = np.asarray(faces, dtype=np.int64)
+        valid = (
+            (tris[:, 0] != tris[:, 1])
+            & (tris[:, 1] != tris[:, 2])
+            & (tris[:, 2] != tris[:, 0])
+            & (tris.max() < n_verts)
+            & (tris.min() >= 0)
+        )
+        tris = tris[valid]
+        if len(tris) > 0:
+            p0 = positions[tris[:, 0]].astype(np.float64)
+            p1 = positions[tris[:, 1]].astype(np.float64)
+            p2 = positions[tris[:, 2]].astype(np.float64)
+            areas = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0), axis=1)
+            tri_mass = areas * float(areal_density) / 3.0
+            np.add.at(masses, tris[:, 0], tri_mass)
+            np.add.at(masses, tris[:, 1], tri_mass)
+            np.add.at(masses, tris[:, 2], tri_mass)
+    masses = np.maximum(masses, min_mass)
+    inv_masses = (1.0 / masses).astype(np.float32)
+    if pin_weights is not None:
+        w = np.clip(np.asarray(pin_weights, dtype=np.float32), 0.0, 1.0)
+        if len(w) == n_verts:
+            inv_masses = (inv_masses * (1.0 - w)).astype(np.float32)
+    return inv_masses
+
+
+def get_pin_weights(obj, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
+    """ピン頂点グループのウェイト配列 (0.0〜1.0) を取得する。"""
+    if n_verts is None:
+        n_verts = len(obj.data.vertices)
+    weights = np.zeros(n_verts, dtype=np.float32)
+    if not obj or not hasattr(obj, "vertex_groups"):
+        return weights
+    vg_name = getattr(settings, "pin_vertex_group", "") if settings else ""
+    pin_vg = None
+    if vg_name:
+        pin_vg = obj.vertex_groups.get(vg_name)
+    if not pin_vg:
+        pin_vg = obj.vertex_groups.get("Pin") or obj.vertex_groups.get("Cloth_Pin")
+    if pin_vg:
+        for i in range(n_verts):
+            try:
+                weights[i] = float(pin_vg.weight(i))
+            except RuntimeError:
+                weights[i] = 0.0
+    return weights
+
+
 def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = None) -> ClothMeshData:
     """
     Blenderメッシュオブジェクトから布シミュレータ初期化に必要な全データを一括抽出・分類する。
@@ -133,6 +198,13 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
     sew_2d = np.array(sewing_edges, dtype=np.uint32) if sewing_edges else None
 
     inv_masses = get_pin_inv_masses(obj, settings, n_verts)
+    try:
+        density = float(getattr(settings, "areal_density", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        density = 0.0
+    if density > 0.0 and faces_2d is not None and len(faces_2d) > 0:
+        pin_weights = get_pin_weights(obj, settings, n_verts)
+        inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights, density)
 
     return ClothMeshData(
         positions=pos_2d,

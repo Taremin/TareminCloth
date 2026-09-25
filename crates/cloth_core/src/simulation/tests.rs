@@ -559,7 +559,7 @@ mod tests {
         let mut sim = make_pin_test_sim(&ctx);
         // w=0.5: 目標と布拘束のブレンド (0 < y < 0.5 の中間) になること
         sim.set_pin_target(1, [1.0, 0.5, 0.0], 0.5);
-        for _ in 0..30 {
+        for _ in 0..150 {
             sim.step(1.0 / 60.0, 20);
         }
         let verts = sim.read_vertices();

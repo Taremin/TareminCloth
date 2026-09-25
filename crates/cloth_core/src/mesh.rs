@@ -192,11 +192,68 @@ pub struct GpuTriangle {
     pub layer_id: u32,
 }
 
+/// 面密度 (kg/m2) とピンウェイトから物理単位の逆質量配列を計算する。
+/// 各三角形の面積×面密度を3頂点へ等分配し、`inv = (1 - pin_w) / mass` とする。
+/// 面を持たない・面積ゼロの頂点は微小質量で支え、ゼロ除算を防ぐ。
+/// ピンウェイト1.0の頂点は 0.0 (完全固定) となる。
+pub fn areal_inv_masses(
+    positions: &[[f32; 3]],
+    faces: Option<&[[u32; 3]]>,
+    pin_weights: Option<&[f32]>,
+    areal_density: f32,
+) -> Vec<f32> {
+    const MIN_MASS: f32 = 1e-9;
+    let n = positions.len();
+    let mut masses = vec![0.0f32; n];
+    if areal_density > 0.0 {
+        if let Some(tris) = faces {
+            for &[a, b, c] in tris {
+                let (ia, ib, ic) = (a as usize, b as usize, c as usize);
+                if ia >= n || ib >= n || ic >= n || (a == b || b == c || c == a) {
+                    continue;
+                }
+                let pa = positions[ia];
+                let pb = positions[ib];
+                let pc = positions[ic];
+                let ab = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+                let ac = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+                let cross = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+                let area = 0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+                let share = area * areal_density / 3.0;
+                masses[ia] += share;
+                masses[ib] += share;
+                masses[ic] += share;
+            }
+        }
+    }
+    masses
+        .iter()
+        .enumerate()
+        .map(|(i, &m)| {
+            let w = pin_weights
+                .and_then(|ws| ws.get(i).copied())
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            if w >= 1.0 {
+                0.0
+            } else {
+                (1.0 - w) / m.max(MIN_MASS)
+            }
+        })
+        .collect()
+}
+
 pub struct ClothMesh {
     pub vertices: Vec<GpuVertex>,
     pub distance_constraints: Vec<GpuDistanceConstraint>,
     pub dist_color_offsets: Vec<u32>,
     pub dist_color_counts: Vec<u32>,
+    /// 長距離拘束 (constraint_type=2) の件数。無効時は 0。
+    pub coarse_constraint_count: u32,
     pub original_edge_to_constraint: Vec<usize>,
     pub initial_distance_rest_lengths: Vec<f32>,
 
@@ -220,6 +277,8 @@ pub struct ClothMesh {
 }
 
 impl ClothMesh {
+    /// 後方互換コンストラクタ (長距離拘束なし)。新規コードは from_raw_with_opts を使うこと。
+    #[allow(clippy::too_many_arguments)]
     pub fn from_raw(
         positions: &[[f32; 3]],
         edges: &[[u32; 2]],
@@ -237,6 +296,34 @@ impl ClothMesh {
         sewing_shrink_speed: f32,
         sewing_stiffness: Option<f32>,
         enable_sewing_lock: Option<bool>,
+    ) -> Self {
+        Self::from_raw_with_opts(
+            positions, edges, faces, inv_masses, sewing_springs, layer_ids, thicknesses,
+            default_layer_id, default_thickness, tension_stiffness, compression_stiffness,
+            shear_stiffness, bending_stiffness, sewing_shrink_speed, sewing_stiffness,
+            enable_sewing_lock, false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_raw_with_opts(
+        positions: &[[f32; 3]],
+        edges: &[[u32; 2]],
+        faces: Option<&[[u32; 3]]>,
+        inv_masses: Option<&[f32]>,
+        sewing_springs: Option<&[[u32; 2]]>,
+        layer_ids: Option<&[u32]>,
+        thicknesses: Option<&[f32]>,
+        default_layer_id: u32,
+        default_thickness: f32,
+        tension_stiffness: f32,
+        compression_stiffness: f32,
+        shear_stiffness: f32,
+        bending_stiffness: f32,
+        sewing_shrink_speed: f32,
+        sewing_stiffness: Option<f32>,
+        enable_sewing_lock: Option<bool>,
+        enable_coarse_constraints: bool,
     ) -> Self {
         let n_verts = positions.len();
         let mut vertices = Vec::with_capacity(n_verts);
@@ -259,10 +346,13 @@ impl ClothMesh {
         // 1. 距離拘束 (Stretch: 引張 & 圧縮, Shear: せん断)
         let mut dist_constraints = Vec::with_capacity(edges.len() * 2);
 
+        // 剛性は物理単位 (N/m) のバネ定数 k として扱い、XPBDコンプライアンス
+        // alpha = 1/k とする。頂点質量も物理単位 (kg) のため、静止釣り合い伸びは
+        // 荷重/k で決まる物理的に正しい値に収束する。5000 N/m以上は完全非伸縮。
         let tension_compliance = if tension_stiffness >= 5000.0 {
             0.0 // 完全非伸縮 (Inextensible PBD)
         } else if tension_stiffness > 0.0 {
-            1.0 / (tension_stiffness * 1000.0)
+            1.0 / tension_stiffness
         } else {
             1e10
         };
@@ -270,7 +360,7 @@ impl ClothMesh {
         let compression_compliance = if compression_stiffness >= 5000.0 {
             0.0
         } else if compression_stiffness > 0.0 {
-            1.0 / (compression_stiffness * 1000.0)
+            1.0 / compression_stiffness
         } else {
             1e10
         };
@@ -278,7 +368,7 @@ impl ClothMesh {
         let shear_compliance = if shear_stiffness >= 5000.0 {
             0.0
         } else if shear_stiffness > 0.0 {
-            1.0 / (shear_stiffness * 1000.0)
+            1.0 / shear_stiffness
         } else {
             1e10
         };
@@ -356,6 +446,75 @@ impl ClothMesh {
             }
         }
 
+        // 長距離拘束 (Coarse: 2ホップ先頂点間の距離拘束、オプション)。
+        // 反復1回あたりの拘束伝播距離を約2倍にし、長尺布の静止伸び残留を低減する
+        // (2階層法の粗層に相当。細層と同一ループで解くため prolongation 不要)。
+        // 既存辺・せん断対角と重複せず、頂点あたり最大4件 (最短優先)。
+        // constraint_type=2 (引張コンプライアンスを使用)。
+        let mut coarse_constraint_count: u32 = 0;
+        if enable_coarse_constraints && n_verts > 0 {
+            let mut existing: std::collections::HashSet<(u32, u32)> = edges
+                .iter()
+                .filter_map(|&[a, b]| {
+                    if (a as usize) < n_verts && (b as usize) < n_verts && a != b {
+                        Some((a.min(b), a.max(b)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for dc in dist_constraints.iter() {
+                existing.insert((dc.v0.min(dc.v1), dc.v0.max(dc.v1)));
+            }
+            let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n_verts];
+            for &[a, b] in edges {
+                if (a as usize) < n_verts && (b as usize) < n_verts && a != b {
+                    adj[a as usize].push(b);
+                    adj[b as usize].push(a);
+                }
+            }
+            const MAX_COARSE_PER_VERT: usize = 4;
+            for i in 0..n_verts {
+                let mut cands: Vec<(f32, u32)> = Vec::new();
+                for &j in &adj[i] {
+                    for &k in &adj[j as usize] {
+                        if k as usize == i {
+                            continue;
+                        }
+                        let key = ((i as u32).min(k), (i as u32).max(k));
+                        if existing.contains(&key) {
+                            continue;
+                        }
+                        let p0 = positions[i];
+                        let p1 = positions[k as usize];
+                        let dx = p0[0] - p1[0];
+                        let dy = p0[1] - p1[1];
+                        let dz = p0[2] - p1[2];
+                        cands.push(((dx * dx + dy * dy + dz * dz).sqrt(), k));
+                    }
+                }
+                cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                cands.dedup_by(|a, b| a.1 == b.1);
+                for (rest_length, k) in cands.into_iter().take(MAX_COARSE_PER_VERT) {
+                    let key = ((i as u32).min(k), (i as u32).max(k));
+                    if !existing.insert(key) {
+                        continue;
+                    }
+                    dist_constraints.push(GpuDistanceConstraint {
+                        v0: i as u32,
+                        v1: k,
+                        rest_length,
+                        tension_compliance,
+                        compression_compliance,
+                        constraint_type: 2,
+                        _pad0: 0.0,
+                        _pad1: 0.0,
+                    });
+                    coarse_constraint_count += 1;
+                }
+            }
+        }
+
         let (sorted_dist, dist_color_offsets, dist_color_counts, dist_remap) =
             crate::coloring::color_distance_constraints(n_verts, &dist_constraints);
 
@@ -376,7 +535,7 @@ impl ClothMesh {
         // 2. 曲げ拘束 (Distance Bending: 共有エッジを持つ2三角形の対向頂点間距離拘束)
         let mut bending_constraints = Vec::new();
         let bend_compliance = if bending_stiffness > 0.0 {
-            1.0 / (bending_stiffness * 100.0)
+            1.0 / bending_stiffness
         } else {
             1e10
         };
@@ -429,7 +588,7 @@ impl ClothMesh {
         let sew_compliance = if sew_stiff >= 5000.0 {
             0.0 // 完全非伸縮 (Inextensible PBD)
         } else if sew_stiff > 0.0 {
-            1.0 / (sew_stiff * 1000.0)
+            1.0 / sew_stiff
         } else {
             1e10
         };
@@ -674,6 +833,7 @@ impl ClothMesh {
             distance_constraints: sorted_dist,
             dist_color_offsets,
             dist_color_counts,
+            coarse_constraint_count,
             original_edge_to_constraint,
             initial_distance_rest_lengths,
             bending_constraints: sorted_bend,
@@ -877,5 +1037,73 @@ mod tests {
                 assert!(w[0] < w[1], "頂点 {} の2ホップリストが厳密昇順であること", v);
             }
         }
+    }
+
+    #[test]
+    fn test_coarse_long_range_constraints() {
+        // 直線メッシュ: 0 -- 1 -- 2 -- 3 -- 4
+        let positions = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0], [4.0, 0.0, 0.0],
+        ];
+        let edges = [[0, 1], [1, 2], [2, 3], [3, 4]];
+
+        let plain = ClothMesh::from_raw(
+            &positions, &edges, None, None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 1000.0, 10.0, 1.0,
+            None, None,
+        );
+        assert_eq!(plain.coarse_constraint_count, 0);
+
+        let coarse = ClothMesh::from_raw_with_opts(
+            &positions, &edges, None, None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 1000.0, 10.0, 1.0,
+            None, None, true,
+        );
+        assert!(coarse.coarse_constraint_count > 0);
+        // 2ホップ対 (0,2) 等が type=2 で含まれること
+        let has_02 = coarse.distance_constraints.iter().any(|c| {
+            c.constraint_type == 2 && ((c.v0 == 0 && c.v1 == 2) || (c.v0 == 2 && c.v1 == 0))
+        });
+        assert!(has_02, "2ホップ対 (0,2) が長距離拘束として含まれること");
+        // 長距離拘束の自然長が初期幾何と一致すること
+        for c in coarse.distance_constraints.iter().filter(|c| c.constraint_type == 2) {
+            let p0 = positions[c.v0 as usize];
+            let p1 = positions[c.v1 as usize];
+            let dx = p0[0] - p1[0];
+            let dy = p0[1] - p1[1];
+            let dz = p0[2] - p1[2];
+            let expect = (dx * dx + dy * dy + dz * dz).sqrt();
+            assert!((c.rest_length - expect).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_areal_inv_masses_physical_units() {
+        // 1m x 1m の正方形 (2三角形)。面密度 0.15 kg/m2 なら総質量 0.15 kg。
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = [[0, 1, 2], [0, 2, 3]];
+        let inv = super::areal_inv_masses(&positions, Some(&faces), None, 0.15);
+        assert_eq!(inv.len(), 4);
+        let masses: Vec<f32> = inv.iter().map(|&w| 1.0 / w).collect();
+        let total: f32 = masses.iter().sum();
+        assert!((total - 0.15).abs() < 1e-5, "総質量が面積×面密度に一致すること: {}", total);
+        // 対角頂点 (0, 2) は2面分、他は1面分のため重い
+        assert!(masses[0] > masses[1]);
+        assert!((masses[1] - masses[3]).abs() < 1e-7);
+
+        // ピンウェイト1.0は完全固定 (0.0)
+        let pinned = super::areal_inv_masses(&positions, Some(&faces), Some(&[1.0, 0.0, 0.0, 0.0]), 0.15);
+        assert_eq!(pinned[0], 0.0);
+        assert!(pinned[1] > 0.0);
+
+        // 面なし・密度ゼロは有限値を返す (ゼロ除算なし)
+        let bare = super::areal_inv_masses(&positions, None, None, 0.15);
+        assert!(bare.iter().all(|&w| w.is_finite() && w > 0.0));
     }
 }

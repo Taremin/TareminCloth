@@ -246,6 +246,11 @@ class ClothReplayer:
         if isinstance(raw_layer, list) and len(raw_layer) == len(build_pos):
             layer_arr = np.ascontiguousarray(np.array(raw_layer, dtype=np.uint32))
         faces_arg = self.faces if self.faces.size > 0 else None
+        try:
+            areal_density_f = float(self.metadata.get("areal_density", 0.15))
+        except (TypeError, ValueError):
+            areal_density_f = 0.15
+        coarse_f = bool(self.metadata.get("enable_coarse_constraints", False))
 
         sim = taremin_cloth_core.ClothSimulator(
             positions=build_pos,
@@ -261,6 +266,8 @@ class ClothReplayer:
             compression_stiffness=float(comp_stiff) if comp_stiff is not None else None,
             shear_stiffness=float(shear_stiff) if shear_stiff is not None else None,
             sewing_shrink_speed=shrink_speed_f,
+            areal_density=areal_density_f,
+            enable_coarse_constraints=coarse_f,
         )
 
         # SimConfig一本化: 正本があれば一括適用 (新パラメータ自動追従)
@@ -278,6 +285,11 @@ class ClothReplayer:
         gravity = self.metadata.get("gravity", [0.0, 0.0, -9.81])
         sim.set_gravity(float(gravity[0]), float(gravity[1]), float(gravity[2]))
         sim.set_damping(float(self.metadata.get("damping", 0.01)))
+        if hasattr(sim, "set_areal_density"):
+            try:
+                sim.set_areal_density(float(self.metadata.get("areal_density", 0.15)))
+            except (TypeError, ValueError):
+                pass
 
         # ソルバー設定
         sim.set_solver_mode(int(self.metadata.get("solver_mode", 0)))

@@ -257,6 +257,8 @@ def get_cloth_params_signature(obj):
         int(getattr(settings, "sewing_priority_ramp_frames", 3)),
         int(getattr(settings, "sewing_priority_max_frames", 600)),
         round(float(getattr(settings, "thickness", 0.005)), 5),
+        round(float(getattr(settings, "areal_density", 0.15)), 5),
+        bool(getattr(settings, "enable_coarse_constraints", False)),
         bool(getattr(settings, "enable_self_collision", False)),
         str(getattr(settings, "self_collision_purpose", "STANDARD")),
         bool(getattr(settings, "enable_pair_cache", False)),

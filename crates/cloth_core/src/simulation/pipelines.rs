@@ -30,6 +30,9 @@ pub struct SimulationResources {
     pub staging_buffer: wgpu::Buffer,
     pub staging_buffers: [wgpu::Buffer; 2],
     pub accum_buffer: wgpu::Buffer,
+    pub dist_lambda_buffer: wgpu::Buffer,
+    pub bend_lambda_buffer: wgpu::Buffer,
+    pub sew_lambda_buffer: wgpu::Buffer,
     pub distance_atomic_bind_group: wgpu::BindGroup,
     pub compact_position_buffer: wgpu::Buffer,
     pub compact_staging_buffers: [wgpu::Buffer; 2],
@@ -76,6 +79,7 @@ pub struct SimulationResources {
     pub distance_bind_groups: Vec<wgpu::BindGroup>,
     pub bending_bind_groups: Vec<wgpu::BindGroup>,
     pub sewing_bind_groups: Vec<wgpu::BindGroup>,
+    pub sew_shrink_bind_group: wgpu::BindGroup,
     pub update_vel_bind_group: wgpu::BindGroup,
     pub edge_collision_bind_groups: Vec<wgpu::BindGroup>,
     pub self_collision_relief_factor: f32,
@@ -392,6 +396,27 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
+    // XPBDラグランジュ乗数バッファ (拘束毎f32、サブステップ先頭で零化)。
+    // 空時はダミー1要素。clear_buffer 用に COPY_DST を付与する。
+    let dist_lambda_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Distance Lambda Buffer"),
+        size: ((num_distance_constraints as u64) * 4).max(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bend_lambda_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Bending Lambda Buffer"),
+        size: ((num_bending_constraints as u64) * 4).max(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let sew_lambda_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Sewing Lambda Buffer"),
+        size: ((num_sewing_constraints as u64) * 4).max(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     let self_collision_accum_buffer_size = ((num_vertices as u64) * 32).max(64);
     let self_collision_accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Self Collision Accum Buffer"),
@@ -562,6 +587,10 @@ pub fn build_simulation_resources(
                 binding: 3,
                 resource: accum_buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: dist_lambda_buffer.as_entire_binding(),
+            },
         ],
     });
 
@@ -614,6 +643,10 @@ pub fn build_simulation_resources(
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: info_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: dist_lambda_buffer.as_entire_binding(),
                 },
             ],
         }));
@@ -705,6 +738,10 @@ pub fn build_simulation_resources(
                     binding: 3,
                     resource: info_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: bend_lambda_buffer.as_entire_binding(),
+                },
             ],
         }));
     }
@@ -744,9 +781,29 @@ pub fn build_simulation_resources(
                     binding: 3,
                     resource: info_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: sew_lambda_buffer.as_entire_binding(),
+                },
             ],
         }));
     }
+
+    // 縫合自然長の時間進行パス用バインドグループ (サブステップ毎に1回)
+    let sew_shrink_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Sew Shrink Bind Group"),
+        layout: &shared.sew_shrink_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sew_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: params_buffer.as_entire_binding(),
+            },
+        ],
+    });
 
     // 自己衝突用リソース
     let self_collision_relief_factor = 0.2f32;
@@ -1143,6 +1200,9 @@ pub fn build_simulation_resources(
         staging_buffer,
         staging_buffers: [staging_buffer_0, staging_buffer_1],
         accum_buffer,
+        dist_lambda_buffer,
+        bend_lambda_buffer,
+        sew_lambda_buffer,
         distance_atomic_bind_group,
         compact_position_buffer,
         compact_staging_buffers: [compact_staging_0, compact_staging_1],
@@ -1190,6 +1250,7 @@ pub fn build_simulation_resources(
         distance_bind_groups,
         bending_bind_groups,
         sewing_bind_groups,
+        sew_shrink_bind_group,
         update_vel_bind_group,
         edge_collision_bind_groups,
         self_collision_relief_factor,

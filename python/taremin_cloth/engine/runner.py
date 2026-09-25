@@ -146,6 +146,8 @@ def create_simulator_from_state(obj, state):
         solver_mode=state["s_mode"],
         enable_compact_readback=state["compact_rb"],
         enable_pair_cache=getattr(settings, "enable_pair_cache", False),
+        areal_density=getattr(settings, "areal_density", 0.15),
+        enable_coarse_constraints=bool(getattr(settings, "enable_coarse_constraints", False)),
     )
 
     # Cold Resume: レスト座標で自然長を初期化した後、現在の変形頂点座標をGPUにセットして停止位置から再開
@@ -196,6 +198,19 @@ def get_or_create_simulator(obj):
     state = begin_simulator_init(obj)
     sim = create_simulator_from_state(obj, state)
     return finalize_simulator_init(obj, sim, state)
+
+
+def _gravity_active(settings, scene=None) -> bool:
+    """重力荷重が有効か (適応サブステップ下限の判定用)。"""
+    try:
+        scale = abs(float(getattr(settings, "gravity", 1.0)))
+    except (TypeError, ValueError):
+        scale = 1.0
+    if scale <= 1e-3:
+        return False
+    if scene is not None and not bool(getattr(scene, "use_gravity", True)):
+        return False
+    return True
 
 
 def get_effective_substeps(obj, coords, dt, scene=None):
@@ -255,6 +270,12 @@ def get_effective_substeps(obj, coords, dt, scene=None):
     else:
         computed_steps = int(np.ceil(max_disp / cfl_margin))
         target_steps = max(min_steps, min(max_steps, computed_steps))
+
+    # 重力フロア: 静止時も重力荷重の釣り合いには基底予算が必要なため、
+    # 重力有効時は適応低下の下限を基底段数に保つ (基底品質の保証)。
+    # 高速運動時の増段 (上限方向) は従来通り有効。
+    if _gravity_active(settings, scene):
+        target_steps = max(target_steps, min(base_steps, max_steps))
 
     # 4. ヒステリシス制御（スムージング / ジッター防止）
     # 急激なステップ降下による剛性・ダンピングの揺らぎや布のピクつき、および急上昇による極端なFPSドロップを防止

@@ -263,7 +263,7 @@ impl GuiApp {
         let faces_opt = if !data.faces.is_empty() { Some(data.faces.as_slice()) } else { None };
         let sew_opt = data.sewing_springs.as_deref();
 
-        let mesh = ClothMesh::from_raw(
+        let mesh = ClothMesh::from_raw_with_opts(
             &data.positions,
             &data.edges,
             faces_opt,
@@ -280,6 +280,7 @@ impl GuiApp {
             data.sewing_shrink_speed,
             None,
             None,
+            data.enable_coarse_constraints,
         );
 
 
@@ -344,6 +345,7 @@ impl GuiApp {
 
         // ソルバー設定
         sim.solver_iterations = data.solver_iterations;
+        sim.set_areal_density(data.areal_density);
         self.solver_iterations = data.solver_iterations;
         self.substeps = data.substeps;
         if let Some(fps) = data.fps {

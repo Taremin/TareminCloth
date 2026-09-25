@@ -44,6 +44,7 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
   - レイヤー優先度（Layer ID）と厚み（Thickness）に基づき、重ね着した布の突き抜けを防止。
 - **🎨 3軸プリセットシステム & カスタム保存**:
   - **布素材 (Fabric)**: 絹（Silk）、木綿（Cotton）、麻（Linen）、デニム（Denim）、革（Leather）、ゴム（Rubber）
+    - 各素材に面密度（Areal Density、kg/m2）を設定し、三角形面積に応じて分配した物理質量で計算します。剛性値はバネ定数（N/m）です。
   - **シミュレーション品質 (Quality)**: Fast（リアルタイム編集・高FPS）、Balanced（標準）、Best（レンダリング用高精度）、Stiff（伸び防止・紐やタイト服）
   - **コライダー特性 (Collider)**: 肌（Skin）、布（Fabric）、滑面・金属（Smooth/Metal）、高摩擦ゴム（Rubber）
   - ユーザーが調整したお気に入りのパラメータを名前をつけて保存・読み込み・削除可能（JSONファイル形式）。

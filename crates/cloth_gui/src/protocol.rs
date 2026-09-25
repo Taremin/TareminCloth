@@ -160,6 +160,11 @@ pub struct SceneInitData {
     pub inv_masses: Vec<f32>,
     pub layer_id: u32,
     pub thickness: f32,
+    #[serde(default = "default_areal_density")]
+    pub areal_density: f32,
+    /// 長距離拘束 (2ホップ) の有効化。メッシュ構築時のみ有効 (init-only)。
+    #[serde(default)]
+    pub enable_coarse_constraints: bool,
     pub stiffness: f32,
     pub compression_stiffness: f32,
     pub shear_stiffness: f32,
@@ -216,6 +221,7 @@ pub struct SceneInitData {
 
 fn default_solver_iters() -> u32 { 10 }
 fn default_sewing_stiffness() -> f32 { 10000.0 }
+fn default_areal_density() -> f32 { 0.15 }
 fn default_substeps() -> u32 { 20 }
 fn default_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
 fn default_sewing_priority_threshold() -> f32 { 0.9 }

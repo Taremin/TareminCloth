@@ -29,7 +29,7 @@ impl GpuClothSimulator {
             sewing_compliance: if self.sewing_stiffness >= 5000.0 {
                 0.0
             } else {
-                1.0 / (self.sewing_stiffness * 1000.0)
+                1.0 / (self.sewing_stiffness.max(1.0))
             },
             enable_sewing_lock: if self.enable_sewing_lock { 1.0 } else { 0.0 },
         };
@@ -81,6 +81,24 @@ impl GpuClothSimulator {
                 && (self.self_collision_substep_interval <= 1
                     || sub_idx % self.self_collision_substep_interval == 0
                     || is_last_substep);
+
+            // XPBDラムダの零化 (サブステップ毎。反復ループ内では蓄積する)
+            encoder.clear_buffer(&self.dist_lambda_buffer, 0, None);
+            encoder.clear_buffer(&self.bend_lambda_buffer, 0, None);
+            encoder.clear_buffer(&self.sew_lambda_buffer, 0, None);
+
+            // 0. 縫合自然長の時間進行 (サブステップ毎に1回。反復数・衝突モード非依存)
+            if self.num_sewing_constraints > 0 {
+                let sew_workgroups =
+                    (self.num_sewing_constraints + wg_size - 1) / wg_size;
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Sew Shrink Pass"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(self.shared.ensure_sew_shrink());
+                cpass.set_bind_group(0, &self.sew_shrink_bind_group, &[]);
+                cpass.dispatch_workgroups(sew_workgroups, 1, 1);
+            }
 
             // 1. Predict Pass
             {
@@ -203,6 +221,25 @@ impl GpuClothSimulator {
                             cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
                         }
                     }
+                }
+            }
+        }
+
+        // 6.4 Final Sewing Pass (全モード共通: 速度確定の直前にもう一度だけ縫合解決を実行する)。
+        // 反復ループ内ではコライダー押し出しが縫合解決の後に実行されるため、
+        // 身体上に載った縫合線は閉じた後に押し戻されて開いたままになる。
+        // 直前でもう一度閉じ直してから速度を確定することで、自己衝突の有無に
+        // かかわらず同じ閉鎖結果になる (Final Pin Pass と同じ配置理由)。
+        if self.num_sewing_constraints > 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Final Sewing Pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.shared.sewing_pipeline);
+            for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
+                if count > 0 {
+                    cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
+                    cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
                 }
             }
         }

@@ -1034,7 +1034,7 @@ pub struct ClothSimulator {
 #[pymethods]
 impl ClothSimulator {
     #[new]
-    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None))]
+    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None, areal_density=None, enable_coarse_constraints=None))]
     fn new(
         positions: PyReadonlyArray2<f32>,
         edges: PyReadonlyArray2<u32>,
@@ -1056,6 +1056,8 @@ impl ClothSimulator {
         solver_mode: u32,
         enable_compact_readback: Option<bool>,
         enable_pair_cache: Option<bool>,
+        areal_density: Option<f32>,
+        enable_coarse_constraints: Option<bool>,
     ) -> PyResult<Self> {
 
         let pos_view = positions.as_array();
@@ -1125,7 +1127,7 @@ impl ClothSimulator {
         let comp_stiffness = compression_stiffness.unwrap_or(stiffness);
         let sh_stiffness = shear_stiffness.unwrap_or(stiffness * 0.5);
 
-        let mesh = ClothMesh::from_raw(
+        let mesh = ClothMesh::from_raw_with_opts(
             &pos_vec,
             &edge_vec,
             faces_opt,
@@ -1142,10 +1144,14 @@ impl ClothSimulator {
             sewing_shrink_speed,
             sewing_stiffness,
             enable_sewing_lock,
+            enable_coarse_constraints.unwrap_or(false),
         );
 
 
         let mut simulator = GpuClothSimulator::with_options(ctx, mesh, workgroup_size, solver_mode);
+        if let Some(density) = areal_density {
+            simulator.set_areal_density(density);
+        }
         if let Some(compact) = enable_compact_readback {
             simulator.set_enable_compact_readback(compact);
         }
@@ -1937,6 +1943,12 @@ impl ClothSimulator {
     #[pyo3(signature = (enabled=true))]
     fn set_enable_sewing_lock(&mut self, enabled: bool) {
         self.simulator.set_enable_sewing_lock(enabled);
+    }
+
+    /// 布の面密度 (kg/m2) を設定する。記録・署名用の値。
+    #[pyo3(signature = (density=0.15))]
+    fn set_areal_density(&mut self, density: f32) {
+        self.simulator.set_areal_density(density);
     }
 
     /// 縫合優先モードのオプションを設定する (工程フェーズ制御)。

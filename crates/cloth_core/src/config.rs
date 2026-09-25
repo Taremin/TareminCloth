@@ -19,6 +19,7 @@ fn d_merge_dist() -> f32 { 0.005 }
 fn d_threshold() -> f32 { 0.9 }
 fn d_ramp() -> u32 { 3 }
 fn d_max_frames() -> u32 { 600 }
+fn d_areal_density() -> f32 { 0.15 }
 fn d_version() -> u32 { 1 }
 fn d_relax_iters() -> u32 { 1 }
 fn d_substep_interval() -> u32 { 1 }
@@ -114,6 +115,8 @@ pub struct SimConfig {
     pub sewing_priority_ramp_frames: u32,
     #[serde(default = "d_max_frames")]
     pub sewing_priority_max_frames: u32,
+    #[serde(default = "d_areal_density")]
+    pub areal_density: f32,
 }
 
 impl Default for SimConfig {
@@ -159,6 +162,7 @@ impl Default for SimConfig {
             sewing_priority_merge_dist: d_merge_dist(),
             sewing_priority_ramp_frames: d_ramp(),
             sewing_priority_max_frames: d_max_frames(),
+            areal_density: d_areal_density(),
         }
     }
 }
