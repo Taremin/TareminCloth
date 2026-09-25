@@ -1285,6 +1285,16 @@ impl ClothSimulator {
         self.simulator.set_self_collision_substep_interval(interval);
     }
 
+    /// 診断用のGPU時刻計測の有効/無効を設定する。非対応環境では偽を返す
+    fn set_profiling_enabled(&mut self, enable: bool) -> bool {
+        self.simulator.set_profiling_enabled(enable)
+    }
+
+    /// 直近フレームの (パス名, ミリ秒) を回収する
+    fn take_profile(&self) -> Vec<(String, f32)> {
+        self.simulator.take_profile()
+    }
+
     /// 現在の自己衝突サブステップ間隔を取得
     fn get_self_collision_substep_interval(&self) -> u32 {
         self.simulator.self_collision_substep_interval()

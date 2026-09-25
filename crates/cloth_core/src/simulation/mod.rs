@@ -4,6 +4,7 @@ pub mod pipeline_cache;
 pub mod dispatch;
 pub mod recording;
 pub mod config_impl;
+pub(crate) mod profile;
 #[cfg(test)]
 pub mod tests;
 
@@ -21,6 +22,7 @@ use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
 pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
 use self::pipelines::build_simulation_resources;
 use self::pipeline_cache::SharedPipelines;
+use self::profile::GpuProfiler;
 
 /// 頂点あたり保持枠数の上限。物理バッファは N*QUOTA_MAX 確保し、
 /// 論理配置は index*quota+k のコンパクト配置 (収集時に毎回全範囲書換え)。
@@ -264,6 +266,8 @@ pub struct GpuClothSimulator {
     pub mesh_faces: Vec<[u32; 3]>,
     pub debug_recorder: SimulationDebugRecorder,
     pub original_inv_masses: Vec<f32>,
+    // 診断専用のGPU時刻問い合わせ計装 (既定で無効)
+    pub(crate) profiler: GpuProfiler,
 }
 
 
@@ -291,7 +295,7 @@ impl GpuClothSimulator {
         let mesh_faces: Vec<[u32; 3]> = mesh.triangles.iter().map(|tri| [tri.v0, tri.v1, tri.v2]).collect();
 
         let sim = Self {
-            context,
+            context: Arc::clone(&context),
             num_vertices,
             num_distance_constraints,
             num_bending_constraints,
@@ -475,6 +479,7 @@ impl GpuClothSimulator {
             mesh_faces,
             debug_recorder: SimulationDebugRecorder::default(),
             original_inv_masses: mesh.vertices.iter().map(|v| v.inv_mass).collect(),
+            profiler: GpuProfiler::new(&context),
         };
         // ATOMIC モード指定時は初回から必要なため、ここで先行生成する
         if solver_mode == 1 {
@@ -695,6 +700,16 @@ impl GpuClothSimulator {
             self.shared.ensure_hash();
         }
         self.enable_self_collision = enable;
+    }
+
+    /// 診断用のGPU時刻計測の有効/無効を設定する。非対応環境では偽を返す。
+    pub fn set_profiling_enabled(&mut self, enable: bool) -> bool {
+        self.profiler.set_enabled(enable)
+    }
+
+    /// 直近フレームの (パス名, ミリ秒) を回収する。診断専用の同期待機を伴う。
+    pub fn take_profile(&self) -> Vec<(String, f32)> {
+        self.profiler.take_ms()
     }
 
     /// Coupled自己衝突モードと緩和イテレーション数を設定する

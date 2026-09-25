@@ -226,7 +226,8 @@ impl GpuContext {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("TareminCloth Device"),
-                    required_features: wgpu::Features::empty(),
+                    // 診断用の時刻問い合わせは対応時のみ要求する (非対応でも起動できる)。
+                    required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
                     required_limits,
                     memory_hints: Default::default(),
                 },
@@ -297,6 +298,13 @@ impl GpuContext {
     /// アダプタの情報を取得する
     pub fn get_adapter_info(&self) -> wgpu::AdapterInfo {
         self.adapter.get_info()
+    }
+
+    /// 診断用の時刻問い合わせに対応しているかを取得する
+    pub fn timestamp_query_supported(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
     }
 }
 

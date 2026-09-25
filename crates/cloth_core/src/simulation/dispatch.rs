@@ -270,7 +270,9 @@ impl GpuClothSimulator {
         );
 
         self.dispatch_dynamic_bone_sdf_update(&mut encoder);
+        self.profiler.frame_begin();
         self.encode_simulation_steps(&mut encoder, dt, substeps);
+        self.profiler.frame_end(&mut encoder);
         self.context.queue.submit(Some(encoder.finish()));
 
         if self.debug_recorder.is_recording() {
@@ -860,11 +862,14 @@ impl GpuClothSimulator {
         need_rebuild: bool,
         is_last_substep: bool,
     ) {
-        // 1. Compute Normals Pass
-        {
+        // 1. Compute Normals Pass (P4: 法線展開処理が無効の場合は省略する。
+        // 法線バッファの読み手は自己衝突シェーダーの展開分岐のみであり、
+        // いずれも enable_normal_untangling 取得値で保護されている)
+        if self.enable_normal_untangling {
+            let ts = self.profiler.enter("sc_normals");
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("{prefix} Compute Normals Pass")),
-                timestamp_writes: None,
+                timestamp_writes: self.profiler.writes(ts),
             });
             cpass.set_pipeline(&self.shared.ensure_self_collision().normals);
             cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
@@ -879,7 +884,7 @@ impl GpuClothSimulator {
 
         if !self.enable_pair_cache || need_rebuild || force_direct {
             // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
-            self.spatial_hash.dispatch_build(encoder, self.num_vertices, self.shared.ensure_hash());
+            self.spatial_hash.dispatch_build(encoder, self.num_vertices, self.shared.ensure_hash(), &self.profiler);
         }
 
         if self.enable_pair_cache && !force_direct {
@@ -892,9 +897,10 @@ impl GpuClothSimulator {
 
                 // Step B: ブロードフェーズ (接近ペアの検出・収集)
                 {
+                    let ts = self.profiler.enter("pair_collect");
                     let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some(&format!("{prefix} Pair Collect Pass")),
-                        timestamp_writes: None,
+                        timestamp_writes: self.profiler.writes(ts),
                     });
                     cpass.set_pipeline(&self.shared.ensure_pair().collect);
                     cpass.set_bind_group(0, &self.pair_collect_bind_group, &[]);
@@ -912,17 +918,24 @@ impl GpuClothSimulator {
             let ee_workgroups = ((ee_slots + 63) / 64).max(1);
 
             {
+                // V-T ペア解決 (計測のため E-E とパスを分ける。処理内容は同一)
+                let ts_vt = self.profiler.enter("pair_vt");
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some(&format!("{prefix} Pair Solve Narrowphase Pass")),
-                    timestamp_writes: None,
+                    label: Some(&format!("{prefix} Pair Solve VT Pass")),
+                    timestamp_writes: self.profiler.writes(ts_vt),
                 });
-
-                // V-T ペア解決
                 cpass.set_pipeline(&self.shared.ensure_pair().solve_vt);
                 cpass.set_bind_group(0, &self.pair_solve_vt_bind_group, &[]);
                 cpass.dispatch_workgroups(vt_workgroups, 1, 1);
+            }
 
+            {
                 // E-E ペア解決
+                let ts_ee = self.profiler.enter("pair_ee");
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Pair Solve EE Pass")),
+                    timestamp_writes: self.profiler.writes(ts_ee),
+                });
                 cpass.set_pipeline(&self.shared.ensure_pair().solve_ee);
                 cpass.set_bind_group(0, &self.pair_solve_ee_bind_group, &[]);
                 cpass.dispatch_workgroups(ee_workgroups, 1, 1);
@@ -930,9 +943,10 @@ impl GpuClothSimulator {
 
             // Step D: 変位の適用 (既存の self_collision_apply_pipeline を共用)
             {
+                let ts = self.profiler.enter("pair_apply");
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Pair Self Collision Apply Pass")),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.writes(ts),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
                 cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
@@ -942,9 +956,10 @@ impl GpuClothSimulator {
             // 従来のダイレクト走査方式
             // 4. Self Collision Pass (Solve)
             {
+                let ts = self.profiler.enter("sc_solve");
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Self Collision Pass")),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.writes(ts),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().solve);
                 cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
@@ -953,9 +968,10 @@ impl GpuClothSimulator {
 
             // 5. Self Collision Apply Pass
             {
+                let ts = self.profiler.enter("sc_apply");
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Self Collision Apply Pass")),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.writes(ts),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
                 cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);

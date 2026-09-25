@@ -145,6 +145,7 @@ impl GpuSpatialHash {
         encoder: &mut wgpu::CommandEncoder,
         num_vertices: u32,
         hash: &HashPipelines,
+        prof: &crate::simulation::profile::GpuProfiler,
     ) {
         let num_blocks = (self.table_size + 255) / 256;
         let vert_workgroups = (num_vertices + 255) / 256;
@@ -153,7 +154,7 @@ impl GpuSpatialHash {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Clear Pass"),
-                timestamp_writes: None,
+                timestamp_writes: prof.writes(prof.enter("hash_clear")),
             });
             cpass.set_pipeline(&hash.clear);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
@@ -164,7 +165,7 @@ impl GpuSpatialHash {
         if num_vertices > 0 {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Count Pass"),
-                timestamp_writes: None,
+                timestamp_writes: prof.writes(prof.enter("hash_count")),
             });
             cpass.set_pipeline(&hash.count);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
@@ -175,7 +176,7 @@ impl GpuSpatialHash {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Scan Blocks Pass"),
-                timestamp_writes: None,
+                timestamp_writes: prof.writes(prof.enter("hash_scan")),
             });
             cpass.set_pipeline(&hash.scan_blocks);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
@@ -186,7 +187,7 @@ impl GpuSpatialHash {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Scan Top Pass"),
-                timestamp_writes: None,
+                timestamp_writes: prof.writes(prof.enter("hash_top")),
             });
             cpass.set_pipeline(&hash.scan_top);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
@@ -197,7 +198,7 @@ impl GpuSpatialHash {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Add Offsets Pass"),
-                timestamp_writes: None,
+                timestamp_writes: prof.writes(prof.enter("hash_add")),
             });
             cpass.set_pipeline(&hash.add_offsets);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
@@ -208,7 +209,7 @@ impl GpuSpatialHash {
         if num_vertices > 0 {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Scatter Pass"),
-                timestamp_writes: None,
+                timestamp_writes: prof.writes(prof.enter("hash_scatter")),
             });
             cpass.set_pipeline(&hash.scatter);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);

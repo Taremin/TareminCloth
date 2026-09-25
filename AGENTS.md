@@ -92,6 +92,17 @@ python -m unittest tests/test_issue_f71.py
 ### Step 5: サブステップ顕微鏡解析（必要に応じて）
 - `ClothReplayer.trace_substeps(frame_idx)` を呼び出し、該当フレーム内のサブステップ 1〜10 の最大変位・最大速度推移を1ステップ刻みで確認します。
 
+### Step 6: パス別ボトルネック特定（性能問題時のみ・任意）
+- 実経過時間では分離できないパス別コストは、診断専用のGPU時刻問い合わせで特定する（既定で無効のため本番性能への影響なし）。
+```python
+ok = sim.set_profiling_enabled(True)  # TIMESTAMP_QUERY非対応環境ではFalseを返す
+sim.step(dt, substeps)
+for name, ms in sim.take_profile():
+    print(name, ms)
+```
+- 記録対象: `sc_normals` / `hash_*` 6相 / `sc_solve` / `sc_apply`（ペアキャッシュ使用時は `pair_*`）。
+- `take_profile` は同期待機を伴うため、計測時のみ有効化すること。
+
 ---
 
 ## 5. CLIツール (`log_tools`) コマンドリファレンス
