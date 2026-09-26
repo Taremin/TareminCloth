@@ -51,6 +51,7 @@ struct SelfCollisionAccum {
 @group(0) @binding(6) var<storage, read> two_hop_offsets: array<u32>;
 @group(0) @binding(7) var<storage, read> two_hop_indices: array<u32>;
 @group(0) @binding(8) var<storage, read_write> accum: array<SelfCollisionAccum>;
+@group(0) @binding(9) var<storage, read> two_hop_rest_lengths: array<f32>;
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -116,8 +117,9 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     return vec2<f32>(s, t);
 }
 
-// トポロジー2ホップ近傍判定（CSRテーブル二分探索）
-fn is_topologically_near(vert_a: u32, vert_b: u32) -> bool {
+// トポロジー2ホップ近傍判定（Bridson 2002: レスト長比率による動的折り畳み検出）
+// 初期距離 L0 の 50% 未満に圧縮された場合、鋭角なシワ・折り畳みと判定して衝突判定を許可（除外解除）
+fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> bool {
     if (vert_a == vert_b) {
         return true;
     }
@@ -130,6 +132,11 @@ fn is_topologically_near(vert_a: u32, vert_b: u32) -> bool {
         let mid = low + (high - low) / 2u;
         let val = two_hop_indices[mid];
         if (val == vert_b) {
+            let l0 = two_hop_rest_lengths[mid];
+            // 距離が初期レスト長の 50% 未満に縮んだ場合は折り畳みとみなし、衝突判定を有効化 (false を返す)
+            if (current_dist < l0 * 0.5) {
+                return false;
+            }
             return true;
         } else if (val < vert_b) {
             low = mid + 1u;
@@ -237,8 +244,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                     // 2ホップ近傍除外（AABB重なりを通過した候補ペアのみ二分探索を実行）
                     if (params.exclude_neighbors != 0u) {
-                        if (is_topologically_near(u0, j) || is_topologically_near(u0, vj) ||
-                            is_topologically_near(u1, j) || is_topologically_near(u1, vj)) {
+                        let d_u0_j = length(p_u0 - p_j);
+                        let d_u0_vj = length(p_u0 - p_vj);
+                        let d_u1_j = length(p_u1 - p_j);
+                        let d_u1_vj = length(p_u1 - p_vj);
+                        if (is_topologically_near_folded(u0, j, d_u0_j) ||
+                            is_topologically_near_folded(u0, vj, d_u0_vj) ||
+                            is_topologically_near_folded(u1, j, d_u1_j) ||
+                            is_topologically_near_folded(u1, vj, d_u1_vj)) {
                             continue;
                         }
                     }
@@ -256,9 +269,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let thick_b = mix(thick_j, thick_vj, st.y);
                     let effective_thick = thick_a + thick_b;
 
+                    let n_j_raw = normals[j].xyz;
+                    let is_behind_ee = (length(n_j_raw) > 0.5) && (dot(delta_ee, n_j_raw) < 0.0);
+
                     let is_untangling_ee = (params.enable_normal_untangling != 0u)
                         && (v_u0.layer_id > v_j.layer_id)
-                        && (dot(delta_ee, normals[j].xyz) < 0.0);
+                        && is_behind_ee;
 
                     if (!is_untangling_ee && dist_ee < effective_thick && dist_ee > EPSILON) {
                         let n_ee = delta_ee / dist_ee;

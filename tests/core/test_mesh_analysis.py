@@ -52,6 +52,18 @@ class TestMeshAnalysis(unittest.TestCase):
         q2_z = np.array([0.0, 1.0, 1.0])
         self.assertFalse(tri_tri_intersection_sat(p0_z, p1_z, p2_z, q0_z, q1_z, q2_z))
 
+        # 4. 同一平面上でエッジを共有・隣接している三角形（交差していない）
+        q0_coplanar_adj = np.array([1.0, 0.0, 0.0])
+        q1_coplanar_adj = np.array([1.0, 1.0, 0.0])
+        q2_coplanar_adj = np.array([0.0, 1.0, 0.0])
+        self.assertFalse(tri_tri_intersection_sat(p0_z, p1_z, p2_z, q0_coplanar_adj, q1_coplanar_adj, q2_coplanar_adj))
+
+        # 5. 同一平面上で互いに重なり合っている三角形（真の交差）
+        q0_coplanar_overlap = np.array([0.2, 0.2, 0.0])
+        q1_coplanar_overlap = np.array([1.2, 0.2, 0.0])
+        q2_coplanar_overlap = np.array([0.2, 1.2, 0.0])
+        self.assertTrue(tri_tri_intersection_sat(p0_z, p1_z, p2_z, q0_coplanar_overlap, q1_coplanar_overlap, q2_coplanar_overlap))
+
     def test_find_triangle_intersections_in_mesh(self):
         """メッシュ内の空間ハッシュを用いた交差検出の検証"""
         # 2枚の四角形（それぞれ2三角形、計4三角形）

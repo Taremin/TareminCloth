@@ -254,9 +254,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let dist_vt = length(delta_vt);
 
         let tri_cross = cross(p_v0 - p_j, p_v1 - p_j);
+        let tri_len = length(tri_cross);
+        let is_behind = (tri_len > EPSILON) && (dot(delta_vt, tri_cross) < 0.0);
+
+        // 多層布Untangling (外側レイヤー i が内側レイヤー j の裏側に潜り込んだ場合のみ法線脱出)
         let is_untangling_vt = (params.enable_normal_untangling != 0u)
             && (v_i.layer_id > v_j.layer_id)
-            && (dot(delta_vt, tri_cross) < 0.0);
+            && is_behind;
 
         if (!is_pinned_i && !is_untangling_vt && dist_vt < effective_thick && dist_vt > EPSILON) {
             let n_vt = delta_vt / dist_vt;

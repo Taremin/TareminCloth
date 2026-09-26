@@ -150,7 +150,8 @@ sequenceDiagram
           - **専用エッジ空間ハッシュによる多段アクセスの完全排除**: エッジ中点をキーとする `GpuEdgeSpatialHash` を直接走査することで、従来の「頂点セル $\to$ 頂点 $\to$ 隣接エッジリスト $\to$ 相手エッジ」という3段階の不規則メモリアクセスを撤廃し、「エッジセル $\to$ 相手エッジ」の1段階直接アクセスに単純化。E-E計算時間を 44.95 ms から 27.73 ms へ約 38.3% 高速化。
           - **エッジ中点 27 セル固定走査**: エッジ中点 $p_{\text{mid}} = (p_{u0} + p_{u1}) / 2$ の空間セルを中心とする定数 27 近傍（$3 \times 3 \times 3$）のみを均一走査。布メッシュのエッジ半長は自動算出セルサイズに幾何学的に収まるため、100% の幾何学的カバレッジを維持したままスレッド間のループ回数ばらつき（SIMT ダイバージェンス）を完全に排除。
           - **エッジ辞書順序制約 (Global Canonical Ordering)**: 各相手エッジ $e_B = (j, v_j)$ に対し $(u_0 < j) \lor (u_0 = j \land u_1 < v_j)$ を満たす場合のみ評価。これにより、全エッジペアの判定が GPU 全体で厳密に 1 回のみ行われ、重複計算が完全にゼロ化。
-          - **AABB 先行枝切り (Topology Skip)**: 線分 AABB 重なり判定を CSR トポロジー二分探索（`is_topologically_near` $\times$ 4回）の前に配置。空間的に離れた 99% 以上のペアに対する無駄なグローバルメモリアクセスを即座にバイパス。
+          - **AABB 先行枝切り (Topology Skip)**: 線分 AABB 重なり判定を CSR トポロジー二分探索（`is_topologically_near_folded` $\times$ 4回）の前に配置。空間的に離れた 99% 以上のペアに対する無駄なグローバルメモリアクセスを即座にバイパス。
+          - **動的折り畳み検出（Bridson 2002方式: レスト長比率による除外解除）**: 初期レスト長バッファ（`two_hop_rest_lengths: array<f32>`）を参照し、現在の端点間距離が初期距離の 50% 未満（$d < 0.5 L_0$）に圧縮された場合、鋭角なΩ型シワ・折り畳みと判定して2ホップ除外を自動解除。深い座屈時のすり抜けを遮断。
           - **対称アトミック分配 (Coupled XPBD)**: 線分間最短距離が衝突閾値未満の場合、4 端点 $(u_0, u_1, j, v_j)$ へ質量比に応じた厳密な作用・反作用変位をアトミック加算。物理保存則（運動量保存・対称性）を 100% 保持。
         - **エッジ衝突間隔制御 (`self_collision_ee_substep_interval`, 既定 `1`)**: E-E（エッジ対エッジ）接触解決の実行頻度を制御（`0`: 完全無効 [速度最優先、約26.6 FPS]、`1`: 毎サブステップ実行 [完全精度・貫通防止、リアルタイム域達成]、`N >= 2`: Nサブステップ毎 [例: N=2 で 17.9 FPS]）。サブステップディスパッチ時に `solve_ee` パスの実行有無を直接分岐するためオーバーヘッドゼロ。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
@@ -164,6 +165,11 @@ sequenceDiagram
         - **協調収束設計 (Coupled Modes)**:
           - `RELAXATION` モード（推奨標準）: 自己衝突直後に距離拘束および縫合拘束を2反復再適用（Post-Relaxation）。エッジ過剰伸長を約5割抑制しつつ、距離拘束による縫合ペア引き戻しを完全に防ぎ、自己衝突ON時でも0.00mmの完全密着縫合を保証。実測153.2 FPSを維持。
           - `FULL_COUPLED` モード（高精度設定）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和（距離拘束＋縫合拘束）を適用してエッジ伸びを約7割抑制。
+         - **レイヤー衝突階層と Face Attribute (Layer Hierarchy & Untangling)**:
+           - **階層番号 (`layer_id: u32`)**: 頂点ごとに保持され、重ね着やレイヤードスカートの内外関係（0=最内層、1, 2...=外層）を決定。
+           - **自律的脱出 (Untangling)**: 自己衝突シェーダー内で $v_i.\text{layer\_id} > v_j.\text{layer\_id}$ を検知した場合、内側層の表側法線ベクトル方向へ外側層を優先的に押し戻し、複雑な挟み込みや交差からの自律的脱出を実現。
+           - **Face Attribute (`cloth_layer`)**: ボーンウェイト用頂点グループを汚染しないよう、Blender 3.0+ 標準の Mesh Attribute（Faceドメイン、Int型 `cloth_layer`）による面単位のレイヤー指定に対応。
+           - **共有頂点の最大値 (Max) 則**: 内層と外層のウエスト結合部頂点など、複数レイヤーの面で共有される頂点は $\max_{F_k \ni v} L_k$ により自動的に上位レイヤー（外層）と整合し、接合部の引き裂かれやすり抜けを防止。属性未設定時はオブジェクト全体の `default_layer_id` へ安全にフォールバック。
 
 4. **反復後確定 (Final Passes & Velocity Update & Commit)**:
    - **Final Pin Pass**: 反復終了後にピン位置を確定する（Grab等の目標追従）。
@@ -296,6 +302,11 @@ pub struct EdgeCollisionParams {
 //     ccd_dx: atomic<i32>, ccd_dy: atomic<i32>, ccd_dz: atomic<i32>, ccd_count: atomic<u32>, // CCDハード変位 (100%適用)
 // }
 // 固定小数点 10^6 スケール (1μm 分解能) により、データ競合なしに対称な作用・反作用（およびエッジ衝突変位）を蓄積
+
+// トポロジー2ホップ近傍バッファ (GPU Buffer: Read-Only)
+// - two_hop_offsets: array<u32, N + 1>          (CSR行開始インデックス)
+// - two_hop_indices: array<u32, TOTAL_2HOP>     (昇順ソート済み2ホップ近傍頂点インデックス)
+// - two_hop_rest_lengths: array<f32, TOTAL_2HOP> (初期レストポーズ距離 L0。Bridson動的折り畳み検出用)
 
 // 空間ハッシュバッファ (GPU Storage Buffer: Read/Write)
 // - GpuSpatialHash (頂点用, GPU 6相 Counting Sort):

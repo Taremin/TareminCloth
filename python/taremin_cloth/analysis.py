@@ -7,71 +7,142 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
-def tri_tri_intersection_sat(
+def coplanar_tri_tri_2d(
     p0: np.ndarray, p1: np.ndarray, p2: np.ndarray,
     q0: np.ndarray, q1: np.ndarray, q2: np.ndarray,
     eps: float = 1e-5
 ) -> bool:
     """
-    Separating Axis Theorem (SAT) に基づく2つの3D三角形の交差判定。
-    同一平面または接しているだけの場合は False を返します。
+    同一平面上にある2つの2D三角形が真に交差・重なり合っているかを判定します。
+    エッジ共有や頂点接触は交差とみなしません。
     """
-    # 1. 三角形Pの平面に対する三角形Qの頂点の符号付き距離
-    n1 = np.cross(p1 - p0, p2 - p0)
-    norm1 = np.linalg.norm(n1)
-    if norm1 < 1e-7:
-        return False
-    n1 /= norm1
-    d_q = [np.dot(n1, q0 - p0), np.dot(n1, q1 - p0), np.dot(n1, q2 - p0)]
-    if (d_q[0] > eps and d_q[1] > eps and d_q[2] > eps) or (d_q[0] < -eps and d_q[1] < -eps and d_q[2] < -eps):
+    def orient(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+        return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+    def edge_cross_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> bool:
+        o1 = orient(a, b, c)
+        o2 = orient(a, b, d)
+        o3 = orient(c, d, a)
+        o4 = orient(c, d, b)
+        return (o1 * o2 < -eps * eps) and (o3 * o4 < -eps * eps)
+
+    def point_in_tri(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
+        o1 = orient(a, b, p)
+        o2 = orient(b, c, p)
+        o3 = orient(c, a, p)
+        return (o1 > eps and o2 > eps and o3 > eps) or (o1 < -eps and o2 < -eps and o3 < -eps)
+
+    # 1. エッジ交差テスト (3x3 = 9ペア)
+    edges_p = [(p0, p1), (p1, p2), (p2, p0)]
+    edges_q = [(q0, q1), (q1, q2), (q2, q0)]
+    for ep in edges_p:
+        for eq in edges_q:
+            if edge_cross_2d(ep[0], ep[1], eq[0], eq[1]):
+                return True
+
+    # 2. 包含テスト
+    for q in (q0, q1, q2):
+        if point_in_tri(q, p0, p1, p2):
+            return True
+    for p in (p0, p1, p2):
+        if point_in_tri(p, q0, q1, q2):
+            return True
+
+    return False
+
+
+def tri_tri_intersection_moller(
+    v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
+    u0: np.ndarray, u1: np.ndarray, u2: np.ndarray,
+    eps: float = 1e-5
+) -> bool:
+    """
+    Tomas Möller (1997) "A Fast Triangle-Triangle Intersection Test" による厳密交差判定。
+    CG・物理シミュレーション標準。同一平面上の場合は2D射影による包含・交差判定へフォールバックします。
+    """
+    # 1. 三角形Vの平面方程式: N1 . (X - V0) = 0
+    e1 = v1 - v0
+    e2 = v2 - v0
+    n1 = np.cross(e1, e2)
+    d1 = -float(np.dot(n1, v0))
+
+    # Uの各頂点と平面1との符号付き距離
+    du0 = float(np.dot(n1, u0)) + d1
+    du1 = float(np.dot(n1, u1)) + d1
+    du2 = float(np.dot(n1, u2)) + d1
+
+    if abs(du0) < eps:
+        du0 = 0.0
+    if abs(du1) < eps:
+        du1 = 0.0
+    if abs(du2) < eps:
+        du2 = 0.0
+
+    du0du1 = du0 * du1
+    du0du2 = du0 * du2
+    if du0du1 > 0.0 and du0du2 > 0.0:
         return False
 
-    # 2. 三角形Qの平面に対する三角形Pの頂点の符号付き距離
-    n2 = np.cross(q1 - q0, q2 - q0)
-    norm2 = np.linalg.norm(n2)
-    if norm2 < 1e-7:
+    # 2. 三角形Uの平面方程式: N2 . (X - U0) = 0
+    e1_u = u1 - u0
+    e2_u = u2 - u0
+    n2 = np.cross(e1_u, e2_u)
+    d2 = -float(np.dot(n2, u0))
+
+    dv0 = float(np.dot(n2, v0)) + d2
+    dv1 = float(np.dot(n2, v1)) + d2
+    dv2 = float(np.dot(n2, v2)) + d2
+
+    if abs(dv0) < eps:
+        dv0 = 0.0
+    if abs(dv1) < eps:
+        dv1 = 0.0
+    if abs(dv2) < eps:
+        dv2 = 0.0
+
+    dv0dv1 = dv0 * dv1
+    dv0dv2 = dv0 * dv2
+    if dv0dv1 > 0.0 and dv0dv2 > 0.0:
         return False
-    n2 /= norm2
-    d_p = [np.dot(n2, p0 - q0), np.dot(n2, p1 - q0), np.dot(n2, p2 - q0)]
-    if (d_p[0] > eps and d_p[1] > eps and d_p[2] > eps) or (d_p[0] < -eps and d_p[1] < -eps and d_p[2] < -eps):
-        return False
 
-    # 同一平面判定: 両方の三角形の全頂点が他方の平面上にある場合 (|d| <= eps)
-    is_coplanar = all(abs(d) <= eps for d in d_q) and all(abs(d) <= eps for d in d_p)
-    if is_coplanar:
-        # 同一平面上の場合は、各辺に垂直な平面内法線（計6軸）で分離できるか判定
-        edges1 = [p1 - p0, p2 - p1, p0 - p2]
-        edges2 = [q1 - q0, q2 - q1, q0 - q2]
-        for e in edges1 + edges2:
-            axis = np.cross(e, n1)
-            norm = np.linalg.norm(axis)
-            if norm < 1e-6:
-                continue
-            axis /= norm
-            p_proj = [np.dot(axis, p0), np.dot(axis, p1), np.dot(axis, p2)]
-            q_proj = [np.dot(axis, q0), np.dot(axis, q1), np.dot(axis, q2)]
-            if min(p_proj) > max(q_proj) + eps or min(q_proj) > max(p_proj) + eps:
-                return False
-        return True
+    # 3. 交差線の方向ベクトル D = N1 x N2
+    d = np.cross(n1, n2)
 
-    # 3. 各エッジの外積軸（9軸）に対する射影重複判定
-    edges1 = [p1 - p0, p2 - p1, p0 - p2]
-    edges2 = [q1 - q0, q2 - q1, q0 - q2]
-    for e1 in edges1:
-        for e2 in edges2:
-            axis = np.cross(e1, e2)
-            norm = np.linalg.norm(axis)
-            if norm < 1e-6:
-                continue
-            axis /= norm
-            p_proj = [np.dot(axis, p0), np.dot(axis, p1), np.dot(axis, p2)]
-            q_proj = [np.dot(axis, q0), np.dot(axis, q1), np.dot(axis, q2)]
-            min_p, max_p = min(p_proj), max(p_proj)
-            min_q, max_q = min(q_proj), max(q_proj)
-            if min_p > max_q + eps or min_q > max_p + eps:
-                return False
+    # 同一平面 (Coplanar) の場合
+    if np.dot(d, d) < 1e-10:
+        abs_n = np.abs(n1)
+        max_idx = int(np.argmax(abs_n))
+        axes = [i for i in range(3) if i != max_idx]
+        return coplanar_tri_tri_2d(
+            v0[axes], v1[axes], v2[axes],
+            u0[axes], u1[axes], u2[axes],
+            eps
+        )
 
-    return True
+    # 4. 3D交差区間の重複判定
+    max_idx = int(np.argmax(np.abs(d)))
+    vp0, vp1, vp2 = float(v0[max_idx]), float(v1[max_idx]), float(v2[max_idx])
+    up0, up1, up2 = float(u0[max_idx]), float(u1[max_idx]), float(u2[max_idx])
+
+    def compute_intervals(p0: float, p1: float, p2: float, d0: float, d1: float, d2: float, d0d1: float, d0d2: float) -> Tuple[float, float]:
+        if d0d1 > 0.0:
+            return (p2 + (p0 - p2) * (d2 / (d2 - d0)), p2 + (p1 - p2) * (d2 / (d1 - d2)))
+        elif d0d2 > 0.0:
+            return (p1 + (p0 - p1) * (d1 / (d1 - d0)), p1 + (p2 - p1) * (d1 / (d2 - d1)))
+        else:
+            return (p0 + (p1 - p0) * (d0 / (d0 - d1)), p0 + (p2 - p0) * (d0 / (d0 - d2)))
+
+    isect1_a, isect1_b = compute_intervals(vp0, vp1, vp2, dv0, dv1, dv2, dv0dv1, dv0dv2)
+    isect2_a, isect2_b = compute_intervals(up0, up1, up2, du0, du1, du2, du0du1, du0du2)
+
+    t1_min, t1_max = min(isect1_a, isect1_b), max(isect1_a, isect1_b)
+    t2_min, t2_max = min(isect2_a, isect2_b), max(isect2_a, isect2_b)
+
+    return not (t1_max < t2_min - eps or t2_max < t1_min - eps)
+
+
+# 後方互換性エイリアス
+tri_tri_intersection_sat = tri_tri_intersection_moller
 
 
 def find_triangle_intersections(

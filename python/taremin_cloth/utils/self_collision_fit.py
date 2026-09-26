@@ -65,7 +65,12 @@ def calculate_mesh_edge_stats(obj) -> Optional[Tuple[float, float, int]]:
         return None
 
     avg_len = float(np.mean(edge_lengths))
-    min_len = float(np.min(edge_lengths))
+    # 外れ値（襟元やボタン穴等の極小エッジ）に引きずられないよう、
+    # エッジ数が十分（20本以上）ある場合は下位5パーセンタイル値を実効最小エッジ長として採用する
+    if len(edge_lengths) >= 20:
+        min_len = float(np.percentile(edge_lengths, 5))
+    else:
+        min_len = float(np.min(edge_lengths))
     return avg_len, min_len, len(vertices)
 
 
@@ -80,9 +85,11 @@ def compute_self_collision_params(
     """
     if purpose == 'SKIRT':
         # プリーツスカート・多重折り:
-        # 密集したヒダ同士が挟まっても過度な膨らみを起こさないよう厚みはやや薄め（3.5%）
+        # 密集したヒダ同士が挟まっても過度な膨らみを起こさないよう厚みはやや薄め（15%）
         # 急激な弾きによる破裂を防ぐため relief は 0.15、FULL_COUPLED で伸びを7割抑制
-        thickness = max(0.0008, min(0.015, avg_edge_len * 0.035))
+        min_floor = 0.0010  # 1.0mm
+        max_cap = 0.0080    # 8.0mm
+        thickness = max(min_floor, min(max_cap, avg_edge_len * 0.15))
         relief_factor = 0.15
         max_displacement_ratio = 0.15
         max_iterations = '512'
@@ -90,8 +97,10 @@ def compute_self_collision_params(
         relaxation_iters = 2
     elif purpose == 'THIN':
         # 薄手・シルク・フリル:
-        # 極薄布向けに厚み 2.5%（最小 0.5mm）、マイルドな反発
-        thickness = max(0.0005, min(0.008, avg_edge_len * 0.025))
+        # 極薄布向けに厚み 10%（最小 0.8mm）、マイルドな反発
+        min_floor = 0.0008  # 0.8mm
+        max_cap = 0.0050    # 5.0mm
+        thickness = max(min_floor, min(max_cap, avg_edge_len * 0.10))
         relief_factor = 0.10
         max_displacement_ratio = 0.10
         max_iterations = '256'
@@ -99,17 +108,21 @@ def compute_self_collision_params(
         relaxation_iters = 2
     else:
         # STANDARD (一般の衣服) およびデフォルト:
-        # 平均エッジ長の 5%（最小 1mm、最大 20mm）
-        thickness = max(0.001, min(0.02, avg_edge_len * 0.05))
+        # 平均エッジ長の 20%（最小 1.5mm、最大 10mm）
+        min_floor = 0.0015  # 1.5mm
+        max_cap = 0.0100    # 10.0mm
+        thickness = max(min_floor, min(max_cap, avg_edge_len * 0.20))
         relief_factor = 0.20
         max_displacement_ratio = 0.20
         max_iterations = '512' if num_vertices >= 2000 else '256'
         coupled_mode = 'RELAXATION'
         relaxation_iters = 2
 
-    # 安全策: 厚みは最小エッジ長の40%を超えないようにクランプ（自縄自縛・爆発防止）
+    # 安全策: 最小エッジ長の40%を超えないようにクランプ（自縄自縛・初期埋没防止）
+    # ただし、外れ値や微小エッジによって用途ごとの下限フロア (min_floor) を破壊しないよう保護する
     if min_edge_len > 0:
-        thickness = min(thickness, min_edge_len * 0.4)
+        safe_clamped = max(min_floor, min_edge_len * 0.4)
+        thickness = min(thickness, safe_clamped)
 
     return {
         'thickness': thickness,

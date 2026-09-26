@@ -12,6 +12,8 @@ from taremin_cloth.utils.mesh_extract import (
     extract_cloth_mesh_data,
     extract_mesh_vertices_and_triangles,
     get_pin_inv_masses,
+    get_cloth_layer_ids,
+    get_mesh_face_layers_summary,
 )
 
 
@@ -77,6 +79,16 @@ class TestMeshExtract(unittest.TestCase):
                 target[:] = self.all_edges.flatten()
         mock_edges.foreach_get = mock_edges_foreach_get
         self.mock_mesh.edges = mock_edges
+
+        # ポリゴン: 2面
+        poly0 = MagicMock()
+        poly0.vertices = (0, 1, 2)
+        poly1 = MagicMock()
+        poly1.vertices = (0, 2, 3)
+        mock_polys = MagicMock()
+        mock_polys.__len__.return_value = 2
+        mock_polys.__iter__.return_value = iter([poly0, poly1])
+        self.mock_mesh.polygons = mock_polys
 
         # オブジェクト模擬
         self.mock_obj = MagicMock()
@@ -144,6 +156,72 @@ class TestMeshExtract(unittest.TestCase):
         data = extract_cloth_mesh_data(self.mock_obj, settings)
         self.assertEqual(len(data.normal_edges), 6)
         self.assertIsNone(data.sewing_edges)
+
+    def test_extract_cloth_mesh_data_without_cloth_layer(self):
+        """cloth_layer 属性が存在しない場合、layer_ids は None であること"""
+        self.mock_mesh.attributes.get.return_value = None
+        data = extract_cloth_mesh_data(self.mock_obj)
+        self.assertIsNone(data.layer_ids)
+
+    def test_get_cloth_layer_ids_face_domain(self):
+        """FACEドメインの属性から頂点レイヤーIDが正しく抽出され、共有頂点はMax則に従うこと"""
+        attr = MagicMock()
+        attr.domain = 'FACE'
+        # 2ポリゴン: ポリゴン0=0, ポリゴン1=1
+        poly_layers = np.array([0, 1], dtype=np.int32)
+        attr.data.foreach_get = lambda prop, arr: np.copyto(arr, poly_layers)
+
+        self.mock_mesh.attributes.get = lambda name: attr if name == "cloth_layer" else None
+
+        # ポリゴン所属インデックス設定: 三角形0 -> ポリゴン0, 三角形1 -> ポリゴン1
+        poly_indices = np.array([0, 1], dtype=np.int32)
+        orig_foreach_get = self.mock_mesh.loop_triangles.foreach_get
+        def mock_lt_foreach(prop, arr):
+            if prop == "polygon_index":
+                np.copyto(arr, poly_indices)
+            else:
+                orig_foreach_get(prop, arr)
+        self.mock_mesh.loop_triangles.foreach_get = mock_lt_foreach
+
+        layer_ids = get_cloth_layer_ids(self.mock_obj, n_verts=4)
+        self.assertIsNotNone(layer_ids)
+        self.assertEqual(len(layer_ids), 4)
+        # 頂点0: 面0と面1で共有 -> max(0, 1) = 1
+        # 頂点1: 面0のみ -> 0
+        # 頂点2: 面0と面1で共有 -> max(0, 1) = 1
+        # 頂点3: 面1のみ -> 1
+        np.testing.assert_array_equal(layer_ids, [1, 0, 1, 1])
+
+    def test_get_cloth_layer_ids_point_domain(self):
+        """POINTドメインの属性から頂点ごとの値が直接抽出されること"""
+        attr = MagicMock()
+        attr.domain = 'POINT'
+        point_layers = np.array([0, 1, 2, 0], dtype=np.int32)
+        attr.data.foreach_get = lambda prop, arr: np.copyto(arr, point_layers)
+
+        self.mock_mesh.attributes.get = lambda name: attr if name == "cloth_layer" else None
+
+        layer_ids = get_cloth_layer_ids(self.mock_obj, n_verts=4)
+        self.assertIsNotNone(layer_ids)
+        np.testing.assert_array_equal(layer_ids, [0, 1, 2, 0])
+
+    def test_get_mesh_face_layers_summary(self):
+        """属性のサマリー情報が正しく取得できること"""
+        attr = MagicMock()
+        attr.domain = 'FACE'
+        poly_layers = np.array([0, 2], dtype=np.int32)
+        mock_data = MagicMock()
+        mock_data.__len__.return_value = 2
+        mock_data.foreach_get = lambda prop, arr: np.copyto(arr, poly_layers)
+        attr.data = mock_data
+
+        self.mock_mesh.attributes.get = lambda name: attr if name == "cloth_layer" else None
+
+        summary = get_mesh_face_layers_summary(self.mock_mesh)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["domain"], 'FACE')
+        self.assertEqual(summary["unique_layers"], [0, 2])
+        self.assertEqual(summary["count"], 2)
 
 
 if __name__ == "__main__":

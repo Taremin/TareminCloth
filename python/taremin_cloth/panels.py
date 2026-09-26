@@ -651,7 +651,39 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
                         icon='MEMORY')
                 self_sub.prop(settings, "enable_pair_cache_final_fallback", text=i18n.trans("Final Fallback"))
         l_col.separator()
-        l_col.prop(settings, "layer_id")
+        box_layer = l_col.box()
+        box_layer.label(text=i18n.trans("Layer & Collision Hierarchy"), icon='OVERLAY')
+        box_layer.prop(settings, "layer_id", text=i18n.trans("Default Layer ID"))
+
+        obj = context.active_object
+        if obj and obj.type == 'MESH':
+            from .utils.mesh_extract import get_mesh_face_layers_summary
+            summary = get_mesh_face_layers_summary(obj.data)
+
+            sub_fl = box_layer.box()
+            sub_fl.label(text=i18n.trans("Face Layers (Layered Cloth)"), icon='FACESEL')
+
+            if summary is not None:
+                layers_str = ", ".join(str(l) for l in summary["unique_layers"])
+                sub_fl.label(
+                    text=i18n.trans(f"Active Face Layers: [{layers_str}] ({summary['domain']})"),
+                    icon='CHECKMARK'
+                )
+            else:
+                sub_fl.label(
+                    text=i18n.trans("No Face Layers (using Default Layer ID)"),
+                    icon='INFO'
+                )
+
+            row_target = sub_fl.row(align=True)
+            row_target.prop(settings, "target_face_layer_id", text=i18n.trans("Target Layer"))
+            row_target.operator("taremin_cloth.assign_face_layer", text=i18n.trans("Assign"), icon='ADD')
+
+            row_actions = sub_fl.row(align=True)
+            row_actions.operator("taremin_cloth.select_face_layer", text=i18n.trans("Select"), icon='RESTRICT_SELECT_OFF')
+            if summary is not None:
+                row_actions.operator("taremin_cloth.clear_face_layers", text=i18n.trans("Clear"), icon='TRASH')
+
         row_thick = l_col.row(align=True)
         row_thick.prop(settings, "thickness")
         row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')

@@ -338,3 +338,151 @@ class TAREMIN_CLOTH_OT_auto_fit_thickness(bpy.types.Operator):
         obj.taremin_cloth.thickness = recommended_thick
         self.report({'INFO'}, f"推奨厚み {recommended_thick * 1000.0:.1f} mm を設定しました (平均エッジ長: {avg_len * 1000.0:.1f} mm)")
         return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_assign_face_layer(bpy.types.Operator):
+    """選択された面に指定レイヤーIDを割り当てる (cloth_layer 属性を作成・更新)"""
+    bl_idname = "taremin_cloth.assign_face_layer"
+    bl_label = "Assign Face Layer"
+    bl_description = "Assign target layer ID to selected faces"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.type == 'MESH' and hasattr(obj, "taremin_cloth")
+
+    def execute(self, context):
+        import bmesh
+        obj = context.active_object
+        settings = obj.taremin_cloth
+        mesh = obj.data
+        target_layer = int(settings.target_face_layer_id)
+
+        if obj.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(mesh)
+            layer = bm.faces.layers.int.get("cloth_layer")
+            if layer is None:
+                layer = bm.faces.layers.int.new("cloth_layer")
+
+            count = 0
+            for f in bm.faces:
+                if f.select:
+                    f[layer] = target_layer
+                    count += 1
+
+            if count == 0:
+                self.report({'WARNING'}, "面が選択されていません。面を選択して実行してください")
+                return {'CANCELLED'}
+
+            bmesh.update_edit_mesh(mesh)
+            self.report({'INFO'}, f"{count} 面にレイヤー {target_layer} を割り当てました")
+        else:
+            attr = mesh.attributes.get("cloth_layer")
+            if attr is None:
+                attr = mesh.attributes.new(name="cloth_layer", type='INT', domain='FACE')
+
+            selected_polys = [p for p in mesh.polygons if p.select]
+            if not selected_polys:
+                self.report({'WARNING'}, "編集モードで面を選択するか、ポリゴンを選択して実行してください")
+                return {'CANCELLED'}
+
+            for p in selected_polys:
+                attr.data[p.index].value = target_layer
+
+            mesh.update()
+            self.report({'INFO'}, f"{len(selected_polys)} 面にレイヤー {target_layer} を割り当てました")
+
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_select_face_layer(bpy.types.Operator):
+    """指定レイヤーIDを持つ面を選択する"""
+    bl_idname = "taremin_cloth.select_face_layer"
+    bl_label = "Select Face Layer"
+    bl_description = "Select faces that match target layer ID"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.type == 'MESH' and hasattr(obj, "taremin_cloth")
+
+    def execute(self, context):
+        import bmesh
+        obj = context.active_object
+        settings = obj.taremin_cloth
+        mesh = obj.data
+        target_layer = int(settings.target_face_layer_id)
+
+        if obj.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(mesh)
+            layer = bm.faces.layers.int.get("cloth_layer")
+            if layer is None:
+                self.report({'WARNING'}, "メッシュに cloth_layer 属性が設定されていません")
+                return {'CANCELLED'}
+
+            count = 0
+            for f in bm.faces:
+                is_target = (f[layer] == target_layer)
+                f.select = is_target
+                if is_target:
+                    count += 1
+
+            bmesh.update_edit_mesh(mesh)
+            self.report({'INFO'}, f"レイヤー {target_layer} の面を {count} 個選択しました")
+        else:
+            attr = mesh.attributes.get("cloth_layer")
+            if attr is None:
+                self.report({'WARNING'}, "メッシュに cloth_layer 属性が設定されていません")
+                return {'CANCELLED'}
+
+            count = 0
+            for p in mesh.polygons:
+                is_target = (attr.data[p.index].value == target_layer)
+                p.select = is_target
+                if is_target:
+                    count += 1
+
+            mesh.update()
+            self.report({'INFO'}, f"レイヤー {target_layer} のポリゴンを {count} 個選択しました")
+
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_clear_face_layers(bpy.types.Operator):
+    """メッシュから cloth_layer 属性を削除する (オブジェクト共通レイヤーに復元)"""
+    bl_idname = "taremin_cloth.clear_face_layers"
+    bl_label = "Clear Face Layers"
+    bl_description = "Clear cloth_layer attribute to use default layer ID"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.type == 'MESH' and hasattr(obj, "taremin_cloth")
+
+    def execute(self, context):
+        import bmesh
+        obj = context.active_object
+        mesh = obj.data
+
+        if "cloth_layer" not in mesh.attributes:
+            self.report({'INFO'}, "cloth_layer 属性は設定されていません")
+            return {'FINISHED'}
+
+        if obj.mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(mesh)
+            layer = bm.faces.layers.int.get("cloth_layer")
+            if layer is not None:
+                bm.faces.layers.int.remove(layer)
+            bmesh.update_edit_mesh(mesh)
+        else:
+            mesh.attributes.remove(mesh.attributes["cloth_layer"])
+            mesh.update()
+
+        self.report({'INFO'}, "Face レイヤー指定をクリアしました (オブジェクト共通 Layer ID を使用します)")
+        return {'FINISHED'}

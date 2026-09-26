@@ -74,6 +74,7 @@ struct ClosestBaryResult {
 @group(0) @binding(12) var<storage, read_write> counters: PairCounters;
 @group(0) @binding(13) var<storage, read_write> active_vt_pairs: array<GpuVtPair>;
 @group(0) @binding(14) var<storage, read_write> active_ee_pairs: array<GpuEePair>;
+@group(0) @binding(15) var<storage, read> two_hop_rest_lengths: array<f32>;
 
 const EPSILON: f32 = 1e-7;
 
@@ -85,8 +86,9 @@ fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
     return n % table_size;
 }
 
-// 2ホップ近傍CSR配列に対する二分探索
-fn is_topologically_near(vert_a: u32, vert_b: u32) -> bool {
+// 2ホップ近傍CSR配列に対する二分探索 (Bridson 2002: レスト長比率による動的折り畳み検出)
+// 初期距離 L0 の 50% 未満に圧縮された場合、鋭角なシワ・折り畳みと判定してペア収集を許可（除外解除）
+fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> bool {
     let start = two_hop_offsets[vert_a];
     let end = two_hop_offsets[vert_a + 1u];
     if (start >= end) {
@@ -103,6 +105,11 @@ fn is_topologically_near(vert_a: u32, vert_b: u32) -> bool {
         let mid = low + ((high - low) >> 1u);
         let val = two_hop_indices[mid];
         if (val == vert_b) {
+            let l0 = two_hop_rest_lengths[mid];
+            // 距離が初期レスト長の 50% 未満に潰れた場合は折り畳みとみなし、ペア収集を有効化 (false を返す)
+            if (current_dist < l0 * 0.5) {
+                return false;
+            }
             return true;
         } else if (val < vert_b) {
             low = mid + 1u;
@@ -288,7 +295,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         let broad_bound = effective_thick + (local_len_i + local_len_j) * 1.3 + margin + horizon_i_eff + horizon_j;
                         if (dist_sq_vv <= broad_bound * broad_bound) {
                             let same_island = (island_ids[index] == island_ids[j]);
-                            let is_near_topology = same_island && (params.exclude_neighbors != 0u) && is_topologically_near(index, j);
+                            let dist_vv = sqrt(max(dist_sq_vv, 0.0));
+                            let is_near_topology = same_island && (params.exclude_neighbors != 0u) && is_topologically_near_folded(index, j, dist_vv);
 
                             if (!is_near_topology) {
                                 // ==============================================
@@ -472,6 +480,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             active_vt_pairs[base_vt + k] = GpuVtPair(0xFFFFFFFFu, 0u, 0u, 0u);
         }
     }
+
     let base_ee = index * quota_ee;
     for (var k = 0u; k < 8u; k = k + 1u) {
         if (k >= quota_ee) {

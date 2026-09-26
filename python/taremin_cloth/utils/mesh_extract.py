@@ -15,6 +15,7 @@ class ClothMeshData(NamedTuple):
     faces: Optional[np.ndarray]    # shape [F, 3], uint32 (存在しない場合は None)
     sewing_edges: Optional[np.ndarray]  # shape [S, 2], uint32 (存在しない場合は None)
     inv_masses: np.ndarray         # shape [N], float32
+    layer_ids: Optional[np.ndarray] = None  # shape [N], uint32 (存在しない場合は None)
 
 
 def extract_mesh_vertices_and_triangles(mesh) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -206,13 +207,154 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
         pin_weights = get_pin_weights(obj, settings, n_verts)
         inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights, density)
 
+    layer_ids = get_cloth_layer_ids(obj, settings, n_verts, faces_2d)
+
     return ClothMeshData(
         positions=pos_2d,
         normal_edges=edges_2d,
         faces=faces_2d,
         sewing_edges=sew_2d,
         inv_masses=inv_masses,
+        layer_ids=layer_ids,
     )
+
+
+def get_cloth_layer_ids(
+    obj,
+    settings=None,
+    n_verts: Optional[int] = None,
+    faces_2d: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """メッシュ属性 (cloth_layer) から頂点単位のレイヤーID配列 (uint32) を抽出する。
+
+    Blender 3.0+ の Mesh Attribute ('cloth_layer') を参照し、
+    Face / Point / Corner 各ドメインから頂点単位のレイヤーIDを算出する。
+    複数の面で共有される頂点には、共有面の中で最大 (Max) のレイヤーIDが割り当てられる
+    (例: レイヤードスカートの接合部が上位レイヤーと整合する)。
+
+    Args:
+        obj: bpy.types.Object
+        settings: taremin_cloth プロパティ
+        n_verts: 頂点数
+        faces_2d: 三角形インデックス配列 [F, 3] (任意)
+
+    Returns:
+        np.ndarray [N] (uint32) または属性が存在しない場合は None
+    """
+    if not obj or not hasattr(obj, "data") or not hasattr(obj.data, "attributes"):
+        return None
+
+    mesh = obj.data
+    attr = mesh.attributes.get("cloth_layer")
+    if attr is None:
+        return None
+
+    if n_verts is None:
+        n_verts = len(mesh.vertices)
+    if n_verts == 0:
+        return np.empty(0, dtype=np.uint32)
+
+    default_layer = int(getattr(settings, "layer_id", 0)) if settings else 0
+    default_layer = max(0, default_layer)
+
+    domain = getattr(attr, "domain", "FACE")
+
+    if domain == "POINT":
+        raw = np.empty(n_verts, dtype=np.int32)
+        try:
+            attr.data.foreach_get("value", raw)
+            return np.maximum(raw, 0).astype(np.uint32)
+        except Exception:
+            return None
+
+    elif domain == "FACE":
+        n_polys = len(mesh.polygons)
+        if n_polys == 0:
+            return None
+        poly_layers = np.empty(n_polys, dtype=np.int32)
+        try:
+            attr.data.foreach_get("value", poly_layers)
+        except Exception:
+            return None
+        poly_layers = np.maximum(poly_layers, 0).astype(np.uint32)
+
+        layer_ids = np.full(n_verts, default_layer, dtype=np.uint32)
+
+        try:
+            if hasattr(mesh, "calc_loop_triangles") and hasattr(mesh, "loop_triangles"):
+                mesh.calc_loop_triangles()
+                n_tris = len(mesh.loop_triangles)
+                if n_tris > 0:
+                    tri_poly_indices = np.empty(n_tris, dtype=np.int32)
+                    mesh.loop_triangles.foreach_get("polygon_index", tri_poly_indices)
+
+                    if faces_2d is not None and len(faces_2d) == n_tris:
+                        tris = faces_2d
+                    else:
+                        tri_verts = np.empty(n_tris * 3, dtype=np.int32)
+                        mesh.loop_triangles.foreach_get("vertices", tri_verts)
+                        tris = tri_verts.reshape((n_tris, 3))
+
+                    valid_mask = (tri_poly_indices >= 0) & (tri_poly_indices < n_polys)
+                    if np.all(valid_mask):
+                        tri_layers = poly_layers[tri_poly_indices]
+                        np.maximum.at(layer_ids, tris[:, 0], tri_layers)
+                        np.maximum.at(layer_ids, tris[:, 1], tri_layers)
+                        np.maximum.at(layer_ids, tris[:, 2], tri_layers)
+                        return layer_ids
+        except Exception:
+            pass
+
+        # ポリゴン直接走査のフォールバック
+        for p_idx, poly in enumerate(mesh.polygons):
+            l_val = poly_layers[p_idx]
+            for v in poly.vertices:
+                if 0 <= v < n_verts:
+                    layer_ids[v] = max(layer_ids[v], l_val)
+
+        return layer_ids
+
+    elif domain == "CORNER":
+        n_loops = len(mesh.loops)
+        if n_loops == 0:
+            return None
+        loop_layers = np.empty(n_loops, dtype=np.int32)
+        loop_verts = np.empty(n_loops, dtype=np.int32)
+        try:
+            attr.data.foreach_get("value", loop_layers)
+            mesh.loops.foreach_get("vertex_index", loop_verts)
+        except Exception:
+            return None
+        loop_layers = np.maximum(loop_layers, 0).astype(np.uint32)
+        layer_ids = np.full(n_verts, default_layer, dtype=np.uint32)
+        np.maximum.at(layer_ids, loop_verts, loop_layers)
+        return layer_ids
+
+    return None
+
+
+def get_mesh_face_layers_summary(mesh) -> Optional[dict]:
+    """メッシュに設定された cloth_layer 属性のサマリー情報を取得する。"""
+    if not mesh or not hasattr(mesh, "attributes"):
+        return None
+    attr = mesh.attributes.get("cloth_layer")
+    if attr is None:
+        return None
+    domain = getattr(attr, "domain", "FACE")
+    count = len(attr.data)
+    if count == 0:
+        return None
+    raw = np.empty(count, dtype=np.int32)
+    try:
+        attr.data.foreach_get("value", raw)
+        unique_layers = sorted(list(set(raw.tolist())))
+        return {
+            "domain": domain,
+            "unique_layers": unique_layers,
+            "count": count,
+        }
+    except Exception:
+        return None
 
 
 def extract_mesh_data(obj):

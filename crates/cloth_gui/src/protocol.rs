@@ -158,6 +158,8 @@ pub struct SceneInitData {
     pub edges: Vec<[u32; 2]>,
     pub sewing_springs: Option<Vec<[u32; 2]>>,
     pub inv_masses: Vec<f32>,
+    #[serde(default)]
+    pub layer_ids: Option<Vec<u32>>,
     pub layer_id: u32,
     pub thickness: f32,
     #[serde(default = "default_areal_density")]

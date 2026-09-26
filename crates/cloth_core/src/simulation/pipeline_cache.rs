@@ -315,6 +315,7 @@ impl SharedPipelines {
                     storage_rw_at(11),
                     storage_ro(12),
                     storage_ro(13),
+                    storage_ro(14), // two_hop_rest_lengths
                 ],
             });
         let self_collision_ee_bgl =
@@ -330,6 +331,7 @@ impl SharedPipelines {
                     storage_ro(6),     // two_hop_offsets
                     storage_ro(7),     // two_hop_indices
                     storage_rw_at(8),  // accum
+                    storage_ro(9),     // two_hop_rest_lengths
                 ],
             });
         let self_collision_apply_bgl =
@@ -367,6 +369,7 @@ impl SharedPipelines {
                     storage_rw_at(12),
                     storage_rw_at(13),
                     storage_rw_at(14),
+                    storage_ro(15), // two_hop_rest_lengths
                 ],
             });
         let pair_solve_vt_bgl =

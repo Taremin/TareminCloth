@@ -418,6 +418,7 @@ class ClothGuiClient:
                 "edges": normal_edges,
                 "sewing_springs": sewing_springs,
                 "inv_masses": inv_masses,
+                "layer_ids": cloth_data.layer_ids.tolist() if cloth_data.layer_ids is not None else None,
                 "layer_id": int(getattr(settings, "layer_id", 0)) if settings else 0,
                 "thickness": float(getattr(settings, "thickness", 0.005)) if settings else 0.005,
                 "areal_density": float(cfg.get("areal_density", 0.15)),
@@ -774,5 +775,5 @@ class ClothGuiClient:
     def reset(self) -> bool:
         return self.send_command("Reset")
 
-    def step(self, dt: float = 1.0 / 60.0, substeps: int = 15, solver_iterations: int = 2) -> bool:
-        return self.send_command("Step", {"dt": dt, "substeps": substeps, "solver_iterations": solver_iterations})
+    def step(self, dt: float = 1.0 / 60.0, substeps: int = 15, solver_iterations: int = 2, timeout: float = 5.0) -> bool:
+        return self.send_command("Step", {"dt": dt, "substeps": substeps, "solver_iterations": solver_iterations}, timeout=timeout)

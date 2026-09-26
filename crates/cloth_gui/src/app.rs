@@ -269,7 +269,7 @@ impl GuiApp {
             faces_opt,
             Some(&data.inv_masses),
             sew_opt,
-            None,
+            data.layer_ids.as_deref(),
             None,
             data.layer_id,
             data.thickness,

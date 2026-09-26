@@ -172,9 +172,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let delta_ee = pt1 - pt2;
     let dist_ee = length(delta_ee);
 
+    let n_j_raw = normals[j].xyz;
+    let is_behind_ee = (length(n_j_raw) > 0.5) && (dot(delta_ee, n_j_raw) < 0.0);
+
     let is_untangling_ee = (params.enable_normal_untangling != 0u)
         && (v_i.layer_id > v_j.layer_id)
-        && (dot(delta_ee, normals[j].xyz) < 0.0);
+        && is_behind_ee;
 
     if (!is_untangling_ee && dist_ee < effective_thick && dist_ee > EPSILON) {
         let n_ee = delta_ee / dist_ee;

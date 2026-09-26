@@ -356,6 +356,13 @@ class TareminClothObjectSettings(PropertyGroup):
         min=0,
         max=10,
     )
+    target_face_layer_id: IntProperty(
+        name="Target Face Layer",
+        description="Target layer ID to assign to selected faces (0=innermost, 1, 2...=outer layers)",
+        default=1,
+        min=0,
+        max=31,
+    )
     thickness: FloatProperty(
         name="Thickness",
         description="Cloth thickness in meters",
@@ -488,8 +495,8 @@ class TareminClothObjectSettings(PropertyGroup):
         name="Coupled Mode",
         description="Coupled convergence mode for self-collision and distance constraints",
         items=[
-            ('OFF', "Off (Legacy)", "Traditional self-collision (executed outside loop, no relaxation)"),
-            ('RELAXATION', "Relaxation (Balanced)", "Re-apply distance constraints twice right after collision"),
+            ('OFF', "Off (Wrinkle-Safe)", "Traditional self-collision without post-relaxation; prevents wrinkle locking during grab and deep folding"),
+            ('RELAXATION', "Relaxation (Anti-Stretch)", "Re-apply distance constraints after collision; suppresses stretching under heavy surface pressing"),
             ('FULL_COUPLED', "Full Coupled (High Quality)", "Coupled solve inside loop with finishing relaxation"),
         ],
         default='RELAXATION',

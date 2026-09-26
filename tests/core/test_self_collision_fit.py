@@ -87,15 +87,15 @@ class TestSelfCollisionFit(unittest.TestCase):
 
     def test_compute_params_standard(self):
         """STANDARD（一般衣服）目的における計算パラメータの検証"""
-        # 平均エッジ長 0.1m (100mm)
+        # 平均エッジ長 0.04m (40mm)
         params = compute_self_collision_params(
-            avg_edge_len=0.1,
-            min_edge_len=0.1,
+            avg_edge_len=0.04,
+            min_edge_len=0.04,
             num_vertices=500,
             purpose='STANDARD',
         )
-        # 厚み: 0.1 * 0.05 = 0.005m (5mm)
-        self.assertAlmostEqual(params['thickness'], 0.005, places=5)
+        # 厚み: 0.04 * 0.20 = 0.008m (8mm)
+        self.assertAlmostEqual(params['thickness'], 0.008, places=5)
         self.assertEqual(params['self_collision_relief_factor'], 0.20)
         self.assertEqual(params['self_collision_max_displacement_ratio'], 0.20)
         self.assertEqual(params['self_collision_max_iterations'], '256')
@@ -105,15 +105,15 @@ class TestSelfCollisionFit(unittest.TestCase):
 
     def test_compute_params_skirt(self):
         """SKIRT（プリーツ・スカート・多重折り）目的における計算パラメータの検証"""
-        # スカート用: 密着折り畳みに耐えるよう厚みは3.5%、FULL_COUPLED、iterations=512
+        # スカート用: 密着折り畳みに耐えるよう厚みは15%、FULL_COUPLED、iterations=512
         params = compute_self_collision_params(
-            avg_edge_len=0.1,
-            min_edge_len=0.1,
+            avg_edge_len=0.04,
+            min_edge_len=0.04,
             num_vertices=1500,
             purpose='SKIRT',
         )
-        # 厚み: 0.1 * 0.035 = 0.0035m (3.5mm)
-        self.assertAlmostEqual(params['thickness'], 0.0035, places=5)
+        # 厚み: 0.04 * 0.15 = 0.006m (6mm)
+        self.assertAlmostEqual(params['thickness'], 0.006, places=5)
         self.assertEqual(params['self_collision_relief_factor'], 0.15)
         self.assertEqual(params['self_collision_max_displacement_ratio'], 0.15)
         self.assertEqual(params['self_collision_max_iterations'], '512')
@@ -122,31 +122,42 @@ class TestSelfCollisionFit(unittest.TestCase):
 
     def test_compute_params_thin(self):
         """THIN（薄手・シルク・フリル）目的における計算パラメータの検証"""
-        # 薄手用: 極薄 2.5%、relief 0.10、マイルドな反発
+        # 薄手用: 極薄 10%、relief 0.10、マイルドな反発
         params = compute_self_collision_params(
-            avg_edge_len=0.1,
-            min_edge_len=0.1,
+            avg_edge_len=0.03,
+            min_edge_len=0.03,
             num_vertices=500,
             purpose='THIN',
         )
-        # 厚み: 0.1 * 0.025 = 0.0025m (2.5mm)
-        self.assertAlmostEqual(params['thickness'], 0.0025, places=5)
+        # 厚み: 0.03 * 0.10 = 0.003m (3mm)
+        self.assertAlmostEqual(params['thickness'], 0.003, places=5)
         self.assertEqual(params['self_collision_relief_factor'], 0.10)
         self.assertEqual(params['self_collision_max_displacement_ratio'], 0.10)
         self.assertEqual(params['self_collision_max_iterations'], '256')
         self.assertEqual(params['coupled_self_collision_mode'], 'RELAXATION')
 
     def test_thickness_clamp_safety(self):
-        """局所的に極小エッジがある場合、最小エッジ長の40%に厚みがクランプされ自発爆発を防ぐ"""
-        # 平均は 0.1m だが、最小エッジが 0.005m (5mm) の場合
+        """局所的に小エッジがある場合、最小エッジ長の40%に安全クランプされる"""
+        # 平均は 0.05m (50mm) だが、小エッジが 0.006m (6mm) の場合
         params = compute_self_collision_params(
-            avg_edge_len=0.1,
-            min_edge_len=0.005,
+            avg_edge_len=0.05,
+            min_edge_len=0.006,
             num_vertices=500,
             purpose='STANDARD',
         )
-        # 本来 0.1 * 0.05 = 0.005 だが、min_edge_len * 0.4 = 0.002m に安全クランプされること
-        self.assertAlmostEqual(params['thickness'], 0.002, places=5)
+        # 本来 0.05 * 0.20 = 0.010m だが、min_edge_len * 0.4 = 0.0024m (2.4mm) に安全クランプされること
+        self.assertAlmostEqual(params['thickness'], 0.0024, places=5)
+
+    def test_outlier_min_edge_protected_by_min_floor(self):
+        """襟元等に極小エッジ（0.2mm）があっても、下限フロア（1.5mm）を死守して極薄化（0.12mmバグ）を防止する"""
+        params = compute_self_collision_params(
+            avg_edge_len=0.0055,  # 平均 5.5mm
+            min_edge_len=0.0002,  # 最小 0.2mm (極小外れ値)
+            num_vertices=10000,
+            purpose='STANDARD',
+        )
+        # 従来の0.0002 * 0.4 = 0.00008m (0.08mm) に潰れることなく、下限フロア 0.0015m (1.5mm) を死守
+        self.assertAlmostEqual(params['thickness'], 0.0015, places=5)
 
     def test_fit_self_collision_for_object(self):
         """オブジェクトの settings への一括適用を検証"""
@@ -155,9 +166,25 @@ class TestSelfCollisionFit(unittest.TestCase):
 
         result = fit_self_collision_for_object(obj)
         self.assertIsNotNone(result)
-        self.assertAlmostEqual(obj.taremin_cloth.thickness, 0.0035, places=5)
+        # 0.1m * 0.15 = 0.015m だが、SKIRTの max_cap 0.008m (8mm) にキャップされる
+        self.assertAlmostEqual(obj.taremin_cloth.thickness, 0.008, places=5)
         self.assertEqual(obj.taremin_cloth.coupled_self_collision_mode, 'FULL_COUPLED')
         self.assertEqual(obj.taremin_cloth.self_collision_max_iterations, '512')
+
+    def test_percentile_ignores_outlier_edges(self):
+        """十分なエッジ数がある場合、下位5%パーセンタイル値により極小外れ値エッジが無視される"""
+        # 100本の直列エッジ（通常長 0.01m = 10mm、1本だけ 0.0001m = 0.1mm の外れ値）
+        verts = [(i * 0.01, 0.0, 0.0) for i in range(101)]
+        # 最後の1頂点だけ極小距離
+        verts[100] = (verts[99][0] + 0.0001, 0.0, 0.0)
+        edges = [(i, i + 1) for i in range(100)]
+
+        obj = MockClothObject(verts, edges)
+        stats = calculate_mesh_edge_stats(obj)
+        self.assertIsNotNone(stats)
+        avg_len, effective_min, n_verts = stats
+        # 最小値 0.0001m ではなく、下位5%パーセンタイル値（0.01m 近傍）が返ること
+        self.assertGreater(effective_min, 0.005)
 
     def test_fit_custom_purpose_noop(self):
         """CUSTOM 目的の場合は手動値を上書きせず None を返す"""

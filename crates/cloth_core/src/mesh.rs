@@ -298,6 +298,7 @@ pub struct ClothMesh {
     pub adj_indices: Vec<u32>,
     pub two_hop_offsets: Vec<u32>,
     pub two_hop_indices: Vec<u32>,
+    pub two_hop_rest_lengths: Vec<f32>,
     pub local_edge_lengths: Vec<f32>,
     pub star_offsets: Vec<u32>,
     pub star_indices: Vec<GpuStarPair>,
@@ -792,6 +793,7 @@ impl ClothMesh {
         // 4b. トポロジー2ホップ近傍リスト (Two-Hop Neighbor CSR for Self-Collision)
         let mut two_hop_offsets = Vec::with_capacity(n_verts + 1);
         let mut two_hop_indices = Vec::new();
+        let mut two_hop_rest_lengths = Vec::new();
         let mut current_two_hop_offset = 0u32;
         for i in 0..n_verts {
             let mut neighbors = Vec::new();
@@ -814,7 +816,16 @@ impl ClothMesh {
             neighbors.dedup();
 
             two_hop_offsets.push(current_two_hop_offset);
-            two_hop_indices.extend_from_slice(&neighbors);
+            for &nbr in &neighbors {
+                two_hop_indices.push(nbr);
+                let p_i = positions[i];
+                let p_nbr = positions[nbr as usize];
+                let dx = p_i[0] - p_nbr[0];
+                let dy = p_i[1] - p_nbr[1];
+                let dz = p_i[2] - p_nbr[2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                two_hop_rest_lengths.push(dist);
+            }
             current_two_hop_offset += neighbors.len() as u32;
         }
         two_hop_offsets.push(current_two_hop_offset);
@@ -905,6 +916,7 @@ impl ClothMesh {
             adj_indices,
             two_hop_offsets,
             two_hop_indices,
+            two_hop_rest_lengths,
             local_edge_lengths,
             star_offsets,
             star_indices,
@@ -1117,6 +1129,8 @@ mod tests {
 
         // 頂点0の2ホップ: 0自身, 1(1ホップ), 2(2ホップ)
         assert_eq!(get_two_hop(0), &[0, 1, 2]);
+        // 頂点0自身のレスト距離は0.0
+        assert!((mesh.two_hop_rest_lengths[0] - 0.0).abs() < 1e-6);
 
         // 頂点1の2ホップ: 1自身, 0,2(1ホップ), 3(2ホップ)
         assert_eq!(get_two_hop(1), &[0, 1, 2, 3]);

@@ -40,6 +40,9 @@ from .tools import (
     TAREMIN_CLOTH_OT_apply_dynamic_diagonal,
     TAREMIN_CLOTH_OT_restore_quad_topology,
     TAREMIN_CLOTH_OT_auto_fit_thickness,
+    TAREMIN_CLOTH_OT_assign_face_layer,
+    TAREMIN_CLOTH_OT_select_face_layer,
+    TAREMIN_CLOTH_OT_clear_face_layers,
 )
 from .pose import (
     TAREMIN_CLOTH_OT_record_pose,
@@ -98,6 +101,9 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_stop_gui_preview,
     TAREMIN_CLOTH_OT_apply_gui_pose,
     TAREMIN_CLOTH_OT_sync_gui_colliders,
+    TAREMIN_CLOTH_OT_assign_face_layer,
+    TAREMIN_CLOTH_OT_select_face_layer,
+    TAREMIN_CLOTH_OT_clear_face_layers,
 )
 
 __all__ = [
@@ -129,6 +135,9 @@ __all__ = [
     "TAREMIN_CLOTH_OT_apply_pose_preview",
     "TAREMIN_CLOTH_OT_select_object",
     "TAREMIN_CLOTH_OT_auto_fit_thickness",
+    "TAREMIN_CLOTH_OT_assign_face_layer",
+    "TAREMIN_CLOTH_OT_select_face_layer",
+    "TAREMIN_CLOTH_OT_clear_face_layers",
     "TAREMIN_CLOTH_OT_clear_bone_sdf_cache",
     "TAREMIN_CLOTH_OT_rebake_bone_sdf",
     "TAREMIN_CLOTH_OT_auto_detect_collider",

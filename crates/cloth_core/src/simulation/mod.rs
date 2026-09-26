@@ -195,6 +195,8 @@ pub struct GpuClothSimulator {
     #[allow(dead_code)]
     pub(crate) two_hop_indices_buffer: wgpu::Buffer,
     #[allow(dead_code)]
+    pub(crate) two_hop_rest_lengths_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
     pub(crate) island_ids_buffer: wgpu::Buffer,
     pub(crate) compute_normals_bind_group: wgpu::BindGroup,
 
@@ -426,6 +428,7 @@ impl GpuClothSimulator {
             adj_indices_buffer: res.adj_indices_buffer,
             two_hop_offsets_buffer: res.two_hop_offsets_buffer,
             two_hop_indices_buffer: res.two_hop_indices_buffer,
+            two_hop_rest_lengths_buffer: res.two_hop_rest_lengths_buffer,
             island_ids_buffer: res.island_ids_buffer,
             compute_normals_bind_group: res.compute_normals_bind_group,
             predict_bind_group: res.predict_bind_group,
