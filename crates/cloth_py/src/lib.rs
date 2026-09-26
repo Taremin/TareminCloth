@@ -1295,9 +1295,16 @@ impl ClothSimulator {
         self.simulator.set_profiling_enabled(enable)
     }
 
-    /// 直近フレームの (パス名, ミリ秒) を回収する
+    /// 直近の完成フレームの (パス名, ミリ秒) を回収する
     fn take_profile(&self) -> Vec<(String, f32)> {
         self.simulator.take_profile()
+    }
+
+    /// 直近の完成フレームを chrometrace JSON へ保存する
+    fn save_profile_trace(&self, path: String) -> PyResult<()> {
+        self.simulator
+            .save_profile_trace(std::path::Path::new(&path))
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
     }
 
     /// 現在の自己衝突サブステップ間隔を取得

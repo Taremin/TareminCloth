@@ -740,9 +740,14 @@ impl GpuClothSimulator {
         self.profiler.set_enabled(enable)
     }
 
-    /// 直近フレームの (パス名, ミリ秒) を回収する。診断専用の同期待機を伴う。
+    /// 直近の完成フレームの (パス名, ミリ秒) を回収する。非同期回収のため最大数フレーム遅延する。
     pub fn take_profile(&self) -> Vec<(String, f32)> {
         self.profiler.take_ms()
+    }
+
+    /// 直近の完成フレームを chrometrace JSON へ保存する。未完成時は前回値で保存する。
+    pub fn save_profile_trace(&self, path: &std::path::Path) -> std::io::Result<()> {
+        self.profiler.save_chrometrace(path)
     }
 
     /// Coupled自己衝突モードと緩和イテレーション数を設定する

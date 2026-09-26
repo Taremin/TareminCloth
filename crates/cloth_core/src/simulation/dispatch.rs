@@ -96,31 +96,38 @@ impl GpuClothSimulator {
             if self.num_sewing_constraints > 0 {
                 let sew_workgroups =
                     (self.num_sewing_constraints + wg_size - 1) / wg_size;
+                let query = self.profiler.begin_pass("sew_shrink", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Sew Shrink Pass"),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(self.shared.ensure_sew_shrink());
                 cpass.set_bind_group(0, &self.sew_shrink_bind_group, &[]);
                 cpass.dispatch_workgroups(sew_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
 
             // 1. Predict Pass
             {
+                let query = self.profiler.begin_pass("predict", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Predict Pass"),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.predict_pipeline);
                 cpass.set_bind_group(0, &self.predict_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
 
             // 拘束解決反復ループ (Solver Iterations)
             for _ in 0..self.solver_iterations {
+                let query = self.profiler.begin_pass("solver_iter", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Solver Iteration Pass"),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
 
                 // 1. Pin Constraints
@@ -162,6 +169,7 @@ impl GpuClothSimulator {
                 }
 
                 drop(cpass);
+                self.profiler.end_pass(encoder, query);
 
                 // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
                 if should_solve_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
@@ -172,13 +180,16 @@ impl GpuClothSimulator {
 
         // 5. 反復終了後にピン位置を適用 (Grab等)
         if num_pins > 0 {
+            let query = self.profiler.begin_pass("final_pin", encoder);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Final Pin Pass"),
-                timestamp_writes: None,
+                timestamp_writes: self.profiler.pass_writes(&query),
             });
             cpass.set_pipeline(&self.shared.pin_pipeline);
             cpass.set_bind_group(0, &self.pin_bind_group, &[]);
             cpass.dispatch_workgroups(pin_workgroups, 1, 1);
+            drop(cpass);
+            self.profiler.end_pass(encoder, query);
         }
 
         // =========================================================================
@@ -187,14 +198,17 @@ impl GpuClothSimulator {
         // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突: 全布エッジ単一ディスパッチ)
         let ran_edge_collision = has_colliders && self.enable_edge_collision && self.num_edges > 0;
         if ran_edge_collision {
+            let query = self.profiler.begin_pass("edge_collision", encoder);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Edge Collision Pass"),
-                timestamp_writes: None,
+                timestamp_writes: self.profiler.pass_writes(&query),
             });
             cpass.set_pipeline(self.shared.ensure_edge());
             cpass.set_bind_group(0, &self.edge_collision_bind_group, &[]);
             let edge_workgroups = (self.num_edges + wg_size - 1) / wg_size;
             cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+            drop(cpass);
+            self.profiler.end_pass(encoder, query);
         }
 
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
@@ -204,13 +218,16 @@ impl GpuClothSimulator {
             self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild, is_last_substep, should_run_ee);
         } else if ran_edge_collision {
             // 自己衝突が走らない場合は、エッジ衝突で蓄積された変位を適用してアキュムレータをクリア
+            let query = self.profiler.begin_pass("edge_apply", encoder);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Edge Collision Apply Pass"),
-                timestamp_writes: None,
+                timestamp_writes: self.profiler.pass_writes(&query),
             });
             cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
             cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            drop(cpass);
+            self.profiler.end_pass(encoder, query);
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
@@ -219,9 +236,10 @@ impl GpuClothSimulator {
             && self.post_collision_relaxation_iters > 0
         {
             for _ in 0..self.post_collision_relaxation_iters {
+                let query = self.profiler.begin_pass("post_relax", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Post-Collision Relaxation Pass"),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 self.dispatch_distance_constraints(&mut cpass, vert_workgroups, wg_size);
 
@@ -235,6 +253,8 @@ impl GpuClothSimulator {
                         }
                     }
                 }
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
         }
 
@@ -244,9 +264,10 @@ impl GpuClothSimulator {
         // 直前でもう一度閉じ直してから速度を確定することで、自己衝突の有無に
         // かかわらず同じ閉鎖結果になる (Final Pin Pass と同じ配置理由)。
         if self.num_sewing_constraints > 0 {
+            let query = self.profiler.begin_pass("final_sewing", encoder);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Final Sewing Pass"),
-                timestamp_writes: None,
+                timestamp_writes: self.profiler.pass_writes(&query),
             });
             cpass.set_pipeline(&self.shared.sewing_pipeline);
             for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
@@ -255,17 +276,22 @@ impl GpuClothSimulator {
                     cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
                 }
             }
+            drop(cpass);
+            self.profiler.end_pass(encoder, query);
         }
 
             // 7. Update Vel & Commit Positions Pass
             {
+                let query = self.profiler.begin_pass("update_vel", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Update Vel Pass"),
-                    timestamp_writes: None,
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.update_vel_pipeline);
                 cpass.set_bind_group(0, &self.update_vel_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
         }
     }
@@ -287,6 +313,7 @@ impl GpuClothSimulator {
         self.encode_simulation_steps(&mut encoder, dt, substeps);
         self.profiler.frame_end(&mut encoder);
         self.context.queue.submit(Some(encoder.finish()));
+        self.profiler.frame_submitted();
 
         if self.debug_recorder.is_recording() {
             self.record_current_frame(dt, substeps);
@@ -876,18 +903,23 @@ impl GpuClothSimulator {
         is_last_substep: bool,
         enable_ee: bool,
     ) {
+        let parent = self
+            .profiler
+            .begin_scope(format!("self_collision_{prefix}"), encoder);
         // 1. Compute Normals Pass (P4: 法線展開処理が無効の場合は省略する。
         // 法線バッファの読み手は自己衝突シェーダーの展開分岐のみであり、
         // いずれも enable_normal_untangling 取得値で保護されている)
         if self.enable_normal_untangling {
-            let ts = self.profiler.enter("sc_normals");
+            let query = self.profiler.begin_pass_with_parent("sc_normals", encoder, parent.as_ref());
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("{prefix} Compute Normals Pass")),
-                timestamp_writes: self.profiler.writes(ts),
+                timestamp_writes: self.profiler.pass_writes(&query),
             });
             cpass.set_pipeline(&self.shared.ensure_self_collision().normals);
             cpass.set_bind_group(0, &self.compute_normals_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            drop(cpass);
+            self.profiler.end_pass(encoder, query);
         }
 
         // 最終サブステップ直進フォールバック: 速度確定前のトンネリングを新鮮なBroadphaseで遮断。
@@ -898,10 +930,10 @@ impl GpuClothSimulator {
 
         if !self.enable_pair_cache || need_rebuild || force_direct {
             // 2. SpatialGrid GPU Counting Sort (Clear -> Count -> ScanBlocks -> ScanTop -> AddOffsets -> Scatter)
-            self.spatial_hash.dispatch_build(encoder, self.num_vertices, self.shared.ensure_hash(), &self.profiler);
+            self.spatial_hash.dispatch_build(encoder, self.num_vertices, self.shared.ensure_hash(), &self.profiler, parent.as_ref());
 
             if enable_ee && self.num_edges > 0 && (!self.enable_pair_cache || force_direct) {
-                self.edge_spatial_hash.dispatch_build(encoder, self.num_edges, self.shared.ensure_edge_hash(), &self.profiler);
+                self.edge_spatial_hash.dispatch_build(encoder, self.num_edges, self.shared.ensure_edge_hash(), &self.profiler, parent.as_ref());
             }
         }
 
@@ -915,14 +947,16 @@ impl GpuClothSimulator {
 
                 // Step B: ブロードフェーズ (接近ペアの検出・収集)
                 {
-                    let ts = self.profiler.enter("pair_collect");
+                    let query = self.profiler.begin_pass_with_parent("pair_collect", encoder, parent.as_ref());
                     let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some(&format!("{prefix} Pair Collect Pass")),
-                        timestamp_writes: self.profiler.writes(ts),
+                        timestamp_writes: self.profiler.pass_writes(&query),
                     });
                     cpass.set_pipeline(&self.shared.ensure_pair().collect);
                     cpass.set_bind_group(0, &self.pair_collect_bind_group, &[]);
                     cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                    drop(cpass);
+                    self.profiler.end_pass(encoder, query);
                 }
             }
 
@@ -937,78 +971,91 @@ impl GpuClothSimulator {
 
             {
                 // V-T ペア解決 (計測のため E-E とパスを分ける。処理内容は同一)
-                let ts_vt = self.profiler.enter("pair_vt");
+                let query = self.profiler.begin_pass_with_parent("pair_vt", encoder, parent.as_ref());
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Pair Solve VT Pass")),
-                    timestamp_writes: self.profiler.writes(ts_vt),
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_pair().solve_vt);
                 cpass.set_bind_group(0, &self.pair_solve_vt_bind_group, &[]);
                 cpass.dispatch_workgroups(vt_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
 
             if enable_ee {
                 // E-E ペア解決
-                let ts_ee = self.profiler.enter("pair_ee");
+                let query = self.profiler.begin_pass_with_parent("pair_ee", encoder, parent.as_ref());
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Pair Solve EE Pass")),
-                    timestamp_writes: self.profiler.writes(ts_ee),
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_pair().solve_ee);
                 cpass.set_bind_group(0, &self.pair_solve_ee_bind_group, &[]);
                 cpass.dispatch_workgroups(ee_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
 
             // Step D: 変位の適用 (既存の self_collision_apply_pipeline を共用)
             {
-                let ts = self.profiler.enter("pair_apply");
+                let query = self.profiler.begin_pass_with_parent("pair_apply", encoder, parent.as_ref());
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Pair Self Collision Apply Pass")),
-                    timestamp_writes: self.profiler.writes(ts),
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
                 cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
         } else {
             // 従来のダイレクト走査方式
             // 4-a. Self Collision Pass (Solve V-T / V-V)
             {
-                let ts = self.profiler.enter("sc_solve");
+                let query = self.profiler.begin_pass_with_parent("sc_solve", encoder, parent.as_ref());
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Self Collision Pass")),
-                    timestamp_writes: self.profiler.writes(ts),
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().solve);
                 cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
 
             // 4-b. Self Collision Pass (Solve Edge-Edge)
             if enable_ee && self.num_edges > 0 {
-                let ts = self.profiler.enter("sc_solve_ee");
+                let query = self.profiler.begin_pass_with_parent("sc_solve_ee", encoder, parent.as_ref());
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Self Collision EE Pass")),
-                    timestamp_writes: self.profiler.writes(ts),
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().solve_ee);
                 cpass.set_bind_group(0, &self.self_collision_ee_bind_group, &[]);
                 let edge_workgroups = (self.num_edges + wg_size - 1) / wg_size;
                 cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
 
             // 5. Self Collision Apply Pass
             {
-                let ts = self.profiler.enter("sc_apply");
+                let query = self.profiler.begin_pass_with_parent("sc_apply", encoder, parent.as_ref());
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(&format!("{prefix} Self Collision Apply Pass")),
-                    timestamp_writes: self.profiler.writes(ts),
+                    timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
                 cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
             }
         }
+        self.profiler.end_scope(encoder, parent);
     }
 }
 

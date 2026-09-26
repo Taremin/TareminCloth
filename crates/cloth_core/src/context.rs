@@ -227,7 +227,11 @@ impl GpuContext {
                 &wgpu::DeviceDescriptor {
                     label: Some("TareminCloth Device"),
                     // 診断用の時刻問い合わせは対応時のみ要求する (非対応でも起動できる)。
-                    required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+                    // 親子ネストのエンコーダ計測を有効にするため INSIDE 系も要求する。
+                    required_features: adapter.features()
+                        & (wgpu::Features::TIMESTAMP_QUERY
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
                     required_limits,
                     memory_hints: Default::default(),
                 },

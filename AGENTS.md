@@ -93,15 +93,19 @@ python -m unittest tests/test_issue_f71.py
 - `ClothReplayer.trace_substeps(frame_idx)` を呼び出し、該当フレーム内のサブステップ 1〜10 の最大変位・最大速度推移を1ステップ刻みで確認します。
 
 ### Step 6: パス別ボトルネック特定（性能問題時のみ・任意）
-- 実経過時間では分離できないパス別コストは、診断専用のGPU時刻問い合わせで特定する（既定で無効のため本番性能への影響なし）。
+- 実経過時間では分離できないパス別コストは、診断専用のGPU時刻問い合わせで特定する（既定で無効のため本番性能への影響なし）。内部は `wgpu-profiler 0.20系` 委譲の非同期回収である。
 ```python
 ok = sim.set_profiling_enabled(True)  # TIMESTAMP_QUERY非対応環境ではFalseを返す
 sim.step(dt, substeps)
 for name, ms in sim.take_profile():
     print(name, ms)
+sim.save_profile_trace("scratch/trace.json")  # chrome://tracing で開ける
 ```
-- 記録対象: `sc_normals` / `hash_*` 6相 / `sc_solve` / `sc_apply`（ペアキャッシュ使用時は `pair_*`）。
-- `take_profile` は同期待機を伴うため、計測時のみ有効化すること。
+- ログ再現での定型手順（壁時計併記・trace保存）: `python -m taremin_cloth.log_tools profile input.jsonl.gz -f 71 -o trace.json`
+- Blender本番経路では `engine.runner.set_profiling_enabled_all/take_profiles/save_profile_traces` を使用する。
+- 記録対象: `predict` / `solver_iter` / `sc_normals` / `hash_*` 6相 / `edge_hash_*` 6相 / `sc_solve` / `sc_solve_ee` / `sc_apply`（ペアキャッシュ使用時は `pair_*`）/ `update_vel` 等。自己衝突系は `self_collision_Outer` 親スコープ配下にネストされる。
+- `take_profile` は最大数フレーム遅延の非同期回収のため、計測時のみ有効化すること。親は包含時間のため、平坦合計は二重計上になる。正味評価は `engine.profiling.aggregate_profile` の正味合計（親除外）または親1件で行うこと。
+- 壁時計の初回はパイプライン遅延生成を含むため、比較時は2フレーム目以降を用いること。
 
 ---
 
@@ -121,6 +125,7 @@ for name, ms in sim.take_profile():
 | `audit` | cache ON/OFFの2本ログからPairCache見逃しを定量化 | `python -m taremin_cloth.log_tools audit cache.jsonl.gz direct.jsonl.gz --tolerance 1.0` |
 | `audit-pairs` | GPU収集ペアとCPU真値のカバレッジ分類 (hit/stale/horizon/other/飽和) | `python -m taremin_cloth.log_tools audit-pairs input.jsonl.gz -f 71` |
 | `audit-cache` | 同一ログのON/OFF再現で貫通起因を判定 (再記録不要) | `python -m taremin_cloth.log_tools audit-cache input.jsonl.gz -f 71 --lookback 3` |
+| `profile` | 指定区間をGPU計測付きでリプレイし壁時計と内訳表示・trace保存 | `python -m taremin_cloth.log_tools profile input.jsonl.gz -f 71 -o trace.json` |
 
 > [!TIP]
 > **スパース記録 (2階層ロギング)**: `sim.set_debug_recording_options(full_stride=5, ring_size=3, lookahead=2, enable_triggers=True)` で間引きフル保存+トリガー時文脈復元。スタブ区間は座標なし (`inspect` はstats表示、`render/check/export-obj` は近傍フルを案内、`replay_range/replay_until` は入力連続性を保ちフル区間のみ比較)。スパース形式のファイルは `version: 3` で識別される。

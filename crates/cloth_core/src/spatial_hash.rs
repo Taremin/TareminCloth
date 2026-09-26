@@ -147,74 +147,93 @@ impl GpuSpatialHash {
         num_vertices: u32,
         hash: &HashPipelines,
         prof: &crate::simulation::profile::GpuProfiler,
+        parent: Option<&wgpu_profiler::GpuProfilerQuery>,
     ) {
         let num_blocks = (self.table_size + 255) / 256;
         let vert_workgroups = (num_vertices + 255) / 256;
 
         // 1. カウンタクリア
         {
+            let query = prof.begin_pass_with_parent("hash_clear", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Clear Pass"),
-                timestamp_writes: prof.writes(prof.enter("hash_clear")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.clear);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 2. 頂点セルカウント
         if num_vertices > 0 {
+            let query = prof.begin_pass_with_parent("hash_count", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Count Pass"),
-                timestamp_writes: prof.writes(prof.enter("hash_count")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.count);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 3. ブロック内 Prefix Sum
         {
+            let query = prof.begin_pass_with_parent("hash_scan", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Scan Blocks Pass"),
-                timestamp_writes: prof.writes(prof.enter("hash_scan")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scan_blocks);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 4. トップレベル Prefix Sum (block_sums)
         {
+            let query = prof.begin_pass_with_parent("hash_top", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Scan Top Pass"),
-                timestamp_writes: prof.writes(prof.enter("hash_top")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scan_top);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 5. ブロックオフセット加算 (最終 cell_starts 作成)
         {
+            let query = prof.begin_pass_with_parent("hash_add", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Add Offsets Pass"),
-                timestamp_writes: prof.writes(prof.enter("hash_add")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.add_offsets);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 6. 頂点インデックスのスキャッター配置
         if num_vertices > 0 {
+            let query = prof.begin_pass_with_parent("hash_scatter", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("SpatialGrid Scatter Pass"),
-                timestamp_writes: prof.writes(prof.enter("hash_scatter")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scatter);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
     }
 }
@@ -350,74 +369,93 @@ impl GpuEdgeSpatialHash {
         num_edges: u32,
         hash: &HashPipelines,
         prof: &crate::simulation::profile::GpuProfiler,
+        parent: Option<&wgpu_profiler::GpuProfilerQuery>,
     ) {
         let num_blocks = (self.table_size + 255) / 256;
         let edge_workgroups = (num_edges + 255) / 256;
 
         // 1. カウンタクリア
         {
+            let query = prof.begin_pass_with_parent("edge_hash_clear", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("EdgeSpatialGrid Clear Pass"),
-                timestamp_writes: prof.writes(prof.enter("edge_hash_clear")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.clear);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 2. エッジセルカウント
         if num_edges > 0 {
+            let query = prof.begin_pass_with_parent("edge_hash_count", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("EdgeSpatialGrid Count Pass"),
-                timestamp_writes: prof.writes(prof.enter("edge_hash_count")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.count);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 3. ブロック内 Prefix Sum
         {
+            let query = prof.begin_pass_with_parent("edge_hash_scan", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("EdgeSpatialGrid Scan Blocks Pass"),
-                timestamp_writes: prof.writes(prof.enter("edge_hash_scan")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scan_blocks);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 4. トップレベル Prefix Sum (block_sums)
         {
+            let query = prof.begin_pass_with_parent("edge_hash_top", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("EdgeSpatialGrid Scan Top Pass"),
-                timestamp_writes: prof.writes(prof.enter("edge_hash_top")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scan_top);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 5. ブロックオフセット加算 (最終 cell_starts 作成)
         {
+            let query = prof.begin_pass_with_parent("edge_hash_add", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("EdgeSpatialGrid Add Offsets Pass"),
-                timestamp_writes: prof.writes(prof.enter("edge_hash_add")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.add_offsets);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
 
         // 6. エッジインデックスのスキャッター配置
         if num_edges > 0 {
+            let query = prof.begin_pass_with_parent("edge_hash_scatter", encoder, parent);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("EdgeSpatialGrid Scatter Pass"),
-                timestamp_writes: prof.writes(prof.enter("edge_hash_scatter")),
+                timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scatter);
             cpass.set_bind_group(0, &self.grid_bind_group, &[]);
             cpass.dispatch_workgroups(edge_workgroups, 1, 1);
+            drop(cpass);
+            prof.end_pass(encoder, query);
         }
     }
 }

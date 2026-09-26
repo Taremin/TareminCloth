@@ -22,6 +22,7 @@ from .cache import (
 )
 from .collider import sync_colliders
 from .params import sync_cloth_parameters, sync_attachment_pins
+from .profiling import format_profile_table
 from ..utils import anim_driver
 from ..utils.logger import logger
 from ..utils.mesh_extract import extract_cloth_mesh_data
@@ -433,6 +434,53 @@ def step_cloth_scene(
             results[obj.name] = (sim, coords)
 
     return results
+
+
+def set_profiling_enabled_all(enable: bool = True) -> dict:
+    """登録済み全シミュレータのGPU計測を切替える。{obj名: 可否} を返す。"""
+    out = {}
+    for name, (sim, _coords) in list(_simulators.items()):
+        try:
+            out[name] = bool(sim.set_profiling_enabled(enable))
+        except Exception:
+            out[name] = False
+    return out
+
+
+def take_profiles() -> dict:
+    """登録済み全シミュレータの直近プロファイルを回収する。{obj名: [(label, ms)]}。"""
+    out = {}
+    for name, (sim, _coords) in list(_simulators.items()):
+        try:
+            out[name] = list(sim.take_profile())
+        except Exception:
+            out[name] = []
+    return out
+
+
+def format_profiles(profiles: dict) -> str:
+    """`take_profiles` 結果を可読表にする。"""
+    lines = []
+    for name, entries in profiles.items():
+        lines.append(f"== {name} ==")
+        lines.append(format_profile_table(entries))
+    return "\n".join(lines) if lines else "profile: no simulators"
+
+
+def save_profile_traces(directory: str = "scratch") -> dict:
+    """登録済み全シミュレータのtraceを保存する。{obj名: パス} を返す。"""
+    import os
+
+    os.makedirs(directory, exist_ok=True)
+    out = {}
+    for name, (sim, _coords) in list(_simulators.items()):
+        path = os.path.join(directory, f"profile_{name}.json")
+        try:
+            sim.save_profile_trace(path)
+            out[name] = path
+        except Exception:
+            continue
+    return out
 
 
 def _persistent(func):

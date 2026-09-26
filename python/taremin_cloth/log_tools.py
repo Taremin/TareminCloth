@@ -920,6 +920,120 @@ def cmd_audit_cache(args: argparse.Namespace) -> None:
         print("次手順: audit-pairs で miss 分類 (horizon/飽和) を特定してください。")
 
 
+def cmd_profile(args: argparse.Namespace) -> None:
+    """指定区間をGPU計測付きでリプレイし、壁時計とGPU内訳を表示する。
+
+    親スコープは包含時間のため、正味評価は子合計または親1件で
+    行うこと（平坦合計は二重計上の参考値）。
+    """
+    import time
+
+    try:
+        from .engine import profiling as prof_helper
+    except ImportError:
+        from taremin_cloth.engine import profiling as prof_helper  # type: ignore
+
+    log_path = args.log_file
+    target_f = int(args.frame) if getattr(args, "frame", None) is not None else None
+    lookback = max(1, int(getattr(args, "lookback", 2) or 2))
+    trace_out = getattr(args, "output", None)
+
+    if target_f is None:
+        frames_idx = [f["frame_index"] for f in replayer.iter_frames(log_path)]
+        if not frames_idx:
+            print("エラー: フレームが存在しません。")
+            sys.exit(1)
+        target_f = max(frames_idx)
+    start_f = max(0, target_f - lookback)
+
+    frames = {}
+    for f in replayer.iter_frames(log_path):
+        idx = f["frame_index"]
+        if start_f <= idx <= target_f:
+            frames[idx] = f
+    if start_f not in frames or not replayer.frame_has_positions(frames[start_f]):
+        near = replayer.nearest_full_frame(log_path, start_f)
+        hint = f" (近傍フル: Frame {near})" if near is not None else ""
+        print(f"エラー: 開始フレーム {start_f} はスタブのため再現できません{hint}。")
+        sys.exit(1)
+
+    rp = replayer.ClothReplayer(log_path)
+    init_pos = np.array(frames[start_f]["positions"], dtype=np.float32).reshape((-1, 3))
+    init_vel = None
+    if "velocities" in frames[start_f] and len(frames[start_f]["velocities"]) > 0:
+        init_vel = np.array(frames[start_f]["velocities"], dtype=np.float32).reshape((-1, 3))
+    rp.create_simulator(init_pos)
+    rp.sim.set_positions_and_velocities(init_pos, init_vel)
+    rp.apply_config_at(start_f)
+    rp.apply_elastic_at(start_f)
+    rp.apply_sewing_at(start_f)
+    try:
+        rp.apply_frame_bone(frames[start_f])
+    except Exception:
+        pass
+
+    ok = False
+    try:
+        ok = bool(rp.sim.set_profiling_enabled(True))
+    except Exception:
+        ok = False
+    print(f"profiling enabled: {ok} (F{start_f} -> F{target_f})")
+    if not ok:
+        print("TIMESTAMP_QUERY非対応のためGPU内訳は取得できません（壁時計のみ）。")
+
+    out_pos = np.zeros(rp.num_vertices * 3, dtype=np.float32)
+    prev_fdata = frames.get(start_f)
+    prev_replay_pos = init_pos.copy()
+    wall_ms = []
+    for f_idx in range(start_f + 1, target_f + 1):
+        if f_idx not in frames:
+            break
+        fdata = frames[f_idx]
+        dt = float(fdata.get("dt", 1.0 / 60.0))
+        substeps = int(fdata.get("substeps", 10))
+        try:
+            iters = int(fdata.get("solver_iterations", 0))
+            if iters > 0 and hasattr(rp.sim, "set_solver_iterations"):
+                rp.sim.set_solver_iterations(iters)
+        except Exception:
+            pass
+        rp.apply_frame_inputs(fdata)
+        rp.apply_frame_config(fdata)
+        rp.apply_frame_elastic(fdata)
+        rp.apply_frame_bone(fdata)
+        if prev_fdata is not None:
+            rp.apply_frame_sewing(prev_fdata)
+        if not rp.apply_frame_priority(fdata):
+            rp._update_sewing_priority(prev_replay_pos)
+        t0 = time.perf_counter()
+        rp.sim.step(dt=dt, substeps=substeps)
+        wall_ms.append((time.perf_counter() - t0) * 1000.0)
+        rp.sim.get_positions(out_pos)
+        prev_replay_pos = out_pos.reshape((-1, 3)).copy()
+        prev_fdata = fdata
+
+    if wall_ms:
+        print(f"wall: frames={len(wall_ms)} avg={sum(wall_ms)/len(wall_ms):.3f}ms "
+              f"min={min(wall_ms):.3f}ms max={max(wall_ms):.3f}ms")
+
+    entries: list = []
+    try:
+        # 非同期回収の遅延吸収のため枯れるまで繰返す
+        for _ in range(6):
+            cur = list(rp.sim.take_profile())
+            if cur:
+                entries = cur
+    except Exception:
+        entries = []
+    print(prof_helper.format_profile_table(entries))
+    if trace_out and entries:
+        try:
+            rp.sim.save_profile_trace(trace_out)
+            print(f"saved: {trace_out}")
+        except Exception as e:
+            print(f"trace保存に失敗: {e}")
+
+
 def cmd_audit(args: argparse.Namespace) -> None:
     """cacheログとdirectログの差分からPairCacheの見逃し率を定量化する"""
     log_cache = args.log_cache
@@ -1093,6 +1207,14 @@ def main() -> None:
     p_audit_cache.add_argument("--frame", "-f", type=int, required=True, help="判定フレーム番号")
     p_audit_cache.add_argument("--lookback", type=int, default=3, help="何フレーム前から再現するか")
     p_audit_cache.set_defaults(func=cmd_audit_cache)
+
+    # 13. profile (GPU計測付きリプレイ)
+    p_profile = subparsers.add_parser("profile", help="指定区間をGPU計測付きでリプレイし内訳表示")
+    p_profile.add_argument("log_file", help="対象ログファイル (.jsonl.gz)")
+    p_profile.add_argument("--frame", "-f", type=int, default=None, help="計測末尾フレーム (省略時は末尾)")
+    p_profile.add_argument("--lookback", type=int, default=2, help="何フレーム前から再現するか")
+    p_profile.add_argument("--output", "-o", default=None, help="chrometrace保存先 (.json)")
+    p_profile.set_defaults(func=cmd_profile)
 
 
     args = parser.parse_args()

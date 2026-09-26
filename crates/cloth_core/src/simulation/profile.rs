@@ -1,75 +1,70 @@
-//! 診断専用のGPU時刻問い合わせ計装。
+//! 診断専用のGPU時刻問い合わせ計装（`wgpu-profiler 0.20系` 委譲）。
 //!
 //! 自己衝突のパス別内訳 (法線・ハッシュ6相・パッチ構築・解決・適用) を
-//! 特定するための一時的な計測手段である。既定で無効であり、無効時は
+//! 特定するための計測手段である。既定で無効であり、無効時は
 //! `timestamp_writes: None` と同一経路のため挙動・性能は変わらない。
 //! 有効化にはアダプタの TIMESTAMP_QUERY 対応が必要であり、
 //! 非対応環境では有効化要求が偽を返して何もしない。
+//!
+//! 親スコープ（`begin_scope`）と子パス（`begin_pass_with_parent`）による
+//! ネスト集計に対応する。INSIDE系非対応環境では親が時刻なしになるが、
+//! 子の時刻と木構造は維持される。
+//!
+//! `take_ms` は最大 `max_num_pending_frames` 件遅延の非同期回収である
+//! （直前フレームの同期値ではない）。
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::context::GpuContext;
 
-/// 1フレームあたりの最大クエリ数 (2スタンプ/パス)。
-const MAX_QUERIES: u32 = 2048;
+fn lock_inner(
+    inner: &Mutex<Option<wgpu_profiler::GpuProfiler>>,
+) -> MutexGuard<'_, Option<wgpu_profiler::GpuProfiler>> {
+    inner.lock().unwrap_or_else(|e| e.into_inner())
+}
 
-fn lock_labels(labels: &Mutex<Vec<String>>) -> MutexGuard<'_, Vec<String>> {
-    labels.lock().unwrap_or_else(|e| e.into_inner())
+fn lock_flat(flat: &Mutex<Vec<(String, f32)>>) -> MutexGuard<'_, Vec<(String, f32)>> {
+    flat.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_tree(
+    tree: &Mutex<Vec<wgpu_profiler::GpuTimerQueryResult>>,
+) -> MutexGuard<'_, Vec<wgpu_profiler::GpuTimerQueryResult>> {
+    tree.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub struct GpuProfiler {
     context: Arc<GpuContext>,
     supported: bool,
     enabled: AtomicBool,
-    query_set: Option<wgpu::QuerySet>,
-    resolve_buffer: Option<wgpu::Buffer>,
-    staging_buffer: Option<wgpu::Buffer>,
-    period: f32,
-    next: AtomicU32,
-    used: AtomicU32,
-    labels: Mutex<Vec<String>>,
+    inner: Mutex<Option<wgpu_profiler::GpuProfiler>>,
+    last_flat: Mutex<Vec<(String, f32)>>,
+    last_tree: Mutex<Vec<wgpu_profiler::GpuTimerQueryResult>>,
 }
 
 impl GpuProfiler {
     pub fn new(context: &Arc<GpuContext>) -> Self {
         let supported = context.timestamp_query_supported();
-        let (query_set, resolve_buffer, staging_buffer, period) = if supported {
-            let device = &context.device;
-            let qs = device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("Profiler Query Set"),
-                ty: wgpu::QueryType::Timestamp,
-                count: MAX_QUERIES,
-            });
-            let size = (MAX_QUERIES as u64) * 8;
-            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Profiler Resolve Buffer"),
-                size,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let staging = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Profiler Staging Buffer"),
-                size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let period = context.queue.get_timestamp_period();
-            (Some(qs), Some(resolve), Some(staging), period)
+        let inner = if supported {
+            let settings = wgpu_profiler::GpuProfilerSettings {
+                enable_timer_queries: true,
+                enable_debug_groups: false,
+                max_num_pending_frames: 3,
+            };
+            wgpu_profiler::GpuProfiler::new(settings).ok()
         } else {
-            (None, None, None, 0.0)
+            None
         };
+        let supported = supported && inner.is_some();
         Self {
             context: Arc::clone(context),
             supported,
             enabled: AtomicBool::new(false),
-            query_set,
-            resolve_buffer,
-            staging_buffer,
-            period,
-            next: AtomicU32::new(0),
-            used: AtomicU32::new(0),
-            labels: Mutex::new(Vec::new()),
+            inner: Mutex::new(inner),
+            last_flat: Mutex::new(Vec::new()),
+            last_tree: Mutex::new(Vec::new()),
         }
     }
 
@@ -85,49 +80,101 @@ impl GpuProfiler {
     pub fn set_enabled(&self, enable: bool) -> bool {
         let on = enable && self.supported;
         self.enabled.store(on, Ordering::Relaxed);
-        self.next.store(0, Ordering::Relaxed);
-        self.used.store(0, Ordering::Relaxed);
-        lock_labels(&self.labels).clear();
+        lock_flat(&self.last_flat).clear();
+        lock_tree(&self.last_tree).clear();
         on
     }
 
-    /// フレーム記録開始 (エンコード直前に呼ぶ)。
+    /// フレーム記録開始 (エンコード直前に呼ぶ)。互換用の no-op。
     pub(crate) fn frame_begin(&self) {
+        // wgpu-profiler はスコープ単位で管理するため開始処理は不要。
+    }
+
+    /// 旧 `enter` 互換のパス計測開始。無効時は `None` を返す。
+    /// 戻り値は所有権付きクエリであり、パス終了後に `end_pass` へ渡すこと。
+    pub(crate) fn begin_pass(
+        &self,
+        label: &'static str,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<wgpu_profiler::GpuProfilerQuery> {
+        self.begin_pass_with_parent(label, encoder, None)
+    }
+
+    /// 親付きのパス計測開始。ネスト集計用。親が `None` の場合は頂層になる。
+    pub(crate) fn begin_pass_with_parent(
+        &self,
+        label: impl Into<String>,
+        encoder: &mut wgpu::CommandEncoder,
+        parent: Option<&wgpu_profiler::GpuProfilerQuery>,
+    ) -> Option<wgpu_profiler::GpuProfilerQuery> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let guard = lock_inner(&self.inner);
+        let inner = guard.as_ref()?;
+        Some(
+            inner
+                .begin_pass_query(label, encoder, &self.context.device)
+                .with_parent(parent),
+        )
+    }
+
+    /// エンコーダ区間の親スコープ開始。子パスを束ねる grouping 用。
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS` 非対応環境では時刻なし（n/a）になるが、
+    /// 子の集計構造は維持される。
+    pub(crate) fn begin_scope(
+        &self,
+        label: impl Into<String>,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Option<wgpu_profiler::GpuProfilerQuery> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let guard = lock_inner(&self.inner);
+        let inner = guard.as_ref()?;
+        Some(inner.begin_query(label, encoder, &self.context.device))
+    }
+
+    /// 親スコープ終了。`begin_scope` と対で呼ぶこと。
+    pub(crate) fn end_scope(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        query: Option<wgpu_profiler::GpuProfilerQuery>,
+    ) {
+        let Some(q) = query else { return };
         if !self.is_enabled() {
             return;
         }
-        self.next.store(0, Ordering::Relaxed);
-        self.used.store(0, Ordering::Relaxed);
-        lock_labels(&self.labels).clear();
+        let guard = lock_inner(&self.inner);
+        if let Some(inner) = guard.as_ref() {
+            inner.end_query(encoder, q);
+        }
     }
 
-    /// パス記録開始。ラベルを登録し、開始スタンプ番号を返す。
-    /// 無効時や枯渇時は u32::MAX を返し、呼び出し側は素通りする。
-    pub(crate) fn enter(&self, label: &'static str) -> u32 {
+    /// `begin_pass` で得たクエリから `ComputePassDescriptor` 用の書き込みを得る。
+    pub(crate) fn pass_writes<'a>(
+        &self,
+        query: &'a Option<wgpu_profiler::GpuProfilerQuery>,
+    ) -> Option<wgpu::ComputePassTimestampWrites<'a>> {
+        query
+            .as_ref()
+            .and_then(|q| q.compute_pass_timestamp_writes())
+    }
+
+    /// パス計測終了。`begin_pass` と対で呼ぶこと。
+    pub(crate) fn end_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        query: Option<wgpu_profiler::GpuProfilerQuery>,
+    ) {
+        let Some(q) = query else { return };
         if !self.is_enabled() {
-            return u32::MAX;
+            return;
         }
-        let begin = self.next.load(Ordering::Relaxed);
-        if begin + 2 > MAX_QUERIES {
-            return u32::MAX;
+        let guard = lock_inner(&self.inner);
+        if let Some(inner) = guard.as_ref() {
+            inner.end_query(encoder, q);
         }
-        lock_labels(&self.labels).push(label.to_string());
-        self.next.store(begin + 2, Ordering::Relaxed);
-        self.used.store(begin + 2, Ordering::Relaxed);
-        begin
-    }
-
-    /// ComputePassDescriptor に渡す時刻書き込み。無効時は None を返す。
-    pub(crate) fn writes(&self, begin: u32) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
-        if begin == u32::MAX {
-            return None;
-        }
-        let qs = self.query_set.as_ref()?;
-        Some(wgpu::ComputePassTimestampWrites {
-            query_set: qs,
-            beginning_of_pass_write_index: Some(begin),
-            end_of_pass_write_index: Some(begin + 1),
-        })
     }
 
     /// フレーム記録終了 (提出直前に呼ぶ)。使用分を解決バッファへ回収する。
@@ -135,59 +182,71 @@ impl GpuProfiler {
         if !self.is_enabled() {
             return;
         }
-        let used = self.used.load(Ordering::Relaxed);
-        if used == 0 {
-            return;
-        }
-        if let (Some(qs), Some(resolve)) = (self.query_set.as_ref(), self.resolve_buffer.as_ref()) {
-            encoder.resolve_query_set(qs, 0..used, resolve, 0);
+        let mut guard = lock_inner(&self.inner);
+        if let Some(inner) = guard.as_mut() {
+            inner.resolve_queries(encoder);
         }
     }
 
-    /// 直近フレームの (ラベル, ミリ秒) を回収する。診断専用の同期待機を伴う。
+    /// 提出直後に呼ぶ。フレーム境界を確定する。
+    pub(crate) fn frame_submitted(&self) {
+        if !self.is_enabled() {
+            return;
+        }
+        let mut guard = lock_inner(&self.inner);
+        if let Some(inner) = guard.as_mut() {
+            if let Err(e) = inner.end_frame() {
+                log::warn!("profiler end_frame failed: {:?}", e);
+            }
+        }
+    }
+
+    /// 直近の完成フレームを (ラベル, ミリ秒) の平坦列で回収する。
+    /// 非同期回収のため最大数フレーム遅延する。未完成時は前回値を返す。
     pub fn take_ms(&self) -> Vec<(String, f32)> {
         if !self.is_enabled() {
             return Vec::new();
         }
-        let used = self.used.load(Ordering::Relaxed);
-        if used == 0 {
-            return Vec::new();
-        }
-        let (resolve, staging) = match (self.resolve_buffer.as_ref(), self.staging_buffer.as_ref()) {
-            (Some(r), Some(s)) => (r, s),
-            _ => return Vec::new(),
+        let period = self.context.queue.get_timestamp_period();
+        let mut guard = lock_inner(&self.inner);
+        let inner = match guard.as_mut() {
+            Some(v) => v,
+            None => return Vec::new(),
         };
-        let size = (used as u64) * 8;
-        let mut encoder = self.context.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some("Profiler Readback Encoder"),
-            },
-        );
-        encoder.copy_buffer_to_buffer(resolve, 0, staging, 0, size);
-        self.context.queue.submit(Some(encoder.finish()));
+        if let Some(results) = inner.process_finished_frame(period) {
+            let mut flat = Vec::new();
+            flatten_results(&results, &mut flat);
+            *lock_flat(&self.last_flat) = flat.clone();
+            *lock_tree(&self.last_tree) = results;
+            flat
+        } else {
+            lock_flat(&self.last_flat).clone()
+        }
+    }
 
-        let slice = staging.slice(..size);
-        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |v| {
-            let _ = sender.send(v);
-        });
-        self.context.device.poll(wgpu::Maintain::Wait);
-        if pollster::block_on(receiver.receive()).is_none() {
-            return Vec::new();
+    /// 直近の完成フレームツリーを取得する（chrometrace書出し用）。
+    pub fn last_tree(&self) -> Vec<wgpu_profiler::GpuTimerQueryResult> {
+        lock_tree(&self.last_tree).clone()
+    }
+
+    /// 直近の完成フレームを chrometrace JSON へ保存する。
+    pub fn save_chrometrace(&self, path: &Path) -> std::io::Result<()> {
+        let tree = lock_tree(&self.last_tree);
+        wgpu_profiler::chrometrace::write_chrometrace(path, &tree)
+    }
+}
+
+fn flatten_results(
+    results: &[wgpu_profiler::GpuTimerQueryResult],
+    out: &mut Vec<(String, f32)>,
+) {
+    for r in results {
+        if let Some(time) = &r.time {
+            let ms = ((time.end - time.start) * 1000.0) as f32;
+            out.push((r.label.clone(), ms));
         }
-        let data = slice.get_mapped_range();
-        let ticks: &[u64] = bytemuck::cast_slice(&data);
-        let labels = lock_labels(&self.labels);
-        let mut out = Vec::new();
-        for (i, label) in labels.iter().enumerate() {
-            let b = (i * 2) as usize;
-            if b + 1 < ticks.len() {
-                let dt = ticks[b + 1].wrapping_sub(ticks[b]) as f32;
-                out.push((label.clone(), dt * self.period / 1_000_000.0));
-            }
+        if !r.nested_queries.is_empty() {
+            flatten_results(&r.nested_queries, out);
         }
-        drop(data);
-        staging.unmap();
-        out
     }
 }

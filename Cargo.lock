@@ -380,6 +380,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "wgpu",
+ "wgpu-profiler",
 ]
 
 [[package]]
@@ -3191,6 +3192,17 @@ dependencies = [
  "wgpu-types",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "wgpu-profiler"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a4a6f78dabb0ef257b8c6a806c9edc3ffd90f5f4491b5845d6d5c738482d36d"
+dependencies = [
+ "parking_lot",
+ "thiserror 2.0.20",
+ "wgpu",
 ]
 
 [[package]]
