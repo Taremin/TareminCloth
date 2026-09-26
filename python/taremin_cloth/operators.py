@@ -62,6 +62,7 @@ from .ops import (
     TAREMIN_CLOTH_OT_bake,
     TAREMIN_CLOTH_OT_free_bake,
     TAREMIN_CLOTH_OT_interactive,
+    TAREMIN_CLOTH_OT_confirm_debug_save,
     TAREMIN_CLOTH_OT_benchmark_fps,
     TAREMIN_CLOTH_OT_create_seam,
     TAREMIN_CLOTH_OT_add_elastic_group,
@@ -92,6 +93,12 @@ from .ops import (
     is_interactive_running,
     stop_interactive_if_running,
     resolve_debug_filepath,
+    get_pending_debug_save,
+    clear_pending_debug_save,
+    discard_pending_debug_recording,
+    format_bytes,
+    estimate_debug_file_bytes,
+    estimate_debug_raw_bytes,
 )
 
 # 従来互換用のクラス一覧

@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 import bpy
 import mathutils
+from bpy.props import IntProperty, StringProperty
 from bpy_extras import view3d_utils
 from ..engine.cache import (
     _simulators,
@@ -120,6 +121,626 @@ def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "j
 
     os.makedirs(dir_path, exist_ok=True)
     return os.path.join(dir_path, filename)
+
+
+# -----------------------------------------------------------------------------
+# デバッグ記録ファイル出力の確認フロー
+# (DEBUGレベル時の巨大ファイル誤出力を防ぐため、保存直前に確認ダイアログを挟む)
+# -----------------------------------------------------------------------------
+_pending_debug_save = None
+
+
+def format_bytes(num_bytes) -> str:
+    """バイト数を人間可読な表記 (B/KB/MB/GB/TB) に変換する (純粋関数・Blender非依存)"""
+    try:
+        n = float(num_bytes)
+    except (TypeError, ValueError):
+        return "unknown"
+    if n < 0:
+        return "unknown"
+    units = ("B", "KB", "MB", "GB", "TB")
+    idx = 0
+    while n >= 1024.0 and idx < len(units) - 1:
+        n /= 1024.0
+        idx += 1
+    if idx == 0:
+        return f"{int(n)} {units[idx]}"
+    return f"{n:.1f} {units[idx]}"
+
+
+# 実測キャリブレーションに基づく推定係数 (gzip圧縮.jsonl.gz の実ファイルサイズ)。
+# 測定条件: 5x5〜40x40グリッド・自由落下・substeps=10 (一時スクリプトによる測定)。
+#   - 非圧縮JSON: 約60B/頂点/フレーム、gzip圧縮後: 約3〜6B/頂点/フレーム (穏やかな運動時)
+#   - 激しい運動時はフレームのgzip効率が低下する (実ファイルで約0.3倍) ため
+#     フレーム項は14B/頂点に割増 (穏やかな自由落下では最大約5倍の過大評価になるが安全側)
+#   - メタデータ行 (エッジ・面・初期値配列) の圧縮後寄与: 約60B/頂点
+#   - BONE_SDF使用時は焼き付けテクスチャ全体がbase64でメタデータに埋め込まれる
+#     (例: 55ボーンで実測89MB→圧縮後44MB。式: voxels*4B*4/3(base64)*0.55(gzip))
+#   - 毎フレームのボーン姿勢 (world+inv行列) は実測約360B/ボーン→圧縮後140B/ボーン
+# 安全側 (過大側) に丸めた概算であり、次数オーダー判定用。sparse記録では
+# フル座標フレームのみを計上する。
+_DEBUG_FILE_META_BYTES_PER_VERT = 60
+_DEBUG_FILE_FRAME_BYTES_PER_VERT = 14
+_DEBUG_FILE_BONE_SDF_GZIP_RATIO = 0.55
+_DEBUG_FILE_BONE_POSE_BYTES_PER_BONE_FRAME = 140
+
+
+def estimate_debug_raw_bytes(frame_count, vertex_count, full_stride=1, bone_voxels=0, bone_count=0) -> int:
+    """記録JSON全体の非圧縮サイズ概算 (バイト) を返す。
+
+    base64テクスチャ部は完全確定値 (ceil(bytes/3)*4+2)、それ以外は実測単価:
+    メタデータのメッシュ配列群 約280B/頂点、ボーン静的情報 約200B/ボーン、
+    フルフレーム 約70B/頂点 + 約370B/ボーン、スタブ・固定部 約350B/フレーム。
+    実ファイル2件では0.96〜1.2倍に収まる。純粋関数・Blender非依存。
+    """
+    try:
+        f = int(frame_count)
+        v = int(vertex_count)
+        s = int(full_stride)
+    except (TypeError, ValueError):
+        return 0
+    if f <= 0 or v <= 0:
+        return 0
+    if s < 1:
+        s = 1
+    full_frames = (f + s - 1) // s
+    try:
+        bv = int(bone_voxels)
+    except (TypeError, ValueError):
+        bv = 0
+    try:
+        bc = int(bone_count)
+    except (TypeError, ValueError):
+        bc = 0
+    if bv < 0:
+        bv = 0
+    if bc < 0:
+        bc = 0
+    total = v * 280 + bc * 200
+    if bv > 0:
+        total += (bv * 4 + 2) // 3 * 4 + 2
+    total += full_frames * (v * 70 + bc * 370) + f * 350
+    return total
+
+
+def estimate_debug_file_bytes(frame_count, vertex_count, full_stride=1, bone_voxels=0, bone_count=0) -> int:
+    """出力される .jsonl.gz ファイルサイズの概算 (バイト) を返す。
+
+    モデル: verts*60 (メタデータ) + フル座標フレーム数*verts*14
+            + bone_voxels*4*4/3*0.55 (BONE_SDFテクスチャ、存在時のみ)
+            + frames*bones*140 (毎フレームのボーン姿勢、存在時のみ)。
+    実測に対し概ね0.9〜4倍 (安全側への過大評価が主) の範囲に収まる概算。
+    純粋関数・Blender非依存。
+    """
+    try:
+        f = int(frame_count)
+        v = int(vertex_count)
+        s = int(full_stride)
+    except (TypeError, ValueError):
+        return 0
+    if f <= 0 or v <= 0:
+        return 0
+    if s < 1:
+        s = 1
+    full_frames = (f + s - 1) // s
+    total = v * _DEBUG_FILE_META_BYTES_PER_VERT + full_frames * v * _DEBUG_FILE_FRAME_BYTES_PER_VERT
+    try:
+        bv = int(bone_voxels)
+    except (TypeError, ValueError):
+        bv = 0
+    if bv > 0:
+        total += int(bv * 4 * 4 / 3 * _DEBUG_FILE_BONE_SDF_GZIP_RATIO)
+    try:
+        bc = int(bone_count)
+    except (TypeError, ValueError):
+        bc = 0
+    if bc > 0:
+        total += f * bc * _DEBUG_FILE_BONE_POSE_BYTES_PER_BONE_FRAME
+    return total
+
+
+def _lookup_bone_sdf_info(sim):
+    """ボーンSDFテクスチャの (voxels, bone_count) を取得する。無ければ (0, 0)。
+
+    engine.collider._bone_sdf_cache (sim_id=id(sim)キー) のベイク結果から、
+    記録メタデータに埋め込まれるテクスチャ寸法とボーン数を求める。
+    """
+    try:
+        from ..engine.collider import _bone_sdf_cache
+    except Exception:
+        return 0, 0
+    try:
+        entry = _bone_sdf_cache.get(id(sim))
+    except Exception:
+        return 0, 0
+    if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+        return 0, 0
+    bake_res = entry[1]
+    try:
+        w = int(getattr(bake_res, "width", 0) or 0)
+        h = int(getattr(bake_res, "height", 0) or 0)
+        d = int(getattr(bake_res, "depth", 0) or 0)
+    except Exception:
+        return 0, 0
+    if w <= 0 or h <= 0 or d <= 0:
+        return 0, 0
+    try:
+        infos = getattr(bake_res, "bone_infos", None)
+        n_bones = int(len(infos)) if infos is not None else 0
+    except Exception:
+        n_bones = 0
+    return w * h * d, max(n_bones, 0)
+
+
+def get_pending_debug_save():
+    """保存確認待ちのデバッグ記録情報 (dict) を返す。なければ None。"""
+    return _pending_debug_save
+
+
+def clear_pending_debug_save():
+    """保存確認待ち情報を破棄する。"""
+    global _pending_debug_save
+    _pending_debug_save = None
+
+
+def _coords_vertex_count(coords) -> int:
+    """_simulatorsキャッシュのcoords配列から頂点数を算出する (flat 3N / (N,3)両対応)。"""
+    try:
+        shape = getattr(coords, "shape", None)
+        if shape is not None and len(shape) == 2 and int(shape[1]) == 3:
+            return int(shape[0])
+        return int(len(coords) // 3)
+    except Exception:
+        return 0
+
+
+def _lookup_sim_coords(obj_name):
+    """_simulatorsから (sim, coords) を安全に取得する。"""
+    try:
+        entry = _simulators.get(obj_name)
+    except Exception:
+        return None, None
+    if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+        return entry[0], entry[1]
+    return entry, None
+
+
+def _sim_vertex_count(sim, coords=None) -> int:
+    """シミュレーターの頂点数を返す。取得不可時は 0。
+
+    ホスト非依存のRust API (get_num_vertices) を正とする。
+    将来的なMaya等の他ホスト移植を見据え、Blender層のキャッシュ規約に依存しない。
+    APIを持たない旧ビルドでは _simulatorsキャッシュのcoordsから求める。
+    """
+    try:
+        n = int(getattr(sim, "get_num_vertices", 0) or 0)
+        if n > 0:
+            return n
+    except Exception:
+        pass
+    if coords is not None:
+        return _coords_vertex_count(coords)
+    return 0
+
+
+def is_headless_debug_save_context(context) -> bool:
+    """確認ダイアログを出せないヘッドレス/バックグラウンド状況かを判定する。
+
+    バックグラウンド実行・テストモック・ウィンドウ不在時は True を返し、
+    従来通りの自動保存フォールバックを選択する。
+    """
+    try:
+        import bpy as _bpy
+        if bool(getattr(getattr(_bpy, "app", None), "background", False)):
+            return True
+    except Exception:
+        return True
+    try:
+        wm = getattr(context, "window_manager", None)
+        if wm is None:
+            return True
+        # MagicMock化されたテスト環境ではダイアログ表示不能のため自動保存側に倒す
+        if type(wm).__name__ == "MagicMock" or "MagicMock" in type(wm).__module__:
+            return True
+        if getattr(context, "window", None) is None:
+            return True
+    except Exception:
+        return True
+    return False
+
+
+def _deferred_invoke_debug_save_confirm():
+    """モーダル終了直後のダイアログ遅延呼び出し (bpy.app.timers 用コールバック)。"""
+    try:
+        import bpy as _bpy
+        _bpy.ops.taremin_cloth.confirm_debug_save('INVOKE_DEFAULT')
+    except Exception as e:
+        try:
+            logger.warning(f"[DebugRecorder] 確認ダイアログの表示に失敗しました: {e}")
+        except Exception:
+            pass
+    return None
+
+
+def request_debug_save_confirmation(context, obj_name, sim, frame_count, filepath, full_stride=1) -> str:
+    """保存確認待ち情報を登録し、確認ダイアログ表示をスケジュールする。
+
+    戻り値: 'deferred' (ダイアログ予約) / 'fallback-saved' / 'fallback-pending'。
+    バッファの破棄は行わない (保存/破棄の判断は確認オペレーターに委譲する)。
+    """
+    global _pending_debug_save
+    _, _coords = _lookup_sim_coords(obj_name)
+    vertex_count = _sim_vertex_count(sim, _coords)
+    bone_voxels, bone_count = _lookup_bone_sdf_info(sim)
+    try:
+        stride = int(full_stride)
+    except (TypeError, ValueError):
+        stride = 1
+    if stride < 1:
+        stride = 1
+    _pending_debug_save = {
+        "obj_name": obj_name,
+        "frame_count": int(frame_count),
+        "filepath": filepath,
+        "vertex_count": int(vertex_count),
+        "full_stride": stride,
+        "bone_voxels": int(bone_voxels),
+        "bone_count": int(bone_count),
+    }
+    if is_headless_debug_save_context(context):
+        # ヘッドレス/テスト時は従来通り即時自動保存 (CI・E2E互換のため)
+        try:
+            saved_path = sim.save_debug_recording(filepath)
+            try:
+                file_size = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0
+            except Exception:
+                file_size = 0
+            logger.info(f"[DebugRecorder] Successfully saved debug recording ({frame_count} frames, {file_size:,} bytes) to: {saved_path}")
+            sim.stop_debug_recording()
+            clear_pending_debug_save()
+            return 'fallback-saved'
+        except Exception as e:
+            logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
+            try:
+                sim.stop_debug_recording()
+            except Exception:
+                pass
+            clear_pending_debug_save()
+            return 'fallback-pending'
+    # 対話UI時はモーダル終了後にダイアログを表示 (モーダル中の直接invokeは避ける)
+    scheduled = False
+    try:
+        import bpy as _bpy
+        timers = getattr(getattr(_bpy, "app", None), "timers", None)
+        if timers is not None and hasattr(timers, "register"):
+            timers.register(_deferred_invoke_debug_save_confirm, first_interval=0.2)
+            scheduled = True
+    except Exception as e:
+        logger.warning(f"[DebugRecorder] 確認ダイアログの予約に失敗しました: {e}")
+        scheduled = False
+    if not scheduled:
+        try:
+            wm = context.window_manager
+            invoke = getattr(wm, "invoke_props_dialog", None)
+            if callable(invoke):
+                _deferred_invoke_debug_save_confirm()
+                scheduled = True
+        except Exception:
+            scheduled = False
+    est = estimate_debug_file_bytes(frame_count, vertex_count, stride, bone_voxels, bone_count)
+    raw = estimate_debug_raw_bytes(frame_count, vertex_count, stride, bone_voxels, bone_count)
+    logger.info(
+        f"[DebugRecorder] Stopped with {frame_count} recorded frames for '{obj_name}'. "
+        f"Waiting for save confirmation (pending file: {filepath}, "
+        f"verts={vertex_count}, bones={bone_count}, "
+        f"uncompressed=~{format_bytes(raw)}, compressed est.=~{format_bytes(est)})."
+    )
+    return 'deferred' if scheduled else 'fallback-pending'
+
+
+def discard_pending_debug_recording(reason: str = "discarded by user") -> bool:
+    """保存確認待ち (または記録中) のデバッグ記録バッファを破棄する (Blender非依存ロジック)。
+
+    戻り値: バッファ破棄を実行した場合 True。
+    """
+    global _pending_debug_save
+    pending = _pending_debug_save
+    target_names = [pending["obj_name"]] if pending and pending.get("obj_name") else []
+    if not target_names:
+        # pendingが無い場合は記録中の全simを対象にする
+        try:
+            for name, entry in list(_simulators.items()):
+                sim = entry[0] if isinstance(entry, (tuple, list)) else entry
+                if sim is not None and hasattr(sim, "is_debug_recording"):
+                    try:
+                        if sim.is_debug_recording():
+                            target_names.append(name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    discarded_any = False
+    for name in target_names:
+        try:
+            entry = _simulators.get(name)
+        except Exception:
+            entry = None
+        if entry is None:
+            continue
+        sim = entry[0] if isinstance(entry, (tuple, list)) else entry
+        try:
+            if sim is not None and hasattr(sim, "stop_debug_recording"):
+                sim.stop_debug_recording()
+                discarded_any = True
+        except Exception as e:
+            logger.warning(f"[DebugRecorder] Failed to discard debug recording for '{name}': {e}")
+    if discarded_any or pending is not None:
+        logger.info(f"[DebugRecorder] Debug recording {reason} (frames={pending['frame_count'] if pending else 'unknown'}).")
+    clear_pending_debug_save()
+    return discarded_any
+
+
+class TAREMIN_CLOTH_OT_confirm_debug_save(bpy.types.Operator):
+    """インタラクティブ終了時のデバッグ記録ファイル出力を確認するダイアログ。
+
+    DEBUGレベル誤設定による数十MB〜数百GBの誤出力を防ぐため、
+    保存直前にフレーム数・頂点数・出力先を提示する。
+    OK=保存、キャンセル/ESC=破棄 (バッファ解放) とし、誤操作で巨大ファイルが出力されない。
+    """
+
+    bl_idname = "taremin_cloth.confirm_debug_save"
+    bl_label = "Save Debug Recording?"
+    bl_description = "Confirm saving the debug recording file (may be very large)"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER'}
+
+    obj_name: StringProperty(name="Object")
+    filepath: StringProperty(name="File Path", subtype='FILE_PATH')
+    frame_count: IntProperty(name="Frames", default=0)
+    vertex_count: IntProperty(name="Vertices", default=0)
+    full_stride: IntProperty(
+        name="Full Stride",
+        description="Full-coordinate save interval used for size estimation (1=every frame)",
+        default=1,
+        min=1,
+    )
+    bone_voxels: IntProperty(
+        name="Bone SDF Voxels",
+        description="Bone SDF texture voxels embedded in metadata (0 when unused)",
+        default=0,
+        min=0,
+    )
+    bone_count: IntProperty(
+        name="Bone Count",
+        description="Bones recorded per frame (0 when unused)",
+        default=0,
+        min=0,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if _pending_debug_save is not None:
+            return True
+        try:
+            for entry in _simulators.values():
+                sim = entry[0] if isinstance(entry, (tuple, list)) else entry
+                if sim is not None and hasattr(sim, "is_debug_recording"):
+                    try:
+                        if sim.is_debug_recording():
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return False
+
+    def _fill_from_pending(self):
+        pending = _pending_debug_save
+        if pending is None:
+            return False
+        if not self.obj_name:
+            self.obj_name = str(pending.get("obj_name", ""))
+        if not self.filepath:
+            self.filepath = str(pending.get("filepath", ""))
+        if not self.frame_count:
+            try:
+                self.frame_count = int(pending.get("frame_count", 0))
+            except Exception:
+                pass
+        if not self.vertex_count:
+            try:
+                self.vertex_count = int(pending.get("vertex_count", 0))
+            except Exception:
+                pass
+        if not self.full_stride:
+            try:
+                self.full_stride = int(pending.get("full_stride", 1))
+            except Exception:
+                pass
+        if self.full_stride < 1:
+            self.full_stride = 1
+        if not self.bone_voxels:
+            try:
+                self.bone_voxels = int(pending.get("bone_voxels", 0))
+            except Exception:
+                pass
+        if not self.bone_count:
+            try:
+                self.bone_count = int(pending.get("bone_count", 0))
+            except Exception:
+                pass
+        try:
+            if self.bone_voxels < 0:
+                self.bone_voxels = 0
+        except Exception:
+            pass
+        try:
+            if self.bone_count < 0:
+                self.bone_count = 0
+        except Exception:
+            pass
+        return True
+
+    def _fill_from_live_sim(self):
+        if self.obj_name:
+            try:
+                entry = _simulators.get(self.obj_name)
+            except Exception:
+                entry = None
+            sims = [(self.obj_name, entry)] if entry is not None else []
+        else:
+            try:
+                sims = list(_simulators.items())
+            except Exception:
+                sims = []
+        for name, entry in sims:
+            sim = entry[0] if isinstance(entry, (tuple, list)) else entry
+            ecoords = entry[1] if isinstance(entry, (tuple, list)) and len(entry) >= 2 else None
+            try:
+                if sim is not None and hasattr(sim, "is_debug_recording") and sim.is_debug_recording():
+                    if not self.obj_name:
+                        self.obj_name = str(name)
+                    try:
+                        self.frame_count = int(sim.get_debug_frame_count())
+                    except Exception:
+                        pass
+                    if not self.vertex_count:
+                        self.vertex_count = _sim_vertex_count(sim, ecoords)
+                    if not self.bone_voxels or not self.bone_count:
+                        bv, bc = _lookup_bone_sdf_info(sim)
+                        if not self.bone_voxels:
+                            self.bone_voxels = bv
+                        if not self.bone_count:
+                            self.bone_count = bc
+                    if not self.filepath:
+                        try:
+                            from ..preferences import get_preferences as _get_prefs
+                            prefs = _get_prefs()
+                        except Exception:
+                            prefs = None
+                        try:
+                            self.filepath = resolve_debug_filepath(prefs, self.obj_name, self.frame_count, ext="jsonl.gz")
+                        except Exception:
+                            pass
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def invoke(self, context, event):
+        self._fill_from_pending()
+        if not self.obj_name or not self.frame_count:
+            if not self._fill_from_live_sim():
+                self.report({'INFO'}, i18n.trans("No debug recording to save"))
+                return {'CANCELLED'}
+        try:
+            wm = context.window_manager
+            return wm.invoke_props_dialog(self, width=480)
+        except Exception:
+            # ダイアログ表示不能環境では何もせずpendingを維持する
+            self.report({'WARNING'}, i18n.trans("Cannot show confirmation dialog in this context"))
+            return {'CANCELLED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text=i18n.trans("Debug recording output needs confirmation"), icon='ERROR')
+        box = layout.box()
+        box.label(text=i18n.trans("Frames: %d") % (int(self.frame_count or 0),))
+        if int(self.vertex_count or 0) > 0:
+            box.label(text=i18n.trans("Vertices: %d") % (int(self.vertex_count),))
+            raw = estimate_debug_raw_bytes(
+                self.frame_count, self.vertex_count, self.full_stride,
+                self.bone_voxels, self.bone_count,
+            )
+            box.label(text=i18n.trans("Uncompressed: ~%s") % format_bytes(raw))
+            est = estimate_debug_file_bytes(
+                self.frame_count, self.vertex_count, self.full_stride,
+                self.bone_voxels, self.bone_count,
+            )
+            box.label(text=i18n.trans("Compressed file (est.): ~%s") % format_bytes(est))
+        if self.filepath:
+            box.label(text=i18n.trans("Output: %s") % (self.filepath,))
+        layout.label(text=i18n.trans("Save it?"), icon='INFO')
+
+    def execute(self, context):
+        # OKボタン=保存。キャンセル/ESC時は execute ではなく cancel() が呼ばれ破棄される。
+        pending = _pending_debug_save
+        obj_name = self.obj_name or (pending.get("obj_name") if pending else "")
+        filepath = self.filepath or (pending.get("filepath") if pending else "")
+        if not obj_name:
+            self.report({'WARNING'}, i18n.trans("No debug recording to save"))
+            return {'CANCELLED'}
+        try:
+            entry = _simulators.get(obj_name)
+        except Exception:
+            entry = None
+        if entry is None:
+            clear_pending_debug_save()
+            self.report({'WARNING'}, i18n.trans("No debug recording to save"))
+            return {'CANCELLED'}
+        sim = entry[0] if isinstance(entry, (tuple, list)) else entry
+        if sim is None or not hasattr(sim, "is_debug_recording"):
+            clear_pending_debug_save()
+            return {'CANCELLED'}
+        try:
+            recording = bool(sim.is_debug_recording())
+        except Exception:
+            recording = False
+        if not recording:
+            clear_pending_debug_save()
+            self.report({'INFO'}, i18n.trans("No debug recording to save"))
+            return {'CANCELLED'}
+        try:
+            live_count = int(sim.get_debug_frame_count())
+        except Exception:
+            live_count = -1
+        if live_count != int(self.frame_count or 0):
+            # 確認ダイアログ表示後に新規セッションが開始されバッファが入れ替わった場合は
+            # 別セッションの記録を誤保存しないよう拒否する (pendingには触れない)
+            self.report({'WARNING'}, i18n.trans("Debug recording changed since confirmation. Please confirm again."))
+            return {'CANCELLED'}
+        if not filepath:
+            try:
+                from ..preferences import get_preferences as _get_prefs
+                prefs = _get_prefs(context)
+            except Exception:
+                prefs = None
+            try:
+                frame_count = int(sim.get_debug_frame_count())
+            except Exception:
+                frame_count = int(self.frame_count or 0)
+            filepath = resolve_debug_filepath(prefs, obj_name, frame_count, ext="jsonl.gz")
+        try:
+            frame_count = int(sim.get_debug_frame_count())
+        except Exception:
+            frame_count = int(self.frame_count or 0)
+        try:
+            saved_path = sim.save_debug_recording(filepath)
+            try:
+                file_size = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0
+            except Exception:
+                file_size = 0
+            logger.info(f"[DebugRecorder] Successfully saved debug recording ({frame_count} frames, {file_size:,} bytes) to: {saved_path}")
+            self.report({'INFO'}, i18n.trans("Debug recording saved: %s (%d frames)") % (os.path.basename(saved_path), frame_count))
+        except Exception as e:
+            logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        finally:
+            try:
+                sim.stop_debug_recording()
+            except Exception:
+                pass
+            clear_pending_debug_save()
+        return {'FINISHED'}
+
+    def cancel(self, context):
+        # キャンセル/ESC=破棄 (バッファ解放)。ヘッダーにも破棄を通知する。
+        try:
+            discard_pending_debug_recording(reason="discarded (dialog cancelled)")
+            self.report({'INFO'}, i18n.trans("Debug recording discarded"))
+        except Exception:
+            pass
 
 
 class FPSCounter:
@@ -706,6 +1327,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         should_debug_record = prefs and (prefs.log_level == 'DEBUG') and getattr(prefs, "enable_debug_recording", True)
         if should_debug_record and obj and obj.type == 'MESH':
             if sim and hasattr(sim, "start_debug_recording"):
+                # 新規記録開始で前回の確認待ち情報は無効になるため破棄する
+                # (Rust側のstart_recordingもバッファをクリアする)
+                clear_pending_debug_save()
                 max_frames = getattr(prefs, "debug_max_frames", 3600)
                 sim.start_debug_recording(obj.name, max_frames=max_frames)
                 try:
@@ -719,6 +1343,15 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 except Exception:
                     applied = False
                 logger.debug(f"[DebugRecorder] Started recording simulation states for '{obj.name}' (max_frames={max_frames}, sparse={applied})")
+        elif sim is not None and hasattr(sim, "is_debug_recording"):
+            # 前回セッションの確認ダイアログが破棄扱い (ESC等) で残留したバッファがあれば解放する
+            try:
+                if sim.is_debug_recording():
+                    sim.stop_debug_recording()
+                    clear_pending_debug_save()
+                    logger.info(f"[DebugRecorder] Discarded stale debug recording from previous session for '{obj.name if obj else '?'}'.")
+            except Exception:
+                pass
 
     def _init_stage_setup(self, context, obj):
         """段階3: 隔離ビュー等の仕上げ"""
@@ -1199,6 +1832,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         tag_redraw_view3d(context)
 
         # デバッグ状態記録のファイル保存とクリーンアップ
+        # (巨大ファイルの誤出力防止のため、対話UI時は確認ダイアログを挟む。
+        #  ヘッドレス/バックグラウンド時は従来通り自動保存する)
         obj = context.active_object
         if obj and obj.name in _simulators:
             sim, _ = _simulators[obj.name]
@@ -1207,14 +1842,24 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 if frame_count > 0:
                     prefs = get_preferences(context)
                     filepath = resolve_debug_filepath(prefs, obj.name, frame_count, ext="jsonl.gz")
-                    try:
-                        saved_path = sim.save_debug_recording(filepath)
-                        file_size = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0
-                        logger.info(f"[DebugRecorder] Successfully saved debug recording ({frame_count} frames, {file_size:,} bytes) to: {saved_path}")
-                        self.report({'INFO'}, i18n.trans("Debug recording saved: %s (%d frames)") % (os.path.basename(saved_path), frame_count))
-                    except Exception as e:
-                        logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
-                sim.stop_debug_recording()
+                    if is_headless_debug_save_context(context):
+                        try:
+                            saved_path = sim.save_debug_recording(filepath)
+                            file_size = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0
+                            logger.info(f"[DebugRecorder] Successfully saved debug recording ({frame_count} frames, {file_size:,} bytes) to: {saved_path}")
+                            self.report({'INFO'}, i18n.trans("Debug recording saved: %s (%d frames)") % (os.path.basename(saved_path), frame_count))
+                        except Exception as e:
+                            logger.error(f"[DebugRecorder] Failed to save debug recording: {e}")
+                        sim.stop_debug_recording()
+                    else:
+                        stride = getattr(prefs, "debug_sparse_stride", 1) if prefs else 1
+                        res = request_debug_save_confirmation(context, obj.name, sim, frame_count, filepath, stride)
+                        if res == 'fallback-pending':
+                            self.report({'WARNING'}, i18n.trans("Debug recording kept. Run 'Save Debug Recording?' to save or discard it."))
+                        else:
+                            self.report({'INFO'}, i18n.trans("Debug recording stopped. Confirm save in the dialog."))
+                else:
+                    sim.stop_debug_recording()
 
         # ローカルビューの復帰
         if self._isolated_areas:

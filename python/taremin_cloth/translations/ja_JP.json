@@ -713,5 +713,20 @@
   "Clear Face Layers": "Faceレイヤーをクリア",
   "Assign target layer ID to selected faces": "選択中の面に指定レイヤーIDを割り当てます (重なり合う布の外層/内層を指定)",
   "Select faces that match target layer ID": "指定レイヤーIDを持つ面を選択します",
-  "Clear cloth_layer attribute to use default layer ID": "面ごとのレイヤー指定 (cloth_layer 属性) を削除し、オブジェクト全体のレイヤー設定を使用するようにします"
+  "Clear cloth_layer attribute to use default layer ID": "面ごとのレイヤー指定 (cloth_layer 属性) を削除し、オブジェクト全体のレイヤー設定を使用するようにします",
+  "Save Debug Recording?": "デバッグ記録を保存しますか?",
+  "Confirm saving the debug recording file (may be very large)": "デバッグ記録ファイルの保存を確認します（非常に大きくなる場合があります）",
+  "Debug recording output needs confirmation": "デバッグ記録の出力を確認してください",
+  "Frames: %d": "フレーム数: %d",
+  "Vertices: %d": "頂点数: %d",
+  "Uncompressed: ~%s": "非圧縮: 約%s",
+  "Compressed file (est.): ~%s": "圧縮後ファイル (概算): 約%s",
+  "Output: %s": "出力先: %s",
+  "Save it?": "保存しますか？",
+  "Debug recording stopped. Confirm save in the dialog.": "デバッグ記録を停止しました。ダイアログで保存を確認してください。",
+  "Debug recording discarded": "デバッグ記録を破棄しました",
+  "No debug recording to save": "保存するデバッグ記録がありません",
+  "Cannot show confirmation dialog in this context": "このコンテキストでは確認ダイアログを表示できません",
+  "Debug recording kept. Run 'Save Debug Recording?' to save or discard it.": "デバッグ記録を保持しました。「デバッグ記録を保存しますか?」から保存または破棄してください。",
+  "Debug recording changed since confirmation. Please confirm again.": "確認後にデバッグ記録が変更されました。もう一度確認してください。"
 }

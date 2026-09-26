@@ -713,5 +713,20 @@
   "Clear Face Layers": "Clear Face Layers",
   "Assign target layer ID to selected faces": "Assign target layer ID to selected faces",
   "Select faces that match target layer ID": "Select faces that match target layer ID",
-  "Clear cloth_layer attribute to use default layer ID": "Clear cloth_layer attribute to use default layer ID"
+  "Clear cloth_layer attribute to use default layer ID": "Clear cloth_layer attribute to use default layer ID",
+  "Save Debug Recording?": "Save Debug Recording?",
+  "Confirm saving the debug recording file (may be very large)": "Confirm saving the debug recording file (may be very large)",
+  "Debug recording output needs confirmation": "Debug recording output needs confirmation",
+  "Frames: %d": "Frames: %d",
+  "Vertices: %d": "Vertices: %d",
+  "Uncompressed: ~%s": "Uncompressed: ~%s",
+  "Compressed file (est.): ~%s": "Compressed file (est.): ~%s",
+  "Output: %s": "Output: %s",
+  "Save it?": "Save it?",
+  "Debug recording stopped. Confirm save in the dialog.": "Debug recording stopped. Confirm save in the dialog.",
+  "Debug recording discarded": "Debug recording discarded",
+  "No debug recording to save": "No debug recording to save",
+  "Cannot show confirmation dialog in this context": "Cannot show confirmation dialog in this context",
+  "Debug recording kept. Run 'Save Debug Recording?' to save or discard it.": "Debug recording kept. Run 'Save Debug Recording?' to save or discard it.",
+  "Debug recording changed since confirmation. Please confirm again.": "Debug recording changed since confirmation. Please confirm again."
 }
