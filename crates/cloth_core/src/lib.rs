@@ -2,6 +2,11 @@ pub mod context;
 pub mod config;
 pub mod mesh;
 pub mod coloring;
+pub use coloring::color_edge_pairs;
+pub mod geometry;
+pub use geometry::{find_proximity_violations, find_triangle_intersections, tri_tri_intersect};
+pub mod pair_audit;
+pub use pair_audit::{audit_pairs, AuditResult};
 pub mod smooth;
 pub mod spatial_hash;
 pub mod simulation;
@@ -11,7 +16,7 @@ pub mod sdf_baker;
 
 pub use context::{GpuBufferLimits, GpuContext, GpuContextError, GpuDeviceInfo};
 pub use config::SimConfig;
-pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams};
+pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams, areal_inv_masses};
 pub use smooth::{
     TENSION_EXPAND, GRAB_PIN_THRESHOLD,
     FALLOFF_SMOOTH, FALLOFF_SPHERE, FALLOFF_SHARP, FALLOFF_LINEAR, FALLOFF_CONSTANT,

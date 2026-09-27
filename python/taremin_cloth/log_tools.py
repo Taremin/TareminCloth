@@ -497,34 +497,49 @@ def cmd_render_coloring(args: argparse.Namespace) -> None:
     edges_arr = np.array(edges, dtype=np.uint32)
     num_constraints = len(edges_arr)
 
-    # Welsh-Powell グラフ彩色
-    adj = [[] for _ in range(num_vertices)]
-    for idx, (v0, v1) in enumerate(edges_arr):
-        if v0 < num_vertices:
-            adj[v0].append(idx)
-        if v1 < num_vertices:
-            adj[v1].append(idx)
+    # Welsh-Powell グラフ彩色 (Rust核を正本とし、利用可能な場合は優先)
+    colors = None
+    try:
+        import taremin_cloth_core as _core
 
-    order = list(range(num_constraints))
-    order.sort(key=lambda i: len(adj[edges_arr[i][0]]) + len(adj[edges_arr[i][1]]), reverse=True)
+        if hasattr(_core, "color_edge_pairs"):
+            colors = list(
+                _core.color_edge_pairs(
+                    int(num_vertices), np.ascontiguousarray(edges_arr, dtype=np.uint32)
+                )
+            )
+    except Exception:
+        colors = None
+    if colors is None:
+        adj = [[] for _ in range(num_vertices)]
+        for idx, (v0, v1) in enumerate(edges_arr):
+            if v0 < num_vertices:
+                adj[v0].append(idx)
+            if v1 < num_vertices:
+                adj[v1].append(idx)
 
-    colors = [-1] * num_constraints
-    num_colors = 0
-    for i in order:
-        v0, v1 = edges_arr[i]
-        used = set()
-        for adj_i in adj[v0]:
-            if adj_i != i and colors[adj_i] != -1:
-                used.add(colors[adj_i])
-        for adj_i in adj[v1]:
-            if adj_i != i and colors[adj_i] != -1:
-                used.add(colors[adj_i])
-        c = 0
-        while c in used:
-            c += 1
-        colors[i] = c
-        if c >= num_colors:
-            num_colors = c + 1
+        order = list(range(num_constraints))
+        order.sort(key=lambda i: len(adj[edges_arr[i][0]]) + len(adj[edges_arr[i][1]]), reverse=True)
+
+        colors = [-1] * num_constraints
+        num_colors = 0
+        for i in order:
+            v0, v1 = edges_arr[i]
+            used = set()
+            for adj_i in adj[v0]:
+                if adj_i != i and colors[adj_i] != -1:
+                    used.add(colors[adj_i])
+            for adj_i in adj[v1]:
+                if adj_i != i and colors[adj_i] != -1:
+                    used.add(colors[adj_i])
+            c = 0
+            while c in used:
+                c += 1
+            colors[i] = c
+            if c >= num_colors:
+                num_colors = c + 1
+    else:
+        num_colors = (max(colors) + 1) if colors else 0
 
     print(f"=== {name} Welsh-Powell 彩色統計 ===")
     print(f"  総拘束数: {num_constraints}")

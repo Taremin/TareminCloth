@@ -17,13 +17,6 @@ try:
 except ImportError:
     bpy = None
 
-try:
-    import mathutils
-    from mathutils.bvhtree import BVHTree
-    HAS_MATHUTILS_BVH = True
-except ImportError:
-    HAS_MATHUTILS_BVH = False
-
 
 # Mesh SDF 用の既定VRAM予算 (MB)。
 # 旧既定値 256 は wgpu のデフォルト下限（最小保証値）に由来する保守値であり、
@@ -505,19 +498,6 @@ def compute_mesh_signature(
     return hasher.hexdigest()[:16]
 
 
-def compute_vertex_normals(verts: np.ndarray, tris: np.ndarray) -> np.ndarray:
-    """メッシュ頂点の外向き法線を計算する"""
-    normals = np.zeros_like(verts, dtype=np.float32)
-    v0 = verts[tris[:, 0]]
-    v1 = verts[tris[:, 1]]
-    v2 = verts[tris[:, 2]]
-    face_normals = np.cross(v1 - v0, v2 - v0)
-    for i in range(3):
-        np.add.at(normals, tris[:, i], face_normals)
-    lens = np.linalg.norm(normals, axis=-1, keepdims=True)
-    return normals / np.maximum(lens, 1e-8)
-
-
 def bake_bone_sdf_from_data(
     mesh_verts: np.ndarray,               # shape: [V, 3] (メッシュ空間)
     mesh_tris: np.ndarray,                # shape: [F, 3] (三角形インデックス)
@@ -554,206 +534,45 @@ def bake_bone_sdf_from_data(
 
     n_cols, n_rows, n_layers, res, total_width, total_height, total_depth = compute_3d_atlas_layout(n_bones, resolution)
 
-    gpu_baked = False
-    texture_bytes = b""
-    bone_infos_arr = np.zeros((0, 20), dtype=np.float32)
-    bind_matrices_arr = np.zeros((0, 4, 4), dtype=np.float32)
+    # 2. GPUコンピュートシェーダーによる並列ベイク (GPU必須)。
+    # XPBD本体がGPUなしで動作しないため、CPUフォールバックは持たない。
+    # メッシュSDF (`bake_mesh_sdf_from_data`) と同様、失敗時は例外とする。
+    import taremin_cloth_core
+    if not hasattr(taremin_cloth_core, "bake_bone_sdf_gpu") or not taremin_cloth_core.is_gpu_available():
+        raise RuntimeError(
+            "[SDF Baker] GPUが利用できないためボーンSDFをベイクできません。"
+            "Taremin Cloth の動作にはGPU (wgpu対応デバイス) が必須です"
+        )
+    logger.info(f"[SDF Baker] GPUコンピュートシェーダーによる高速並列ベイクを実行中...")
+    t_start = time.time()
+    b_weights_list = [np.ascontiguousarray(bone_weights[b], dtype=np.float32) for b in active_bones]
+    b_mats_list = np.ascontiguousarray([bone_bind_matrices[b] for b in active_bones], dtype=np.float32)
 
-    # 2. GPUコンピュートシェーダーによる並列ベイクの優先試行
     try:
-        import taremin_cloth_core
-        if hasattr(taremin_cloth_core, "bake_bone_sdf_gpu") and taremin_cloth_core.is_gpu_available():
-            logger.info(f"[SDF Baker] GPUコンピュートシェーダーによる高速並列ベイクを実行中...")
-            t_start = time.time()
-            b_weights_list = [np.ascontiguousarray(bone_weights[b], dtype=np.float32) for b in active_bones]
-            b_mats_list = np.ascontiguousarray([bone_bind_matrices[b] for b in active_bones], dtype=np.float32)
-
-            gpu_dict = taremin_cloth_core.bake_bone_sdf_gpu(
-                mesh_verts=np.ascontiguousarray(mesh_verts, dtype=np.float32),
-                mesh_tris=np.ascontiguousarray(mesh_tris, dtype=np.int32),
-                bone_names=active_bones,
-                bone_weights=b_weights_list,
-                bone_bind_matrices=b_mats_list,
-                resolution=int(resolution),
-                margin=float(margin),
-                weight_threshold=float(weight_threshold),
-                blend_k=float(blend_k),
-                friction=float(friction),
-                thickness=float(thickness),
-                restitution=float(restitution),
-            )
-            texture_bytes = gpu_dict["texture_bytes"]
-            total_width = int(gpu_dict["width"])
-            total_height = int(gpu_dict["height"])
-            total_depth = int(gpu_dict["depth"])
-            bone_infos_arr = np.ascontiguousarray(gpu_dict["bone_infos"], dtype=np.float32)
-            bind_matrices_arr = np.ascontiguousarray(gpu_dict["bind_matrices"], dtype=np.float32)
-            active_bones = list(gpu_dict["active_bones"])
-            gpu_baked = True
-            logger.info(f"[SDF Baker] GPUベイク完了 ({time.time() - t_start:.3f}秒, {len(active_bones)} 本)")
+        gpu_dict = taremin_cloth_core.bake_bone_sdf_gpu(
+            mesh_verts=np.ascontiguousarray(mesh_verts, dtype=np.float32),
+            mesh_tris=np.ascontiguousarray(mesh_tris, dtype=np.int32),
+            bone_names=active_bones,
+            bone_weights=b_weights_list,
+            bone_bind_matrices=b_mats_list,
+            resolution=int(resolution),
+            margin=float(margin),
+            weight_threshold=float(weight_threshold),
+            blend_k=float(blend_k),
+            friction=float(friction),
+            thickness=float(thickness),
+            restitution=float(restitution),
+        )
     except Exception as e:
-        logger.warning(f"[SDF Baker] GPUベイク失敗、CPUフォールバックを実行します: {e}")
-        gpu_baked = False
-
-    # 3. CPUフォールバック (BVHTree または NumPy)
-    if not gpu_baked:
-        logger.info(f"[SDF Baker] CPUフォールバックベイクを開始します...")
-        bvh = None
-        if HAS_MATHUTILS_BVH:
-            verts_math = [mathutils.Vector(v) for v in mesh_verts]
-            polys = [tuple(t) for t in mesh_tris]
-            bvh = BVHTree.FromPolygons(verts_math, polys, all_triangles=True)
-
-        vram_bytes = total_width * total_height * total_depth * 4  # Rg16Float (4 bytes/voxel)
-        vram_mb = vram_bytes / (1024 * 1024)
-        if vram_mb > 1500.0:
-            logger.warning(
-                f"[SDF Baker] 警告: SDFテクスチャの推定VRAM使用量が大きいです: {vram_mb:.1f} MB ({total_width}x{total_height}x{total_depth})"
-            )
-
-        atlas_3d = np.zeros((total_depth, total_height, total_width, 2), dtype=np.float16)
-        bone_infos_list = []
-        bind_matrices_list = []
-
-        for b_idx, b_name in enumerate(active_bones):
-            w_arr = bone_weights[b_name]
-            valid_indices = np.where(w_arr > weight_threshold)[0]
-            if len(valid_indices) == 0:
-                continue
-
-            mat_inv = bone_bind_matrices[b_name]  # メッシュ空間 -> ボーン空間
-            try:
-                mat_fwd = np.linalg.inv(mat_inv)  # ボーン空間 -> メッシュ空間
-            except np.linalg.LinAlgError:
-                mat_fwd = np.eye(4, dtype=np.float32)
-
-            verts_target = mesh_verts[valid_indices]
-            ones = np.ones((len(verts_target), 1), dtype=np.float32)
-            v_homo = np.hstack([verts_target, ones])
-            v_local = (v_homo @ mat_inv.T)[:, :3]
-
-            local_min = np.min(v_local, axis=0)
-            local_max = np.max(v_local, axis=0)
-            size = local_max - local_min
-            size = np.maximum(size, 0.05)
-            local_min -= size * margin
-            local_max += size * margin
-            size = local_max - local_min
-
-            b_per_layer = n_cols * n_rows
-            l = b_idx // b_per_layer
-            rem = b_idx % b_per_layer
-            r = rem // n_cols
-            c = rem % n_cols
-
-            uvw_scale_local = 1.0 / size
-            uvw_offset_local = -local_min / size
-
-            atlas_uvw_scale = np.array([
-                uvw_scale_local[0] / float(n_cols),
-                uvw_scale_local[1] / float(n_rows),
-                uvw_scale_local[2] / float(n_layers),
-                blend_k,
-            ], dtype=np.float32)
-
-            atlas_uvw_offset = np.array([
-                (uvw_offset_local[0] + float(c)) / float(n_cols),
-                (uvw_offset_local[1] + float(r)) / float(n_rows),
-                (uvw_offset_local[2] + float(l)) / float(n_layers),
-                0.0,
-            ], dtype=np.float32)
-
-            bone_params = np.array([friction, thickness, restitution, weight_threshold], dtype=np.float32)
-
-            info_row = np.concatenate([
-                np.append(local_min, float(b_idx)),
-                np.append(local_max, float(res)),
-                atlas_uvw_scale,
-                atlas_uvw_offset,
-                bone_params,
-            ]).astype(np.float32)
-            bone_infos_list.append(info_row)
-            bind_matrices_list.append(mat_inv)
-
-            grid_x = np.linspace(local_min[0], local_max[0], res, dtype=np.float32)
-            grid_y = np.linspace(local_min[1], local_max[1], res, dtype=np.float32)
-            grid_z = np.linspace(local_min[2], local_max[2], res, dtype=np.float32)
-            gx, gy, gz = np.meshgrid(grid_x, grid_y, grid_z, indexing='ij')
-
-            pts_local = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=-1)
-            ones_pts = np.ones((len(pts_local), 1), dtype=np.float32)
-            pts_mesh = (np.hstack([pts_local, ones_pts]) @ mat_fwd.T)[:, :3]
-
-            dists = np.zeros(len(pts_mesh), dtype=np.float32)
-            alphas = np.zeros(len(pts_mesh), dtype=np.float32)
-
-            if bvh is not None:
-                for p_idx, pt in enumerate(pts_mesh):
-                    v_pt = mathutils.Vector((pt[0], pt[1], pt[2]))
-                    loc, norm, poly_idx, d = bvh.find_nearest(v_pt)
-                    if loc is not None:
-                        diff = v_pt - loc
-                        sign = 1.0 if diff.dot(norm) >= 0.0 else -1.0
-                        dists[p_idx] = d * sign
-                        tri = mesh_tris[poly_idx]
-                        tri_weights = w_arr[tri]
-                        alphas[p_idx] = np.mean(tri_weights)
-                    else:
-                        dists[p_idx] = 10.0
-                        alphas[p_idx] = 0.0
-            else:
-                vert_normals = compute_vertex_normals(mesh_verts, mesh_tris)
-                sub_verts = mesh_verts[valid_indices]
-                sub_weights = w_arr[valid_indices]
-                sub_normals = vert_normals[valid_indices]
-
-                tri_v0 = mesh_verts[mesh_tris[:, 0]]
-                tri_v1 = mesh_verts[mesh_tris[:, 1]]
-                tri_v2 = mesh_verts[mesh_tris[:, 2]]
-                tri_centers = (tri_v0 + tri_v1 + tri_v2) / 3.0
-                tri_normals = np.cross(tri_v1 - tri_v0, tri_v2 - tri_v0)
-                tri_lens = np.linalg.norm(tri_normals, axis=-1, keepdims=True)
-                tri_normals = tri_normals / np.maximum(tri_lens, 1e-8)
-
-                chunk_size = 2048
-                for c_start in range(0, len(pts_mesh), chunk_size):
-                    c_end = min(c_start + chunk_size, len(pts_mesh))
-                    p_chunk = pts_mesh[c_start:c_end]
-
-                    diffs_v = p_chunk[:, np.newaxis, :] - sub_verts[np.newaxis, :, :]
-                    sq_dists_v = np.sum(diffs_v * diffs_v, axis=-1)
-                    nearest_v_idx = np.argmin(sq_dists_v, axis=-1)
-                    min_dv = np.sqrt(sq_dists_v[np.arange(len(p_chunk)), nearest_v_idx])
-
-                    diffs_t = p_chunk[:, np.newaxis, :] - tri_centers[np.newaxis, :, :]
-                    sq_dists_t = np.sum(diffs_t * diffs_t, axis=-1)
-                    nearest_t_idx = np.argmin(sq_dists_t, axis=-1)
-
-                    best_t = nearest_t_idx
-                    t_norm = tri_normals[best_t]
-                    t_center = tri_centers[best_t]
-                    dot_t = np.sum((p_chunk - t_center) * t_norm, axis=-1)
-
-                    plane_dist = np.abs(dot_t)
-                    min_d = np.minimum(min_dv, plane_dist)
-
-                    signs = np.where(dot_t >= 0.0, 1.0, -1.0)
-                    dists[c_start:c_end] = min_d * signs
-                    alphas[c_start:c_end] = sub_weights[nearest_v_idx]
-
-            dists_3d = dists.reshape((res, res, res))
-            alphas_3d = alphas.reshape((res, res, res))
-            bone_voxels_xyz = np.stack([dists_3d, alphas_3d], axis=-1)
-            bone_voxels_zyx = np.transpose(bone_voxels_xyz, (2, 1, 0, 3)).astype(np.float16)
-
-            z0, z1 = l * res, (l + 1) * res
-            y0, y1 = r * res, (r + 1) * res
-            x0, x1 = c * res, (c + 1) * res
-            atlas_3d[z0:z1, y0:y1, x0:x1, :] = bone_voxels_zyx
-
-        texture_bytes = np.ascontiguousarray(atlas_3d).tobytes()
-        bone_infos_arr = np.array(bone_infos_list, dtype=np.float32)
-        bind_matrices_arr = np.array(bind_matrices_list, dtype=np.float32)
+        raise RuntimeError(f"[SDF Baker] GPUベイクに失敗しました: {e}") from e
+    texture_bytes = gpu_dict["texture_bytes"]
+    total_width = int(gpu_dict["width"])
+    total_height = int(gpu_dict["height"])
+    total_depth = int(gpu_dict["depth"])
+    bone_infos_arr = np.ascontiguousarray(gpu_dict["bone_infos"], dtype=np.float32)
+    bind_matrices_arr = np.ascontiguousarray(gpu_dict["bind_matrices"], dtype=np.float32)
+    active_bones = list(gpu_dict["active_bones"])
+    logger.info(f"[SDF Baker] GPUベイク完了 ({time.time() - t_start:.3f}秒, {len(active_bones)} 本)")
 
     # ハイブリッド用に関節部三角形インデックスを抽出 (親子階層自動抽出方式、または主要関節フォールバック)
     joint_face_indices = np.empty(0, dtype=np.int32)
@@ -1174,23 +993,27 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
             )
             return cached
 
-    # ベイク実行
-    result = bake_bone_sdf_from_data(
-        mesh_verts=mesh_verts,
-        mesh_tris=mesh_tris,
-        bone_weights=bone_weights,
-        bone_bind_matrices=bone_bind_matrices,
-        resolution=resolution,
-        margin=margin,
-        weight_threshold=weight_threshold,
-        blend_k=blend_k,
-        friction=float(col_settings.friction),
-        thickness=float(col_settings.thickness),
-        restitution=float(getattr(col_settings, "restitution", 0.0)),
-        enable_joint_mesh=enable_joint_mesh,
-        joint_weight_threshold=joint_weight_threshold,
-        bone_parent_map=bone_parent_map,
-    )
+    # ベイク実行 (GPU必須。失敗時はコライダー未登録として続行)
+    try:
+        result = bake_bone_sdf_from_data(
+            mesh_verts=mesh_verts,
+            mesh_tris=mesh_tris,
+            bone_weights=bone_weights,
+            bone_bind_matrices=bone_bind_matrices,
+            resolution=resolution,
+            margin=margin,
+            weight_threshold=weight_threshold,
+            blend_k=blend_k,
+            friction=float(col_settings.friction),
+            thickness=float(col_settings.thickness),
+            restitution=float(getattr(col_settings, "restitution", 0.0)),
+            enable_joint_mesh=enable_joint_mesh,
+            joint_weight_threshold=joint_weight_threshold,
+            bone_parent_map=bone_parent_map,
+        )
+    except Exception as e:
+        logger.error(f"[SDF Baker] ベイク失敗のためコライダーは未登録のまま続行します: {e}")
+        return None
 
     if result is not None and result.depth > 0:
         ok, reason = check_sdf_texture_integrity(

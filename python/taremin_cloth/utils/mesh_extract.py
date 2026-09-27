@@ -7,6 +7,14 @@ Blenderの bpy.types.Mesh から NumPy 配列へのゼロコピー/一括デー�
 from typing import NamedTuple, Optional, Tuple
 import numpy as np
 
+try:
+    import taremin_cloth_core as _core
+
+    _RUST_AREAL = hasattr(_core, "compute_areal_inv_masses")
+except Exception:
+    _core = None
+    _RUST_AREAL = False
+
 
 class ClothMeshData(NamedTuple):
     """布シミュレーション初期化に必要なメッシュデータコンテナ"""
@@ -91,7 +99,24 @@ def compute_areal_inv_masses(
     各三角形の面積に面密度 (kg/m2) を掛けた質量を3頂点へ等分配し、
     ピンウェイト (1.0=完全固定) との積で逆質量を求める。
     面を持たない孤立頂点は微小質量として扱い、ゼロ除算を防ぐ。
+    Rust核 (`taremin_cloth_core.compute_areal_inv_masses`) を正本とし、
+    利用可能な場合はそちらを優先する。NumPy実装はフォールバック。
     """
+    if _RUST_AREAL:
+        try:
+            pos_c = np.ascontiguousarray(positions, dtype=np.float32)
+            faces_c = None
+            if faces is not None and len(faces) > 0:
+                faces_c = np.ascontiguousarray(faces, dtype=np.uint32)
+            pin_c = None
+            if pin_weights is not None and len(pin_weights) == len(positions):
+                pin_c = np.ascontiguousarray(pin_weights, dtype=np.float32)
+            return np.asarray(
+                _core.compute_areal_inv_masses(pos_c, faces_c, pin_c, float(areal_density)),
+                dtype=np.float32,
+            )
+        except Exception:
+            pass
     n_verts = len(positions)
     masses = np.zeros(n_verts, dtype=np.float64)
     if faces is not None and len(faces) > 0 and areal_density > 0.0:

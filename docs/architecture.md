@@ -188,6 +188,8 @@ GPU構造体は、16バイト境界アライメント（WGSL仕様）に厳密�
 ```rust
 // 頂点データ (GPU Buffer: Read/Write)
 // inv_mass は三角形面積から算出した質量 (kg) の逆数。areal_density (kg/m2) から算出。
+// 面積分配の正本は Rust (`mesh::areal_inv_masses`) であり、
+// Python (`utils/mesh_extract.compute_areal_inv_masses`) は `taremin_cloth_core` 経由で委譲します（NumPy実装はフォールバック）。
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuVertex {
@@ -332,6 +334,7 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
 
 - 同一色グループ内の拘束は互いに頂点を共有しないため、アトミック操作なしに完全並列でディスパッチ可能です。
 - 各色グループの拘束数およびバッファオフセットは `color_counts` / `color_offsets` によりGPUディスパッチ時に管理されます。
+- 検証・可視化用途の汎用エッジ彩色は Rust (`coloring::color_edge_pairs`) を正本とし、`taremin_cloth_core.color_edge_pairs` 経由で `log_tools render-coloring` が利用します（Python実装はフォールバック）。
 
 ---
 
@@ -353,11 +356,12 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
 6. **Blender非依存の高速解析 (`python -m taremin_cloth.log_tools`)**:
    - デバッグレコーダーが出力する `.jsonl.gz` を活用し、Blender非依存のCLIおよびPythonテストコード上でサブステップ解析・異常検出を実行。
    - 可変パラメータは `SimConfig` (`crates/cloth_core/src/config.rs`) に一本化し、`export_config/apply_config` で記録・再生する。新規パラメータは `tests/core/test_config_parity.py` が写像漏れを検出する。
-   - `FrameStats` に `vt/ee_count・vt_saturated・max_strain・config_hash` を記録し、`inspect` でPair飽和と設定変更を検出する。条件付きブレーク (`watch`) と精度監査 (`audit`) については `AGENTS.md` §5 を参照。
+   - `FrameStats` に `vt/ee_count・vt_saturated・max_strain・config_hash` を記録し、`inspect` でPair飽和と設定変更を検出する。条件付きブレーク (`watch`) と精度監査 (`audit`) については `AGENTS.md` §5 を参照。ペア監査の真値判定 (`pair_audit.audit_frame`) の正本は Rust (`pair_audit::audit_pairs`) であり、Pythonは `taremin_cloth_core` 経由で委譲する（方策実験系はPython残留）。
    - 2階層記録 (`DebugRecordOptions`, `debug_recorder.rs`): `full_stride` 間引きでフル座標を削減し、間欠フレームは stats+pins/colliders のみ持つスタブとして保存する。`ring_size/lookahead` と変位・速度・歪み・飽和・NaN・設定変更トリガーにより、発火前後の文脈フルを自動復元する。スタブ形式ファイルは `version: 3` で識別され、`replayer`/`log_tools` は入力連続性を保ちつつフル区間のみ比較・描画する (`tests/core/test_sparse_recording.py`)。
    - パラメータ同期一本化 (`python/taremin_cloth/engine/simconfig.py`): Blender設定→`SimConfig`辞書の収集は本モジュールのみが行い、`params.py` (In-proc毎フレーム同期・署名差分スキップ)、`gui_client.py` (GUI転送辞書)、`cache.py` (無効化署名) が共有する。新パラメータは `tests/core/test_simconfig_sync.py` が収集網羅・往復一致・署名感度を検証する。GUIサーバー (`crates/cloth_gui`) のInitScene適用も `apply_config` 一括化し、旧来の `max_iterations=256` ハードコード等を排除した。転送プロトコルは serde 既定値により前後互換 (`protocol.rs` 単体テストで検証)。
    - フレーム途中変更の再現 (`param_deltas`): 設定変更フレームのみ当時のフル`SimConfig`を保存し (初回は`metadata.config`)、`replay_range/replay_until/trace_substeps` は開始時点までの差分を折り畳んで適用する (`tests/core/test_param_deltas.py`)。`watch --stop-on config` で変更点停止も可能。
    - 解放後残存貫通の診断: `watch --require-release --persist N` (ピン数減少でアームしN連続成立で発火。grab中の瞬間貫通を除外) と `audit-cache` (同一ログのON/OFF再現で起因判定。再記録不要) を併用する。
+    - 検証幾何の正本は Rust (`geometry::tri_tri_intersect/find_triangle_intersections/find_proximity_violations`) であり、Python (`analysis.py`) は `taremin_cloth_core` 経由で委譲する（NumPy実装はフォールバック）。parityは `tests/core/test_geometry_public_api.py` が検証する。
    - メタデータ完全化: 頂点毎厚み・レイヤー、元メッシュ辺 (`original_edges`、せん断対角を除外してリプレイ再構築の型崩れを防止)、辺スケール差分 (`elastic_scales`)、BONE_SDF (テクスチャ＋姿勢。動的再ベイク有効時はテクスチャが古くなる旨を記録)、縫合現在自然長＋優先ラッチ状態を記録する。旧フィールドの剛性換算 (1000倍ズレ) も修正済み。
    - 再現性の既知の制限: stiffなスナップ遷移・活発な自己接触下ではGPU実行順序の非決定性がmm級に増幅される (双子実行同士でも再現しない)。穏やかな regime ではbit級に一致する。`make-test` の厳密一致判定は穏やかな区間に用い、激しい区間は `audit-pairs` とトポロジー検査で診断すること。
 

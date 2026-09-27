@@ -2,10 +2,16 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
+    areal_inv_masses as core_areal_inv_masses,
+    audit_pairs as core_audit_pairs,
+    find_proximity_violations as core_proximity_violations,
+    find_triangle_intersections as core_triangle_intersections,
     bake_bone_sdf_gpu as core_bake_bone_sdf_gpu,
     bake_mesh_sdf_gpu as core_bake_mesh_sdf_gpu,
     bake_mesh_sdf_hierarchical as core_bake_mesh_sdf_hierarchical,
     BoneInput, ClothMesh, DynamicBoneSdfSetup,
+    color_edge_pairs as core_color_edge_pairs,
+    tri_tri_intersect as core_tri_tri_intersect,
     GpuBakeParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuClothSimulator,
     GpuContext, GpuMeshTriangle, GpuSkinningVertex,
     build_adjacency_csr as core_build_adjacency_csr,
@@ -502,6 +508,264 @@ fn brush_ray_plane_hit(
     plane_normal: [f32; 3],
 ) -> Option<[f32; 3]> {
     core_ray_plane_hit(origin, direction, plane_point, plane_normal)
+}
+
+/// 面密度とピンウェイトから物理単位の逆質量配列 [N] を計算する。
+/// 純CPU・GPU初期化不要。Python `utils/mesh_extract.compute_areal_inv_masses` と同一仕様でRustを正本とする。
+#[pyfunction]
+#[pyo3(signature = (positions, faces=None, pin_weights=None, areal_density=0.15))]
+fn compute_areal_inv_masses<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    faces: Option<PyReadonlyArray2<u32>>,
+    pin_weights: Option<PyReadonlyArray1<f32>>,
+    areal_density: f32,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
+    let p_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "positions配列の各頂点は3次元である必要があります",
+            ));
+        }
+        pos_vec.push([row[0], row[1], row[2]]);
+    }
+    let mut face_storage: Vec<[u32; 3]> = Vec::new();
+    if let Some(f_arr) = faces {
+        let f_view = f_arr.as_array();
+        face_storage.reserve(f_view.shape()[0]);
+        for row in f_view.outer_iter() {
+            if row.len() >= 3 {
+                face_storage.push([row[0], row[1], row[2]]);
+            }
+        }
+    }
+    let faces_opt = if face_storage.is_empty() {
+        None
+    } else {
+        Some(face_storage.as_slice())
+    };
+    let pin_vec: Option<Vec<f32>> = pin_weights.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
+    let inv = core_areal_inv_masses(&pos_vec, faces_opt, pin_vec.as_deref(), areal_density);
+    Ok(PyArray1::from_vec(py, inv))
+}
+
+/// 汎用エッジペアのWelsh-Powell彩色で拘束ごとの色番号 [E] を返す。
+/// 純CPU・GPU初期化不要。Python `log_tools.render-coloring` と同一仕様でRustを正本とする。
+#[pyfunction]
+fn color_edge_pairs(num_vertices: usize, edges: PyReadonlyArray2<u32>) -> PyResult<Vec<u32>> {
+    let e_view = edges.as_array();
+    let mut pairs = Vec::with_capacity(e_view.shape()[0]);
+    for row in e_view.outer_iter() {
+        if row.len() >= 2 {
+            pairs.push([row[0], row[1]]);
+        }
+    }
+    Ok(core_color_edge_pairs(num_vertices, &pairs))
+}
+
+/// 接触候補ペアキャッシュのカバレッジ監査。純CPU・GPU初期化不要。
+/// Python `pair_audit.audit_frame` と同一仕様でRustを正本とする。
+#[pyfunction]
+#[pyo3(signature = (prev_pos, prev_vel, curr_pos, vt_pairs, ee_pairs, vt_count, ee_count, faces, edges, thickness=0.005, safety_margin=0.005, horizon_scale=1.3, max_horizon=0.02, margin_mode=1, dt_frame=0.016666667, max_vt_pairs=65536, max_ee_pairs=65536))]
+fn audit_pairs<'py>(
+    py: Python<'py>,
+    prev_pos: PyReadonlyArray2<f64>,
+    prev_vel: Option<PyReadonlyArray2<f64>>,
+    curr_pos: PyReadonlyArray2<f64>,
+    vt_pairs: PyReadonlyArray2<u32>,
+    ee_pairs: PyReadonlyArray2<u32>,
+    vt_count: u32,
+    ee_count: u32,
+    faces: PyReadonlyArray2<u32>,
+    edges: PyReadonlyArray2<u32>,
+    thickness: f64,
+    safety_margin: f64,
+    horizon_scale: f64,
+    max_horizon: f64,
+    margin_mode: u32,
+    dt_frame: f64,
+    max_vt_pairs: u32,
+    max_ee_pairs: u32,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn to_v3(m: &numpy::ndarray::ArrayView2<f64>) -> PyResult<Vec<[f64; 3]>> {
+        let mut out = Vec::with_capacity(m.shape()[0]);
+        for row in m.outer_iter() {
+            if row.len() != 3 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "座標配列の各行は3次元である必要があります",
+                ));
+            }
+            out.push([row[0], row[1], row[2]]);
+        }
+        Ok(out)
+    }
+    let prev = to_v3(&prev_pos.as_array())?;
+    let curr = to_v3(&curr_pos.as_array())?;
+    if prev.len() != curr.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "prev_pos と curr_pos の頂点数が一致しません",
+        ));
+    }
+    let vel_storage;
+    let vel_opt = match prev_vel {
+        Some(v) => {
+            vel_storage = to_v3(&v.as_array())?;
+            if vel_storage.len() != prev.len() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "prev_vel の頂点数が一致しません",
+                ));
+            }
+            Some(vel_storage.as_slice())
+        }
+        None => None,
+    };
+    let mut vt_vec = Vec::new();
+    for row in vt_pairs.as_array().outer_iter() {
+        if row.len() >= 4 {
+            vt_vec.push([row[0], row[1], row[2], row[3]]);
+        }
+    }
+    let mut ee_vec = Vec::new();
+    for row in ee_pairs.as_array().outer_iter() {
+        if row.len() >= 4 {
+            ee_vec.push([row[0], row[1], row[2], row[3]]);
+        }
+    }
+    let mut face_vec = Vec::new();
+    for row in faces.as_array().outer_iter() {
+        if row.len() >= 3 {
+            face_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+    let mut edge_vec = Vec::new();
+    for row in edges.as_array().outer_iter() {
+        if row.len() >= 2 {
+            edge_vec.push([row[0], row[1]]);
+        }
+    }
+    let r = core_audit_pairs(
+        &prev,
+        vel_opt,
+        &curr,
+        &vt_vec,
+        &ee_vec,
+        vt_count,
+        ee_count,
+        &face_vec,
+        &edge_vec,
+        thickness,
+        safety_margin,
+        horizon_scale,
+        max_horizon,
+        margin_mode,
+        dt_frame,
+        max_vt_pairs,
+        max_ee_pairs,
+    );
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("vt_ground", r.vt_ground)?;
+    d.set_item("vt_hit", r.vt_hit)?;
+    d.set_item("vt_coverage", r.vt_coverage)?;
+    d.set_item("vt_missed", r.vt_missed)?;
+    d.set_item("vt_miss_horizon", r.vt_miss_horizon)?;
+    d.set_item("vt_miss_other", r.vt_miss_other)?;
+    d.set_item("vt_stale", r.vt_stale)?;
+    d.set_item("vt_cached", r.vt_cached)?;
+    d.set_item("vt_dropped", r.vt_dropped)?;
+    d.set_item("ee_ground", r.ee_ground)?;
+    d.set_item("ee_hit", r.ee_hit)?;
+    d.set_item("ee_coverage", r.ee_coverage)?;
+    d.set_item("ee_missed", r.ee_missed)?;
+    d.set_item("ee_miss_horizon", r.ee_miss_horizon)?;
+    d.set_item("ee_miss_other", r.ee_miss_other)?;
+    d.set_item("ee_stale", r.ee_stale)?;
+    d.set_item("ee_cached", r.ee_cached)?;
+    d.set_item("ee_dropped", r.ee_dropped)?;
+    d.set_item("check_static", r.check_static)?;
+    Ok(d)
+}
+
+/// Möller (1997) 三角形交差判定1件。純CPU・GPU初期化不要。
+#[pyfunction]
+fn tri_tri_intersect(
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    u0: [f32; 3],
+    u1: [f32; 3],
+    u2: [f32; 3],
+) -> bool {
+    core_tri_tri_intersect(v0, v1, v2, u0, u1, u2)
+}
+
+/// 自己交差三角形ペア検出。純CPU・GPU初期化不要。
+/// Python `analysis.find_triangle_intersections` と同一仕様でRustを正本とする。
+#[pyfunction]
+#[pyo3(signature = (positions, faces, ignore_adjacent=true, cell_size=None))]
+fn find_triangle_intersections(
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    ignore_adjacent: bool,
+    cell_size: Option<f32>,
+) -> PyResult<Vec<(u32, u32)>> {
+    let p_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "positions配列の各頂点は3次元である必要があります",
+            ));
+        }
+        pos_vec.push([row[0], row[1], row[2]]);
+    }
+    let f_view = faces.as_array();
+    let mut face_vec = Vec::with_capacity(f_view.shape()[0]);
+    for row in f_view.outer_iter() {
+        if row.len() >= 3 {
+            face_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+    Ok(core_triangle_intersections(&pos_vec, &face_vec, ignore_adjacent, cell_size)
+        .into_iter()
+        .map(|[a, b]| (a, b))
+        .collect())
+}
+
+/// 厚み未満接近の頂点-面ペア検出。純CPU・GPU初期化不要。
+/// Python `analysis.find_proximity_violations` と同一仕様でRustを正本とする。
+#[pyfunction]
+#[pyo3(signature = (positions, faces, thickness=0.005, ignore_adjacent=true))]
+fn find_proximity_violations(
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    thickness: f32,
+    ignore_adjacent: bool,
+) -> PyResult<Vec<(u32, u32, f32)>> {
+    let p_view = positions.as_array();
+    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
+    for row in p_view.outer_iter() {
+        if row.len() != 3 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "positions配列の各頂点は3次元である必要があります",
+            ));
+        }
+        pos_vec.push([row[0], row[1], row[2]]);
+    }
+    let f_view = faces.as_array();
+    let mut face_vec = Vec::with_capacity(f_view.shape()[0]);
+    for row in f_view.outer_iter() {
+        if row.len() >= 3 {
+            face_vec.push([row[0], row[1], row[2]]);
+        }
+    }
+    Ok(core_proximity_violations(
+        &pos_vec,
+        &face_vec,
+        thickness,
+        ignore_adjacent,
+    ))
 }
 
 /// メモリ上のRGBバイト配列を直接返却する高速レンダリング関数 (ディスクI/Oなし)
@@ -2228,6 +2492,12 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(brush_radial_adjust, m)?)?;
     m.add_function(wrap_pyfunction!(brush_grab_drag_targets, m)?)?;
     m.add_function(wrap_pyfunction!(brush_ray_plane_hit, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_areal_inv_masses, m)?)?;
+    m.add_function(wrap_pyfunction!(color_edge_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(tri_tri_intersect, m)?)?;
+    m.add_function(wrap_pyfunction!(find_triangle_intersections, m)?)?;
+    m.add_function(wrap_pyfunction!(find_proximity_violations, m)?)?;
+    m.add_function(wrap_pyfunction!(audit_pairs, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

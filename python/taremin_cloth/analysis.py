@@ -6,6 +6,21 @@ Blender非依存で、NumPy配列ベースの高速幾何計算を提供しま�
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
+try:
+    import taremin_cloth_core as _core
+
+    _RUST_GEOMETRY = all(
+        hasattr(_core, n)
+        for n in (
+            "tri_tri_intersect",
+            "find_triangle_intersections",
+            "find_proximity_violations",
+        )
+    )
+except Exception:
+    _core = None
+    _RUST_GEOMETRY = False
+
 
 def coplanar_tri_tri_2d(
     p0: np.ndarray, p1: np.ndarray, p2: np.ndarray,
@@ -59,7 +74,22 @@ def tri_tri_intersection_moller(
     """
     Tomas Möller (1997) "A Fast Triangle-Triangle Intersection Test" による厳密交差判定。
     CG・物理シミュレーション標準。同一平面上の場合は2D射影による包含・交差判定へフォールバックします。
+    Rust核 (`taremin_cloth_core.tri_tri_intersect`) を正本とし、利用可能な場合はそちらを優先する。
     """
+    if _RUST_GEOMETRY:
+        try:
+            return bool(
+                _core.tri_tri_intersect(
+                    np.ascontiguousarray(v0, dtype=np.float32).tolist(),
+                    np.ascontiguousarray(v1, dtype=np.float32).tolist(),
+                    np.ascontiguousarray(v2, dtype=np.float32).tolist(),
+                    np.ascontiguousarray(u0, dtype=np.float32).tolist(),
+                    np.ascontiguousarray(u1, dtype=np.float32).tolist(),
+                    np.ascontiguousarray(u2, dtype=np.float32).tolist(),
+                )
+            )
+        except Exception:
+            pass
     # 1. 三角形Vの平面方程式: N1 . (X - V0) = 0
     e1 = v1 - v0
     e2 = v2 - v0
@@ -163,7 +193,20 @@ def find_triangle_intersections(
 
     Returns:
         交差している面インデックスのペアリスト [(f0, f1), ...] (f0 < f1)
+    Rust核 (`taremin_cloth_core.find_triangle_intersections`) を正本とし、
+    利用可能な場合はそちらを優先する。NumPy実装はフォールバック。
     """
+    if _RUST_GEOMETRY:
+        try:
+            got = _core.find_triangle_intersections(
+                np.ascontiguousarray(positions, dtype=np.float32),
+                np.ascontiguousarray(faces, dtype=np.uint32),
+                bool(ignore_adjacent),
+                float(cell_size) if cell_size else None,
+            )
+            return sorted([(int(a), int(b)) for (a, b) in got])
+        except Exception:
+            pass
     if len(faces) == 0:
         return []
 
@@ -291,7 +334,20 @@ def find_proximity_violations(
     """
     非隣接面間で、厚み（thickness）未満に異常接近・食い込んでいる頂点-面ペアを検出します。
     戻り値: [(vertex_idx, face_idx, distance), ...]
+    Rust核 (`taremin_cloth_core.find_proximity_violations`) を正本とし、
+    利用可能な場合はそちらを優先する。NumPy実装はフォールバック。
     """
+    if _RUST_GEOMETRY:
+        try:
+            got = _core.find_proximity_violations(
+                np.ascontiguousarray(positions, dtype=np.float32),
+                np.ascontiguousarray(faces, dtype=np.uint32),
+                float(thickness),
+                bool(ignore_adjacent),
+            )
+            return [(int(v), int(f), float(d)) for (v, f, d) in got]
+        except Exception:
+            pass
     violations = []
     tris = positions[faces]  # [M, 3, 3]
     face_centers = np.mean(tris, axis=1)

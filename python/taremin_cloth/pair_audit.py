@@ -18,6 +18,14 @@ CPU参照実装によるグラウンドトゥルースと比較し、以下に�
 from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 
+try:
+    import taremin_cloth_core as _core
+
+    _RUST_AUDIT = hasattr(_core, "audit_pairs")
+except Exception:
+    _core = None
+    _RUST_AUDIT = False
+
 
 def build_two_hop_sets(edges: np.ndarray, num_vertices: int) -> List[Set[int]]:
     """各頂点の2ホップ以内近傍集合を構築する (自身を含む)。"""
@@ -224,7 +232,41 @@ def audit_frame(
     max_vt_pairs: int,
     max_ee_pairs: int,
 ) -> Dict[str, Any]:
-    """1フレーム分のペアカバレッジ監査を実行する。"""
+    """1フレーム分のペアカバレッジ監査を実行する。
+    Rust核 (`taremin_cloth_core.audit_pairs`) を正本とし、利用可能な場合は
+    そちらを優先する。NumPy実装はフォールバック。
+    """
+    if _RUST_AUDIT:
+        try:
+            vt_arr = np.asarray(vt_pairs, dtype=np.uint32).reshape((-1, 4))
+            ee_arr = np.asarray(ee_pairs, dtype=np.uint32).reshape((-1, 4))
+            vel_arr = (
+                None
+                if prev_vel is None or len(np.asarray(prev_vel)) == 0
+                else np.ascontiguousarray(prev_vel, dtype=np.float64)
+            )
+            got = _core.audit_pairs(
+                np.ascontiguousarray(prev_pos, dtype=np.float64),
+                vel_arr,
+                np.ascontiguousarray(curr_pos, dtype=np.float64),
+                np.ascontiguousarray(vt_arr),
+                np.ascontiguousarray(ee_arr),
+                int(vt_count),
+                int(ee_count),
+                np.ascontiguousarray(faces, dtype=np.uint32),
+                np.ascontiguousarray(edges, dtype=np.uint32),
+                float(thickness),
+                float(safety_margin),
+                float(horizon_scale),
+                float(max_horizon),
+                int(margin_mode),
+                float(dt_frame),
+                int(max_vt_pairs),
+                int(max_ee_pairs),
+            )
+            return {k: (float(v) if isinstance(v, float) else int(v)) for k, v in dict(got).items()}
+        except Exception:
+            pass
     n = len(curr_pos)
     prev_pos = np.asarray(prev_pos, dtype=np.float64)
     curr_pos = np.asarray(curr_pos, dtype=np.float64)

@@ -148,6 +148,66 @@ pub fn color_bending_constraints(
     (sorted_constraints, color_offsets, color_counts)
 }
 
+/// 汎用エッジペア (v0, v1) に対するWelsh-Powell彩色。
+/// 距離拘束・縫合拘束いずれの可視化・検証用途でも使えるよう、
+/// 拘束ペイロードに依存せず頂点競合のみで色番号を付与する。
+/// 戻り値: 拘束ごとの色番号 (長さ = pairs.len())。
+/// 範囲外頂点を含むペアは隣接登録をスキップし、色0として扱う。
+pub fn color_edge_pairs(num_vertices: usize, pairs: &[[u32; 2]]) -> Vec<u32> {
+    let n = pairs.len();
+    if n == 0 || num_vertices == 0 {
+        return vec![0; n];
+    }
+    let mut vertex_to_constraints: Vec<Vec<usize>> = vec![Vec::new(); num_vertices];
+    for (i, &[v0, v1]) in pairs.iter().enumerate() {
+        let (a, b) = (v0 as usize, v1 as usize);
+        if a < num_vertices {
+            vertex_to_constraints[a].push(i);
+        }
+        if b < num_vertices {
+            vertex_to_constraints[b].push(i);
+        }
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| {
+        let [v0, v1] = pairs[i];
+        let (a, b) = (v0 as usize, v1 as usize);
+        let deg = vertex_to_constraints.get(a).map_or(0, |v| v.len())
+            + vertex_to_constraints.get(b).map_or(0, |v| v.len());
+        (std::cmp::Reverse(deg), i)
+    });
+    let mut colors = vec![u32::MAX; n];
+    let mut num_colors = 0u32;
+    for &i in &order {
+        let [v0, v1] = pairs[i];
+        let (a, b) = (v0 as usize, v1 as usize);
+        let mut used = std::collections::HashSet::new();
+        if let Some(list) = vertex_to_constraints.get(a) {
+            for &adj in list {
+                if adj != i && colors[adj] != u32::MAX {
+                    used.insert(colors[adj]);
+                }
+            }
+        }
+        if let Some(list) = vertex_to_constraints.get(b) {
+            for &adj in list {
+                if adj != i && colors[adj] != u32::MAX {
+                    used.insert(colors[adj]);
+                }
+            }
+        }
+        let mut color = 0u32;
+        while used.contains(&color) {
+            color += 1;
+        }
+        colors[i] = color;
+        if color >= num_colors {
+            num_colors = color + 1;
+        }
+    }
+    colors
+}
+
 /// 縫合拘束をグラフ彩色し、頂点競合が起きない色グループ順に拘束を再配置する
 pub fn color_sewing_constraints(
     num_vertices: usize,
