@@ -96,6 +96,9 @@ pub struct SimulationResources {
     pub self_collision_exclude_neighbors: bool,
     pub self_collision_max_iterations: u32,
     pub enable_normal_untangling: bool,
+    /// 頂点レイヤーが2種類以上あるか (自動判定。単一レイヤーでは
+    /// Untangling分岐が発火し得ないため法線パスとシェーダー分岐を省略する)。
+    pub has_multiple_layers: bool,
 }
 
 pub fn build_simulation_resources(
@@ -770,6 +773,13 @@ pub fn build_simulation_resources(
     let enable_normal_untangling = true;
     let self_collision_max_iterations = 256u32;
 
+    // 単一レイヤーでは Untangling 条件 (layer_i > layer_j) が成立し得ないため、
+    // 法線計算パスとシェーダー内分岐を丸ごと省略しても結果は同一になる。
+    // アイランド自動割当の後の最終 layer_id で判定する。
+    let first_layer = mesh.vertices.first().map(|v| v.layer_id).unwrap_or(0);
+    let has_multiple_layers = mesh.vertices.iter().any(|v| v.layer_id != first_layer);
+    let effective_untangling = enable_normal_untangling && has_multiple_layers;
+
     let thickness = mesh.vertices.first().map(|v| v.thickness).unwrap_or(0.005);
     // 幾何学的見逃し防止のためのセルサイズ自動決定:
     // 1. 厚みベース: 衝突境界 (thickness * 4.0) をカバー
@@ -790,7 +800,7 @@ pub fn build_simulation_resources(
         relief_factor: self_collision_relief_factor,
         max_displacement_ratio: self_collision_max_displacement_ratio,
         enable_relief: 1,
-        enable_normal_untangling: 1,
+        enable_normal_untangling: if effective_untangling { 1 } else { 0 },
         exclude_neighbors: 1,
         max_search_iterations: self_collision_max_iterations,
         enable_ee: 1,
@@ -1250,7 +1260,7 @@ pub fn build_simulation_resources(
         num_vertices,
         max_vt_pairs: num_vertices * PAIR_QUOTA_MAX,
         max_ee_pairs: num_vertices * PAIR_QUOTA_MAX,
-        enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
+        enable_normal_untangling: if effective_untangling { 1 } else { 0 },
     };
     let pair_solve_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Pair Solve Params Buffer"),
@@ -1449,5 +1459,6 @@ pub fn build_simulation_resources(
         self_collision_exclude_neighbors,
         self_collision_max_iterations,
         enable_normal_untangling,
+        has_multiple_layers,
     }
 }

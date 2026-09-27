@@ -170,6 +170,7 @@ sequenceDiagram
            - **自律的脱出 (Untangling)**: 自己衝突シェーダー内で $v_i.\text{layer\_id} > v_j.\text{layer\_id}$ を検知した場合、内側層の表側法線ベクトル方向へ外側層を優先的に押し戻し、複雑な挟み込みや交差からの自律的脱出を実現。
            - **Face Attribute (`cloth_layer`)**: ボーンウェイト用頂点グループを汚染しないよう、Blender 3.0+ 標準の Mesh Attribute（Faceドメイン、Int型 `cloth_layer`）による面単位のレイヤー指定に対応。
            - **共有頂点の最大値 (Max) 則**: 内層と外層のウエスト結合部頂点など、複数レイヤーの面で共有される頂点は $\max_{F_k \ni v} L_k$ により自動的に上位レイヤー（外層）と整合し、接合部の引き裂かれやすり抜けを防止。属性未設定時はオブジェクト全体の `default_layer_id` へ安全にフォールバック。
+            - **単一レイヤー自動省略**: 全頂点の layer_id が同一の場合、Untangling 条件は成立し得ないため、実効フラグをOFFにして法線計算パス（sc_normals）とシェーダー内分岐を省略する。法線バッファの読み手は Untangling 分岐のみのため結果は同一。ユーザー設定・記録値はONのまま保持され、多層メッシュでは従来通り動作する。
 
 4. **反復後確定 (Final Passes & Velocity Update & Commit)**:
    - **Final Pin Pass**: 反復終了後にピン位置を確定する（Grab等の目標追従）。

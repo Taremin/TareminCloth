@@ -908,8 +908,10 @@ impl GpuClothSimulator {
             .begin_scope(format!("self_collision_{prefix}"), encoder);
         // 1. Compute Normals Pass (P4: 法線展開処理が無効の場合は省略する。
         // 法線バッファの読み手は自己衝突シェーダーの展開分岐のみであり、
-        // いずれも enable_normal_untangling 取得値で保護されている)
-        if self.enable_normal_untangling {
+        // いずれも enable_normal_untangling 取得値で保護されている。
+        // 単一レイヤーでは展開条件 (layer_i > layer_j) が成立し得ないため、
+        // 実効フラグOFF時はパス自体を省略しても結果は同一になる)
+        if self.effective_normal_untangling() {
             let query = self.profiler.begin_pass_with_parent("sc_normals", encoder, parent.as_ref());
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(&format!("{prefix} Compute Normals Pass")),

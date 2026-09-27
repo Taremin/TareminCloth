@@ -1317,6 +1317,17 @@ impl ClothSimulator {
         self.simulator.self_collision_ee_substep_interval()
     }
 
+    /// 法線展開 (Untangling) の実効フラグを取得。単一レイヤーでは
+    /// ユーザー設定がONでも偽を返す (法線パス省略・結果は同一)。
+    fn get_effective_normal_untangling(&self) -> bool {
+        self.simulator.effective_normal_untangling()
+    }
+
+    /// 頂点レイヤーが2種類以上あるかを取得 (構築時に確定)。
+    fn get_has_multiple_layers(&self) -> bool {
+        self.simulator.has_multiple_layers
+    }
+
     /// コンパクトリードバックの有効/無効を設定 (true: 12B/頂点, false: 48B/頂点)
     fn set_enable_compact_readback(&mut self, enable: bool) {
         self.simulator.set_enable_compact_readback(enable);

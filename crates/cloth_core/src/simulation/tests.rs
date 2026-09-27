@@ -390,6 +390,57 @@ mod tests {
     }
 
     #[test]
+    fn test_single_layer_disables_effective_untangling() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 単一レイヤー: ユーザー設定ONでも実効OFF (法線パス省略・結果は同一)
+        let sim = GpuClothSimulator::with_options(Arc::clone(&ctx), make_quad_mesh(), 32, 0);
+        assert!(!sim.has_multiple_layers, "単一quadは単一レイヤーでなければならない");
+        assert!(sim.enable_normal_untangling, "ユーザー設定の既定はONのまま");
+        assert!(!sim.effective_normal_untangling(), "単一レイヤーでは実効OFFでなければならない");
+
+        // 複数レイヤー: 実効ONを維持
+        let positions = vec![
+            [0.0, 0.0, 0.5],
+            [1.0, 0.0, 0.5],
+            [1.0, 1.0, 0.5],
+            [0.0, 1.0, 0.5],
+        ];
+        let edges = vec![[0, 1], [1, 2], [2, 3], [3, 0], [0, 2]];
+        let faces = vec![[0, 1, 2], [0, 2, 3]];
+        let layers = vec![0u32, 0, 1, 1];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            Some(&layers),
+            None,
+            0,
+            0.02,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+        let sim2 = GpuClothSimulator::with_options(Arc::clone(&ctx), mesh, 32, 0);
+        assert!(sim2.has_multiple_layers, "レイヤー混在は複数レイヤーと判定されなければならない");
+        assert!(sim2.effective_normal_untangling(), "複数レイヤーでは実効ONを維持しなければならない");
+
+        // OFF設定時は複数レイヤーでも実効OFF
+        let mut sim3 = sim2;
+        sim3.set_self_collision_options(0.2, 0.2, true, false, 128);
+        assert!(!sim3.effective_normal_untangling());
+    }
+
+    #[test]
     fn test_bone_sdf_collision() {
         use half::f16;
         use crate::simulation::types::{GpuBoneInfo, GpuBoneTransform};

@@ -239,6 +239,9 @@ pub struct GpuClothSimulator {
     pub self_collision_max_displacement_ratio: f32,
     pub self_collision_exclude_neighbors: bool,
     pub enable_normal_untangling: bool,
+    /// 頂点レイヤーが2種類以上あるか (構築時に確定、init-only)。
+    /// 単一レイヤーでは Untangling 条件が成立し得ないため、実効フラグは常にOFF。
+    pub has_multiple_layers: bool,
     pub enable_edge_collision: bool,
     pub edge_margin_scale: f32,
     pub edge_margin_offset: f32,
@@ -476,6 +479,7 @@ impl GpuClothSimulator {
             self_collision_substep_interval: 1,
             self_collision_ee_substep_interval: 1,
             enable_normal_untangling: res.enable_normal_untangling,
+            has_multiple_layers: res.has_multiple_layers,
             enable_edge_collision: false,
             edge_margin_scale: 1.0,
             edge_margin_offset: 0.0,
@@ -599,6 +603,13 @@ impl GpuClothSimulator {
         );
     }
 
+    /// Untangling の実効フラグ。単一レイヤーでは条件 (layer_i > layer_j) が
+    /// 成立し得ないため、ユーザー設定がONでもシェーダー分岐・法線パスを省略する。
+    /// 法線バッファの読み手は Untangling 分岐のみであり、結果は同一になる。
+    pub fn effective_normal_untangling(&self) -> bool {
+        self.enable_normal_untangling && self.has_multiple_layers
+    }
+
     /// ペア解決パラメータバッファを現在の論理設定で書き込む。
     /// max_* には予算ではなくスロット数 (N*quota) を格納し、
     /// 解決シェーダーの範囲ガードと頂点メジャー配置の除数に用いる。
@@ -607,7 +618,7 @@ impl GpuClothSimulator {
             num_vertices: self.num_vertices,
             max_vt_pairs: self.num_vertices * self.pair_cache_quota_vt.clamp(1, PAIR_QUOTA_MAX),
             max_ee_pairs: self.num_vertices * self.pair_cache_quota_ee.clamp(1, PAIR_QUOTA_MAX),
-            enable_normal_untangling: if self.enable_normal_untangling { 1 } else { 0 },
+            enable_normal_untangling: if self.effective_normal_untangling() { 1 } else { 0 },
         };
         self.context.queue.write_buffer(
             &self.pair_solve_params_buffer,
@@ -649,7 +660,7 @@ impl GpuClothSimulator {
             relief_factor,
             max_displacement_ratio,
             enable_relief: if relief_factor < 0.999 { 1 } else { 0 },
-            enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
+            enable_normal_untangling: if self.effective_normal_untangling() { 1 } else { 0 },
             exclude_neighbors: if exclude_neighbors { 1 } else { 0 },
             max_search_iterations: max_iterations,
             enable_ee: 1,
@@ -694,7 +705,7 @@ impl GpuClothSimulator {
             num_vertices: self.num_vertices,
             max_vt_pairs: self.num_vertices * self.pair_cache_quota_vt.clamp(1, PAIR_QUOTA_MAX),
             max_ee_pairs: self.num_vertices * self.pair_cache_quota_ee.clamp(1, PAIR_QUOTA_MAX),
-            enable_normal_untangling: if enable_normal_untangling { 1 } else { 0 },
+            enable_normal_untangling: if self.effective_normal_untangling() { 1 } else { 0 },
         };
         self.context.queue.write_buffer(
             &self.pair_solve_params_buffer,
