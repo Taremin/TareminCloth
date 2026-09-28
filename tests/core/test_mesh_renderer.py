@@ -427,6 +427,96 @@ class TestMeshRenderer(unittest.TestCase):
         act_all = filter_active_joint_faces(joint_faces, rotations, rotation_threshold_deg=0.0)
         self.assertEqual(len(act_all), 8)
 
+    def test_generate_wrinkle_curve_lines(self):
+        """シワカーブ（Crest / Root）の3Dライン生成検証"""
+        from taremin_cloth.mesh_renderer import generate_wrinkle_curve_lines
+
+        # 円形カーブ 4点 (閉ループ)
+        th = np.linspace(0.0, 2.0 * np.pi, 4, endpoint=False)
+        crest_pts = np.stack([0.07 * np.cos(th), 0.07 * np.sin(th), np.full_like(th, 0.12)], axis=-1)
+        root_pts = np.stack([0.05 * np.cos(th), 0.05 * np.sin(th), np.full_like(th, 0.10)], axis=-1)
+
+        lines = generate_wrinkle_curve_lines(
+            crest_curves=[crest_pts],
+            root_curves=[root_pts],
+            is_closed=True
+        )
+
+        self.assertIsNotNone(lines)
+        # 各4点閉ループ -> 各4エッジ、合計8エッジ
+        self.assertEqual(len(lines), 8)
+        self.assertEqual(lines.shape[1], 9)
+        # 前半4本は赤/オレンジ (255, 60, 20)、後半4本はシアン (0, 220, 255)
+        np.testing.assert_allclose(lines[:4, 6:9], np.array([[255, 60, 20]] * 4, dtype=np.float32))
+        np.testing.assert_allclose(lines[4:, 6:9], np.array([[0, 220, 255]] * 4, dtype=np.float32))
+
+    def test_compute_wrinkle_weight_colors(self):
+        """シワ影響度ヒートマップ頂点カラーの計算検証"""
+        from taremin_cloth.mesh_renderer import compute_wrinkle_weight_colors
+
+        positions = np.array([
+            [0.05, 0.0, 0.10],  # 谷の真上 (Z=0.10) -> weight=1.0 (赤系)
+            [0.05, 0.0, 0.20],  # 遠い位置 (Z=0.20, diff=0.10 > influence=0.05) -> weight=0.0 (青系)
+        ], dtype=np.float32)
+
+        valley_z = np.full(32, 0.10, dtype=np.float32)
+        colors = compute_wrinkle_weight_colors(
+            positions,
+            origin=(0.0, 0.0, 0.0),
+            axis=(0.0, 0.0, 1.0),
+            influence_radius=0.05,
+            valley_z_profile=valley_z
+        )
+
+        self.assertEqual(len(colors), 2)
+        self.assertEqual(colors.shape[1], 3)
+        # 頂点0は weight=1.0 -> Jet では純粋な赤 (R成分>100, G=0, B=0)
+        self.assertGreater(colors[0, 0], 100)
+        self.assertEqual(colors[0, 1], 0)
+        self.assertEqual(colors[0, 2], 0)
+        # 頂点1は weight=0.0 -> Jet では純粋な青 (B成分>100, R=0, G=0)
+        self.assertGreater(colors[1, 2], 100)
+        self.assertEqual(colors[1, 0], 0)
+        self.assertEqual(colors[1, 1], 0)
+
+    def test_xray_overlay_line_behind_mesh(self):
+        """メッシュの裏側に遮蔽されたラインがX-ray透視（半透明合成）されることの検証"""
+        from taremin_cloth.mesh_renderer import render_scene_to_image
+
+        # カメラは [0, 0, 3] から原点を見下ろす
+        # Z=0 に大きな正方形板メッシュ (CCW、表面白) を配置
+        positions = np.array([
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ], dtype=np.float32)
+        faces = np.array([
+            [0, 1, 2],
+            [0, 2, 3],
+        ], dtype=np.uint32)
+
+        # 板メッシュの裏側（奥: Z = -0.5）にシアンのラインを配置
+        cyan_line = np.array([
+            [-0.5, 0.0, -0.5, 0.5, 0.0, -0.5, 0.0, 220.0, 255.0]
+        ], dtype=np.float32)
+
+        img = render_scene_to_image(
+            positions, faces,
+            extra_lines=cyan_line,
+            width=200, height=200,
+            camera_pos=(0.0, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=False,
+        )
+
+        arr = np.array(img)
+        # 板メッシュ中央付近 (Y=99) のピクセルにシアン成分（B > 200 かつ R < 200）が
+        # 透視合成されて現れていることを確認
+        mask = (arr[:, :, 2] > 200) & (arr[:, :, 0] < 200)
+        self.assertGreater(np.sum(mask), 20, "メッシュ裏側のラインが透視合成されていません")
+
 
 if __name__ == "__main__":
     unittest.main()
+

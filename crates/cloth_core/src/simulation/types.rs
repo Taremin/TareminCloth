@@ -87,3 +87,34 @@ pub struct GpuBoneTriangleSource {
     pub _pad: f32,
 }
 
+/// シワフィールドプロファイルサンプル（サイズ: 32バイト, 16Bアライメント準拠）
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuWrinkleProfileSample {
+    pub valley_z: f32,       // 谷の軸方向ターゲット位置 (m)
+    pub valley_radius: f32,  // 谷の径方向ターゲット半径 (m, 通常はボーン表面)
+    pub crest_z: f32,        // 山の軸方向ターゲット位置 (m)
+    pub crest_radius: f32,   // 山の径方向ターゲット半径 (m, 外側)
+    pub valley_weight: f32,  // 谷のメタボールポテンシャル強度 (0.0〜1.0)
+    pub crest_weight: f32,   // 山のメタボールポテンシャル強度 (0.0〜1.0)
+    pub _pad0: f32,
+    pub _pad1: f32,
+}
+
+/// シワフィールド Uniform パラメータ（サイズ: 96バイト, 16Bアライメント準拠）
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct WrinkleFieldParams {
+    pub bone_origin: [f32; 4],     // xyz: origin, w: influence_radius
+    pub bone_axis: [f32; 4],       // xyz: axis, w: bone_radius
+    pub bone_normal: [f32; 4],     // xyz: normal, w: stiffness
+    pub bone_binormal: [f32; 4],   // xyz: binormal, w: blend_weight
+    pub z_range: [f32; 2],         // x: z_min, y: z_max (ボーン長手方向のUVマッピング範囲)
+    pub r_range: [f32; 2],         // x: r_min, y: r_max (径方向のターゲット正規化範囲)
+    pub enabled: u32,              // 有効フラグ (0 or 1)
+    pub use_texture: u32,          // 2Dテクスチャモードフラグ (0 or 1)
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+

@@ -813,6 +813,19 @@ def enter_isolated_view(context, cloth_obj):
             if mod.type == 'ARMATURE' and getattr(mod, "object", None):
                 target_objs.add(mod.object)
 
+        # 布オブジェクトのシワフィールド用カーブおよびアーマチュアも含める (ローカルビュー除外防止)
+        settings = getattr(cloth_obj, "taremin_cloth", None)
+        if settings:
+            wrinkle_col = getattr(settings, "wrinkle_collection", None)
+            if not wrinkle_col:
+                wrinkle_col = bpy.data.collections.get("TareminCloth_Wrinkles")
+            if wrinkle_col:
+                for obj_in_col in wrinkle_col.objects:
+                    target_objs.add(obj_in_col)
+            wrinkle_arm = getattr(settings, "wrinkle_armature", None)
+            if wrinkle_arm:
+                target_objs.add(wrinkle_arm)
+
         # 2. 選択状態の切り替え
         bpy.ops.object.select_all(action='DESELECT')
         for o in target_objs:
@@ -1005,8 +1018,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
     def step_simulation(self, context):
         """シミュレーションを実時間同期で進め、メッシュとオーバーレイを更新する"""
-        obj = context.active_object
-        if not obj or not obj.taremin_cloth.is_cloth:
+        cloth_name = getattr(self, "_cloth_obj_name", "")
+        obj = bpy.data.objects.get(cloth_name) if cloth_name else context.active_object
+        if not obj or not getattr(obj, "taremin_cloth", None) or not obj.taremin_cloth.is_cloth:
             return
 
         sim, coords = get_or_create_simulator(obj)
@@ -1142,8 +1156,105 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     def _active_brush_tool(self, brush):
         return self._brush_tools.get(active_tool_name(brush))
 
+    def _start_interactive_wrinkle_slide(self, context, cloth_obj, event) -> bool:
+        """インタラクティブモード中にシワカーブのスライドを開始する"""
+        settings = getattr(cloth_obj, "taremin_cloth", None)
+        target_col = getattr(settings, "wrinkle_collection", None) if settings else None
+        if not target_col:
+            target_col = bpy.data.collections.get("TareminCloth_Wrinkles")
+
+        curves = []
+        act = context.active_object
+        if act and act.type == 'CURVE' and (hasattr(act, "taremin_wrinkle") or "wrinkle_type" in act):
+            curves = [act]
+        elif target_col:
+            curves = [o for o in target_col.objects if o.type == 'CURVE']
+
+        if not curves:
+            return False
+
+        first_obj = curves[0]
+        arm_name = first_obj.get("wrinkle_armature", "")
+        bone_name = first_obj.get("wrinkle_target_bone", "")
+        arm_obj = bpy.data.objects.get(arm_name)
+        if not arm_obj or arm_obj.type != 'ARMATURE':
+            arm_obj = getattr(settings, "wrinkle_armature", None) if settings else None
+
+        if not arm_obj or not bone_name:
+            return False
+
+        from .wrinkle import _extract_bone_chain_data
+        from ..engine.wrinkle_slide import BoneChain
+
+        bones_data = _extract_bone_chain_data(arm_obj, bone_name)
+        if not bones_data:
+            return False
+
+        self._slide_chain = BoneChain.from_bones(bones_data)
+        self._sliding_curves = curves
+        self._slide_base_t = float(first_obj.get("wrinkle_t_param", 0.5))
+        self._slide_current_t = self._slide_base_t
+        self._slide_scale_radius = float(first_obj.get("wrinkle_scale_radius", 1.0))
+        self._slide_influence_radius = float(first_obj.get("wrinkle_influence_radius", 0.03))
+        self._slide_strength = float(first_obj.get("wrinkle_strength", 1.0))
+        self._slide_init_x = event.mouse_x
+
+        self._slide_initial_points = []
+        for c_obj in curves:
+            pts = []
+            for sp in c_obj.data.splines:
+                for p in sp.points:
+                    pts.append(list(p.co[:3]))
+            self._slide_initial_points.append(np.array(pts, dtype=np.float32))
+
+        self._wrinkle_sliding = True
+        return True
+
+    def _update_interactive_wrinkle_curves(self):
+        """シワスライド中のパラメータ変更を全対象カーブに反映"""
+        if not self._slide_chain or not self._sliding_curves or not self._slide_initial_points:
+            return
+        from ..engine.wrinkle_slide import slide_curves_along_chain
+        slid = slide_curves_along_chain(
+            curve_points_list=self._slide_initial_points,
+            chain=self._slide_chain,
+            source_t=self._slide_base_t,
+            target_t=self._slide_current_t,
+            scale_radius=self._slide_scale_radius,
+        )
+        for obj, pts in zip(self._sliding_curves, slid):
+            obj["wrinkle_t_param"] = float(self._slide_current_t)
+            obj["wrinkle_scale_radius"] = float(self._slide_scale_radius)
+            obj["wrinkle_influence_radius"] = float(self._slide_influence_radius)
+            obj["wrinkle_strength"] = float(self._slide_strength)
+            tw = getattr(obj, "taremin_wrinkle", None)
+            if tw:
+                try:
+                    tw.influence_radius = float(self._slide_influence_radius)
+                    tw.strength = float(self._slide_strength)
+                except Exception:
+                    pass
+            p_idx = 0
+            for sp in obj.data.splines:
+                for p in sp.points:
+                    if p_idx < len(pts):
+                        p.co = (pts[p_idx, 0], pts[p_idx, 1], pts[p_idx, 2], 1.0)
+                        p_idx += 1
+
+    def _restore_interactive_wrinkle_curves(self):
+        """シワスライドキャンセル時に初期位置を復元"""
+        for obj, pts in zip(self._sliding_curves, self._slide_initial_points):
+            obj["wrinkle_t_param"] = float(self._slide_base_t)
+            p_idx = 0
+            for sp in obj.data.splines:
+                for p in sp.points:
+                    if p_idx < len(pts):
+                        p.co = (pts[p_idx, 0], pts[p_idx, 1], pts[p_idx, 2], 1.0)
+                        p_idx += 1
+
     def _reset_run_state(self):
         """1回の起動試行に先立ち、実行時ステートを初期化する"""
+        self._cloth_obj_name = ""
         self._stop_requested = False
         self._pinned_verts = set()
         self._brush_tools = create_tools()
@@ -1164,6 +1275,17 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._init_timings = []
         self._init_partial = None
         self._init_sim = None
+        # インタラクティブモード中のシワスライド状態
+        self._wrinkle_sliding = False
+        self._sliding_curves = []
+        self._slide_chain = None
+        self._slide_initial_points = []
+        self._slide_base_t = 0.5
+        self._slide_current_t = 0.5
+        self._slide_init_x = 0
+        self._slide_scale_radius = 1.0
+        self._slide_influence_radius = 0.03
+        self._slide_strength = 1.0
         drawing.clear_interactive_fps_info()
         drawing.clear_init_overlay_info()
 
@@ -1249,6 +1371,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     def _run_init_stage(self, context):
         """現在の準備段階を1つだけ実行し、次段階へ進める（段階所要時間も記録する）"""
         obj = context.active_object
+        if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
+            self._cloth_obj_name = obj.name
         stage = self._init_stage or 0
         t0 = time.perf_counter()
         if stage == 0:
@@ -1482,12 +1606,61 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             self.cancel(context)
             return {'FINISHED'}
 
-        obj = context.active_object
-        if not obj or not obj.taremin_cloth.is_cloth:
+        cloth_name = getattr(self, "_cloth_obj_name", "")
+        cloth_obj = bpy.data.objects.get(cloth_name) if cloth_name else None
+        if not cloth_obj:
+            cloth_obj = context.active_object
+            if cloth_obj and getattr(cloth_obj, "taremin_cloth", None) and cloth_obj.taremin_cloth.is_cloth:
+                self._cloth_obj_name = cloth_obj.name
+
+        if not cloth_obj or not getattr(cloth_obj, "taremin_cloth", None) or not cloth_obj.taremin_cloth.is_cloth:
             self.cancel(context)
             return {'CANCELLED'}
 
+        obj = cloth_obj
         sim, coords = get_or_create_simulator(obj)
+
+        # インタラクティブモード中のシワスライド操作
+        if getattr(self, "_wrinkle_sliding", False):
+            if event.type == 'TIMER':
+                self.step_simulation(context)
+                return {'PASS_THROUGH'}
+
+            elif event.type == 'MOUSEMOVE':
+                dx = event.mouse_x - self._slide_init_x
+                speed = 0.0005 if event.shift else 0.002
+                self._slide_current_t = float(np.clip(self._slide_base_t + dx * speed, 0.0, 1.0))
+                self._update_interactive_wrinkle_curves()
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+
+            elif event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+                delta = 1.0 if event.type == 'WHEELUPMOUSE' else -1.0
+                if event.shift:
+                    self._slide_influence_radius = max(0.002, self._slide_influence_radius + delta * 0.002)
+                elif event.ctrl:
+                    self._slide_strength = max(0.0, self._slide_strength + delta * 0.1)
+                else:
+                    self._slide_scale_radius = max(0.1, self._slide_scale_radius + delta * 0.05)
+                self._update_interactive_wrinkle_curves()
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+
+            elif event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+                self._wrinkle_sliding = False
+                self._update_interactive_wrinkle_curves()
+                tag_redraw_view3d(context)
+                self.report({'INFO'}, i18n.trans(f"Confirmed wrinkle slide at t={self._slide_current_t:.3f}."))
+                return {'RUNNING_MODAL'}
+
+            elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+                self._restore_interactive_wrinkle_curves()
+                self._wrinkle_sliding = False
+                tag_redraw_view3d(context)
+                self.report({'INFO'}, i18n.trans("Cancelled wrinkle slide."))
+                return {'RUNNING_MODAL'}
+
+            return {'RUNNING_MODAL'}
 
         if event.type == 'TIMER':
             self.step_simulation(context)
@@ -1633,6 +1806,13 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
+        elif event.type in {'G', 'W'} and event.value == 'PRESS':
+            if _event_in_viewport_window(context, event):
+                if self._start_interactive_wrinkle_slide(context, obj, event):
+                    tag_redraw_view3d(context)
+                    self.report({'INFO'}, i18n.trans("Wrinkle Slide: Drag mouse to slide along bone (Wheel: Radius, Shift+Wheel: Influence)"))
+                    return {'RUNNING_MODAL'}
+
         elif event.type == 'P' and event.value == 'PRESS':
             if not _event_in_viewport_window(context, event):
                 return {'PASS_THROUGH'}
@@ -1734,6 +1914,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         except Exception:
             pass
         self._reset_run_state()
+        if context.active_object and getattr(context.active_object, "taremin_cloth", None) and context.active_object.taremin_cloth.is_cloth:
+            self._cloth_obj_name = context.active_object.name
         self._begin_init_ui(context)
         wm = context.window_manager
         try:
@@ -1760,6 +1942,8 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         obj = context.active_object
         self._reset_run_state()
+        if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
+            self._cloth_obj_name = obj.name
         # 同期パス（バックグラウンド/テスト用）: 全段階を一括実行
         try:
             while self._init_stage is not None and self._init_stage < self._init_progress_total():

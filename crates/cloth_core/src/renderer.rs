@@ -244,6 +244,14 @@ fn draw_line_3d(
                             fb[idx * 3] = color[0];
                             fb[idx * 3 + 1] = color[1];
                             fb[idx * 3 + 2] = color[2];
+                        } else {
+                            // メッシュ裏側に遮蔽されたラインをX-ray透視オーバーレイ表示 (45%ブレンド)
+                            let cur_r = fb[idx * 3] as f32;
+                            let cur_g = fb[idx * 3 + 1] as f32;
+                            let cur_b = fb[idx * 3 + 2] as f32;
+                            fb[idx * 3] = (cur_r * 0.55 + color[0] as f32 * 0.45) as u8;
+                            fb[idx * 3 + 1] = (cur_g * 0.55 + color[1] as f32 * 0.45) as u8;
+                            fb[idx * 3 + 2] = (cur_b * 0.55 + color[2] as f32 * 0.45) as u8;
                         }
                     }
                 }
@@ -856,7 +864,7 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
             draw_line_3d(
                 p0_s, z0, p1_s, z1,
                 line_color,
-                1.5,
+                2.0,
                 width, height,
                 &mut fb, &mut z_buffer,
             );

@@ -3,6 +3,8 @@
 ピン留め頂点や縫合線の視覚的オーバーレイ描画を行う。
 """
 
+import math
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import bpy
 import gpu
 import numpy as np
@@ -22,6 +24,7 @@ _bake_overlay_info = None  # {"current_frame": int, "end_frame": int, "pct": int
 
 _cached_point_shader = None
 _cached_line_shader = None
+_cached_3d_uniform_shader = None
 _cached_2d_shader = None
 _cached_smooth_line_shader = None
 
@@ -250,11 +253,24 @@ def apply_view_depth_bias(coords, region_3d=None):
         return coords
 
 
+def get_3d_uniform_color_shader():
+    global _cached_3d_uniform_shader
+    if _cached_3d_uniform_shader is not None:
+        return _cached_3d_uniform_shader
+    for name in ('UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
+        try:
+            _cached_3d_uniform_shader = gpu.shader.from_builtin(name)
+            return _cached_3d_uniform_shader
+        except Exception:
+            pass
+    return None
+
+
 def get_point_shader():
     global _cached_point_shader
     if _cached_point_shader is not None:
         return _cached_point_shader
-    for name in ('POINT_UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
+    for name in ('POINT_UNIFORM_COLOR', 'UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
         try:
             _cached_point_shader = gpu.shader.from_builtin(name)
             return _cached_point_shader
@@ -267,7 +283,7 @@ def get_line_shader():
     global _cached_line_shader
     if _cached_line_shader is not None:
         return _cached_line_shader
-    for name in ('POLYLINE_UNIFORM_COLOR', '3D_UNIFORM_COLOR'):
+    for name in ('UNIFORM_COLOR', '3D_UNIFORM_COLOR', 'POLYLINE_UNIFORM_COLOR'):
         try:
             _cached_line_shader = gpu.shader.from_builtin(name)
             return _cached_line_shader
@@ -339,6 +355,20 @@ def draw_callback_3d():
         settings = obj.taremin_cloth
         if not settings.is_cloth:
             continue
+
+        # 非表示オブジェクト（hide_viewport、コレクション非表示、ローカルビュー非表示等）はスキップ
+        try:
+            if not obj.visible_get():
+                continue
+        except Exception:
+            if getattr(obj, "hide_viewport", False) or (hasattr(obj, "hide_get") and obj.hide_get()):
+                continue
+
+        # インタラクティブシミュレーション実行中は、シミュレータに登録されているアクティブな布オブジェクトのみ描画
+        if _interactive_active:
+            from ..engine.cache import _simulators
+            if obj.name not in _simulators:
+                continue
 
         mesh = obj.data
         world_mat = obj.matrix_world
@@ -464,12 +494,31 @@ def draw_callback_3d():
 
                 if loose_edge_pairs:
                     sew_lines = []
-                    verts = mesh.vertices
-                    for v0_idx, v1_idx in loose_edge_pairs:
-                        p0 = world_mat @ verts[v0_idx].co
-                        p1 = world_mat @ verts[v1_idx].co
-                        sew_lines.append([p0.x, p0.y, p0.z])
-                        sew_lines.append([p1.x, p1.y, p1.z])
+                    # シミュレータから最新の現在座標 (coords) を直接取得してリアルタイム追従させる
+                    curr_coords_2d = None
+                    try:
+                        from ..engine.cache import _simulators
+                        sim_entry = _simulators.get(obj.name)
+                        if sim_entry is not None and sim_entry[1] is not None:
+                            curr_coords_2d = sim_entry[1].reshape(-1, 3)
+                    except Exception:
+                        pass
+
+                    if curr_coords_2d is not None and len(curr_coords_2d) >= vert_count:
+                        # 最新のシミュレーション座標をワールド変換
+                        mat_np = np.asarray(world_mat, dtype=np.float32)
+                        coords_world = curr_coords_2d @ mat_np[:3, :3].T + mat_np[:3, 3]
+                        for v0_idx, v1_idx in loose_edge_pairs:
+                            sew_lines.append(coords_world[v0_idx].tolist())
+                            sew_lines.append(coords_world[v1_idx].tolist())
+                    else:
+                        # フォールバック: メッシュ座標から抽出
+                        verts = mesh.vertices
+                        for v0_idx, v1_idx in loose_edge_pairs:
+                            p0 = world_mat @ verts[v0_idx].co
+                            p1 = world_mat @ verts[v1_idx].co
+                            sew_lines.append([p0.x, p0.y, p0.z])
+                            sew_lines.append([p1.x, p1.y, p1.z])
 
                     if sew_lines:
                         draw_sew_lines = apply_view_depth_bias(sew_lines, region_3d) if use_depth_test else sew_lines
@@ -549,6 +598,60 @@ def draw_callback_3d():
                         line_shader.uniform_float("color", (0.2, 0.7, 1.0, 0.8))
                         batch.draw(line_shader)
                     gpu.state.blend_set('NONE')
+
+            # --- 3. シワフィールドの影響範囲（インフルエンス・ボリューム）の半透明描画 ---
+            try:
+                wrinkle_curves_data = []
+                processed_objs = set()
+
+                target_col = None
+                if settings and getattr(settings, "use_wrinkle_field", False) and settings.wrinkle_collection:
+                    target_col = settings.wrinkle_collection
+                elif bpy.data.collections.get("TareminCloth_Wrinkles"):
+                    target_col = bpy.data.collections.get("TareminCloth_Wrinkles")
+
+                if target_col:
+                    for c_obj in target_col.objects:
+                        if c_obj.type != 'CURVE' or c_obj.name in processed_objs:
+                            continue
+                        try:
+                            if not c_obj.visible_get():
+                                continue
+                        except Exception:
+                            if getattr(c_obj, "hide_viewport", False) or (hasattr(c_obj, "hide_get") and c_obj.hide_get()):
+                                continue
+                        processed_objs.add(c_obj.name)
+                        tw = getattr(c_obj, "taremin_wrinkle", None)
+                        w_type = tw.curve_type if tw else c_obj.get("wrinkle_type", "crest")
+                        inf_r = tw.influence_radius if tw else float(c_obj.get("wrinkle_influence_radius", 0.03))
+                        w_mat = c_obj.matrix_world
+                        for sp in c_obj.data.splines:
+                            pts = [(w_mat @ (p.co.xyz if hasattr(p.co, "xyz") else mathutils.Vector(p.co[:3]))) for p in sp.points]
+                            if len(pts) >= 2:
+                                wrinkle_curves_data.append((w_type, [list(p) for p in pts], inf_r))
+
+                active_c = context.active_object
+                if active_c and active_c.type == 'CURVE' and active_c.name not in processed_objs:
+                    is_c_vis = True
+                    try:
+                        is_c_vis = active_c.visible_get()
+                    except Exception:
+                        is_c_vis = not (getattr(active_c, "hide_viewport", False) or (hasattr(active_c, "hide_get") and active_c.hide_get()))
+                    if is_c_vis and (hasattr(active_c, "taremin_wrinkle") or "wrinkle_type" in active_c):
+                        processed_objs.add(active_c.name)
+                        tw = getattr(active_c, "taremin_wrinkle", None)
+                        w_type = tw.curve_type if tw else active_c.get("wrinkle_type", "crest")
+                        inf_r = tw.influence_radius if tw else float(active_c.get("wrinkle_influence_radius", 0.03))
+                        w_mat = active_c.matrix_world
+                        for sp in active_c.data.splines:
+                            pts = [(w_mat @ (p.co.xyz if hasattr(p.co, "xyz") else mathutils.Vector(p.co[:3]))) for p in sp.points]
+                            if len(pts) >= 2:
+                                wrinkle_curves_data.append((w_type, [list(p) for p in pts], inf_r))
+
+                if wrinkle_curves_data:
+                    draw_wrinkle_influence_tubes(wrinkle_curves_data)
+            except Exception:
+                pass
 
         finally:
             gpu.state.depth_test_set(orig_depth_test)
@@ -745,6 +848,400 @@ def _draw_bottom_badge_2row(region, shader_2d, line1: str, line2=None,
             blf.draw(font_id, line2)
     except Exception:
         pass
+
+
+def draw_wrinkle_slide_hud(region, line1: str, line2: str = ""):
+    """シワカーブのモーダルスライド操作用HUDバッジを描画する（docs/hud.md準拠）"""
+    shader_2d = get_2d_uniform_color_shader()
+    _draw_bottom_badge_2row(region, shader_2d, line1, line2 if line2 else None)
+
+
+def compute_octahedron_mesh(head, tail, radius=None):
+    """
+    ボーンのhead, tailから八面体（Octahedral）の三角形頂点リスト（TRIS: 24頂点）と
+    ワイヤーフレーム線分頂点リスト（LINES: 24頂点）を算出する。
+    太さはボーン長によらず一定（均一）のプロポーションを保つ。
+    """
+    h = np.asarray(head, dtype=np.float32)
+    t = np.asarray(tail, dtype=np.float32)
+    v = t - h
+    length = float(np.linalg.norm(v))
+    if length < 1e-4:
+        return [], []
+
+    a = v / length
+    # 軸 a に直交する基底ベクトルを安定して計算
+    ref = np.array([0.0, 0.0, 1.0], dtype=np.float32) if abs(a[2]) < 0.9 else np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    u1 = np.cross(a, ref)
+    norm_u1 = float(np.linalg.norm(u1))
+    if norm_u1 < 1e-5:
+        ref = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        u1 = np.cross(a, ref)
+        norm_u1 = float(np.linalg.norm(u1))
+    u1 = u1 / norm_u1
+    u2 = np.cross(a, u1)
+
+    # ボーンの太さはボーン長によらず一定（均一）にする。
+    # 基準半径を 0.016m (16mm) とし、極短ボーン（指など）のみ突き抜けないよう上限クランプ。
+    base_r = float(radius) if (radius is not None and float(radius) > 1e-4) else 0.016
+    r = min(base_r, length * 0.25)
+
+    # 八面体の最大膨らみリング位置：長いボーンで間延びしないよう基部から固定距離（最大 3.5cm、または長さの15%）
+    ring_dist = min(0.035, length * 0.15)
+    m = h + a * ring_dist
+
+    p0 = m + u1 * r
+    p1 = m + u2 * r
+    p2 = m - u1 * r
+    p3 = m - u2 * r
+
+    tris = [
+        h, p0, p1,  h, p1, p2,  h, p2, p3,  h, p3, p0,
+        t, p1, p0,  t, p2, p1,  t, p3, p2,  t, p0, p3,
+    ]
+    lines = [
+        h, p0,  h, p1,  h, p2,  h, p3,
+        p0, t,  p1, t,  p2, t,  p3, t,
+        p0, p1, p1, p2, p2, p3, p3, p0,
+    ]
+    return [tuple(x) for x in tris], [tuple(x) for x in lines]
+
+
+def compute_curve_tube_mesh(
+    points: Sequence[Sequence[float]],
+    radius: float,
+    num_sides: int = 16,
+    is_cyclic: bool = True,
+) -> Tuple[List[Tuple[float, float, float]], List[Tuple[float, float, float]]]:
+    """
+    カーブ点列を取り囲む半径 radius のチューブ（円筒ボリューム）メッシュを生成する。
+    - 戻り値: (tris_pos, lines_pos)
+    """
+    pts = [np.array(p[:3], dtype=np.float32) for p in points]
+    n_pts = len(pts)
+    if n_pts < 2 or radius <= 1e-5:
+        return [], []
+
+    # 閉曲線判定（明示的指定または始点終点の近接）
+    if not is_cyclic:
+        if np.linalg.norm(pts[0] - pts[-1]) < 1e-4:
+            is_cyclic = True
+
+    # 各点での接線 (Tangent)
+    tangents = []
+    for i in range(n_pts):
+        if is_cyclic:
+            prev_p = pts[(i - 1) % n_pts]
+            next_p = pts[(i + 1) % n_pts]
+            t = next_p - prev_p
+        else:
+            if i == 0:
+                t = pts[1] - pts[0]
+            elif i == n_pts - 1:
+                t = pts[-1] - pts[-2]
+            else:
+                t = pts[i + 1] - pts[i - 1]
+        t_len = float(np.linalg.norm(t))
+        tangents.append(t / (t_len + 1e-8))
+
+    # 並行移動フレーム (Parallel Transport Frames) による安定した断面直交基底の構築
+    t0 = tangents[0]
+    up = np.array([0, 0, 1], dtype=np.float32)
+    if abs(np.dot(t0, up)) > 0.95:
+        up = np.array([0, 1, 0], dtype=np.float32)
+    n0 = np.cross(t0, up)
+    n0 = n0 / (np.linalg.norm(n0) + 1e-8)
+    b0 = np.cross(t0, n0)
+
+    normals = [n0]
+    binormals = [b0]
+    for i in range(1, n_pts):
+        prev_t = tangents[i - 1]
+        curr_t = tangents[i]
+        axis = np.cross(prev_t, curr_t)
+        axis_len = float(np.linalg.norm(axis))
+        if axis_len > 1e-6:
+            axis_n = axis / axis_len
+            angle = math.atan2(axis_len, float(np.dot(prev_t, curr_t)))
+            prev_n = normals[-1]
+            curr_n = (prev_n * math.cos(angle) +
+                      np.cross(axis_n, prev_n) * math.sin(angle) +
+                      axis_n * np.dot(axis_n, prev_n) * (1.0 - math.cos(angle)))
+            curr_n = curr_n - curr_t * np.dot(curr_n, curr_t)
+            curr_n = curr_n / (np.linalg.norm(curr_n) + 1e-8)
+        else:
+            curr_n = normals[-1]
+        normals.append(curr_n)
+        binormals.append(np.cross(curr_t, curr_n))
+
+    # 各点の周りのリング頂点を生成
+    rings = []
+    phi_vals = [2.0 * math.pi * k / num_sides for k in range(num_sides)]
+    cos_vals = [math.cos(phi) for phi in phi_vals]
+    sin_vals = [math.sin(phi) for phi in phi_vals]
+
+    for i in range(n_pts):
+        p_center = pts[i]
+        n_vec = normals[i]
+        b_vec = binormals[i]
+        ring = []
+        for k in range(num_sides):
+            v = p_center + radius * (cos_vals[k] * n_vec + sin_vals[k] * b_vec)
+            ring.append(v)
+        rings.append(ring)
+
+    tris = []
+    lines = []
+
+    # セグメントごとのクアッド三角形化およびライン生成
+    seg_count = n_pts if is_cyclic else n_pts - 1
+    for i in range(seg_count):
+        next_i = (i + 1) % n_pts
+        r1 = rings[i]
+        r2 = rings[next_i]
+
+        for k in range(num_sides):
+            next_k = (k + 1) % num_sides
+            v0 = r1[k]
+            v1 = r1[next_k]
+            v2 = r2[next_k]
+            v3 = r2[k]
+
+            # 2つの三角形 (TRIS)
+            tris.extend([tuple(v0), tuple(v1), tuple(v2)])
+            tris.extend([tuple(v0), tuple(v2), tuple(v3)])
+
+            # 等高線ライン (LINES)
+            lines.extend([tuple(v0), tuple(v1)])
+            if k % 4 == 0:  # 4本ごとの縦稜線
+                lines.extend([tuple(v0), tuple(v3)])
+
+    return tris, lines
+
+
+def draw_wrinkle_influence_tubes(
+    curves_data: Sequence[Tuple[str, Sequence[Sequence[float]], float]],
+    alpha_mul: float = 1.0,
+):
+    """
+    シワカーブ群の影響範囲（インフルエンス・ボリューム）を3D空間上に半透明チューブとして描画する。
+    - curves_data: (wrinkle_type, points, influence_radius) のタプルリスト
+    """
+    if not curves_data:
+        return
+
+    shader = get_3d_uniform_color_shader() or get_line_shader()
+    if not shader:
+        return
+
+    orig_depth_test = gpu.state.depth_test_get()
+    orig_blend = gpu.state.blend_get()
+    orig_line_width = gpu.state.line_width_get()
+
+    try:
+        # 最前面（X-Ray）で半透明ボリュームを描画（衣装・コライダーに隠れない）
+        gpu.state.depth_test_set('NONE')
+        gpu.state.blend_set('ALPHA')
+
+        for w_type, pts, inf_r in curves_data:
+            if len(pts) < 2 or inf_r <= 1e-4:
+                continue
+
+            tris, lines = compute_curve_tube_mesh(pts, radius=inf_r, num_sides=16, is_cyclic=True)
+            if not tris:
+                continue
+
+            is_crest = str(w_type).lower() in ("crest", "ridge")
+            if is_crest:
+                face_color = (1.0, 0.42, 0.08, 0.15 * alpha_mul)
+                line_color = (1.0, 0.55, 0.15, 0.65 * alpha_mul)
+            else:
+                face_color = (0.08, 0.72, 1.0, 0.15 * alpha_mul)
+                line_color = (0.15, 0.85, 1.0, 0.65 * alpha_mul)
+
+            # 面の描画 (TRIS)
+            batch_tris = batch_for_shader(shader, 'TRIS', {"pos": tris})
+            if batch_tris:
+                shader.bind()
+                shader.uniform_float("color", face_color)
+                batch_tris.draw(shader)
+
+            # ワイヤーリングの描画 (LINES)
+            if lines:
+                try:
+                    gpu.state.line_width_set(1.5)
+                except Exception:
+                    pass
+                batch_lines = batch_for_shader(shader, 'LINES', {"pos": lines})
+                if batch_lines:
+                    shader.bind()
+                    shader.uniform_float("color", line_color)
+                    batch_lines.draw(shader)
+
+    finally:
+        gpu.state.depth_test_set(orig_depth_test)
+        gpu.state.blend_set(orig_blend)
+        try:
+            gpu.state.line_width_set(orig_line_width)
+        except Exception:
+            pass
+
+
+def draw_wrinkle_armature_overlay(
+    all_bones_data: list,
+    active_bone_name: str = "",
+    chain_bone_names: list = None,
+):
+    """
+    シワモーダル実行中に、アーマチュアの全ボーンおよびアクティブボーンを3D空間上に最前面（X-Ray）で強調表示する。
+    アーマチュア自体の表示・非表示設定に関わらず、gpuモジュールで直接八面体メッシュとして描画する。
+    - all_bones_data: 各ボーンの (name, head_world, tail_world, radius) のタプルリスト
+    - active_bone_name: 現在カーソル最近傍またはスライド対象のボーン名
+    - chain_bone_names: 現在のボーンチェーンに含まれるボーン名のリスト（オプション）
+    """
+    if not all_bones_data:
+        return
+
+    shader = get_3d_uniform_color_shader() or get_line_shader()
+    point_shader = get_point_shader()
+    if not shader:
+        return
+
+    chain_set = set(chain_bone_names) if chain_bone_names else set()
+
+    orig_depth_test = gpu.state.depth_test_get()
+    orig_line_width = gpu.state.line_width_get()
+    orig_blend = gpu.state.blend_get()
+
+    try:
+        # 深度テストを無効化（最前面・X-Ray表示）
+        gpu.state.depth_test_set('NONE')
+        gpu.state.blend_set('ALPHA')
+
+        # 頂点バッチの構築
+        other_tris, other_lines = [], []
+        chain_tris, chain_lines = [], []
+        active_tris, active_lines = [], []
+        active_points = []
+
+        for item in all_bones_data:
+            b_name = item[0]
+            head = item[1]
+            tail = item[2]
+            # ボーン長に比例するエンベロープ半径は使わず、一定の基準太さ（16mm）で統一
+            rad = 0.016
+
+            tris, lines = compute_octahedron_mesh(head, tail, rad)
+            if not tris:
+                continue
+
+            if b_name == active_bone_name:
+                active_tris.extend(tris)
+                active_lines.extend(lines)
+                active_points.extend([head, tail])
+            elif b_name in chain_set:
+                chain_tris.extend(tris)
+                chain_lines.extend(lines)
+            else:
+                other_tris.extend(tris)
+                other_lines.extend(lines)
+
+        # 1. その他全ボーン（非アクティブ）: 半透明グレー・ホワイト
+        if other_tris:
+            batch = batch_for_shader(shader, 'TRIS', {"pos": other_tris})
+            shader.bind()
+            shader.uniform_float("color", (0.8, 0.85, 0.9, 0.12))
+            batch.draw(shader)
+
+        if other_lines:
+            try:
+                gpu.state.line_width_set(1.5)
+            except Exception:
+                pass
+            batch = batch_for_shader(shader, 'LINES', {"pos": other_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.85, 0.9, 1.0, 0.35))
+            batch.draw(shader)
+
+        # 2. チェーン内ボーン（スライド可能範囲）: 半透明ライトシアン
+        if chain_tris:
+            batch = batch_for_shader(shader, 'TRIS', {"pos": chain_tris})
+            shader.bind()
+            shader.uniform_float("color", (0.2, 0.75, 0.95, 0.25))
+            batch.draw(shader)
+
+        if chain_lines:
+            try:
+                gpu.state.line_width_set(2.5)
+            except Exception:
+                pass
+            batch = batch_for_shader(shader, 'LINES', {"pos": chain_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.3, 0.85, 1.0, 0.65))
+            batch.draw(shader)
+
+        # 3. アクティブボーン（現在選択中・カーソル最近傍）: 鮮やかなシアン＋太線
+        if active_tris:
+            batch = batch_for_shader(shader, 'TRIS', {"pos": active_tris})
+            shader.bind()
+            shader.uniform_float("color", (0.1, 0.85, 1.0, 0.45))
+            batch.draw(shader)
+
+        if active_lines:
+            try:
+                gpu.state.line_width_set(4.0)
+            except Exception:
+                pass
+            batch = batch_for_shader(shader, 'LINES', {"pos": active_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.35, 1.0, 1.0, 0.95))
+            batch.draw(shader)
+
+        # 4. アクティブボーンの Head / Tail マーカー
+        if point_shader and active_points:
+            orig_point_size = gpu.state.point_size_get()
+            try:
+                gpu.state.point_size_set(9.0)
+                batch_pts = batch_for_shader(point_shader, 'POINTS', {"pos": active_points})
+                point_shader.bind()
+                point_shader.uniform_float("color", (1.0, 0.85, 0.2, 0.95))
+                batch_pts.draw(point_shader)
+            finally:
+                gpu.state.point_size_set(orig_point_size)
+
+    except Exception:
+        pass
+    finally:
+        gpu.state.depth_test_set(orig_depth_test)
+        gpu.state.line_width_set(orig_line_width)
+        gpu.state.blend_set(orig_blend)
+
+
+def draw_wrinkle_bone_overlay(chain_bones_coords, active_bone_idx: int = 0):
+    """
+    シワスライドモーダル中のボーンチェーンを3D空間上に最前面で強調表示する（後方互換ラッパー）。
+    - chain_bones_coords: 各ボーンの (head_world, tail_world, name) のタプルリスト
+    - active_bone_idx: 現在操作対象となっているボーンのインデックス
+    """
+    if not chain_bones_coords:
+        return
+    active_name = ""
+    all_bones_data = []
+    chain_names = []
+    for idx, item in enumerate(chain_bones_coords):
+        head = item[0]
+        tail = item[1]
+        name = item[2] if len(item) > 2 else f"bone_{idx}"
+        rad = item[3] if len(item) > 3 else 0.05
+        if isinstance(rad, (tuple, list)):
+            rad = max(rad[0], rad[1])
+        all_bones_data.append((name, head, tail, rad))
+        chain_names.append(name)
+        if idx == active_bone_idx:
+            active_name = name
+
+    draw_wrinkle_armature_overlay(all_bones_data, active_bone_name=active_name, chain_bone_names=chain_names)
+
 
 
 def draw_callback_2d():

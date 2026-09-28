@@ -767,6 +767,35 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Automatically execute post-processing on simulation stop",
         default=True,
     )
+    # シワフィールド設定 (Wrinkle Field)
+    use_wrinkle_field: BoolProperty(
+        name="Wrinkle Field",
+        description="Enable stylized wrinkle field forces",
+        default=False,
+    )
+    wrinkle_collection: PointerProperty(
+        name="Wrinkle Collection",
+        type=bpy.types.Collection,
+        description="Collection containing wrinkle guide curves",
+    )
+    wrinkle_global_strength: FloatProperty(
+        name="Global Strength",
+        description="Global strength multiplier for wrinkle curves",
+        default=1.0,
+        min=0.0,
+        max=10.0,
+    )
+    wrinkle_armature: PointerProperty(
+        name="Armature",
+        type=bpy.types.Object,
+        description="Target armature for bone chain following",
+        poll=lambda s, o: o.type == 'ARMATURE',
+    )
+    wrinkle_bone_name: StringProperty(
+        name="Target Bone",
+        description="Target bone name for wrinkle placement",
+        default="",
+    )
 
 
 def _on_anim_progress_updated(self, context):
@@ -1193,14 +1222,77 @@ class TareminClothColliderSettings(PropertyGroup):
     anim: PointerProperty(type=TareminClothColliderAnimSettings)
 
 
+def _on_wrinkle_curve_prop_updated(self, context):
+    """シワカーブのプロパティ変更時にIDプロパティおよび布シミュレータに通知する"""
+    try:
+        obj = getattr(self, "id_data", None)
+        if obj is None:
+            return
+        # IDプロパティへの同期（低層エンジンとの完全互換）
+        obj["wrinkle_type"] = self.curve_type
+        obj["wrinkle_strength"] = float(self.strength)
+        obj["wrinkle_influence_radius"] = float(self.influence_radius)
+        if self.target_radius > 0:
+            obj["wrinkle_target_radius"] = float(self.target_radius)
+        elif "wrinkle_target_radius" in obj:
+            del obj["wrinkle_target_radius"]
+
+        if context:
+            from .utils.view3d import tag_redraw_view3d
+            tag_redraw_view3d(context)
+    except Exception:
+        pass
+
+
+class TareminWrinkleCurveSettings(bpy.types.PropertyGroup):
+    """個別のシワカーブオブジェクト用設定プロパティ"""
+    curve_type: EnumProperty(
+        name="Type",
+        description="Type of wrinkle curve force (Crest: expands outward, Root: cinches inward)",
+        items=[
+            ('crest', "Crest (Ridge)", "Outward bulging wrinkle (Ridge/Puff)", 'IPO_EASE_OUT', 0),
+            ('root', "Root (Valley)", "Inward cinching wrinkle (Valley/Pinch)", 'IPO_EASE_IN', 1),
+        ],
+        default='crest',
+        update=_on_wrinkle_curve_prop_updated,
+    )
+    strength: FloatProperty(
+        name="Strength",
+        description="Individual strength multiplier for this curve",
+        default=1.0,
+        min=0.0,
+        max=10.0,
+        update=_on_wrinkle_curve_prop_updated,
+    )
+    influence_radius: FloatProperty(
+        name="Influence Radius",
+        description="Gradient falloff distance of this wrinkle curve",
+        default=0.03,
+        min=0.001,
+        max=0.5,
+        unit='LENGTH',
+        update=_on_wrinkle_curve_prop_updated,
+    )
+    target_radius: FloatProperty(
+        name="Target Radius",
+        description="Explicit target radius constraint (0 = auto from bone)",
+        default=0.0,
+        min=0.0,
+        max=2.0,
+        unit='LENGTH',
+        update=_on_wrinkle_curve_prop_updated,
+    )
+
+
 def register():
-    for cls in (TareminClothElasticGroup, TareminClothBrushSettings, TareminClothObjectSettings, TareminClothColliderAnimSettings, TareminClothColliderSettings):
+    for cls in (TareminClothElasticGroup, TareminClothBrushSettings, TareminClothObjectSettings, TareminClothColliderAnimSettings, TareminClothColliderSettings, TareminWrinkleCurveSettings):
         try:
             bpy.utils.register_class(cls)
         except ValueError:
             pass
     bpy.types.Object.taremin_cloth = PointerProperty(type=TareminClothObjectSettings)
     bpy.types.Object.taremin_cloth_collider = PointerProperty(type=TareminClothColliderSettings)
+    bpy.types.Object.taremin_wrinkle = PointerProperty(type=TareminWrinkleCurveSettings)
     bpy.types.Scene.taremin_cloth_fast_playback = BoolProperty(
         name="Fast Playback",
         description="Bypass modifiers of non-simulated objects during playback to reduce Depsgraph overhead",
@@ -1236,11 +1328,13 @@ def unregister():
         del bpy.types.Scene.taremin_cloth_config_presets_json
     if hasattr(bpy.types.Scene, "taremin_cloth_fast_playback"):
         del bpy.types.Scene.taremin_cloth_fast_playback
+    if hasattr(bpy.types.Object, "taremin_wrinkle"):
+        del bpy.types.Object.taremin_wrinkle
     if hasattr(bpy.types.Object, "taremin_cloth"):
         del bpy.types.Object.taremin_cloth
     if hasattr(bpy.types.Object, "taremin_cloth_collider"):
         del bpy.types.Object.taremin_cloth_collider
-    for cls in (TareminClothColliderSettings, TareminClothColliderAnimSettings, TareminClothObjectSettings, TareminClothBrushSettings, TareminClothElasticGroup):
+    for cls in (TareminWrinkleCurveSettings, TareminClothColliderSettings, TareminClothColliderAnimSettings, TareminClothObjectSettings, TareminClothBrushSettings, TareminClothElasticGroup):
         try:
             bpy.utils.unregister_class(cls)
         except RuntimeError:

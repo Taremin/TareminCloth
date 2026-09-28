@@ -69,6 +69,11 @@ from .bake import (
     TAREMIN_CLOTH_OT_bake,
     TAREMIN_CLOTH_OT_free_bake,
 )
+from .wrinkle import (
+    TAREMIN_CLOTH_OT_add_wrinkle_preset,
+    TAREMIN_CLOTH_OT_slide_wrinkle_curves,
+    TAREMIN_CLOTH_OT_save_wrinkle_preset,
+)
 
 OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_toggle_cloth,
@@ -112,6 +117,9 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_assign_face_layer,
     TAREMIN_CLOTH_OT_select_face_layer,
     TAREMIN_CLOTH_OT_clear_face_layers,
+    TAREMIN_CLOTH_OT_add_wrinkle_preset,
+    TAREMIN_CLOTH_OT_slide_wrinkle_curves,
+    TAREMIN_CLOTH_OT_save_wrinkle_preset,
 )
 
 __all__ = [
@@ -151,6 +159,9 @@ __all__ = [
     "TAREMIN_CLOTH_OT_rebake_bone_sdf",
     "TAREMIN_CLOTH_OT_auto_detect_collider",
     "TAREMIN_CLOTH_OT_auto_fit_self_collision",
+    "TAREMIN_CLOTH_OT_add_wrinkle_preset",
+    "TAREMIN_CLOTH_OT_slide_wrinkle_curves",
+    "TAREMIN_CLOTH_OT_save_wrinkle_preset",
     "FPSCounter",
     "is_interactive_running",
     "stop_interactive_if_running",

@@ -8,7 +8,7 @@ use cloth_core::mesh::{
 };
 use cloth_core::simulation::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
-    GpuSkinningVertex, NormalParams, PinParams,
+    GpuSkinningVertex, GpuWrinkleProfileSample, NormalParams, PinParams, WrinkleFieldParams,
 };
 use cloth_core::sdf_baker::{GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams};
 use cloth_core::spatial_hash::SpatialHashParams;
@@ -427,6 +427,32 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, EdgeCollisionParams, num_collider_edges);
             check_member!(filename, s, EdgeCollisionParams, edge_margin_scale);
             check_member!(filename, s, EdgeCollisionParams, edge_margin_offset);
+        }
+
+        if let Some(s) = structs.get("GpuWrinkleProfileSample") {
+            check_struct_size!(filename, s, GpuWrinkleProfileSample);
+            check_member!(filename, s, GpuWrinkleProfileSample, valley_z);
+            check_member!(filename, s, GpuWrinkleProfileSample, valley_radius);
+            check_member!(filename, s, GpuWrinkleProfileSample, crest_z);
+            check_member!(filename, s, GpuWrinkleProfileSample, crest_radius);
+            check_member!(filename, s, GpuWrinkleProfileSample, valley_weight);
+            check_member!(filename, s, GpuWrinkleProfileSample, crest_weight);
+            check_member!(filename, s, GpuWrinkleProfileSample, _pad0);
+            check_member!(filename, s, GpuWrinkleProfileSample, _pad1);
+        }
+
+        if let Some(s) = structs.get("WrinkleFieldParams") {
+            check_struct_size!(filename, s, WrinkleFieldParams);
+            check_member!(filename, s, WrinkleFieldParams, bone_origin);
+            check_member!(filename, s, WrinkleFieldParams, bone_axis);
+            check_member!(filename, s, WrinkleFieldParams, bone_normal);
+            check_member!(filename, s, WrinkleFieldParams, bone_binormal);
+            check_member!(filename, s, WrinkleFieldParams, z_range);
+            check_member!(filename, s, WrinkleFieldParams, r_range);
+            check_member!(filename, s, WrinkleFieldParams, enabled);
+            check_member!(filename, s, WrinkleFieldParams, use_texture);
+            check_member!(filename, s, WrinkleFieldParams, _pad0);
+            check_member!(filename, s, WrinkleFieldParams, _pad1);
         }
     }
 }

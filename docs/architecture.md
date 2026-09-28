@@ -141,6 +141,8 @@ sequenceDiagram
    - **曲げ拘束 (Bending Constraints)**: 隣接2三角形の二面角（Dihedral Angle）に基づく曲率補正。
    - **固定・追従ピン拘束 (Pin & Attachment Constraints)**: 頂点グループウェイトおよびターゲット位置・ボーン追従。
    - **縫合拘束 (Sewing Constraints)**: 型紙エッジ間を時間経過に伴い収縮（スプリング）させて衣服を仕立てる。自然長短縮はサブステップ毎1回の独立パス（`sewing_shrink.wgsl`）で時間進行し、反復数・自己衝突モードに非依存。縫合エッジペアはトポロジー近接判定においてUnion-Find完全縮約トポロジーグラフ（ホップ数0換算・結節点隣接の相互対称登録）として扱われ、自己衝突（2ホップ除外）との誤爆拮抗を物理的に排除する。また、収縮完了時の密着剛体ロックオプション（`lock_on_close`）をサポート。衣装組立工程向けに、指定割合の縫合が結合するまで重力を抑制する**縫合優先モード**（Rustコアのラッチ・ランプ状態機械＋ホスト側測定、WGSL変更なし）をオプション提供する。
+   - **シワフィールド拘束 (Wrinkle Field Constraints, `wrinkle_field.wgsl`)**:
+     アニメ・イラスト特有の「山・谷の折れ目」を布メッシュに自発的に座屈させるための外力加速度フィールド。ボーン直交基底および円柱座標系（$\theta, z, r$）に射影されたスプライン幾何カーブ群から生成される**円柱UV展開2D-SDFテクスチャ（RGBA8Unorm, $512\times 256$）**および`texture_2d<f32>`サンプラー（$U$軸`AddressMode::Repeat`による全周シームレス補間）に基づき、位置直接ワープを完全撤廃。各カーブは**個別強度（`strength`）**と**個別影響半径（`influence_radius`）**を保持可能で、テクスチャベイク時に各カーブのフォールオフが個別合成され、GPUシェーダー側で全体強度（`stiffness`）と乗算適用される。さらに**縫合優先モード（`sewing_priority`）**と完全連動し、縫合未完了フェーズ中はディスパッチ自体がスキップ（外力ゼロ）され、縫合完了後にランプアップ復帰することで縫合工程を一切阻害しない。サブステップ先頭（`predict`直後）の外力パスとしてディスパッチされ、山領域への外向き風加速度（$+r$ 方向）と谷領域への内向き風加速度（$-r$ 方向）を速度 $\vec{v}$ および予測位置 $\vec{p}_{\text{prev}}$ に滑らかに積分。反復ループ内の距離拘束・曲げ拘束との競合・ノイズ（ぐちゃぐちゃ）を原理的に排除し、布自身の張力と風圧が釣り合った極めて自然なドレープとくびれを形成。同角度$\theta$における多重シワや"Y"字分岐シワも2D平面上の独立座標として潰れずに完全両立。
    - **衝突拘束 (Collisions)**:
      - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。
      - **メッシュコライダー**: クラスタカリング付き三角パッチ衝突判定。
@@ -178,6 +180,13 @@ sequenceDiagram
    - **速度更新と位置確定**:
     $$v_i \leftarrow (p_i - x_i) / dt$$
     $$x_i \leftarrow p_i$$
+
+5. **イラスト風シワフィールド (Stylized Wrinkle Field 外力パイプライン)**:
+   - **サブステップ先頭の外力加速度積分**: 従来の位置強制テレポート（幾何位置拘束）を完全撤廃し、`predict` 直後の外力積分タイミングで 2D-SDF テクスチャからサンプリングした風・重力加速度 $\vec{a}_{\text{wrinkle}}$ を速度と予測位置へ加算（$v += a \Delta t, p_{\text{prev}} += a \Delta t^2$）。距離拘束との激しい綱引きによる局所ノイズ（ぐちゃぐちゃ）を根絶し、布本来の引張剛性と調和した滑らかなドレープを形成。
+   - **円柱UV展開 2D-SDF テクスチャ**: ボーン周りの円柱座標系（$\theta, z$）を平坦な 2D テクスチャに展開し、周期的境界（$2\pi$ ラップ）を考慮した距離変換（L2-SDF）をベイク。RGBA 4チャンネル（R: 谷フォールオフ, G: 山フォールオフ, B: 谷目標半径, A: 山目標半径）をバイリニアサンプリング。
+   - **カーブ単位の強度・影響半径とマルチカーブ合成**: 各シワカーブの個別強度・影響半径（グラデーション幅）を考慮した Smoothstep フォールオフを算出し、最大寄与合成（$\max_k w_k$）でスムーズにブレンディング。
+   - **縫合優先モード (Sewing Priority) 連携**: 縫合フェーズ中（未完了時）はシワ外力ディスパッチを完全スキップ（外力ゼロ扱い）し、縫合完了後にランプアップ関数で滑らかに立ち上げ復帰。
+   - **ボーンチェーン仮想リンク補間とスライド幾何**: 非連続ボーン（親Tail〜子Headのギャップ）を `BoneChain` が仮想リンクとして自動検知・補間。3Dビューポート上での直感的なモーダルスライド操作（Gキー感覚、ホイール太さ、Shift+ホイール影響幅、Ctrl+ホイール強度）に対応。
 
 ---
 
@@ -295,6 +304,36 @@ pub struct EdgeCollisionParams {
     pub num_collider_edges: u32, // コライダーエッジ総数
     pub edge_margin_scale: f32,  // エッジマージン倍率
     pub edge_margin_offset: f32, // エッジマージン固定加算 (m)
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+// シワフィールド プロファイルサンプル (GPU Storage Buffer: Read-Only, 16 bytes)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuWrinkleProfileSample {
+    pub valley_z: f32,       // 谷の軸方向ターゲット位置 (m)
+    pub valley_radius: f32,  // 谷の径方向ターゲット半径 (m)
+    pub crest_z: f32,        // 山の軸方向ターゲット位置 (m)
+    pub crest_radius: f32,   // 山の径方向ターゲット半径 (m)
+    pub valley_weight: f32,  // 谷のメタボールポテンシャル強度 (0.0〜1.0)
+    pub crest_weight: f32,   // 山のメタボールポテンシャル強度 (0.0〜1.0)
+    pub _pad0: f32,
+    pub _pad1: f32,
+}
+
+// シワフィールド パラメータ (GPU Uniform Buffer: Read-Only, 96 bytes, 16バイトアライメント)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct WrinkleFieldParams {
+    pub bone_origin: [f32; 4],     // xyz: origin, w: influence_radius
+    pub bone_axis: [f32; 4],       // xyz: axis, w: bone_radius
+    pub bone_normal: [f32; 4],     // xyz: normal, w: stiffness
+    pub bone_binormal: [f32; 4],   // xyz: binormal, w: blend_weight
+    pub z_range: [f32; 2],         // x: z_min, y: z_max (V軸UVマッピング用)
+    pub r_range: [f32; 2],         // x: r_min, y: r_max (目標半径デコード用)
+    pub enabled: u32,              // 有効フラグ (0 or 1)
+    pub use_texture: u32,          // 2Dテクスチャモードフラグ (0 or 1)
     pub _pad0: u32,
     pub _pad1: u32,
 }

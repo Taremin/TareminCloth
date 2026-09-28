@@ -769,6 +769,150 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
             row_elastic_disp.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
 
+class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
+    """イラスト風シワフィールド設定サブパネル"""
+    bl_label = "Wrinkle Field (Stylized)"
+    bl_idname = "TAREMIN_CLOTH_PT_wrinkle_field"
+    bl_parent_id = "TAREMIN_CLOTH_PT_main_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Taremin Cloth"
+    bl_options = {'DEFAULT_CLOSED'}
+    bl_translation_context = i18n.CONTEXT
+
+    @classmethod
+    def poll(cls, context):
+        return _is_cloth_active_advanced(context)
+
+    def draw_header(self, context):
+        obj = context.active_object
+        if obj and hasattr(obj, "taremin_cloth"):
+            self.layout.prop(obj.taremin_cloth, "use_wrinkle_field", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+        if not obj or not hasattr(obj, "taremin_cloth"):
+            return
+
+        settings = obj.taremin_cloth
+        layout.active = settings.use_wrinkle_field
+
+        col = layout.column(align=True)
+        col.prop(settings, "wrinkle_global_strength", text=i18n.trans("Global Strength"))
+        col.prop(settings, "wrinkle_collection", text=i18n.trans("Collection"))
+
+        col.separator()
+        col.prop(settings, "wrinkle_armature", text=i18n.trans("Armature"))
+        if settings.wrinkle_armature and settings.wrinkle_armature.data:
+            col.prop_search(settings, "wrinkle_bone_name", settings.wrinkle_armature.data, "bones", text=i18n.trans("Target Bone"))
+        else:
+            col.prop(settings, "wrinkle_bone_name", text=i18n.trans("Target Bone"))
+
+        col.separator()
+        box_ops = col.box()
+        box_ops.label(text=i18n.trans("Wrinkle Curve Tools"), icon='CURVE_DATA')
+        row_ops = box_ops.row(align=True)
+        row_ops.operator("taremin_cloth.add_wrinkle_preset", text=i18n.trans("Add Preset"), icon='ADD')
+        row_ops.operator("taremin_cloth.slide_wrinkle_curves", text=i18n.trans("Slide [G]"), icon='ARROW_LEFTRIGHT')
+        box_ops.operator("taremin_cloth.save_wrinkle_preset", text=i18n.trans("Save Selected as Preset"), icon='EXPORT')
+
+        # コレクション内のカーブ一覧および選択カーブ個別編集
+        col_wrinkle = settings.wrinkle_collection
+        curves_in_col = [o for o in col_wrinkle.objects if o.type == 'CURVE'] if col_wrinkle else []
+
+        if curves_in_col:
+            col.separator()
+            box_curves = col.box()
+            box_curves.label(text=f"{i18n.trans('Wrinkle Curves in Collection')} ({len(curves_in_col)})", icon='OUTLINER_OB_CURVE')
+
+            # 現在選択中のカーブを判定
+            selected_curve = None
+            for c_obj in curves_in_col:
+                if c_obj.select_get():
+                    selected_curve = c_obj
+                    break
+            if not selected_curve and context.active_object in curves_in_col:
+                selected_curve = context.active_object
+            if not selected_curve:
+                selected_curve = curves_in_col[0]
+
+            # カーブ選択切替ボタン群
+            row_sel = box_curves.row(align=True)
+            for c_obj in curves_in_col:
+                c_tw = getattr(c_obj, "taremin_wrinkle", None)
+                c_type = c_tw.curve_type if c_tw else c_obj.get("wrinkle_type", "crest")
+                c_icon = 'IPO_EASE_OUT' if c_type == 'crest' else 'IPO_EASE_IN'
+                btn = row_sel.operator("taremin_cloth.select_object", text=c_obj.name, icon=c_icon, depress=(c_obj == selected_curve))
+                btn.object_name = c_obj.name
+
+            # 選択中カーブの個別設定（種類・強度・影響幅）
+            if selected_curve:
+                c_tw = getattr(selected_curve, "taremin_wrinkle", None)
+                box_indiv = box_curves.box()
+                c_type_label = i18n.trans("Crest (Ridge)") if (c_tw.curve_type if c_tw else selected_curve.get("wrinkle_type")) == 'crest' else i18n.trans("Root (Valley)")
+                box_indiv.label(text=f"{selected_curve.name} [{c_type_label}]", icon='PROPERTIES')
+
+                if c_tw:
+                    # 1. 種類の切り替えボタングループ [山 (Crest)] [谷 (Root)]
+                    row_type = box_indiv.row(align=True)
+                    row_type.prop(c_tw, "curve_type", expand=True)
+                    # 2. 個別強度スライダー
+                    box_indiv.prop(c_tw, "strength", text=i18n.trans("Individual Strength"))
+                    # 3. 影響幅（フォールオフ距離）スライダー
+                    box_indiv.prop(c_tw, "influence_radius", text=i18n.trans("Influence Radius"))
+                else:
+                    # 旧カスタムプロパティでのフォールバック
+                    box_indiv.label(text=f"Type: {selected_curve.get('wrinkle_type', 'crest')} | Str: {selected_curve.get('wrinkle_strength', 1.0):.2f}")
+
+
+class TAREMIN_CLOTH_PT_wrinkle_curve_item(bpy.types.Panel):
+    """シワカーブオブジェクト選択時の専用Nパネル"""
+    bl_label = "Wrinkle Curve Settings"
+    bl_idname = "TAREMIN_CLOTH_PT_wrinkle_curve_item"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Taremin Cloth"
+    bl_translation_context = i18n.CONTEXT
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if not obj or obj.type != 'CURVE':
+            return False
+        return hasattr(obj, "taremin_wrinkle") or "wrinkle_type" in obj
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+        if not obj:
+            return
+
+        tw = getattr(obj, "taremin_wrinkle", None)
+        col = layout.column(align=True)
+        col.label(text=f"Curve: {obj.name}", icon='CURVE_DATA')
+
+        if tw:
+            # 1. 種類切り替えボタングループ [山 (Crest)] [谷 (Root)]
+            col.separator()
+            row_type = col.row(align=True)
+            row_type.prop(tw, "curve_type", expand=True)
+
+            # 2. 個別強度・影響幅スライダー
+            col.separator()
+            col.prop(tw, "strength", text=i18n.trans("Strength"))
+            col.prop(tw, "influence_radius", text=i18n.trans("Influence Radius"))
+            if tw.target_radius > 0:
+                col.prop(tw, "target_radius", text=i18n.trans("Target Radius"))
+        else:
+            col.label(text=f"Type: {obj.get('wrinkle_type', 'crest')}")
+
+        col.separator()
+        row_ops = col.row(align=True)
+        row_ops.operator("taremin_cloth.slide_wrinkle_curves", text=i18n.trans("Slide [G]"), icon='ARROW_LEFTRIGHT')
+        row_ops.operator("taremin_cloth.save_wrinkle_preset", text=i18n.trans("Save Preset"), icon='EXPORT')
+
+
 class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
     """シミュレーション品質およびソルバー設定サブパネル"""
     bl_label = "Quality & Solver"
@@ -1261,6 +1405,14 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                     c_col.prop(anim, "progress", text=i18n.trans("Progress"), slider=True)
 
 
+def draw_view3d_wrinkle_menu(self, context):
+    """3Dビューポートの右クリックコンテキストメニューにシワスライド項目を追加"""
+    obj = context.active_object
+    if obj and obj.type == 'CURVE' and "wrinkle_type" in obj:
+        self.layout.separator()
+        self.layout.operator("taremin_cloth.slide_wrinkle_curves", text=i18n.trans("Slide Wrinkle Curves [G]"), icon='ARROW_LEFTRIGHT')
+
+
 classes = (
     TAREMIN_CLOTH_UL_elastic_groups,
     TAREMIN_CLOTH_PT_objects_panel,
@@ -1270,6 +1422,8 @@ classes = (
     TAREMIN_CLOTH_PT_forces,
     TAREMIN_CLOTH_PT_collisions,
     TAREMIN_CLOTH_PT_pattern,
+    TAREMIN_CLOTH_PT_wrinkle_field,
+    TAREMIN_CLOTH_PT_wrinkle_curve_item,
     TAREMIN_CLOTH_PT_quality,
     TAREMIN_CLOTH_PT_topology,
     TAREMIN_CLOTH_PT_interactive_opts,
@@ -1282,8 +1436,16 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    try:
+        bpy.types.VIEW3D_MT_object_context_menu.append(draw_view3d_wrinkle_menu)
+    except Exception:
+        pass
 
 
 def unregister():
+    try:
+        bpy.types.VIEW3D_MT_object_context_menu.remove(draw_view3d_wrinkle_menu)
+    except Exception:
+        pass
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

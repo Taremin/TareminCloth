@@ -5,6 +5,7 @@ Blender非依存の高速ソフトウェアZ-bufferレンダラー
 およびアニメーションPNG (APNG) / GIF の生成をサポートします。
 """
 
+import math
 import os
 from typing import List, Optional, Sequence, Tuple, Union
 import numpy as np
@@ -845,4 +846,154 @@ def filter_active_joint_faces(
     if active_faces:
         return np.unique(np.concatenate(active_faces)).astype(np.int32)
     return np.empty(0, dtype=np.int32)
+
+
+def generate_wrinkle_curve_lines(
+    crest_curves: Optional[Sequence[np.ndarray]] = None,
+    root_curves: Optional[Sequence[np.ndarray]] = None,
+    crest_color: Tuple[int, int, int] = (255, 60, 20),      # 山: 赤/オレンジ
+    root_color: Tuple[int, int, int] = (0, 220, 255),       # 谷: シアン/水色
+    is_closed: bool = True,
+) -> Optional[np.ndarray]:
+    """
+    山カーブ（Crest）群および谷カーブ（Root）群の3D点列から、
+    レンダラー用の3Dライン配列 [E, 9] (p0_xyz, p1_xyz, rgb) を生成します。
+    """
+    lines = []
+
+    def _append_curve(pts_arr, col):
+        if pts_arr is None or len(pts_arr) < 2:
+            return
+        pts = np.asarray(pts_arr, dtype=np.float32)
+        n = len(pts)
+        c0, c1, c2 = float(col[0]), float(col[1]), float(col[2])
+        for i in range(n - 1):
+            p0 = pts[i]
+            p1 = pts[i + 1]
+            lines.append([p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], c0, c1, c2])
+        if is_closed and n >= 3:
+            p0 = pts[-1]
+            p1 = pts[0]
+            lines.append([p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], c0, c1, c2])
+
+    if crest_curves:
+        for c in crest_curves:
+            _append_curve(c, crest_color)
+
+    if root_curves:
+        for r in root_curves:
+            _append_curve(r, root_color)
+
+    if lines:
+        return np.array(lines, dtype=np.float32)
+    return None
+
+
+def compute_wrinkle_weight_colors(
+    positions: np.ndarray,
+    origin: Sequence[float],
+    axis: Sequence[float],
+    normal: Optional[Sequence[float]] = None,
+    influence_radius: float = 0.05,
+    valley_z_profile: Optional[np.ndarray] = None,
+    valley_weight_profile: Optional[np.ndarray] = None,
+    crest_z_profile: Optional[np.ndarray] = None,
+    crest_weight_profile: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    布頂点のシワフィールド影響度ウェイト [0, 1] を Jet ヒートマップ頂点カラー [N, 3] (uint8) に変換します。
+    影響度 0 (遠い/カーブ範囲外): 青
+    影響度 1 (山または谷の直近): 赤
+    """
+    from .engine.wrinkle_field import project_points_to_cylindrical
+    pos = np.asarray(positions, dtype=np.float32)
+    n_verts = len(pos)
+    if n_verts == 0:
+        return np.empty((0, 3), dtype=np.uint8)
+
+    thetas, zs, rs = project_points_to_cylindrical(pos, origin, axis, normal)
+    inv_infl = 1.0 / max(influence_radius, 1e-6)
+
+    def _eval_profile(z_prof, w_prof):
+        if z_prof is None or len(z_prof) == 0:
+            return np.zeros(n_verts, dtype=np.float32)
+        n_samples = len(z_prof)
+        norm_t = (thetas / (2.0 * math.pi)) % 1.0
+        indices = norm_t * float(n_samples)
+        i0 = np.floor(indices).astype(np.int32) % n_samples
+        i1 = (i0 + 1) % n_samples
+        frac = (indices - np.floor(indices)).astype(np.float32)
+        target_z = (1.0 - frac) * z_prof[i0] + frac * z_prof[i1]
+        dist_z = np.abs(zs - target_z)
+
+        if w_prof is not None and len(w_prof) > 0:
+            target_w = (1.0 - frac) * w_prof[i0] + frac * w_prof[i1]
+        else:
+            target_w = 1.0
+
+        t = np.clip(1.0 - dist_z * inv_infl, 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t) * target_w
+
+    v_weights = _eval_profile(valley_z_profile, valley_weight_profile)
+    c_weights = _eval_profile(crest_z_profile, crest_weight_profile)
+    weights = np.maximum(v_weights, c_weights)
+
+    return colormap_jet(weights, vmin=0.0, vmax=1.0)
+
+
+def compute_wrinkle_texture_2d_weight_colors(
+    positions: np.ndarray,
+    texture_rgba: np.ndarray,
+    origin: Sequence[float],
+    axis: Sequence[float],
+    normal: Optional[Sequence[float]] = None,
+    z_min: float = -0.15,
+    z_max: float = 0.15,
+) -> np.ndarray:
+    """
+    円柱UV展開2D-SDFテクスチャの山・谷合成影響度ウェイト [0, 1] を Jet ヒートマップ頂点カラー [N, 3] (uint8) に変換します。
+    - texture_rgba: [height, width, 4] (uint8)
+    - R: 谷ウェイト (0-255)
+    - G: 山ウェイト (0-255)
+    """
+    from .engine.wrinkle_field import project_points_to_cylindrical
+    pos = np.asarray(positions, dtype=np.float32)
+    n_verts = len(pos)
+    if n_verts == 0:
+        return np.empty((0, 3), dtype=np.uint8)
+
+    thetas, zs, _ = project_points_to_cylindrical(pos, origin, axis, normal)
+    h, w, _ = texture_rgba.shape
+
+    u = (thetas / (2.0 * math.pi)) % 1.0
+    z_span = max(z_max - z_min, 1e-6)
+    v = np.clip((zs - z_min) / z_span, 0.0, 1.0)
+
+    # バイリニアサンプリング
+    gx = u * float(w)
+    gy = v * float(h - 1)
+    x0 = np.floor(gx).astype(np.int32) % w
+    x1 = (x0 + 1) % w
+    y0 = np.clip(np.floor(gy).astype(np.int32), 0, h - 1)
+    y1 = np.clip(y0 + 1, 0, h - 1)
+    fx = (gx - np.floor(gx)).astype(np.float32)
+    fy = (gy - np.floor(gy)).astype(np.float32)
+
+    # R (谷) と G (山) のサンプリング
+    r00 = texture_rgba[y0, x0, 0].astype(np.float32)
+    r10 = texture_rgba[y0, x1, 0].astype(np.float32)
+    r01 = texture_rgba[y1, x0, 0].astype(np.float32)
+    r11 = texture_rgba[y1, x1, 0].astype(np.float32)
+    r_val = (1.0 - fx) * (1.0 - fy) * r00 + fx * (1.0 - fy) * r10 + (1.0 - fx) * fy * r01 + fx * fy * r11
+
+    g00 = texture_rgba[y0, x0, 1].astype(np.float32)
+    g10 = texture_rgba[y0, x1, 1].astype(np.float32)
+    g01 = texture_rgba[y1, x0, 1].astype(np.float32)
+    g11 = texture_rgba[y1, x1, 1].astype(np.float32)
+    g_val = (1.0 - fx) * (1.0 - fy) * g00 + fx * (1.0 - fy) * g10 + (1.0 - fx) * fy * g01 + fx * fy * g11
+
+    weights = np.maximum(r_val, g_val) / 255.0
+    return colormap_jet(weights, vmin=0.0, vmax=1.0)
+
+
 

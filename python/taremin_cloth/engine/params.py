@@ -44,6 +44,102 @@ def sync_cloth_parameters(sim, obj, scene=None):
     # 6. 伸縮グループ (Elastic Bands / Edge Scaling)
     sync_elastic_groups(sim, obj)
 
+    # 7. シワフィールド (Wrinkle Field 2D-SDF Texture)
+    sync_wrinkle_field(sim, obj)
+
+
+_prev_wrinkle_signatures = {}
+
+
+def sync_wrinkle_field(sim, obj):
+    """シワフィールド設定および2D-SDFテクスチャをGPUシミュレータに同期する"""
+    settings = getattr(obj, "taremin_cloth", None)
+    if not hasattr(sim, "set_wrinkle_field_texture_2d") or not hasattr(sim, "set_wrinkle_field_enabled"):
+        return
+
+    if not settings or not getattr(settings, "use_wrinkle_field", False):
+        if obj.name in _prev_wrinkle_signatures:
+            sim.set_wrinkle_field_enabled(False)
+            del _prev_wrinkle_signatures[obj.name]
+        return
+
+    # コレクション名とアーマチュアの特定
+    col_name = settings.wrinkle_collection.name if settings.wrinkle_collection else "TareminCloth_Wrinkles"
+    global_str = float(getattr(settings, "wrinkle_global_strength", 1.0))
+    arm_obj = getattr(settings, "wrinkle_armature", None)
+    bone_name = getattr(settings, "wrinkle_bone_name", "")
+
+    if not arm_obj:
+        for o in bpy.data.objects:
+            if o.type == 'ARMATURE':
+                arm_obj = o
+                break
+
+    if not arm_obj or not arm_obj.pose or not arm_obj.pose.bones:
+        return
+
+    if not bone_name or bone_name not in arm_obj.pose.bones:
+        bone_name = arm_obj.pose.bones[0].name
+
+    pb = arm_obj.pose.bones[bone_name]
+    w_mat = arm_obj.matrix_world
+    bone_head = np.array((w_mat @ pb.head)[:3], dtype=np.float32)
+    bone_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float32)
+    bone_rad = float(getattr(pb.bone, "head_radius", 0.05))
+    if bone_rad <= 1e-4:
+        bone_rad = float(pb.length * 0.15)
+
+    # コレクションからシワカーブを抽出
+    from .wrinkle_field import extract_curves_from_blender_collection, bake_wrinkle_2d_sdf_texture
+    crest_curves, root_curves = extract_curves_from_blender_collection(col_name)
+    if not crest_curves and not root_curves:
+        if obj.name in _prev_wrinkle_signatures:
+            sim.set_wrinkle_field_enabled(False)
+            del _prev_wrinkle_signatures[obj.name]
+        return
+
+    # 差分キャッシュのチェック (点数や座標、強度に変更がなければベイクをスキップ)
+    sig_parts = [col_name, global_str, bone_head.tobytes(), bone_tail.tobytes(), bone_rad]
+    for c in crest_curves:
+        sig_parts.extend([c.points.shape, c.strength, c.influence_radius, c.points.tobytes()[:64]])
+    for r in root_curves:
+        sig_parts.extend([r.points.shape, r.strength, r.influence_radius, r.points.tobytes()[:64]])
+    current_sig = hash(tuple(sig_parts))
+
+    if _prev_wrinkle_signatures.get(obj.name) == current_sig:
+        return
+
+    # 布の推定半径
+    cloth_rad = bone_rad + 0.02
+    tex_2d = bake_wrinkle_2d_sdf_texture(
+        bone_head=bone_head,
+        bone_tail=bone_tail,
+        bone_radius=bone_rad,
+        cloth_radius=cloth_rad,
+        crest_curves=crest_curves,
+        root_curves=root_curves,
+        width=128,
+        height=128,
+    )
+
+    sim.set_wrinkle_field_texture_2d(
+        texture_rgba_bytes=tex_2d.texture_bytes,
+        width=tex_2d.width,
+        height=tex_2d.height,
+        bone_head=bone_head,
+        bone_tail=bone_tail,
+        bone_radius=bone_rad,
+        cloth_radius=cloth_rad,
+        z_min=tex_2d.z_min,
+        z_max=tex_2d.z_max,
+        r_min=tex_2d.r_min,
+        r_max=tex_2d.r_max,
+        crest_force=30.0 * global_str,
+        valley_force=30.0 * global_str,
+    )
+    sim.set_wrinkle_field_enabled(True)
+    _prev_wrinkle_signatures[obj.name] = current_sig
+
 
 def sync_elastic_groups(sim, obj):
     """伸縮グループ（ゴム紐）の自然長スケールをGPUシミュレータに同期する（平滑化追従対応）"""

@@ -738,6 +738,40 @@ mod tests {
     }
 
     #[test]
+    fn test_sewing_priority_wrinkle_field_suppression() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let edges: Vec<[u32; 2]> = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&[[0u32, 1u32]]),
+            None, None, 0, 0.005, 10000.0, 10.0, 5000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_wrinkle_field(true);
+        sim.set_sewing_priority_options(true, 0.9, 0.005, 2, 0);
+
+        // 1. 未結合 (priority_scale == 0.0): 縫合フェーズ中はシワフィールド外力がスキップされる
+        let (_, s0, lat0) = sim.update_sewing_priority_from_positions(&positions);
+        assert_eq!(s0, 0.0);
+        assert!(!lat0);
+        sim.step(0.016, 2);
+
+        // 2. 結合 (priority_scale -> 0.5 -> 1.0): ランプおよび完全復帰後も正常動作
+        let closed = vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0]];
+        let (_, s1, lat1) = sim.update_sewing_priority_from_positions(&closed);
+        assert!(lat1);
+        assert!((s1 - 0.5).abs() < 1e-6);
+        sim.step(0.016, 2);
+
+        let (_, s2, _) = sim.update_sewing_priority_from_positions(&closed);
+        assert!((s2 - 1.0).abs() < 1e-6);
+        sim.step(0.016, 2);
+    }
+
+    #[test]
     fn test_edge_collision_ee_pipeline() {
         let ctx = match get_test_context() {
             Some(c) => c,

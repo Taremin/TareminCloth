@@ -45,6 +45,15 @@ impl GpuClothSimulator {
             self.write_pair_collect_params(dt);
         }
 
+        // 縫合優先モード: 縫合フェーズ中・ランプ中はシワフィールド外力の実効強度をスケール (外力と同等扱い)
+        if self.enable_wrinkle_field {
+            if let Some(ref buffer) = self.wrinkle_field_params_buffer {
+                let mut p = self.wrinkle_field_params;
+                p.bone_binormal[3] *= priority_scale;
+                self.context.queue.write_buffer(buffer, 0, bytemuck::bytes_of(&p));
+            }
+        }
+
         let wg_size = self.workgroup_size;
         let vert_workgroups = (self.num_vertices + wg_size - 1) / wg_size;
         let num_pins = self.dynamic_pins.len() as u32;
@@ -120,6 +129,23 @@ impl GpuClothSimulator {
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
                 drop(cpass);
                 self.profiler.end_pass(encoder, query);
+            }
+
+            // 1.5 シワフィールド外力パス (Wrinkle Field: 風・重力のような外力加速度場による座屈誘発)
+            // 縫合優先モード中 (priority_scale <= 0.0) は外力パス自体をスキップ (外力と同等扱い)
+            if self.enable_wrinkle_field && priority_scale > 0.0 {
+                if let Some(ref bg) = self.wrinkle_field_bind_group {
+                    let query = self.profiler.begin_pass("wrinkle_field", encoder);
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("Wrinkle Field Pass"),
+                        timestamp_writes: self.profiler.pass_writes(&query),
+                    });
+                    cpass.set_pipeline(self.shared.ensure_wrinkle_field());
+                    cpass.set_bind_group(0, bg, &[]);
+                    cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                    drop(cpass);
+                    self.profiler.end_pass(encoder, query);
+                }
             }
 
             // 拘束解決反復ループ (Solver Iterations)

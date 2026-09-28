@@ -107,6 +107,7 @@ pub struct SharedPipelines {
     pub hash_bgl: wgpu::BindGroupLayout,
     pub edge_hash_bgl: wgpu::BindGroupLayout,
     pub sew_shrink_bgl: wgpu::BindGroupLayout,
+    pub wrinkle_field_bgl: wgpu::BindGroupLayout,
 
     // --- 常時パイプライン (eager・8 本) ---
     pub predict_pipeline: wgpu::ComputePipeline,
@@ -126,6 +127,7 @@ pub struct SharedPipelines {
     hash: OnceLock<HashPipelines>,
     edge_hash: OnceLock<HashPipelines>,
     sew_shrink: OnceLock<wgpu::ComputePipeline>,
+    wrinkle_field: OnceLock<wgpu::ComputePipeline>,
 
     /// ビルド計測ログ (パイプライン名, ミリ秒)。eager + 遅延分を追記する。
     timings: Mutex<Vec<(String, f32)>>,
@@ -425,6 +427,30 @@ impl SharedPipelines {
             label: Some("Sew Shrink BGL"),
             entries: &[storage_rw, uniform_entry(1)],
         });
+        let wrinkle_field_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Wrinkle Field BGL"),
+            entries: &[
+                storage_rw,
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                uniform_entry(3),
+                uniform_entry(4),
+            ],
+        });
 
         // --- 常時シェーダ (eager・8 本) ---
         let predict_shader = create_shader_with_wg_size(
@@ -556,6 +582,7 @@ impl SharedPipelines {
             hash_bgl,
             edge_hash_bgl,
             sew_shrink_bgl,
+            wrinkle_field_bgl,
             predict_pipeline,
             distance_pipeline,
             bending_pipeline,
@@ -571,6 +598,7 @@ impl SharedPipelines {
             hash: OnceLock::new(),
             edge_hash: OnceLock::new(),
             sew_shrink: OnceLock::new(),
+            wrinkle_field: OnceLock::new(),
             timings,
             eager_ms,
         }
@@ -654,6 +682,24 @@ impl SharedPipelines {
             let pl = pipeline_layout(device, "Sew Shrink Pipeline Layout", &self.sew_shrink_bgl);
             timed(&self.timings, "sew_shrink", || {
                 compute_pipeline(device, "Sew Shrink Pipeline", &pl, &shader, "main")
+            })
+        })
+    }
+
+    /// シワフィールド拘束パイプラインを遅延生成・取得する。
+    pub fn ensure_wrinkle_field(&self) -> &wgpu::ComputePipeline {
+        self.wrinkle_field.get_or_init(|| {
+            let device = &self.context.device;
+            let wg = self.workgroup_size;
+            let shader = create_shader_with_wg_size(
+                device,
+                "Wrinkle Field Shader",
+                include_str!("../shaders/wrinkle_field.wgsl"),
+                wg,
+            );
+            let pl = pipeline_layout(device, "Wrinkle Field Pipeline Layout", &self.wrinkle_field_bgl);
+            timed(&self.timings, "wrinkle_field", || {
+                compute_pipeline(device, "Wrinkle Field Pipeline", &pl, &shader, "main")
             })
         })
     }
@@ -815,6 +861,9 @@ impl SharedPipelines {
         }
         if self.sew_shrink.get().is_some() {
             names.push("sew_shrink".to_string());
+        }
+        if self.wrinkle_field.get().is_some() {
+            names.push("wrinkle_field".to_string());
         }
         names
     }

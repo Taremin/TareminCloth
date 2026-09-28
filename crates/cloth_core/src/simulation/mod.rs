@@ -20,7 +20,10 @@ use crate::mesh::{
 };
 use crate::spatial_hash::{GpuColliderEdgeSpatialHash, GpuEdgeSpatialHash, GpuSpatialHash};
 use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
-pub use self::types::{CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex, PinParams};
+pub use self::types::{
+    CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex,
+    GpuWrinkleProfileSample, PinParams, WrinkleFieldParams,
+};
 use self::pipelines::build_simulation_resources;
 use self::pipeline_cache::SharedPipelines;
 use self::profile::GpuProfiler;
@@ -231,6 +234,15 @@ pub struct GpuClothSimulator {
     pub(crate) sew_shrink_bind_group: wgpu::BindGroup,
     pub(crate) update_vel_bind_group: wgpu::BindGroup,
 
+    // シワフィールド（イラスト風シワ拘束）用
+    pub enable_wrinkle_field: bool,
+    pub wrinkle_field_params: WrinkleFieldParams,
+    pub(crate) wrinkle_field_params_buffer: Option<wgpu::Buffer>,
+    pub(crate) wrinkle_texture: Option<wgpu::Texture>,
+    pub(crate) wrinkle_texture_view: Option<wgpu::TextureView>,
+    pub(crate) wrinkle_sampler: Option<wgpu::Sampler>,
+    pub(crate) wrinkle_field_bind_group: Option<wgpu::BindGroup>,
+
     pub solver_iterations: u32,
     pub gravity: [f32; 3],
     pub damping: f32,
@@ -414,6 +426,13 @@ impl GpuClothSimulator {
             dynamic_bake_bind_group: None,
             active_dirty_bone_indices: None,
             dynamic_sdf_initial_baked: false,
+            enable_wrinkle_field: false,
+            wrinkle_field_params: WrinkleFieldParams::default(),
+            wrinkle_field_params_buffer: None,
+            wrinkle_texture: None,
+            wrinkle_texture_view: None,
+            wrinkle_sampler: None,
+            wrinkle_field_bind_group: None,
             spatial_hash: res.spatial_hash,
             edge_spatial_hash: res.edge_spatial_hash,
             self_collision_bind_group: res.self_collision_bind_group,
@@ -2236,6 +2255,152 @@ impl GpuClothSimulator {
     /// ワークグループサイズを設定する
     pub fn set_workgroup_size(&mut self, wg_size: u32) {
         self.workgroup_size = wg_size;
+    }
+
+    /// シワフィールド有効フラグを設定する
+    pub fn set_enable_wrinkle_field(&mut self, enable: bool) {
+        if enable {
+            self.shared.ensure_wrinkle_field();
+        }
+        self.enable_wrinkle_field = enable;
+        self.wrinkle_field_params.enabled = if enable { 1 } else { 0 };
+        if let Some(ref buffer) = self.wrinkle_field_params_buffer {
+            self.context.queue.write_buffer(buffer, 0, bytemuck::bytes_of(&self.wrinkle_field_params));
+        }
+    }
+
+    /// シワフィールド有効フラグを取得する
+    pub fn wrinkle_field_enabled(&self) -> bool {
+        self.enable_wrinkle_field
+    }
+
+    /// シワフィールドのメタパラメータを設定する
+    pub fn set_wrinkle_field_params(&mut self, params: &WrinkleFieldParams) {
+        self.wrinkle_field_params = *params;
+        self.wrinkle_field_params.enabled = if self.enable_wrinkle_field { 1 } else { 0 };
+        if let Some(ref buffer) = self.wrinkle_field_params_buffer {
+            self.context.queue.write_buffer(buffer, 0, bytemuck::bytes_of(&self.wrinkle_field_params));
+        }
+    }
+
+    /// シワフィールドの2D-SDFテクスチャ（円柱UV展開テクスチャ: RGBA8Unorm）を設定し、GPUテクスチャおよびBindGroupを更新する
+    pub fn set_wrinkle_field_texture_2d(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba_bytes: &[u8],
+        z_min: f32,
+        z_max: f32,
+        r_min: f32,
+        r_max: f32,
+    ) {
+        if width == 0 || height == 0 || rgba_bytes.is_empty() {
+            self.wrinkle_texture = None;
+            self.wrinkle_texture_view = None;
+            self.wrinkle_field_bind_group = None;
+            return;
+        }
+
+        let device = &self.context.device;
+        let queue = &self.context.queue;
+
+        // 2D テクスチャの生成
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Wrinkle Field 2D Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // データをGPUテクスチャに書き込み
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba_bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            texture_size,
+        );
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        if self.wrinkle_sampler.is_none() {
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Wrinkle Field 2D Sampler"),
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+            self.wrinkle_sampler = Some(sampler);
+        }
+
+        self.wrinkle_field_params.z_range = [z_min, z_max];
+        self.wrinkle_field_params.r_range = [r_min, r_max];
+        self.wrinkle_field_params.use_texture = 1;
+
+        if self.wrinkle_field_params_buffer.is_none() {
+            use wgpu::util::DeviceExt;
+            let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Wrinkle Field Params Buffer"),
+                contents: bytemuck::bytes_of(&self.wrinkle_field_params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            self.wrinkle_field_params_buffer = Some(params_buf);
+        } else if let Some(ref buffer) = self.wrinkle_field_params_buffer {
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&self.wrinkle_field_params));
+        }
+
+        // BindGroup の作成
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Wrinkle Field Bind Group"),
+            layout: &self.shared.wrinkle_field_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(self.wrinkle_sampler.as_ref().unwrap()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.wrinkle_field_params_buffer.as_ref().unwrap().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        self.wrinkle_texture = Some(texture);
+        self.wrinkle_texture_view = Some(texture_view);
+        self.wrinkle_field_bind_group = Some(bind_group);
     }
 }
 

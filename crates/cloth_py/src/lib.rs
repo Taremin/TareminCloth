@@ -2463,6 +2463,82 @@ impl ClothSimulator {
     fn get_config_hash(&self) -> u64 {
         self.simulator.config_hash_u64()
     }
+
+    /// シワフィールド有効フラグを設定する
+    fn set_enable_wrinkle_field(&mut self, enable: bool) {
+        self.simulator.set_enable_wrinkle_field(enable);
+    }
+
+    /// シワフィールド有効フラグを取得する
+    fn wrinkle_field_enabled(&self) -> bool {
+        self.simulator.wrinkle_field_enabled()
+    }
+
+    /// シワフィールドのメタパラメータを設定する
+    #[pyo3(signature = (origin, axis, normal, binormal, influence_radius=0.05, bone_radius=0.05, stiffness=1.0, blend_weight=1.0, z_min=None, z_max=None, r_min=None, r_max=None))]
+    fn set_wrinkle_field_params(
+        &mut self,
+        origin: [f32; 3],
+        axis: [f32; 3],
+        normal: [f32; 3],
+        binormal: [f32; 3],
+        influence_radius: f32,
+        bone_radius: f32,
+        stiffness: f32,
+        blend_weight: f32,
+        z_min: Option<f32>,
+        z_max: Option<f32>,
+        r_min: Option<f32>,
+        r_max: Option<f32>,
+    ) {
+        let mut p = cloth_core::simulation::types::WrinkleFieldParams {
+            bone_origin: [origin[0], origin[1], origin[2], influence_radius],
+            bone_axis: [axis[0], axis[1], axis[2], bone_radius],
+            bone_normal: [normal[0], normal[1], normal[2], stiffness],
+            bone_binormal: [binormal[0], binormal[1], binormal[2], blend_weight],
+            z_range: [z_min.unwrap_or(0.0), z_max.unwrap_or(0.0)],
+            r_range: [r_min.unwrap_or(0.0), r_max.unwrap_or(0.0)],
+            enabled: if self.simulator.wrinkle_field_enabled() { 1 } else { 0 },
+            use_texture: 1,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        // 既存のz_range / r_rangeが設定済みなら維持
+        if z_min.is_none() && z_max.is_none() {
+            // パラメータのみの更新時
+            p.z_range = self.simulator.wrinkle_field_params.z_range;
+            p.r_range = self.simulator.wrinkle_field_params.r_range;
+        }
+        self.simulator.set_wrinkle_field_params(&p);
+    }
+
+    /// シワフィールドの2D-SDFテクスチャ（RGBA8Unorm, bytes）を設定する
+    #[pyo3(signature = (width, height, texture_bytes, z_min, z_max, r_min, r_max))]
+    fn set_wrinkle_field_texture_2d(
+        &mut self,
+        width: u32,
+        height: u32,
+        texture_bytes: &[u8],
+        z_min: f32,
+        z_max: f32,
+        r_min: f32,
+        r_max: f32,
+    ) -> PyResult<()> {
+        let expected_len = (width * height * 4) as usize;
+        if texture_bytes.len() != expected_len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "texture_bytes のサイズが不正です: actual={}, expected={} (width={}, height={})",
+                texture_bytes.len(),
+                expected_len,
+                width,
+                height
+            )));
+        }
+        self.simulator.set_wrinkle_field_texture_2d(
+            width, height, texture_bytes, z_min, z_max, r_min, r_max,
+        );
+        Ok(())
+    }
 }
 
 /// taremin_cloth_core Python モジュール
