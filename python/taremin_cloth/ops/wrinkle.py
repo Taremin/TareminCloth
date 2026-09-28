@@ -52,6 +52,7 @@ from ..utils.drawing import (
     draw_wrinkle_influence_tubes,
 )
 from ..utils.view3d import tag_redraw_view3d
+from ..utils.modal_event import PressDragTracker, is_left_release
 
 COLLECTION_NAME = "TareminCloth_Wrinkles"
 
@@ -564,7 +565,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
     _target_bone_name: str = ""
     _chain_bones_coords: list = []
     _all_bones_data: list = []
-    _wait_for_lmb_release: bool = False
+    _press_tracker: Any = None
     _target_curves: List[bpy.types.Object] = []
     _armature_obj: Optional[bpy.types.Object] = None
     _chain: Optional[BoneChain] = None
@@ -592,7 +593,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         self._target_bone_name = ""
         self._chain_bones_coords = []
         self._all_bones_data = []
-        self._wait_for_lmb_release = False
+        self._press_tracker = PressDragTracker()
         self._target_curves = []
         self._armature_obj = None
         self._chain = None
@@ -1008,9 +1009,9 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                 pass
 
     def modal(self, context, event):
-        # 左マウスボタンのリリースを検出して誤爆防止フラグを解除
-        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
-            self._wait_for_lmb_release = False
+        # 左マウスボタンの解放で押下追跡を解消し、クリック/ドラッグを確定する
+        if is_left_release(event):
+            self._press_tracker.on_release_event(event)
 
         # ---------------------------------------------------------
         # フェイズ1: 初期対象ボーン決定フェイズ (PICK_BONE)
@@ -1045,7 +1046,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                 self._true_initial_points = [pts.copy() for pts in self._initial_points]
 
                 if event.type == 'LEFTMOUSE':
-                    self._wait_for_lmb_release = True
+                    self._press_tracker.on_press_event(event)
                 tag_redraw_view3d(context)
                 self._report({'INFO'}, i18n.trans(f"Bone '{self._target_bone_name}' selected. Drag mouse to slide."))
                 return {'RUNNING_MODAL'}
@@ -1065,6 +1066,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         # ---------------------------------------------------------
         # 1. マウス移動によるスライド (t パラメータ)
         if event.type == 'MOUSEMOVE':
+            self._press_tracker.on_move_event(event)
             dx = event.mouse_x - self._init_mouse_x
             speed = 0.0005 if event.shift else 0.002
             self._current_t = float(np.clip(self._base_t + dx * speed, 0.0, 1.0))
@@ -1092,14 +1094,14 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         # 3. Bキー: 再びボーン選択フェイズに戻る
         elif event.type == 'B' and event.value == 'PRESS':
             self._phase = 'PICK_BONE'
-            self._wait_for_lmb_release = False
+            self._press_tracker.reset()
             tag_redraw_view3d(context)
             self._report({'INFO'}, i18n.trans("Switched to bone picking phase. Hover over a bone and click LMB."))
             return {'RUNNING_MODAL'}
 
         # 4. 確定操作 (LMB または Enter)
         elif event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
-            if event.type == 'LEFTMOUSE' and self._wait_for_lmb_release:
+            if event.type == 'LEFTMOUSE' and self._press_tracker.pressed:
                 # フェイズ1でのクリック（押し込み）がまだ完了していないため確定を無視
                 return {'RUNNING_MODAL'}
             self._cleanup(context)

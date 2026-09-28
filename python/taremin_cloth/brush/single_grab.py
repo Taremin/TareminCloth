@@ -153,6 +153,9 @@ class SingleGrabTool(BaseBrushTool):
     def on_release(self, ctx, pinned_verts):
         if self.grabbed_vert is None:
             return False
+        # NOTE: クリック/ドラッグ区別が必要になった場合は
+        # utils.modal_event.PressDragTracker の on_release() 結果
+        # ("click" | "drag") で分岐する。現状は挙動変更なし。
         # ピン留めされていない頂点のみ物理解放
         if self.grabbed_vert not in pinned_verts:
             try:

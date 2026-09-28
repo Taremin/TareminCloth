@@ -222,6 +222,7 @@ Taremin Cloth の詳細な物理計算理論、接触・衝突判定（V-T, E-E,
 | **ピンウェイト・質量計算** | `vertex_groups.get()` と頂点ループでインバースマスを手動計算 | `from taremin_cloth.utils.mesh_extract import get_pin_inv_masses` |
 | **3Dビュー再描画** | `for area in context.screen.areas: area.tag_redraw()` を手動ループ | `from taremin_cloth.utils.view3d import tag_redraw_view3d` |
 | **アニメーション停止** | `bpy.ops.screen.animation_cancel()` を try-except で手動呼び出し | `from taremin_cloth.utils.view3d import stop_animation` |
+| **モーダル操作判定・クリック/ドラッグ区別** | `event.type`/`event.value` の直書き分散や独自抑止フラグの再発明 | `from taremin_cloth.utils.modal_event import is_left_press, is_left_release, PressDragTracker` |
 
 ### 実装前チェックリスト (Pre-Implementation Check)
 コードを追加・修正する前に、すべてのAIエージェントおよび開発者は必ず以下の点検を行ってください：

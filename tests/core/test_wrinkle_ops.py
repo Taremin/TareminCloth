@@ -373,15 +373,15 @@ class TestWrinkleOps(unittest.TestCase):
         res = op.modal(mock_context, event_lmb)
         self.assertEqual(res, {'RUNNING_MODAL'})
         self.assertEqual(op._phase, 'SLIDE')
-        self.assertTrue(op._wait_for_lmb_release)
+        self.assertTrue(op._press_tracker.pressed)
 
-        # 1b. 指を離す (RELEASE) -> _wait_for_lmb_release が解除される
+        # 1b. 指を離す (RELEASE) -> 押下追跡が解除される
         event_release = MagicMock()
         event_release.type = 'LEFTMOUSE'
         event_release.value = 'RELEASE'
         res_rel = op.modal(mock_context, event_release)
         self.assertEqual(res_rel, {'RUNNING_MODAL'})
-        self.assertFalse(op._wait_for_lmb_release)
+        self.assertFalse(op._press_tracker.pressed)
 
         # 2. フェイズ2で Bキー -> フェイズ1 (PICK_BONE) へ再移行
         event_b = MagicMock()
@@ -734,7 +734,7 @@ class TestWrinkleOps(unittest.TestCase):
 
         self.assertEqual(res, {'RUNNING_MODAL'})
         self.assertEqual(op._phase, 'SLIDE', "1回目のクリックで確実にSLIDEフェーズへ移行すること")
-        self.assertTrue(op._wait_for_lmb_release, "ボーン決定クリックの指が離されるまで確定誤爆防止フラグが立つこと")
+        self.assertTrue(op._press_tracker.pressed, "ボーン決定クリックの指が離されるまで確定誤爆防止フラグが立つこと")
         self.assertEqual(op._true_initial_bone_name, "TargetBone", "選択されたボーンが真の初期ボーンとして記憶されること")
         self.assertAlmostEqual(op._true_initial_points[0][0, 0], 5.0)
 
@@ -751,7 +751,7 @@ class TestWrinkleOps(unittest.TestCase):
         event_release.type = 'LEFTMOUSE'
         event_release.value = 'RELEASE'
         op.modal(mock_context, event_release)
-        self.assertFalse(op._wait_for_lmb_release, "RELEASEで確定誤爆防止フラグが解除されること")
+        self.assertFalse(op._press_tracker.pressed, "RELEASEで確定誤爆防止フラグが解除されること")
 
         # 4. スライド調整後、次の正式なクリックで確定 (FINISHED) すること
         event_confirm = MagicMock()
