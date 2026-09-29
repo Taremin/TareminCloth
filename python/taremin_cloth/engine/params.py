@@ -54,12 +54,12 @@ _prev_wrinkle_signatures = {}
 def sync_wrinkle_field(sim, obj):
     """シワフィールド設定および2D-SDFテクスチャをGPUシミュレータに同期する"""
     settings = getattr(obj, "taremin_cloth", None)
-    if not hasattr(sim, "set_wrinkle_field_texture_2d") or not hasattr(sim, "set_wrinkle_field_enabled"):
+    if not hasattr(sim, "set_wrinkle_field_texture_2d") or not hasattr(sim, "set_enable_wrinkle_field"):
         return
 
     if not settings or not getattr(settings, "use_wrinkle_field", False):
         if obj.name in _prev_wrinkle_signatures:
-            sim.set_wrinkle_field_enabled(False)
+            sim.set_enable_wrinkle_field(False)
             del _prev_wrinkle_signatures[obj.name]
         return
 
@@ -85,25 +85,59 @@ def sync_wrinkle_field(sim, obj):
     w_mat = arm_obj.matrix_world
     bone_head = np.array((w_mat @ pb.head)[:3], dtype=np.float32)
     bone_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float32)
-    bone_rad = float(getattr(pb.bone, "head_radius", 0.05))
-    if bone_rad <= 1e-4:
-        bone_rad = float(pb.length * 0.15)
+    from .wrinkle_field import resolve_bone_radius
+    explicit_rad = float(getattr(settings, "wrinkle_bone_radius", 0.0) or 0.0)
+    bone_rad = resolve_bone_radius(
+        explicit_rad,
+        float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
+        float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
+        float(getattr(pb, "length", 0.0) or 0.0),
+    )
 
     # コレクションからシワカーブを抽出
-    from .wrinkle_field import extract_curves_from_blender_collection, bake_wrinkle_2d_sdf_texture
+    from .wrinkle_field import (
+        extract_curves_from_blender_collection,
+        bake_wrinkle_2d_sdf_texture,
+        build_orthonormal_basis,
+    )
     crest_curves, root_curves = extract_curves_from_blender_collection(col_name)
     if not crest_curves and not root_curves:
         if obj.name in _prev_wrinkle_signatures:
-            sim.set_wrinkle_field_enabled(False)
+            sim.set_enable_wrinkle_field(False)
             del _prev_wrinkle_signatures[obj.name]
         return
 
+    # ボーン直交基底の算出 (GPU WrinkleFieldParams と 1:1 対応)
+    axis_raw = bone_tail - bone_head
+    if float(np.linalg.norm(axis_raw)) < 1e-6:
+        # 縮退ボーンでは円柱座標系が定義できないため無効化する
+        if obj.name in _prev_wrinkle_signatures:
+            sim.set_enable_wrinkle_field(False)
+            del _prev_wrinkle_signatures[obj.name]
+        return
+    _axis_n, _normal, _binormal = build_orthonormal_basis(axis_raw)
+
     # 差分キャッシュのチェック (点数や座標、強度に変更がなければベイクをスキップ)
-    sig_parts = [col_name, global_str, bone_head.tobytes(), bone_tail.tobytes(), bone_rad]
+    # 署名は軽量に保つ: 全点 tobytes() の毎フレームコピーを避け、shape + 先頭/末尾サンプルで検出する。
+    # 中盤のみの微編集を見逃す可能性は残るが、Blender側のカーブ編集は通常 全点再生成を伴うため実用上十分。
+    sig_parts = [
+        col_name, global_str,
+        bone_head.tobytes(), bone_tail.tobytes(), bone_rad, explicit_rad,
+        float(_normal[0]), float(_normal[1]), float(_normal[2]),
+        128, 128,
+    ]
     for c in crest_curves:
-        sig_parts.extend([c.points.shape, c.strength, c.influence_radius, c.points.tobytes()[:64]])
+        pts = np.asarray(c.points, dtype=np.float32)
+        sig_parts.extend([
+            c.points.shape, c.strength, c.influence_radius,
+            pts.tobytes()[:64], pts.tobytes()[-64:] if pts.size else b"",
+        ])
     for r in root_curves:
-        sig_parts.extend([r.points.shape, r.strength, r.influence_radius, r.points.tobytes()[:64]])
+        pts = np.asarray(r.points, dtype=np.float32)
+        sig_parts.extend([
+            r.points.shape, r.strength, r.influence_radius,
+            pts.tobytes()[:64], pts.tobytes()[-64:] if pts.size else b"",
+        ])
     current_sig = hash(tuple(sig_parts))
 
     if _prev_wrinkle_signatures.get(obj.name) == current_sig:
@@ -112,32 +146,41 @@ def sync_wrinkle_field(sim, obj):
     # 布の推定半径
     cloth_rad = bone_rad + 0.02
     tex_2d = bake_wrinkle_2d_sdf_texture(
-        bone_head=bone_head,
-        bone_tail=bone_tail,
-        bone_radius=bone_rad,
-        cloth_radius=cloth_rad,
         crest_curves=crest_curves,
         root_curves=root_curves,
+        origin=bone_head,
+        axis=_axis_n,
+        normal=_normal,
         width=128,
         height=128,
+        influence_radius=0.03,
+        bone_radius=float(bone_rad),
+        cloth_radius=float(cloth_rad),
     )
 
-    sim.set_wrinkle_field_texture_2d(
-        texture_rgba_bytes=tex_2d.texture_bytes,
-        width=tex_2d.width,
-        height=tex_2d.height,
-        bone_head=bone_head,
-        bone_tail=bone_tail,
-        bone_radius=bone_rad,
-        cloth_radius=cloth_rad,
-        z_min=tex_2d.z_min,
-        z_max=tex_2d.z_max,
-        r_min=tex_2d.r_min,
-        r_max=tex_2d.r_max,
-        crest_force=30.0 * global_str,
-        valley_force=30.0 * global_str,
+    # GPU Uniform へボーン基底・剛性を同期する (縮退射影の防止)。
+    # set_wrinkle_field_texture_2d は z_range/r_range のみ上書きするため、
+    # bone_origin/axis/normal/binormal は本呼び出しで必ず設定すること。
+    sim.set_wrinkle_field_params(
+        origin=[float(bone_head[0]), float(bone_head[1]), float(bone_head[2])],
+        axis=[float(_axis_n[0]), float(_axis_n[1]), float(_axis_n[2])],
+        normal=[float(_normal[0]), float(_normal[1]), float(_normal[2])],
+        binormal=[float(_binormal[0]), float(_binormal[1]), float(_binormal[2])],
+        influence_radius=0.03,
+        bone_radius=float(bone_rad),
+        stiffness=30.0 * global_str,
+        blend_weight=1.0,
     )
-    sim.set_wrinkle_field_enabled(True)
+    sim.set_wrinkle_field_texture_2d(
+        tex_2d.width,
+        tex_2d.height,
+        tex_2d.texture_bytes,
+        tex_2d.z_min,
+        tex_2d.z_max,
+        tex_2d.r_min,
+        tex_2d.r_max,
+    )
+    sim.set_enable_wrinkle_field(True)
     _prev_wrinkle_signatures[obj.name] = current_sig
 
 

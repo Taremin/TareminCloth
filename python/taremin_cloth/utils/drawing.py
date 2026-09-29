@@ -599,57 +599,130 @@ def draw_callback_3d():
                         batch.draw(line_shader)
                     gpu.state.blend_set('NONE')
 
-            # --- 3. シワフィールドの影響範囲（インフルエンス・ボリューム）の半透明描画 ---
+            # --- 3. シワフィールドの影響範囲の半透明描画 ---
             try:
-                wrinkle_curves_data = []
-                processed_objs = set()
+                preview_mode = getattr(settings, "wrinkle_preview_mode", "BOTH") if settings else "BOTH"
+                if preview_mode in ("RANGE", "BOTH"):
+                    wrinkle_curves_data = []
+                    processed_objs = set()
 
-                target_col = None
-                if settings and getattr(settings, "use_wrinkle_field", False) and settings.wrinkle_collection:
-                    target_col = settings.wrinkle_collection
-                elif bpy.data.collections.get("TareminCloth_Wrinkles"):
-                    target_col = bpy.data.collections.get("TareminCloth_Wrinkles")
+                    target_col = None
+                    if settings and getattr(settings, "use_wrinkle_field", False) and settings.wrinkle_collection:
+                        target_col = settings.wrinkle_collection
+                    elif bpy.data.collections.get("TareminCloth_Wrinkles"):
+                        target_col = bpy.data.collections.get("TareminCloth_Wrinkles")
 
-                if target_col:
-                    for c_obj in target_col.objects:
-                        if c_obj.type != 'CURVE' or c_obj.name in processed_objs:
-                            continue
-                        try:
-                            if not c_obj.visible_get():
-                                continue
-                        except Exception:
-                            if getattr(c_obj, "hide_viewport", False) or (hasattr(c_obj, "hide_get") and c_obj.hide_get()):
-                                continue
-                        processed_objs.add(c_obj.name)
+                    def _collect_curve_obj(c_obj):
                         tw = getattr(c_obj, "taremin_wrinkle", None)
                         w_type = tw.curve_type if tw else c_obj.get("wrinkle_type", "crest")
                         inf_r = tw.influence_radius if tw else float(c_obj.get("wrinkle_influence_radius", 0.03))
+                        tgt_r = 0.0
+                        if tw:
+                            try:
+                                tgt_r = float(getattr(tw, "target_radius", 0.0) or 0.0)
+                            except Exception:
+                                tgt_r = 0.0
+                        else:
+                            try:
+                                tgt_r = float(c_obj.get("wrinkle_target_radius", 0.0) or 0.0)
+                            except Exception:
+                                tgt_r = 0.0
+                        try:
+                            curve_bone = str(c_obj.get("wrinkle_target_bone", "") or "")
+                        except Exception:
+                            curve_bone = ""
                         w_mat = c_obj.matrix_world
                         for sp in c_obj.data.splines:
                             pts = [(w_mat @ (p.co.xyz if hasattr(p.co, "xyz") else mathutils.Vector(p.co[:3]))) for p in sp.points]
                             if len(pts) >= 2:
-                                wrinkle_curves_data.append((w_type, [list(p) for p in pts], inf_r))
+                                wrinkle_curves_data.append((w_type, [list(p) for p in pts], inf_r, tgt_r, curve_bone))
 
-                active_c = context.active_object
-                if active_c and active_c.type == 'CURVE' and active_c.name not in processed_objs:
-                    is_c_vis = True
-                    try:
-                        is_c_vis = active_c.visible_get()
-                    except Exception:
-                        is_c_vis = not (getattr(active_c, "hide_viewport", False) or (hasattr(active_c, "hide_get") and active_c.hide_get()))
-                    if is_c_vis and (hasattr(active_c, "taremin_wrinkle") or "wrinkle_type" in active_c):
-                        processed_objs.add(active_c.name)
-                        tw = getattr(active_c, "taremin_wrinkle", None)
-                        w_type = tw.curve_type if tw else active_c.get("wrinkle_type", "crest")
-                        inf_r = tw.influence_radius if tw else float(active_c.get("wrinkle_influence_radius", 0.03))
-                        w_mat = active_c.matrix_world
-                        for sp in active_c.data.splines:
-                            pts = [(w_mat @ (p.co.xyz if hasattr(p.co, "xyz") else mathutils.Vector(p.co[:3]))) for p in sp.points]
-                            if len(pts) >= 2:
-                                wrinkle_curves_data.append((w_type, [list(p) for p in pts], inf_r))
+                    if target_col:
+                        for c_obj in target_col.objects:
+                            if c_obj.type != 'CURVE' or c_obj.name in processed_objs:
+                                continue
+                            try:
+                                if not c_obj.visible_get():
+                                    continue
+                            except Exception:
+                                if getattr(c_obj, "hide_viewport", False) or (hasattr(c_obj, "hide_get") and c_obj.hide_get()):
+                                    continue
+                            processed_objs.add(c_obj.name)
+                            _collect_curve_obj(c_obj)
 
-                if wrinkle_curves_data:
-                    draw_wrinkle_influence_tubes(wrinkle_curves_data)
+                    active_c = context.active_object
+                    if active_c and active_c.type == 'CURVE' and active_c.name not in processed_objs:
+                        is_c_vis = True
+                        try:
+                            is_c_vis = active_c.visible_get()
+                        except Exception:
+                            is_c_vis = not (getattr(active_c, "hide_viewport", False) or (hasattr(active_c, "hide_get") and active_c.hide_get()))
+                        if is_c_vis and (hasattr(active_c, "taremin_wrinkle") or "wrinkle_type" in active_c):
+                            processed_objs.add(active_c.name)
+                            _collect_curve_obj(active_c)
+
+                    if wrinkle_curves_data:
+                        # 各カーブの所属ボーン座標系で描画する。設定ボーン単一座標系では
+                        # 別ボーン配置カーブが垂直化して見えるため、ボーン毎に分類する。
+                        # (params.sync_wrinkle_field のベイク座標系と同一手順で解決)
+                        arm_obj = getattr(settings, "wrinkle_armature", None) if settings else None
+                        if arm_obj is None:
+                            for o in bpy.data.objects:
+                                if o.type == 'ARMATURE':
+                                    arm_obj = o
+                                    break
+                        settings_bone = getattr(settings, "wrinkle_bone_name", "") if settings else ""
+                        if arm_obj is not None and getattr(arm_obj, "pose", None):
+                            from ..engine.wrinkle_field import build_orthonormal_basis, resolve_bone_radius
+                            from collections import defaultdict
+                            pbs = arm_obj.pose.bones
+                            if settings_bone not in pbs:
+                                settings_bone = pbs[0].name if len(pbs) else ""
+                            groups = defaultdict(list)
+                            for item in wrinkle_curves_data:
+                                b_name = item[4] if len(item) > 4 and item[4] in pbs else settings_bone
+                                groups[b_name].append(item[:4])
+                            explicit_r = float(getattr(settings, "wrinkle_bone_radius", 0.0) or 0.0) if settings else 0.0
+                            for b_name, items in groups.items():
+                                if not b_name:
+                                    continue
+                                pb = pbs[b_name]
+                                w_mat = arm_obj.matrix_world
+                                b_head = np.array((w_mat @ pb.head)[:3], dtype=np.float64)
+                                b_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float64)
+                                axis_raw = b_tail - b_head
+                                if float(np.linalg.norm(axis_raw)) < 1e-6:
+                                    continue
+                                axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                bone_rad = resolve_bone_radius(
+                                    explicit_r,
+                                    float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
+                                    float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
+                                    float(getattr(pb, "length", 0.0) or 0.0),
+                                )
+                                meshes = build_wrinkle_influence_meshes(
+                                    items, b_head, axis_n, n_vec, bone_rad,
+                                )
+                                if meshes:
+                                    draw_wrinkle_influence_meshes(meshes)
+                            if preview_mode == "BOTH" and settings_bone:
+                                pb = pbs[settings_bone]
+                                w_mat = arm_obj.matrix_world
+                                b_head = np.array((w_mat @ pb.head)[:3], dtype=np.float64)
+                                b_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float64)
+                                axis_raw = b_tail - b_head
+                                if float(np.linalg.norm(axis_raw)) >= 1e-6:
+                                    axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                    bone_rad = resolve_bone_radius(
+                                        explicit_r,
+                                        float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
+                                        float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
+                                        float(getattr(pb, "length", 0.0) or 0.0),
+                                    )
+                                    _draw_bone_proxy_cylinder(
+                                        b_head, axis_n, n_vec, bone_rad,
+                                        float(np.linalg.norm(axis_raw)),
+                                    )
             except Exception:
                 pass
 
@@ -907,127 +980,180 @@ def compute_octahedron_mesh(head, tail, radius=None):
     return [tuple(x) for x in tris], [tuple(x) for x in lines]
 
 
-def compute_curve_tube_mesh(
-    points: Sequence[Sequence[float]],
-    radius: float,
-    num_sides: int = 16,
-    is_cyclic: bool = True,
+def compute_wrinkle_influence_mesh(
+    origin: Sequence[float],
+    axis: Sequence[float],
+    normal: Sequence[float],
+    theta_min: float,
+    theta_max: float,
+    z_min: float,
+    z_max: float,
+    target_r: float,
+    thick_in: float,
+    thick_out: float,
+    n_theta: int = 48,
+    n_z: int = 8,
 ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[float, float, float]]]:
     """
-    カーブ点列を取り囲む半径 radius のチューブ（円筒ボリューム）メッシュを生成する。
+    目標半径上の影響範囲メッシュ（内外厚を持つ曲面パッチ）を生成する。
+    - 谷: [target, target+0.015]（目標より外のみに力が働く）
+    - 山: [target-0.020, target]（目標より内のみに力が働く）
+    角度・長さ方向の帯を示し、軸まで埋めない。Blender非依存の純粋関数。
     - 戻り値: (tris_pos, lines_pos)
     """
-    pts = [np.array(p[:3], dtype=np.float32) for p in points]
-    n_pts = len(pts)
-    if n_pts < 2 or radius <= 1e-5:
+    orig = np.array(origin[:3], dtype=np.float64)
+    ax = np.array(axis[:3], dtype=np.float64)
+    ax_len = float(np.linalg.norm(ax))
+    if ax_len < 1e-8 or target_r <= 1e-6:
+        return [], []
+    ax = ax / ax_len
+    n_vec = np.array(normal[:3], dtype=np.float64)
+    n_vec = n_vec - ax * float(np.dot(n_vec, ax))
+    n_len = float(np.linalg.norm(n_vec))
+    if n_len < 1e-8:
+        return [], []
+    n_vec = n_vec / n_len
+    b_vec = np.cross(ax, n_vec)
+
+    span = float(theta_max - theta_min)
+    if span < 1e-6:
+        return [], []
+    is_full = span >= 2.0 * math.pi - 1e-3
+    n_theta = max(4, int(n_theta))
+    n_z = max(1, int(n_z))
+
+    r_in = max(float(target_r) - float(thick_in), 0.0)
+    r_out = float(target_r) + float(thick_out)
+    if r_out <= r_in:
         return [], []
 
-    # 閉曲線判定（明示的指定または始点終点の近接）
-    if not is_cyclic:
-        if np.linalg.norm(pts[0] - pts[-1]) < 1e-4:
-            is_cyclic = True
+    def _surf_point(theta: float, z: float, r: float):
+        direction = math.cos(theta) * n_vec + math.sin(theta) * b_vec
+        p = orig + ax * z + direction * r
+        return (float(p[0]), float(p[1]), float(p[2]))
 
-    # 各点での接線 (Tangent)
-    tangents = []
-    for i in range(n_pts):
-        if is_cyclic:
-            prev_p = pts[(i - 1) % n_pts]
-            next_p = pts[(i + 1) % n_pts]
-            t = next_p - prev_p
-        else:
-            if i == 0:
-                t = pts[1] - pts[0]
-            elif i == n_pts - 1:
-                t = pts[-1] - pts[-2]
-            else:
-                t = pts[i + 1] - pts[i - 1]
-        t_len = float(np.linalg.norm(t))
-        tangents.append(t / (t_len + 1e-8))
+    # 外面・内面グリッド
+    outer_grid = []
+    inner_grid = []
+    for iz in range(n_z + 1):
+        z = z_min + (z_max - z_min) * (iz / n_z)
+        row_o = []
+        row_i = []
+        for it in range(n_theta + 1):
+            th = theta_min + span * (it / n_theta)
+            row_o.append(_surf_point(th, z, r_out))
+            row_i.append(_surf_point(th, z, r_in))
+        outer_grid.append(row_o)
+        inner_grid.append(row_i)
 
-    # 並行移動フレーム (Parallel Transport Frames) による安定した断面直交基底の構築
-    t0 = tangents[0]
-    up = np.array([0, 0, 1], dtype=np.float32)
-    if abs(np.dot(t0, up)) > 0.95:
-        up = np.array([0, 1, 0], dtype=np.float32)
-    n0 = np.cross(t0, up)
-    n0 = n0 / (np.linalg.norm(n0) + 1e-8)
-    b0 = np.cross(t0, n0)
+    tris: List[Tuple[float, float, float]] = []
+    lines: List[Tuple[float, float, float]] = []
+    n_seg = n_theta if is_full else n_theta
+    for iz in range(n_z):
+        for it in range(n_seg):
+            jt = (it + 1) % (n_theta + 1) if is_full else it + 1
+            # 外面
+            o00, o01 = outer_grid[iz][it], outer_grid[iz][jt]
+            o10, o11 = outer_grid[iz + 1][it], outer_grid[iz + 1][jt]
+            tris.extend([o00, o10, o11])
+            tris.extend([o00, o11, o01])
+            # 内面（逆巻き）
+            i00, i01 = inner_grid[iz][it], inner_grid[iz][jt]
+            i10, i11 = inner_grid[iz + 1][it], inner_grid[iz + 1][jt]
+            tris.extend([i00, i11, i10])
+            tris.extend([i00, i01, i11])
 
-    normals = [n0]
-    binormals = [b0]
-    for i in range(1, n_pts):
-        prev_t = tangents[i - 1]
-        curr_t = tangents[i]
-        axis = np.cross(prev_t, curr_t)
-        axis_len = float(np.linalg.norm(axis))
-        if axis_len > 1e-6:
-            axis_n = axis / axis_len
-            angle = math.atan2(axis_len, float(np.dot(prev_t, curr_t)))
-            prev_n = normals[-1]
-            curr_n = (prev_n * math.cos(angle) +
-                      np.cross(axis_n, prev_n) * math.sin(angle) +
-                      axis_n * np.dot(axis_n, prev_n) * (1.0 - math.cos(angle)))
-            curr_n = curr_n - curr_t * np.dot(curr_n, curr_t)
-            curr_n = curr_n / (np.linalg.norm(curr_n) + 1e-8)
-        else:
-            curr_n = normals[-1]
-        normals.append(curr_n)
-        binormals.append(np.cross(curr_t, curr_n))
-
-    # 各点の周りのリング頂点を生成
-    rings = []
-    phi_vals = [2.0 * math.pi * k / num_sides for k in range(num_sides)]
-    cos_vals = [math.cos(phi) for phi in phi_vals]
-    sin_vals = [math.sin(phi) for phi in phi_vals]
-
-    for i in range(n_pts):
-        p_center = pts[i]
-        n_vec = normals[i]
-        b_vec = binormals[i]
-        ring = []
-        for k in range(num_sides):
-            v = p_center + radius * (cos_vals[k] * n_vec + sin_vals[k] * b_vec)
-            ring.append(v)
-        rings.append(ring)
-
-    tris = []
-    lines = []
-
-    # セグメントごとのクアッド三角形化およびライン生成
-    seg_count = n_pts if is_cyclic else n_pts - 1
-    for i in range(seg_count):
-        next_i = (i + 1) % n_pts
-        r1 = rings[i]
-        r2 = rings[next_i]
-
-        for k in range(num_sides):
-            next_k = (k + 1) % num_sides
-            v0 = r1[k]
-            v1 = r1[next_k]
-            v2 = r2[next_k]
-            v3 = r2[k]
-
-            # 2つの三角形 (TRIS)
-            tris.extend([tuple(v0), tuple(v1), tuple(v2)])
-            tris.extend([tuple(v0), tuple(v2), tuple(v3)])
-
-            # 等高線ライン (LINES)
-            lines.extend([tuple(v0), tuple(v1)])
-            if k % 4 == 0:  # 4本ごとの縦稜線
-                lines.extend([tuple(v0), tuple(v3)])
+    # 外周ライン
+    for it in range(n_seg):
+        jt = (it + 1) % (n_theta + 1) if is_full else it + 1
+        lines.extend([outer_grid[0][it], outer_grid[0][jt]])
+        lines.extend([outer_grid[n_z][it], outer_grid[n_z][jt]])
+    for iz in range(n_z):
+        lines.extend([outer_grid[iz][0], outer_grid[iz + 1][0]])
+        if not is_full:
+            lines.extend([outer_grid[iz][n_theta], outer_grid[iz + 1][n_theta]])
+    # 目標ライン（z両端）
+    for it in range(n_seg):
+        jt = (it + 1) % (n_theta + 1) if is_full else it + 1
+        t0 = _surf_point(theta_min + span * (it / n_theta), z_min, target_r)
+        t1 = _surf_point(theta_min + span * (jt / n_theta), z_min, target_r)
+        lines.extend([t0, t1])
+        t0 = _surf_point(theta_min + span * (it / n_theta), z_max, target_r)
+        t1 = _surf_point(theta_min + span * (jt / n_theta), z_max, target_r)
+        lines.extend([t0, t1])
 
     return tris, lines
 
 
-def draw_wrinkle_influence_tubes(
-    curves_data: Sequence[Tuple[str, Sequence[Sequence[float]], float]],
+def build_wrinkle_influence_meshes(
+    curves_data: Sequence[Tuple[str, Sequence[Sequence[float]], float, float]],
+    origin: Sequence[float],
+    axis: Sequence[float],
+    normal: Sequence[float],
+    bone_radius: float,
+) -> List[Tuple[str, List[Tuple[float, float, float]], List[Tuple[float, float, float]]]]:
+    """カーブ群から影響範囲メッシュ群を構築する (Blender非依存の幾何部)。
+
+    - curves_data: (wrinkle_type, points, influence_radius, target_radius_or_0) のリスト
+    - 谷 (root/valley): [target, target+0.015]、山 (crest/ridge): [target-0.020, target]
+    - 角度・長さ方向には influence_radius 分だけ帯を拡張する。
+    動径遠方には遮断がないため、メッシュは立ち上がり域のみを示すことに注意。
+    """
+    from ..engine.wrinkle_field import derive_wrinkle_influence_spans
+
+    out = []
+    for item in curves_data:
+        w_type = item[0]
+        pts = item[1]
+        inf_r = float(item[2]) if len(item) > 2 else 0.03
+        explicit_tr = float(item[3]) if len(item) > 3 else 0.0
+        span = derive_wrinkle_influence_spans(pts, origin, axis, normal, explicit_tr)
+        if span is None:
+            continue
+        is_crest = str(w_type).lower() in ("crest", "ridge")
+        t_min = span["theta_min"]
+        t_max = span["theta_max"]
+        z0 = span["z_min"] - max(inf_r, 0.0)
+        z1 = span["z_max"] + max(inf_r, 0.0)
+        if not span["is_closed"]:
+            dtheta = max(inf_r, 0.0) / max(float(bone_radius), 1e-4)
+            t_min -= dtheta
+            t_max += dtheta
+        if is_crest:
+            thick_in, thick_out = 0.020, 0.0
+        else:
+            thick_in, thick_out = 0.0, 0.015
+        tris, lines = compute_wrinkle_influence_mesh(
+            origin, axis, normal, t_min, t_max, z0, z1,
+            span["target_r"], thick_in, thick_out,
+        )
+        if tris:
+            out.append((w_type, tris, lines))
+    return out
+
+
+def _draw_bone_proxy_cylinder(b_head, axis_n, n_vec, bone_rad: float, bone_len: float):
+    """骨半径代理の仮想円柱（先端〜末端）を薄い灰色で表示する。"""
+    if bone_rad <= 1e-6 or bone_len <= 1e-6:
+        return
+    tris, lines = compute_wrinkle_influence_mesh(
+        b_head, axis_n, n_vec, 0.0, 2.0 * math.pi, 0.0, float(bone_len),
+        float(bone_rad), 0.0, 0.002, n_theta=32, n_z=1,
+    )
+    if tris:
+        draw_wrinkle_influence_meshes([("proxy", tris, lines)])
+
+
+def draw_wrinkle_influence_meshes(
+    meshes_data: Sequence[Tuple[str, Sequence[Tuple[float, float, float]], Sequence[Tuple[float, float, float]]]],
     alpha_mul: float = 1.0,
 ):
     """
-    シワカーブ群の影響範囲（インフルエンス・ボリューム）を3D空間上に半透明チューブとして描画する。
-    - curves_data: (wrinkle_type, points, influence_radius) のタプルリスト
+    シワカーブ群の影響範囲（角度・長さ帯と目標前後の厚み）を3D空間上に半透明表示する。
+    - meshes_data: (wrinkle_type, tris, lines) のリスト
+    ドーナツ管表示の置換であり、軸まで埋めない。
     """
-    if not curves_data:
+    if not meshes_data:
         return
 
     shader = get_3d_uniform_color_shader() or get_line_shader()
@@ -1043,16 +1169,16 @@ def draw_wrinkle_influence_tubes(
         gpu.state.depth_test_set('NONE')
         gpu.state.blend_set('ALPHA')
 
-        for w_type, pts, inf_r in curves_data:
-            if len(pts) < 2 or inf_r <= 1e-4:
-                continue
-
-            tris, lines = compute_curve_tube_mesh(pts, radius=inf_r, num_sides=16, is_cyclic=True)
+        for w_type, tris, lines in meshes_data:
             if not tris:
                 continue
 
             is_crest = str(w_type).lower() in ("crest", "ridge")
-            if is_crest:
+            is_proxy = str(w_type).lower() == "proxy"
+            if is_proxy:
+                face_color = (0.75, 0.8, 0.85, 0.10 * alpha_mul)
+                line_color = (0.8, 0.85, 0.9, 0.40 * alpha_mul)
+            elif is_crest:
                 face_color = (1.0, 0.42, 0.08, 0.15 * alpha_mul)
                 line_color = (1.0, 0.55, 0.15, 0.65 * alpha_mul)
             else:
@@ -1066,7 +1192,7 @@ def draw_wrinkle_influence_tubes(
                 shader.uniform_float("color", face_color)
                 batch_tris.draw(shader)
 
-            # ワイヤーリングの描画 (LINES)
+            # 外周・目標ラインの描画 (LINES)
             if lines:
                 try:
                     gpu.state.line_width_set(1.5)

@@ -20,7 +20,13 @@ except ImportError:
 
 @dataclass
 class WrinkleProfile:
-    """角度 θ 毎のシワプロファイルデータ (GPU GpuWrinkleProfileSample 構造体と 1:1 対応)"""
+    """旧1D角度プロファイルデータ (現行2D-SDF方式では未使用・後方互換保持)。
+
+    注意: GPU `GpuWrinkleProfileSample` に対応する旧1Dパスであり、
+    ランタイム (`params.py` / PyO3 / WGSL) からは参照されていない。
+    `interpolate_curve_to_profile` / `build_wrinkle_profile_from_curves` と共に
+    テスト (`test_wrinkle_profile.py`) の回帰検出用に保持する。新規コードからは使用しないこと。
+    """
     valley_z: np.ndarray                      # 谷の軸方向ターゲット位置 (N, float32)
     crest_radius: np.ndarray                  # 山の径方向ターゲット半径 (N, float32)
     valley_weight: np.ndarray                 # 谷の引き寄せ強度 (0.0〜1.0) (N, float32)
@@ -86,7 +92,11 @@ class WrinkleProfile:
 
 @dataclass
 class WrinkleFieldParams:
-    """シワフィールドのメタパラメータ (GPU Uniform WrinkleFieldParams と 1:1 対応)"""
+    """旧1Dメタパラメータ (現行2D-SDF方式では未使用・後方互換保持)。
+
+    注意: ランタイム (`params.py` は `sim.set_wrinkle_field_params` を直接呼ぶ) からは
+    参照されていない。新規コードからは使用しないこと。
+    """
     bone_origin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     bone_axis: Tuple[float, float, float] = (0.0, 0.0, 1.0)      # ボーン軸方向 (単位ベクトル)
     bone_normal: Tuple[float, float, float] = (1.0, 0.0, 0.0)    # 断面基準軸X (単位ベクトル)
@@ -163,8 +173,10 @@ def interpolate_curve_to_profile(
     num_samples: int = 64,
     is_closed: Optional[bool] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    単一の3Dカーブ点群を円柱座標系グリッド [0, 2*pi) の (z_profile, r_profile, weight_profile) に補間サンプリングします。
+    """旧1D用: 単一3Dカーブ点群を円柱座標系グリッドのプロファイルに補間する (現行2D-SDF方式では未使用)。
+
+    `build_wrinkle_profile_from_curves` および `test_wrinkle_profile.py` の回帰検出用に保持する。
+    新規コードからは使用しないこと。
     """
     theta_pts, z_pts, r_pts = project_points_to_cylindrical(curve_points, origin, axis, normal)
     num_pts = len(theta_pts)
@@ -244,9 +256,10 @@ def build_wrinkle_profile_from_curves(
     base_radius: float = 0.05,
     is_closed: Optional[bool] = None,
 ) -> WrinkleProfile:
-    """
-    山カーブ（Crest）群と谷カーブ（Root）群から、メタボール的ポテンシャル合成により統合された WrinkleProfile を生成します。
+    """旧1D用: 山/谷カーブ群から WrinkleProfile を生成する (現行2D-SDF方式では未使用)。
+
     複数カーブが重なる箇所では、ポテンシャル密度を加算し、目標位置（Z, R）を加重平均で滑らかにブレンドします。
+    `test_wrinkle_profile.py` の回帰検出用に保持する。新規コードからは使用しないこと。
     """
     # 谷（Root）のメタボール合成バッファ
     v_z_weighted = np.zeros(num_samples, dtype=np.float64)
@@ -637,3 +650,71 @@ def bake_wrinkle_2d_sdf_texture(
         r_max=float(r_max),
         rgba_array=rgba,
     )
+
+
+def resolve_bone_radius(
+    explicit: float = 0.0,
+    head_r: float = 0.0,
+    tail_r: float = 0.0,
+    length: float = 0.0,
+) -> float:
+    """ボーン代理半径を解決する (Blender非依存の純粋関数)。
+
+    優先順位: 明示値 > 先尾平均 > 骨長フォールバック。
+    旧来の先端側 (`head_radius`) のみの参照はテーパーを無視するため、
+    両端の平均を用いる。`Bone.head_radius` は本来Envelope変形用の関節半径の
+    流用であり、実体表との一致保証はない (明示値での上書きを推奨)。
+    """
+    if explicit is not None and float(explicit) > 1e-6:
+        return float(explicit)
+    vals = [float(v) for v in (head_r, tail_r) if v is not None and float(v) > 1e-4]
+    if vals:
+        return float(sum(vals) / len(vals))
+    return float(max(1e-4, float(length) * 0.15))
+
+
+def derive_wrinkle_influence_spans(
+    points: np.ndarray,
+    origin: Sequence[float],
+    axis: Sequence[float],
+    normal: Optional[Sequence[float]] = None,
+    explicit_target_radius: Optional[float] = None,
+) -> Optional[Dict[str, float]]:
+    """単一カーブ点群から影響範囲表示用の角度スパン・Z範囲・目標半径を導出する。
+
+    重み付け自体は `bake_wrinkle_2d_sdf_texture` の角度・長さ距離に基づくため、
+    本関数は表示用の外形 (theta_min/max, z_min/max, target_r) のみを返す。
+    閉曲線 (始終点近接または角度全周) では全周 (2π) を返す。
+    """
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.size == 0 or len(pts) < 2:
+        return None
+    thetas, zs, rs = project_points_to_cylindrical(pts, origin, axis, normal)
+
+    t_unwrapped = np.unwrap(thetas.astype(np.float64))
+    span = float(np.max(t_unwrapped) - np.min(t_unwrapped))
+    closed = bool(
+        float(np.linalg.norm(pts[0] - pts[-1])) < 1e-3 or span >= 1.85 * math.pi
+    )
+    if closed:
+        theta_min = 0.0
+        theta_max = 2.0 * math.pi
+    else:
+        theta_min = float(np.min(t_unwrapped))
+        theta_max = float(np.max(t_unwrapped))
+        if theta_max - theta_min < 1e-6:
+            theta_max = theta_min + 1e-3
+
+    if explicit_target_radius is not None and float(explicit_target_radius) > 1e-6:
+        target_r = float(explicit_target_radius)
+    else:
+        target_r = float(np.mean(rs)) if len(rs) else 0.0
+
+    return {
+        "theta_min": float(theta_min),
+        "theta_max": float(theta_max),
+        "z_min": float(np.min(zs)),
+        "z_max": float(np.max(zs)) if float(np.max(zs)) > float(np.min(zs)) else float(np.min(zs)) + 1e-3,
+        "target_r": float(target_r),
+        "is_closed": closed,
+    }

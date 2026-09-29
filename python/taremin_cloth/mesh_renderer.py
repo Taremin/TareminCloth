@@ -901,7 +901,9 @@ def compute_wrinkle_weight_colors(
     crest_weight_profile: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
-    布頂点のシワフィールド影響度ウェイト [0, 1] を Jet ヒートマップ頂点カラー [N, 3] (uint8) に変換します。
+    旧1D用: 布頂点のシワフィールド影響度ウェイト [0, 1] を Jet ヒートマップ頂点カラー [N, 3] (uint8) に変換します。
+    現行2D-SDF方式では `compute_wrinkle_texture_2d_weight_colors` を使用すること。
+    本関数は `test_mesh_renderer.py` の回帰検出用に保持する。新規コードからは使用しないこと。
     影響度 0 (遠い/カーブ範囲外): 青
     影響度 1 (山または谷の直近): 赤
     """

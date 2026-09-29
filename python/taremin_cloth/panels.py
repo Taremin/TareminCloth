@@ -808,6 +808,8 @@ class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
             col.prop_search(settings, "wrinkle_bone_name", settings.wrinkle_armature.data, "bones", text=i18n.trans("Target Bone"))
         else:
             col.prop(settings, "wrinkle_bone_name", text=i18n.trans("Target Bone"))
+        col.prop(settings, "wrinkle_bone_radius", text=i18n.trans("Bone Radius"))
+        col.prop(settings, "wrinkle_preview_mode", text=i18n.trans("Preview"))
 
         col.separator()
         box_ops = col.box()

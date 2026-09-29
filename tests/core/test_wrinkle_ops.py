@@ -582,15 +582,17 @@ class TestWrinkleOps(unittest.TestCase):
             mean_z = float(np.mean(z_coords))
             self.assertAlmostEqual(mean_z, 0.5, delta=0.2)
 
-    def test_compute_curve_tube_mesh_geometry(self):
-        """シワ影響範囲チューブメッシュ生成がねじれのない滑らかなジオメトリを生成すること"""
-        from taremin_cloth.utils.drawing import compute_curve_tube_mesh
+    def test_compute_wrinkle_influence_mesh_geometry(self):
+        """影響範囲メッシュ生成が有限値の滑らかなジオメトリを生成すること"""
+        from taremin_cloth.utils.drawing import compute_wrinkle_influence_mesh
 
-        # 1. 円環カーブの点列 (Z=0 平面上の半径 0.2 の円、12点)
-        theta = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
-        pts = [[float(0.2 * np.cos(t)), float(0.2 * np.sin(t)), 0.0] for t in theta]
-
-        tris, lines = compute_curve_tube_mesh(pts, radius=0.03, num_sides=8, is_cyclic=True)
+        # Z=0〜0.1、目標半径0.07の全周影響範囲
+        tris, lines = compute_wrinkle_influence_mesh(
+            origin=[0.0, 0.0, -0.1], axis=[0.0, 0.0, 1.0], normal=[1.0, 0.0, 0.0],
+            theta_min=0.0, theta_max=2.0 * np.pi, z_min=0.0, z_max=0.1,
+            target_r=0.07, thick_in=0.0, thick_out=0.015,
+            n_theta=16, n_z=2,
+        )
 
         self.assertGreater(len(tris), 0)
         self.assertGreater(len(lines), 0)
@@ -606,6 +608,10 @@ class TestWrinkleOps(unittest.TestCase):
         for pt in lines:
             for coord in pt:
                 self.assertTrue(np.isfinite(coord))
+
+        # 外面が目標半径+厚みの近傍にあること
+        radii = [float(np.linalg.norm(np.array(p[:2]))) for p in tris]
+        self.assertAlmostEqual(max(radii), 0.085, delta=1e-6)
 
     def test_wrinkle_curve_rna_sync_to_id_properties(self):
         """TareminWrinkleCurveSettings の更新ハンドラーがIDプロパティへ正しく同期すること"""

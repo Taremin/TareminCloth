@@ -76,6 +76,94 @@ class TestWrinkle2DSdf(unittest.TestCase):
         diff_u_edge = np.abs(rgba[:, 0, :].astype(int) - rgba[:, -1, :].astype(int))
         self.assertLess(np.max(diff_u_edge), 15, "U軸両端の周期境界でテクスチャ値がシームレスであること")
 
+    def test_v_orientation_asymmetric_bands(self):
+        """V方向の非対称バンド検証: 谷(z低)と山(z高)の行位置が反転していないこと"""
+        num_pts = 64
+        thetas = np.linspace(0.0, 2.0 * math.pi, num_pts, endpoint=False)
+        r_col = 0.05
+        r_cloth = 0.06
+
+        # 意図的に非対称配置: 谷は z=-0.05(低)、山は z=+0.08(高)
+        z_valley = -0.05
+        z_crest = 0.08
+        root_pts = np.stack([
+            np.full_like(thetas, r_col + 0.002) * np.cos(thetas),
+            np.full_like(thetas, r_col + 0.002) * np.sin(thetas),
+            np.full_like(thetas, z_valley),
+        ], axis=-1).astype(np.float32)
+        crest_pts = np.stack([
+            np.full_like(thetas, r_cloth + 0.010) * np.cos(thetas),
+            np.full_like(thetas, r_cloth + 0.010) * np.sin(thetas),
+            np.full_like(thetas, z_crest),
+        ], axis=-1).astype(np.float32)
+
+        tex = bake_wrinkle_2d_sdf_texture(
+            crest_curves=[crest_pts],
+            root_curves=[root_pts],
+            origin=[0.0, 0.0, 0.0],
+            axis=[0.0, 0.0, 1.0],
+            normal=[1.0, 0.0, 0.0],
+            width=64,
+            height=64,
+            influence_radius=0.02,
+            bone_radius=r_col,
+            cloth_radius=r_cloth,
+        )
+        rgba = tex.rgba_array
+        # ベイク定義: row 0 == z_min 側。したがって valley行 < crest行でなければならない
+        v_valley = (z_valley - tex.z_min) / (tex.z_max - tex.z_min)
+        v_crest = (z_crest - tex.z_min) / (tex.z_max - tex.z_min)
+        y_valley = int(round(v_valley * (tex.height - 1)))
+        y_crest = int(round(v_crest * (tex.height - 1)))
+        self.assertLess(y_valley, y_crest, "谷(z低)が行0側、山(z高)が行H側であること")
+        # 各行のピークが期待チャンネルに現れること
+        self.assertGreaterEqual(
+            float(np.mean(rgba[y_valley, :, 0])), 200,
+            f"谷行 y={y_valley} のRチャンネルが高いこと")
+        self.assertGreaterEqual(
+            float(np.mean(rgba[y_crest, :, 1])), 200,
+            f"山行 y={y_crest} のGチャンネルが高いこと")
+        # 逆行には現れないこと (反転検出: 谷行に山が、山行に谷が漏れていない)
+        self.assertLess(
+            float(np.mean(rgba[y_valley, :, 1])), 50,
+            "谷行に山ピークが漏れていないこと")
+        self.assertLess(
+            float(np.mean(rgba[y_crest, :, 0])), 50,
+            "山行に谷ピークが漏れていないこと")
+
+    def test_v_orientation_heatmap_matches_bake(self):
+        """ヒートマップCPUサンプラがベイク定義 (row0=z_min) と一致すること"""
+        from taremin_cloth.mesh_renderer import compute_wrinkle_texture_2d_weight_colors
+
+        num_pts = 64
+        thetas = np.linspace(0.0, 2.0 * math.pi, num_pts, endpoint=False)
+        r_col = 0.05
+        z_valley = -0.05
+        root_pts = np.stack([
+            np.full_like(thetas, r_col + 0.002) * np.cos(thetas),
+            np.full_like(thetas, r_col + 0.002) * np.sin(thetas),
+            np.full_like(thetas, z_valley),
+        ], axis=-1).astype(np.float32)
+        tex = bake_wrinkle_2d_sdf_texture(
+            crest_curves=[], root_curves=[root_pts],
+            origin=[0.0, 0.0, 0.0], axis=[0.0, 0.0, 1.0],
+            width=64, height=64, influence_radius=0.02,
+            bone_radius=r_col, cloth_radius=0.06,
+        )
+        # 谷直上の頂点は高ウェイト(赤系 R>100)、z_max側の遠方頂点は低ウェイト(青系 B>100)
+        r_probe = 0.06
+        probe = np.array([
+            [r_probe, 0.0, z_valley],
+            [r_probe, 0.0, tex.z_max],
+        ], dtype=np.float32)
+        colors = compute_wrinkle_texture_2d_weight_colors(
+            probe, texture_rgba=tex.rgba_array,
+            origin=[0.0, 0.0, 0.0], axis=[0.0, 0.0, 1.0],
+            z_min=tex.z_min, z_max=tex.z_max,
+        )
+        self.assertGreater(int(colors[0, 0]), 100, "谷直上は赤系であること")
+        self.assertGreater(int(colors[1, 2]), 100, "遠方は青系であること")
+
     def test_y_branch_curves_bake(self):
         """「Y字型」分岐シワカーブが平均化で潰れずに2D-SDFとして正常にベイクされることを検証"""
         # 幹: Z=-0.03 から Z=0.0 (theta=pi)

@@ -796,6 +796,24 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Target bone name for wrinkle placement",
         default="",
     )
+    wrinkle_bone_radius: FloatProperty(
+        name="Bone Radius",
+        description="Explicit bone proxy radius in meters (0 = auto from head/tail average)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        precision=4,
+    )
+    wrinkle_preview_mode: EnumProperty(
+        name="Preview Mode",
+        description="Wrinkle influence preview: curve lines only, influence range only, or both",
+        items=[
+            ('CURVES', "Curves", "Show wrinkle curve lines only"),
+            ('RANGE', "Range", "Show wrinkle influence range only"),
+            ('BOTH', "Both", "Show wrinkle curves and influence range"),
+        ],
+        default='BOTH',
+    )
 
 
 def _on_anim_progress_updated(self, context):

@@ -39,7 +39,7 @@ STATE_EXCLUDE = {
     "set_sewing_priority_state",  # ラッチ内部状態の復元 (再現用、調整対象ではない)
     "set_enable_wrinkle_field",  # シワフィールド有効化 (動的アセット連携、SimConfig非依存)
     "set_wrinkle_field_params",   # シワフィールド基底・剛性パラメータ
-    "set_wrinkle_field_profile",  # シワフィールドプロファイル配列バッファ
+    # 注意: "set_wrinkle_field_profile" は旧1Dパスの残骸であり実装が存在しないため除外した
     "set_wrinkle_field_texture_2d",  # シワフィールド2D-SDFテクスチャデータ
 }
 

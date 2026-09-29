@@ -49,7 +49,8 @@ from ..utils.drawing import (
     draw_wrinkle_slide_hud,
     draw_wrinkle_bone_overlay,
     draw_wrinkle_armature_overlay,
-    draw_wrinkle_influence_tubes,
+    draw_wrinkle_influence_meshes,
+    build_wrinkle_influence_meshes,
 )
 from ..utils.view3d import tag_redraw_view3d
 from ..utils.modal_event import PressDragTracker, is_left_release
@@ -893,7 +894,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                         p_idx += 1
 
     def _draw_bone_3d(self):
-        """3D空間上で対象ボーンおよびアーマチュア全体を最前面で八面体強調表示し、シワ影響範囲チューブを描画"""
+        """3D空間上で対象ボーンおよびアーマチュア全体を最前面で八面体強調表示し、シワ影響範囲を描画"""
         if self._all_bones_data:
             chain_names = [item[2] for item in self._chain_bones_coords] if self._chain_bones_coords else []
             draw_wrinkle_armature_overlay(
@@ -902,7 +903,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                 chain_bone_names=chain_names,
             )
 
-        # 操作中カーブの影響範囲（インフルエンス・ボリューム）をリアルタイムに半透明チューブ描画
+        # 操作中カーブの影響範囲（角度・長さ帯と目標前後の厚み）を半透明描画
         if self._target_curves:
             modal_curves_data = []
             for obj in self._target_curves:
@@ -923,9 +924,65 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                 if len(pts) >= 2:
                     tw = getattr(obj, "taremin_wrinkle", None)
                     c_type = tw.curve_type if tw else obj.get("wrinkle_type", "crest")
-                    modal_curves_data.append((c_type, pts, float(self._influence_radius)))
+                    tgt_r = 0.0
+                    if tw:
+                        try:
+                            tgt_r = float(getattr(tw, "target_radius", 0.0) or 0.0)
+                        except Exception:
+                            tgt_r = 0.0
+                    else:
+                        try:
+                            tgt_r = float(obj.get("wrinkle_target_radius", 0.0) or 0.0)
+                        except Exception:
+                            tgt_r = 0.0
+                    modal_curves_data.append((c_type, pts, float(self._influence_radius), tgt_r))
             if modal_curves_data:
-                draw_wrinkle_influence_tubes(modal_curves_data)
+                try:
+                    import numpy as _np
+                    from ..engine.wrinkle_field import build_orthonormal_basis
+                    # カーブはチェーン上の current_t に存在するため、描画座標系も
+                    # 同一チェーン評価位置にする (固定ボーン座標系では屈曲時に垂直化する)。
+                    chain_ev = None
+                    try:
+                        if self._chain is not None:
+                            chain_ev = self._chain.evaluate(float(self._current_t))
+                    except Exception:
+                        chain_ev = None
+                    if chain_ev is not None:
+                        meshes = build_wrinkle_influence_meshes(
+                            modal_curves_data,
+                            _np.array(chain_ev.position[:3], dtype=_np.float64),
+                            _np.array(chain_ev.axis[:3], dtype=_np.float64),
+                            _np.array(chain_ev.normal[:3], dtype=_np.float64),
+                            float(chain_ev.radius),
+                        )
+                        if meshes:
+                            draw_wrinkle_influence_meshes(meshes)
+                    else:
+                        b_head = b_tail = None
+                        b_rad = 0.0
+                        for item in (self._all_bones_data or []):
+                            if item[0] == self._target_bone_name:
+                                b_head = _np.array(item[1][:3], dtype=_np.float64)
+                                b_tail = _np.array(item[2][:3], dtype=_np.float64)
+                                try:
+                                    b_rad = float(item[3]) if len(item) > 3 else 0.0
+                                except Exception:
+                                    b_rad = 0.0
+                                if isinstance(b_rad, tuple):
+                                    b_rad = float((b_rad[0] + b_rad[1]) / 2.0)
+                                break
+                        if b_head is not None:
+                            axis_raw = b_tail - b_head
+                            if float(_np.linalg.norm(axis_raw)) >= 1e-6:
+                                axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                meshes = build_wrinkle_influence_meshes(
+                                    modal_curves_data, b_head, axis_n, n_vec, b_rad,
+                                )
+                                if meshes:
+                                    draw_wrinkle_influence_meshes(meshes)
+                except Exception:
+                    pass
 
     def _draw_hud(self):
         """3DビューポートのPOST_PIXEL描画コールバック"""
@@ -1207,9 +1264,13 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
         w_mat = arm_obj.matrix_world
         h_w = np.array((w_mat @ pb.head)[:3], dtype=np.float32)
         t_w = np.array((w_mat @ pb.tail)[:3], dtype=np.float32)
-        r_w = float(getattr(pb.bone, "head_radius", 0.05))
-        if r_w <= 1e-4:
-            r_w = float(pb.length * 0.15)
+        from ..engine.wrinkle_field import resolve_bone_radius
+        r_w = resolve_bone_radius(
+            0.0,
+            float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
+            float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
+            float(getattr(pb, "length", 0.0) or 0.0),
+        )
 
         # 正規化プリセットの生成
         preset = normalize_curves_to_preset(

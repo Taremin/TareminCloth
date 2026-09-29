@@ -90,6 +90,7 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("self_collision_solve_ee.wgsl", include_str!("../src/shaders/self_collision_solve_ee.wgsl")),
     ("self_collision_ee_direct.wgsl", include_str!("../src/shaders/self_collision_ee_direct.wgsl")),
     ("spatial_grid_sort_edges.wgsl", include_str!("../src/shaders/spatial_grid_sort_edges.wgsl")),
+    ("wrinkle_field.wgsl", include_str!("../src/shaders/wrinkle_field.wgsl")),
 ];
 
 macro_rules! check_member {

@@ -11,15 +11,12 @@ import unittest
 import numpy as np
 
 from taremin_cloth.engine.wrinkle_field import (
-    WrinkleFieldParams,
-    build_wrinkle_profile_from_curves,
     bake_wrinkle_2d_sdf_texture,
     WrinkleTexture2D,
 )
 from taremin_cloth.mesh_renderer import (
     generate_capsule_mesh,
     generate_wrinkle_curve_lines,
-    compute_wrinkle_weight_colors,
     compute_wrinkle_texture_2d_weight_colors,
     render_scene_to_file,
 )
@@ -333,6 +330,107 @@ class TestWrinkleFieldStandalone(unittest.TestCase):
         print(f"    - Weight Heatmap:  {img_hm}")
         print(f"    - Frame 10 (進行): {img_f10}")
         print(f"    - Frame 30 (収束): {img_f30}")
+
+    def test_wrinkle_field_v_orientation_gpu(self):
+        """GPU実機V方向検証: 谷(z=-0.05)が下側バンド、山(z=+0.08)が上側バンドに現れること"""
+        radius_cloth = 0.06
+        radius_col = 0.05
+        verts, edges, faces = create_cylinder_cloth_mesh(
+            radius=radius_cloth, height=0.30, n_theta=36, n_z=40, z_center=0.0
+        )
+        num_verts = len(verts)
+        inv_masses = np.ones(num_verts, dtype=np.float32)
+
+        thetas_full = np.linspace(0.0, 2.0 * math.pi, 64, endpoint=False)
+        z_valley = -0.05
+        z_crest = 0.08
+        root_pts = np.stack([
+            np.full_like(thetas_full, radius_col + 0.002) * np.cos(thetas_full),
+            np.full_like(thetas_full, radius_col + 0.002) * np.sin(thetas_full),
+            np.full_like(thetas_full, z_valley),
+        ], axis=-1).astype(np.float32)
+        crest_pts = np.stack([
+            np.full_like(thetas_full, radius_cloth + 0.010) * np.cos(thetas_full),
+            np.full_like(thetas_full, radius_cloth + 0.010) * np.sin(thetas_full),
+            np.full_like(thetas_full, z_crest),
+        ], axis=-1).astype(np.float32)
+
+        origin = (0.0, 0.0, 0.0)
+        axis = (0.0, 0.0, 1.0)
+        normal = (1.0, 0.0, 0.0)
+        binormal = (0.0, 1.0, 0.0)
+
+        tex = bake_wrinkle_2d_sdf_texture(
+            crest_curves=[crest_pts],
+            root_curves=[root_pts],
+            origin=origin,
+            axis=axis,
+            normal=normal,
+            width=128,
+            height=128,
+            influence_radius=0.020,
+            bone_radius=radius_col,
+            cloth_radius=radius_cloth,
+        )
+
+        sim = taremin_cloth_core.ClothSimulator(
+            positions=verts,
+            edges=edges,
+            faces=faces,
+            inv_masses=inv_masses,
+            thickness=0.003,
+            stiffness=800.0,
+            bending_stiffness=20.0,
+            compression_stiffness=150.0,
+            solver_mode=0,
+            workgroup_size=32,
+        )
+        sim.set_gravity(0.0, 0.0, 0.0)
+        sim.set_wrinkle_field_params(
+            origin=[origin[0], origin[1], origin[2]],
+            axis=[axis[0], axis[1], axis[2]],
+            normal=[normal[0], normal[1], normal[2]],
+            binormal=[binormal[0], binormal[1], binormal[2]],
+            influence_radius=0.020,
+            bone_radius=radius_col,
+            stiffness=25.0,
+            blend_weight=1.0,
+            z_min=tex.z_min,
+            z_max=tex.z_max,
+            r_min=tex.r_min,
+            r_max=tex.r_max,
+        )
+        sim.set_wrinkle_field_texture_2d(
+            tex.width, tex.height, tex.texture_bytes,
+            tex.z_min, tex.z_max, tex.r_min, tex.r_max
+        )
+        sim.set_enable_wrinkle_field(True)
+
+        dt = 1.0 / 60.0
+        for _ in range(30):
+            sim.step(dt, 15, 4)
+
+        pos_flat = np.empty(num_verts * 3, dtype=np.float32)
+        sim.get_positions(pos_flat)
+        curr = pos_flat.reshape((-1, 3))
+        rs = np.linalg.norm(curr[:, :2], axis=1)
+        zs = curr[:, 2]
+
+        # 谷バンド (z_valley±15mm) の平均半径 < 山バンド (z_crest±15mm) の平均半径
+        valley_mask = np.abs(zs - z_valley) < 0.015
+        crest_mask = np.abs(zs - z_crest) < 0.015
+        self.assertTrue(np.count_nonzero(valley_mask) > 50, "谷バンド頂点が存在すること")
+        self.assertTrue(np.count_nonzero(crest_mask) > 50, "山バンド頂点が存在すること")
+        mean_valley = float(np.mean(rs[valley_mask]))
+        mean_crest = float(np.mean(rs[crest_mask]))
+        print(f"\n[V-Orientation GPU] valley(z={z_valley}): {mean_valley:.4f}m, "
+              f"crest(z={z_crest}): {mean_crest:.4f}m")
+        # V反転時は谷/山が入れ替わり本assertが赤になる
+        self.assertLess(
+            mean_valley, mean_crest - 0.002,
+            f"V反転の疑い: 谷バンド {mean_valley:.4f}m が山バンド {mean_crest:.4f}m より細くない")
+        # 全体として座屈が発生していること
+        self.assertGreaterEqual(float(np.max(rs) - np.min(rs)), 0.005)
 
     def test_wrinkle_field_oneside_pin_free_buckling(self):
         """片側ピン留め（上端肩側のみ固定、下端袖口は自由）によるダイナミックなシワ座屈検証"""
