@@ -452,8 +452,8 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, WrinkleFieldParams, r_range);
             check_member!(filename, s, WrinkleFieldParams, enabled);
             check_member!(filename, s, WrinkleFieldParams, use_texture);
-            check_member!(filename, s, WrinkleFieldParams, _pad0);
-            check_member!(filename, s, WrinkleFieldParams, _pad1);
+            check_member!(filename, s, WrinkleFieldParams, valley_window);
+            check_member!(filename, s, WrinkleFieldParams, crest_window);
         }
     }
 }

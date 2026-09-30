@@ -85,9 +85,36 @@ class TestInfluenceMesh(unittest.TestCase):
             [("root", pts, 0.03, 0.0)],
             [0, 0, 0], [0, 0, 1], [1, 0, 0], 0.05,
         )
-        self.assertEqual(len(meshes), 1)
-        self.assertEqual(meshes[0][0], "root")
-        self.assertGreater(len(meshes[0][1]), 0)
+        # フェード3分割シェル
+        self.assertEqual(len(meshes), 3)
+        for m in meshes:
+            self.assertEqual(m[0], "root")
+            self.assertGreater(len(m[1]), 0)
+            self.assertEqual(len(m), 4)
+        # 谷は目標側ほど淡い (alpha 昇順)
+        alphas = [m[3] for m in meshes]
+        self.assertLess(alphas[0], alphas[-1])
+        # ラインは最外縁シェルのみに付属
+        self.assertEqual(meshes[0][2], [])
+        self.assertGreater(len(meshes[-1][2]), 0)
+        # 帯域全体が [target, target+valley_depth] に収まること
+        all_r = [float(np.linalg.norm(np.array(p[:2])))
+                 for m in meshes for p in m[1]]
+        self.assertAlmostEqual(min(all_r), 0.06, delta=1e-6)
+        self.assertAlmostEqual(max(all_r), 0.075, delta=1e-6)
+
+    def test_build_meshes_depth_param(self):
+        from taremin_cloth.utils.drawing import build_wrinkle_influence_meshes
+        th = np.linspace(0.0, 2.0 * math.pi, 32)
+        pts = [[float(0.06 * np.cos(t)), float(0.06 * np.sin(t)), 0.05] for t in th]
+        meshes = build_wrinkle_influence_meshes(
+            [("root", pts, 0.03, 0.0)],
+            [0, 0, 0], [0, 0, 1], [1, 0, 0], 0.05,
+            valley_depth=0.03,
+        )
+        all_r = [float(np.linalg.norm(np.array(p[:2])))
+                 for m in meshes for p in m[1]]
+        self.assertAlmostEqual(max(all_r), 0.09, delta=1e-6)
 
     def test_mesh_follows_build_frame(self):
         """影響範囲の長軸は構築座標系の骨軸に一致すること。

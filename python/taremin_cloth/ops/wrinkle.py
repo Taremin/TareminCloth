@@ -574,6 +574,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
     _base_t: float = 0.5
     _current_t: float = 0.5
     _scale_radius: float = 1.0
+    _base_scale_radius: float = 1.0
     _influence_radius: float = 0.03
     _strength: float = 1.0
     _initial_points: List[np.ndarray] = []
@@ -602,6 +603,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         self._base_t = 0.5
         self._current_t = 0.5
         self._scale_radius = 1.0
+        self._base_scale_radius = 1.0
         self._influence_radius = 0.03
         self._strength = 1.0
         self._initial_points = []
@@ -669,6 +671,9 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         self._base_t = float(first_obj.get("wrinkle_t_param", 0.5))
         self._current_t = self._base_t
         self._scale_radius = float(first_obj.get("wrinkle_scale_radius", 1.0))
+        # _initial_points に焼き込み済みのscale。以降の更新はこの比で相対拡縮し、
+        # 初動での二重拡縮を防ぐ（wrinkle_slide.slide_curves_along_chain 参照）。
+        self._base_scale_radius = float(self._scale_radius)
         self._influence_radius = float(first_obj.get("wrinkle_influence_radius", 0.03))
         self._strength = float(first_obj.get("wrinkle_strength", 1.0))
 
@@ -776,12 +781,16 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
 
                 obj["wrinkle_t_param"] = 0.5
                 obj["wrinkle_scale_radius"] = float(self._scale_radius)
+            # 再取得点列に焼き込み済みのscaleを同期（不変条件の回復）
+            self._base_scale_radius = float(self._scale_radius)
         else:
             # プリセット定義がない場合: 旧チェーン断面から新チェーン断面へ正規化円柱座標転送
             if old_chain and self._initial_points:
                 old_src = old_chain.evaluate(self._base_t)
                 new_tgt = new_chain.evaluate(0.5)
-                rad_ratio = (new_tgt.radius / max(old_src.radius, 1e-4)) * self._scale_radius
+                # _initial_points は取得時scale焼き込み済みのため相対比で転送
+                user_scale = float(self._scale_radius) / max(float(self._base_scale_radius), 1e-4)
+                rad_ratio = (new_tgt.radius / max(old_src.radius, 1e-4)) * user_scale
 
                 new_initial_pts = []
                 for obj, pts in zip(self._target_curves, self._initial_points):
@@ -814,6 +823,9 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                     obj["wrinkle_scale_radius"] = float(self._scale_radius)
 
                 self._initial_points = new_initial_pts
+                # 転送後点列の焼き込みscaleに同期（不変条件の回復）
+                self._base_scale_radius = float(self._scale_radius) * (
+                    new_tgt.radius / max(old_src.radius, 1e-4))
             else:
                 self._update_curves_geometry()
 
@@ -838,6 +850,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
             source_t=self._base_t,
             target_t=self._current_t,
             scale_radius=self._scale_radius,
+            base_scale_radius=self._base_scale_radius,
         )
 
         for obj, pts in zip(self._target_curves, slid):

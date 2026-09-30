@@ -809,6 +809,8 @@ class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
         else:
             col.prop(settings, "wrinkle_bone_name", text=i18n.trans("Target Bone"))
         col.prop(settings, "wrinkle_bone_radius", text=i18n.trans("Bone Radius"))
+        col.prop(settings, "wrinkle_valley_depth", text=i18n.trans("Valley Depth"))
+        col.prop(settings, "wrinkle_crest_depth", text=i18n.trans("Crest Depth"))
         col.prop(settings, "wrinkle_preview_mode", text=i18n.trans("Preview"))
 
         col.separator()

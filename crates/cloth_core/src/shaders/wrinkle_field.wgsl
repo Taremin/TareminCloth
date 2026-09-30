@@ -21,8 +21,8 @@ struct WrinkleFieldParams {
     r_range: vec2<f32>,         // x: r_min, y: r_max (径方向のターゲット正規化範囲)
     enabled: u32,               // 有効フラグ (0 or 1)
     use_texture: u32,           // 2Dテクスチャモードフラグ (0 or 1)
-    _pad0: u32,
-    _pad1: u32,
+    valley_window: f32,         // 谷の径方向グラデーション窓 (m)
+    crest_window: f32,          // 山の径方向グラデーション窓 (m)
 };
 
 struct SimParams {
@@ -104,7 +104,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (valley_w > 0.0) {
         let v_radius = max(target_valley_r, bone_r + 0.002);
         let r_margin = max(0.0, r - v_radius);
-        let dist_factor = clamp(r_margin / 0.015, 0.0, 1.0);
+        let v_win = max(wrinkle_params.valley_window, 0.001);
+        let dist_factor = clamp(r_margin / v_win, 0.0, 1.0);
         a_pull = valley_w * blend * stiffness * dist_factor;
     }
 
@@ -112,7 +113,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var a_push = 0.0;
     if (crest_w > 0.0) {
         let r_excess = max(0.0, target_crest_r - r);
-        let dist_factor = clamp(r_excess / 0.020, 0.0, 1.0);
+        let c_win = max(wrinkle_params.crest_window, 0.001);
+        let dist_factor = clamp(r_excess / c_win, 0.0, 1.0);
         a_push = crest_w * blend * stiffness * dist_factor;
     }
 

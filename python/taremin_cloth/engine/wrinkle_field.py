@@ -7,6 +7,7 @@ GPU XPBDシワ拘束カーネルへ渡すバイナリ構造体を生成します
 """
 
 from dataclasses import dataclass
+import hashlib
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
@@ -358,6 +359,10 @@ def extract_curves_from_blender_collection(
         target_radius = obj.get("wrinkle_target_radius", None)
         if target_radius is not None:
             target_radius = float(target_radius)
+        try:
+            target_bone = str(obj.get("wrinkle_target_bone", "") or "")
+        except Exception:
+            target_bone = ""
 
         # スプライン頂点のワールド座標を取得
         curve_data = obj.data
@@ -380,6 +385,7 @@ def extract_curves_from_blender_collection(
                     strength=strength,
                     influence_radius=inf_radius,
                     target_radius=target_radius,
+                    target_bone=target_bone,
                 )
                 if is_crest:
                     crest_curves.append(item)
@@ -397,11 +403,13 @@ class WrinkleCurveItem:
     - strength: 個別強度倍率 (全体強度に乗算される倍率, 既定値: 1.0)
     - influence_radius: 個別影響半径 (m, グラデーション幅, 既定値: 0.03)
     - target_radius: 目標半径 (m, Noneの場合はカーブ自身の半径を使用)
+    - target_bone: 帰属ボーン名 ("": 未指定。コレクション抽出時に設定される)
     """
     points: np.ndarray
     strength: float = 1.0
     influence_radius: float = 0.03
     target_radius: Optional[float] = None
+    target_bone: str = ""
 
 
 def _normalize_curve_items(
@@ -431,6 +439,211 @@ def _normalize_curve_items(
             pts = np.asarray(c, dtype=np.float32)
             items.append(WrinkleCurveItem(pts, 1.0, default_influence_radius))
     return items
+
+
+@dataclass
+class WrinkleCurveDesc:
+    """単一カーブの骨ローカル形状記述子（ベイクキャッシュ・スライド照合用）。
+
+    theta/z/r は `project_points_to_cylindrical` による骨ローカル座標。
+    r は target_radius 上書き適用済みの実効半径。ワールド原点を含まないため、
+    骨とカーブが剛体追従する限り姿勢変化でも不変となる。
+    """
+    kind: str                    # "crest" or "root"
+    theta: np.ndarray            # (N,) [0, 2pi), float32
+    z: np.ndarray                # (N,) m, float32
+    r: np.ndarray                # (N,) m, float32 (実効半径)
+    strength: float
+    influence_radius: float
+
+
+def describe_wrinkle_curves(
+    crest_curves: Sequence[Any],
+    root_curves: Sequence[Any],
+    origin: Sequence[float],
+    axis: Sequence[float],
+    normal: Optional[Sequence[float]],
+    default_influence_radius: float,
+) -> List[WrinkleCurveDesc]:
+    """カーブ群を骨ローカル記述子列へ変換する（ベイク本体より2桁軽い射影のみ）。
+
+    順序は入力順を保持する（抽出順が安定している前提で照合は index-wise）。
+    点数1以下のカーブは除外する（ベイク時と同様に無視されるため）。
+    """
+    norm_crest = _normalize_curve_items(crest_curves, default_influence_radius)
+    norm_root = _normalize_curve_items(root_curves, default_influence_radius)
+    axis_arr = np.asarray(axis, dtype=np.float32)
+    descs: List[WrinkleCurveDesc] = []
+    for kind, items in (("crest", norm_crest), ("root", norm_root)):
+        for item in items:
+            pts = np.asarray(item.points, dtype=np.float32)
+            if len(pts) < 2:
+                continue
+            ths, zs, rs = project_points_to_cylindrical(pts, origin, axis_arr, normal)
+            if item.target_radius is not None:
+                rs = np.full_like(rs, float(item.target_radius))
+            descs.append(WrinkleCurveDesc(
+                kind=kind,
+                theta=np.ascontiguousarray(ths, dtype=np.float32),
+                z=np.ascontiguousarray(zs, dtype=np.float32),
+                r=np.ascontiguousarray(rs, dtype=np.float32),
+                strength=float(item.strength),
+                influence_radius=float(item.influence_radius),
+            ))
+    return descs
+
+
+def wrinkles_descs_match(
+    a: Sequence[WrinkleCurveDesc],
+    b: Sequence[WrinkleCurveDesc],
+    theta_tol: float = 2e-4,
+    zr_tol: float = 2e-6,
+) -> bool:
+    """記述子列の等価判定（許容値付き）。
+
+    形状署名ハッシュの代わりにキャッシュ照合に用いる。float32の1ULP
+    ノイズ（BLAS差・剛体移動の丸め）では不一致にしないため、量子化境界の
+    非決定性を持たない。thetaは周期的距離で評価する。
+    """
+    if len(a) != len(b):
+        return False
+    for da, db in zip(a, b):
+        if da.kind != db.kind:
+            return False
+        if len(da.theta) != len(db.theta):
+            return False
+        if len(da.theta) == 0:
+            continue
+        dth = np.abs((db.theta - da.theta + math.pi) % (2.0 * math.pi) - math.pi)
+        if float(np.max(dth)) > theta_tol:
+            return False
+        if float(np.max(np.abs(db.z - da.z))) > zr_tol:
+            return False
+        if float(np.max(np.abs(db.r - da.r))) > zr_tol:
+            return False
+        if abs(db.strength - da.strength) > 1e-9:
+            return False
+        if abs(db.influence_radius - da.influence_radius) > 1e-9:
+            return False
+    return True
+
+
+def wrinkle_shape_signature(
+    descs: Sequence[WrinkleCurveDesc],
+    width: int,
+    height: int,
+    bone_radius: float,
+    cloth_radius: float,
+    resample_step: float,
+) -> str:
+    """形状署名を返す（プロセス安定な sha256 hex）。
+
+    デバッグ・ログ表示用の識別子。キャッシュ照合の等価判定には
+    `wrinkles_descs_match`（許容値付き）を用いること。ハッシュは量子化
+    境界で1ULP非決定性を持ち得るため、等価性テストには使わないこと。
+    """
+    h = hashlib.sha256()
+    h.update(f"{width}x{height}|{bone_radius:.6f}|{cloth_radius:.6f}|{resample_step:.6f}|".encode())
+    for d in descs:
+        h.update(d.kind.encode())
+        h.update(np.round(d.theta.astype(np.float64), 4).tobytes())
+        h.update(np.round(d.z.astype(np.float64), 5).tobytes())
+        h.update(np.round(d.r.astype(np.float64), 5).tobytes())
+        h.update(f"|{d.strength:.6f}|{d.influence_radius:.6f};".encode())
+    return h.hexdigest()
+
+
+def match_slide_transform(
+    cached: Sequence[WrinkleCurveDesc],
+    current: Sequence[WrinkleCurveDesc],
+    theta_tol: float = 2e-3,
+    z_std_tol: float = 5e-4,
+    r_resid_tol: float = 1e-3,
+) -> Optional[Dict[str, float]]:
+    """正準形状からの剛体スライド (dz, r_scale) 照合。
+
+    スライド操作は theta 保存・z 定数シフト・r アフィン変換のため、
+    その条件を満たせばフルベイク不要で z_range/r_range の uniform 更新のみで
+    厳密に等価になる（target' = a*target + b より range' = a*range + b）。
+    強度の一様スケールも検出し stiffness 側へ折り畳めるよう返す。
+    戻りは {"dz", "r_scale", "r_offset", "strength_scale"}、条件不一致時は None。
+    """
+    if len(cached) != len(current):
+        return None
+    if not cached:
+        return None
+    dz_list = []
+    strength_ratios = []
+    sx = 0.0
+    sy = 0.0
+    sxx = 0.0
+    sxy = 0.0
+    total_n = 0
+    for dc, dn in zip(cached, current):
+        if dc.kind != dn.kind:
+            return None
+        if len(dc.theta) != len(dn.theta):
+            return None
+        if len(dc.theta) == 0:
+            continue
+        dth = np.abs((dn.theta - dc.theta + math.pi) % (2.0 * math.pi) - math.pi)
+        if float(np.max(dth)) > theta_tol:
+            return None
+        dz = dn.z - dc.z
+        dz_list.append(float(np.mean(dz)))
+        if float(np.std(dz)) > z_std_tol:
+            return None
+        # r のアフィン適合: r_cur = a * r_cached + b（全カーブでプール）
+        xc = dc.r.astype(np.float64)
+        xn = dn.r.astype(np.float64)
+        sx += float(np.sum(xc))
+        sy += float(np.sum(xn))
+        sxx += float(np.sum(xc * xc))
+        sxy += float(np.sum(xc * xn))
+        total_n += len(xc)
+        if dn.influence_radius != dc.influence_radius:
+            return None
+        if dc.strength <= 1e-9 or dn.strength <= 1e-9:
+            if abs(dn.strength - dc.strength) > 1e-9:
+                return None
+            strength_ratios.append(1.0)
+        else:
+            strength_ratios.append(float(dn.strength) / float(dc.strength))
+    dz_mean = float(sum(dz_list) / len(dz_list)) if dz_list else 0.0
+    if any(abs(d - dz_mean) > z_std_tol for d in dz_list):
+        return None
+    if total_n == 0:
+        return {"dz": dz_mean, "r_scale": 1.0, "r_offset": 0.0,
+                "strength_scale": float(strength_ratios[0]) if strength_ratios else 1.0}
+    denom = sxx - sx * sx / total_n
+    if abs(denom) < 1e-12:
+        # 縮退（全カーブが定数半径）: 軸中心スケールとして解釈する。
+        # スライド操作の rad_ratio は軸中心スケール (b=0) であり、定数リングの
+        # 重み>0領域では B/A デコードも厳密に一致する。平均半径ゼロ時は
+        # オフセットとして扱い、許容以上の差は不一致とする。
+        mean_c = sx / total_n
+        mean_n = sy / total_n
+        if abs(mean_c) > 1e-6:
+            r_scale, r_offset = float(mean_n / mean_c), 0.0
+        else:
+            r_scale, r_offset = 1.0, float(mean_n - mean_c)
+            if abs(r_offset) > r_resid_tol:
+                return None
+    else:
+        r_scale = float((sxy - sx * sy / total_n) / denom)
+        r_offset = float((sy - r_scale * sx) / total_n)
+    # 残差の厳密検査
+    for dc, dn in zip(cached, current):
+        if len(dc.theta) == 0:
+            continue
+        resid = dn.r.astype(np.float64) - (r_scale * dc.r.astype(np.float64) + r_offset)
+        if float(np.max(np.abs(resid))) > r_resid_tol:
+            return None
+    s0 = strength_ratios[0] if strength_ratios else 1.0
+    if any(abs(s - s0) > 1e-6 for s in strength_ratios):
+        return None
+    return {"dz": dz_mean, "r_scale": float(r_scale), "r_offset": float(r_offset),
+            "strength_scale": float(s0)}
 
 
 @dataclass
@@ -523,110 +736,130 @@ def bake_wrinkle_2d_sdf_texture(
     if r_max <= r_min:
         r_max = r_min + 0.05
 
-    # グリッドの物理座標配列 (height, width)
-    # x_phys = theta * bone_radius, y_phys = z
-    u_coords = np.linspace(0.0, 1.0, width, endpoint=False)
-    v_coords = np.linspace(0.0, 1.0, height, endpoint=True)
-    thetas_grid = u_coords * (2.0 * math.pi)
-    zs_grid = z_min + v_coords * (z_max - z_min)
+    # グリッド定義（従来と同一: Uはendpoint=False、Vはendpoint=True）
+    # x_col[i] = i * circ/width, z_row[j] = z_min + j*(z_max-z_min)/(height-1)
+    if width <= 0 or height <= 0:
+        empty = np.zeros((max(height, 0), max(width, 0), 4), dtype=np.uint8)
+        return WrinkleTexture2D(
+            width=max(width, 0),
+            height=max(height, 0),
+            texture_bytes=b"",
+            z_min=float(z_min),
+            z_max=float(z_max),
+            r_min=float(r_min),
+            r_max=float(r_max),
+            rgba_array=empty,
+        )
+    circ_phys = max(2.0 * math.pi * float(bone_radius), 1e-6)
+    dx_tex = circ_phys / float(width)
+    dz_tex = float(z_max - z_min) / float(max(height - 1, 1))
+    xs_centers = np.arange(width, dtype=np.float64) * dx_tex
+    zs_centers = float(z_min) + np.arange(height, dtype=np.float64) * dz_tex
 
-    mesh_thetas, mesh_zs = np.meshgrid(thetas_grid, zs_grid)
-    grid_x = (mesh_thetas * bone_radius).ravel()
-    grid_y = mesh_zs.ravel()
-    grid_pts = np.stack([grid_x, grid_y], axis=-1)
+    def sample_single_curve_canonical(pts: np.ndarray, target_r: Optional[float] = None):
+        """単一カーブを稠密サンプリングして正準点群 (x in [0, circ), z, r) を生成。
 
-    # 補助関数: 単一カーブを稠密サンプリングして点群 (x_phys, z) と半径 r を生成
-    def sample_single_curve_phys(pts: np.ndarray, target_r: Optional[float] = None):
+        従来の `sample_single_curve_phys` と同一の補間点列だが、3コピー展開は
+        行わない。周期境界は参照側のmod距離で扱うため結果は等価。
+        """
         if len(pts) < 2:
-            return None, None
+            return None, None, None
         ths, zs, rs = project_points_to_cylindrical(pts, origin, axis_norm, norm)
         if target_r is not None:
             rs = np.full_like(rs, target_r)
-        pts_x = []
-        pts_y = []
-        pts_r = []
         n_pts = len(pts)
+        total = 0
+        segs = []
         for i in range(n_pts - 1):
-            p0_th, p0_z, p0_r = ths[i], zs[i], rs[i]
-            p1_th, p1_z, p1_r = ths[i+1], zs[i+1], rs[i+1]
+            p0_th, p0_z, p0_r = float(ths[i]), float(zs[i]), float(rs[i])
+            p1_th, p1_z, p1_r = float(ths[i + 1]), float(zs[i + 1]), float(rs[i + 1])
             dth = ((p1_th - p0_th + math.pi) % (2.0 * math.pi)) - math.pi
             dz = p1_z - p0_z
-            seg_len = math.sqrt((dth * bone_radius)**2 + dz**2)
+            seg_len = math.sqrt((dth * bone_radius) ** 2 + dz ** 2)
             num_sub = max(1, int(math.ceil(seg_len / resample_step)))
+            segs.append((p0_th, p0_z, p0_r, dth, dz, p1_r - p0_r, num_sub))
+            total += num_sub + 1
+        xs = np.empty(total, dtype=np.float32)
+        ys = np.empty(total, dtype=np.float32)
+        rr = np.empty(total, dtype=np.float32)
+        k = 0
+        for (p0_th, p0_z, p0_r, dth, dz, dr, num_sub) in segs:
             for s in range(num_sub + 1):
                 frac = s / float(num_sub)
                 th = (p0_th + frac * dth) % (2.0 * math.pi)
-                z = p0_z + frac * dz
-                r = p0_r + frac * (p1_r - p0_r)
-                pts_x.append(th * bone_radius)
-                pts_y.append(z)
-                pts_r.append(r)
+                xs[k] = th * bone_radius
+                ys[k] = p0_z + frac * dz
+                rr[k] = p0_r + frac * dr
+                k += 1
+        return xs, ys, rr
 
-        if not pts_x:
-            return None, None
+    def splat_channel(items):
+        """カーブ群の距離場をsplat反転で求める（画素->全点の総当たりを廃止）。
 
-        pts_x = np.array(pts_x, dtype=np.float32)
-        pts_y = np.array(pts_y, dtype=np.float32)
-        pts_r = np.array(pts_r, dtype=np.float32)
-
-        # 円周方向周期境界対応: θ - 2π, θ, θ + 2π の 3 コピー
-        circ_phys = 2.0 * math.pi * bone_radius
-        all_x = np.concatenate([pts_x - circ_phys, pts_x, pts_x + circ_phys])
-        all_y = np.concatenate([pts_y, pts_y, pts_y])
-        all_r = np.concatenate([pts_r, pts_r, pts_r])
-
-        ref_pts = np.stack([all_x, all_y], axis=-1)
-        return ref_pts, all_r
-
-    def compute_dists(query_pts: np.ndarray, ref_pts: np.ndarray, chunk_size: int = 8192):
-        """NumPy 高速ベクトル化チャンク距離計算 (Blender環境・CI環境に完全両立)"""
-        n_q = len(query_pts)
-        dists = np.empty(n_q, dtype=np.float32)
-        indices = np.empty(n_q, dtype=np.int32)
-        for i in range(0, n_q, chunk_size):
-            end = min(i + chunk_size, n_q)
-            diff = query_pts[i:end, None, :] - ref_pts[None, :, :]
-            dist_sq = diff[:, :, 0]**2 + diff[:, :, 1]**2
-            min_idx = np.argmin(dist_sq, axis=1)
-            indices[i:end] = min_idx
-            dists[i:end] = np.sqrt(dist_sq[np.arange(end - i), min_idx])
-        return dists, indices
+        各参照点の影響BOX内画素だけを更新するため、計算量は
+        O(Nref * (inf/dx) * (inf/dz))。U周期はmod距離で厳密に扱う。
+        戻りは (potential[H*W], near_r[H*W]) で従来の max合成と同一意味。
+        """
+        n = height * width
+        pot = np.zeros(n, dtype=np.float32)
+        near = np.full(n, (r_min + r_max) * 0.5, dtype=np.float32)
+        half = circ_phys * 0.5
+        for item in items:
+            strength = max(0.0, float(item.strength))
+            if strength <= 0.0:
+                continue
+            sampled = sample_single_curve_canonical(item.points, item.target_radius)
+            if sampled[0] is None:
+                continue
+            xs, ys, rs = sampled
+            r_inf = max(float(item.influence_radius), 1e-6)
+            cbest = np.full(n, np.inf, dtype=np.float32)
+            cbest_r = np.zeros(n, dtype=np.float32)
+            for idx in range(len(xs)):
+                px = float(xs[idx])
+                py = float(ys[idx])
+                pr = float(rs[idx])
+                j0 = int(math.floor((py - r_inf - z_min) / dz_tex)) if dz_tex > 0 else 0
+                j1 = int(math.floor((py + r_inf - z_min) / dz_tex)) if dz_tex > 0 else height - 1
+                if j1 < 0 or j0 > height - 1:
+                    continue
+                j0c = max(0, j0)
+                j1c = min(height - 1, j1)
+                i0 = int(math.floor((px - r_inf) / dx_tex))
+                i1 = int(math.floor((px + r_inf) / dx_tex))
+                if i1 - i0 + 1 >= width:
+                    cols = np.arange(width)
+                else:
+                    cols = np.mod(np.arange(i0, i1 + 1), width)
+                xcols = cols.astype(np.float64) * dx_tex
+                dxs = np.mod(xcols - px + half, circ_phys) - half
+                zrows = zs_centers[j0c:j1c + 1]
+                dy = zrows - py
+                d = np.sqrt(dxs[None, :] ** 2 + dy[:, None] ** 2).astype(np.float32)
+                rows = np.arange(j0c, j1c + 1, dtype=np.int64)[:, None] * width + cols[None, :]
+                flat = rows.ravel()
+                dv = d.ravel()
+                upd = dv < cbest[flat]
+                if np.any(upd):
+                    sel = flat[upd]
+                    cbest[sel] = dv[upd]
+                    cbest_r[sel] = pr
+            t = np.clip(1.0 - cbest / r_inf, 0.0, 1.0)
+            falloff = (t * t * (3.0 - 2.0 * t) * strength).astype(np.float32)
+            mask = falloff > pot
+            pot[mask] = falloff[mask]
+            near[mask] = cbest_r[mask]
+        return pot, near
 
     # 1. 谷（Root）カーブの距離変換およびマルチカーブ合成
-    r_potential = np.zeros(height * width, dtype=np.float32)
-    near_r_v_all = np.full(height * width, (r_min + r_max) * 0.5, dtype=np.float32)
-
-    for item in norm_root:
-        ref_pts, ref_rs = sample_single_curve_phys(item.points, item.target_radius)
-        if ref_pts is None:
-            continue
-        dists, idxs = compute_dists(grid_pts, ref_pts)
-        r_inf = max(item.influence_radius, 1e-6)
-        t = np.clip(1.0 - dists / r_inf, 0.0, 1.0)
-        falloff = t * t * (3.0 - 2.0 * t) * max(0.0, item.strength)
-        mask = falloff > r_potential
-        r_potential[mask] = falloff[mask]
-        near_r_v_all[mask] = ref_rs[idxs[mask]]
+    r_potential, near_r_v_all = splat_channel(norm_root)
 
     r_channel = np.clip(r_potential * 255.0, 0.0, 255.0).astype(np.uint8)
     norm_r_v = np.clip((near_r_v_all - r_min) / (r_max - r_min), 0.0, 1.0)
     b_channel = (norm_r_v * 255.0).astype(np.uint8)
 
     # 2. 山（Crest）カーブの距離変換およびマルチカーブ合成
-    g_potential = np.zeros(height * width, dtype=np.float32)
-    near_r_c_all = np.full(height * width, (r_min + r_max) * 0.5, dtype=np.float32)
-
-    for item in norm_crest:
-        ref_pts, ref_rs = sample_single_curve_phys(item.points, item.target_radius)
-        if ref_pts is None:
-            continue
-        dists, idxs = compute_dists(grid_pts, ref_pts)
-        r_inf = max(item.influence_radius, 1e-6)
-        t = np.clip(1.0 - dists / r_inf, 0.0, 1.0)
-        falloff = t * t * (3.0 - 2.0 * t) * max(0.0, item.strength)
-        mask = falloff > g_potential
-        g_potential[mask] = falloff[mask]
-        near_r_c_all[mask] = ref_rs[idxs[mask]]
+    g_potential, near_r_c_all = splat_channel(norm_crest)
 
     g_channel = np.clip(g_potential * 255.0, 0.0, 255.0).astype(np.uint8)
     norm_r_c = np.clip((near_r_c_all - r_min) / (r_max - r_min), 0.0, 1.0)

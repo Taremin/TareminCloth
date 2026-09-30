@@ -104,10 +104,11 @@ pub struct GpuWrinkleProfileSample {
 }
 
 /// シワフィールド Uniform パラメータ（サイズ: 96バイト, 16Bアライメント準拠）
-/// 注意: `bone_origin.w` および `use_texture` は現在WGSL未読の予約フィールドである。
-/// サイズ変更（96B→80B）は WGSL・Rust・Python・alignmentテストの同時変更になるため行わない。
+/// 注意: `bone_origin.w` は現在WGSL未読の予約フィールドである。
+/// `valley_window` / `crest_window` は径方向グラデーション窓 (m)。
+/// サイズ変更（96B→）は WGSL・Rust・Python・alignmentテストの同時変更になるため行わない。
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct WrinkleFieldParams {
     pub bone_origin: [f32; 4],     // xyz: origin, w: influence_radius
     pub bone_axis: [f32; 4],       // xyz: axis, w: bone_radius
@@ -117,8 +118,27 @@ pub struct WrinkleFieldParams {
     pub r_range: [f32; 2],         // x: r_min, y: r_max (径方向のターゲット正規化範囲)
     pub enabled: u32,              // 有効フラグ (0 or 1)
     pub use_texture: u32,          // 2Dテクスチャモードフラグ (0 or 1)
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub valley_window: f32,        // 谷の径方向グラデーション窓 (m, 既定 0.015)
+    pub crest_window: f32,         // 山の径方向グラデーション窓 (m, 既定 0.020)
+}
+
+impl Default for WrinkleFieldParams {
+    fn default() -> Self {
+        // bytemuck::Zeroable のゼロ埋めではなく、窓の既定値を明示する。
+        // ゼロ窓は dist_factor の飽和（全域最大強度）を招くため避ける。
+        Self {
+            bone_origin: [0.0; 4],
+            bone_axis: [0.0; 4],
+            bone_normal: [0.0; 4],
+            bone_binormal: [0.0; 4],
+            z_range: [0.0; 2],
+            r_range: [0.0; 2],
+            enabled: 0,
+            use_texture: 0,
+            valley_window: 0.015,
+            crest_window: 0.020,
+        }
+    }
 }
 
 

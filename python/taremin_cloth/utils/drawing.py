@@ -683,6 +683,16 @@ def draw_callback_3d():
                                 b_name = item[4] if len(item) > 4 and item[4] in pbs else settings_bone
                                 groups[b_name].append(item[:4])
                             explicit_r = float(getattr(settings, "wrinkle_bone_radius", 0.0) or 0.0) if settings else 0.0
+                            try:
+                                v_depth = float(getattr(settings, "wrinkle_valley_depth", 0.015) or 0.015)
+                            except Exception:
+                                v_depth = 0.015
+                            try:
+                                c_depth = float(getattr(settings, "wrinkle_crest_depth", 0.020) or 0.020)
+                            except Exception:
+                                c_depth = 0.020
+                            v_depth = max(float(v_depth), 0.001)
+                            c_depth = max(float(c_depth), 0.001)
                             for b_name, items in groups.items():
                                 if not b_name:
                                     continue
@@ -702,27 +712,31 @@ def draw_callback_3d():
                                 )
                                 meshes = build_wrinkle_influence_meshes(
                                     items, b_head, axis_n, n_vec, bone_rad,
+                                    valley_depth=v_depth, crest_depth=c_depth,
                                 )
                                 if meshes:
                                     draw_wrinkle_influence_meshes(meshes)
-                            if preview_mode == "BOTH" and settings_bone:
-                                pb = pbs[settings_bone]
-                                w_mat = arm_obj.matrix_world
-                                b_head = np.array((w_mat @ pb.head)[:3], dtype=np.float64)
-                                b_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float64)
-                                axis_raw = b_tail - b_head
-                                if float(np.linalg.norm(axis_raw)) >= 1e-6:
-                                    axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
-                                    bone_rad = resolve_bone_radius(
-                                        explicit_r,
-                                        float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
-                                        float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
-                                        float(getattr(pb, "length", 0.0) or 0.0),
-                                    )
-                                    _draw_bone_proxy_cylinder(
-                                        b_head, axis_n, n_vec, bone_rad,
-                                        float(np.linalg.norm(axis_raw)),
-                                    )
+                            if preview_mode == "BOTH":
+                                for proxy_bone in groups.keys():
+                                    if not proxy_bone or proxy_bone not in pbs:
+                                        continue
+                                    pb = pbs[proxy_bone]
+                                    w_mat = arm_obj.matrix_world
+                                    b_head = np.array((w_mat @ pb.head)[:3], dtype=np.float64)
+                                    b_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float64)
+                                    axis_raw = b_tail - b_head
+                                    if float(np.linalg.norm(axis_raw)) >= 1e-6:
+                                        axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                        bone_rad = resolve_bone_radius(
+                                            explicit_r,
+                                            float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
+                                            float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
+                                            float(getattr(pb, "length", 0.0) or 0.0),
+                                        )
+                                        _draw_bone_proxy_cylinder(
+                                            b_head, axis_n, n_vec, bone_rad,
+                                            float(np.linalg.norm(axis_raw)),
+                                        )
             except Exception:
                 pass
 
@@ -993,12 +1007,15 @@ def compute_wrinkle_influence_mesh(
     thick_out: float,
     n_theta: int = 48,
     n_z: int = 8,
+    with_lines: bool = True,
 ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[float, float, float]]]:
     """
     目標半径上の影響範囲メッシュ（内外厚を持つ曲面パッチ）を生成する。
-    - 谷: [target, target+0.015]（目標より外のみに力が働く）
-    - 山: [target-0.020, target]（目標より内のみに力が働く）
+    - 谷: [target, target+valley_depth]（目標より外のみに力が働く）
+    - 山: [target-crest_depth, target]（目標より内のみに力が働く）
+    厚み窓は呼び出し側指定（GPUシェーダのグラデーション窓と一致させること）。
     角度・長さ方向の帯を示し、軸まで埋めない。Blender非依存の純粋関数。
+    - with_lines=False の場合は面のみ生成する（フェード分割シェル用）。
     - 戻り値: (tris_pos, lines_pos)
     """
     orig = np.array(origin[:3], dtype=np.float64)
@@ -1064,23 +1081,24 @@ def compute_wrinkle_influence_mesh(
             tris.extend([i00, i01, i11])
 
     # 外周ライン
-    for it in range(n_seg):
-        jt = (it + 1) % (n_theta + 1) if is_full else it + 1
-        lines.extend([outer_grid[0][it], outer_grid[0][jt]])
-        lines.extend([outer_grid[n_z][it], outer_grid[n_z][jt]])
-    for iz in range(n_z):
-        lines.extend([outer_grid[iz][0], outer_grid[iz + 1][0]])
-        if not is_full:
-            lines.extend([outer_grid[iz][n_theta], outer_grid[iz + 1][n_theta]])
-    # 目標ライン（z両端）
-    for it in range(n_seg):
-        jt = (it + 1) % (n_theta + 1) if is_full else it + 1
-        t0 = _surf_point(theta_min + span * (it / n_theta), z_min, target_r)
-        t1 = _surf_point(theta_min + span * (jt / n_theta), z_min, target_r)
-        lines.extend([t0, t1])
-        t0 = _surf_point(theta_min + span * (it / n_theta), z_max, target_r)
-        t1 = _surf_point(theta_min + span * (jt / n_theta), z_max, target_r)
-        lines.extend([t0, t1])
+    if with_lines:
+        for it in range(n_seg):
+            jt = (it + 1) % (n_theta + 1) if is_full else it + 1
+            lines.extend([outer_grid[0][it], outer_grid[0][jt]])
+            lines.extend([outer_grid[n_z][it], outer_grid[n_z][jt]])
+        for iz in range(n_z):
+            lines.extend([outer_grid[iz][0], outer_grid[iz + 1][0]])
+            if not is_full:
+                lines.extend([outer_grid[iz][n_theta], outer_grid[iz + 1][n_theta]])
+        # 目標ライン（z両端）
+        for it in range(n_seg):
+            jt = (it + 1) % (n_theta + 1) if is_full else it + 1
+            t0 = _surf_point(theta_min + span * (it / n_theta), z_min, target_r)
+            t1 = _surf_point(theta_min + span * (jt / n_theta), z_min, target_r)
+            lines.extend([t0, t1])
+            t0 = _surf_point(theta_min + span * (it / n_theta), z_max, target_r)
+            t1 = _surf_point(theta_min + span * (jt / n_theta), z_max, target_r)
+            lines.extend([t0, t1])
 
     return tris, lines
 
@@ -1091,12 +1109,18 @@ def build_wrinkle_influence_meshes(
     axis: Sequence[float],
     normal: Sequence[float],
     bone_radius: float,
-) -> List[Tuple[str, List[Tuple[float, float, float]], List[Tuple[float, float, float]]]]:
+    valley_depth: float = 0.015,
+    crest_depth: float = 0.020,
+    fade_shells: int = 3,
+) -> List[Tuple[str, List[Tuple[float, float, float]], List[Tuple[float, float, float]], float]]:
     """カーブ群から影響範囲メッシュ群を構築する (Blender非依存の幾何部)。
 
     - curves_data: (wrinkle_type, points, influence_radius, target_radius_or_0) のリスト
-    - 谷 (root/valley): [target, target+0.015]、山 (crest/ridge): [target-0.020, target]
+    - 谷 (root/valley): [target, target+valley_depth]、山 (crest/ridge): [target-crest_depth, target]
     - 角度・長さ方向には influence_radius 分だけ帯を拡張する。
+    - 動径方向に fade_shells 分割し、GPUシェーダの dist_factor に比例した
+      alpha を付与する（影響力のない目標側ほど淡く）。戻りの各要素は
+      (wrinkle_type, tris, lines, alpha)。lines は外縁シェルにのみ付属。
     動径遠方には遮断がないため、メッシュは立ち上がり域のみを示すことに注意。
     """
     from ..engine.wrinkle_field import derive_wrinkle_influence_spans
@@ -1119,16 +1143,40 @@ def build_wrinkle_influence_meshes(
             dtheta = max(inf_r, 0.0) / max(float(bone_radius), 1e-4)
             t_min -= dtheta
             t_max += dtheta
-        if is_crest:
-            thick_in, thick_out = 0.020, 0.0
-        else:
-            thick_in, thick_out = 0.0, 0.015
-        tris, lines = compute_wrinkle_influence_mesh(
+        depth = max(float(crest_depth if is_crest else valley_depth), 1e-4)
+        n_sh = max(int(fade_shells), 1)
+        # ラインは従来単一帯と同一のフルバンド表示を維持する
+        _, band_lines = compute_wrinkle_influence_mesh(
             origin, axis, normal, t_min, t_max, z0, z1,
-            span["target_r"], thick_in, thick_out,
+            span["target_r"],
+            depth if is_crest else 0.0,
+            0.0 if is_crest else depth,
         )
-        if tris:
-            out.append((w_type, tris, lines))
+        for i in range(n_sh):
+            # alpha はシェーダの dist_factor（目標で0・縁で最大）に比例させる。
+            # 谷: 目標側ほど淡く / 山: 目標側ほど淡く（縁＝最大影響が濃い）。
+            frac_in = i / n_sh
+            frac_out = (i + 1) / n_sh
+            mid = (frac_in + frac_out) * 0.5
+            if is_crest:
+                # i=0 が最内縁（最大影響）
+                r_hi = span["target_r"] - depth * frac_in
+                r_lo = span["target_r"] - depth * frac_out
+                alpha = 1.0 - mid
+            else:
+                # i=n_sh-1 が最外縁（最大影響）
+                r_lo = span["target_r"] + depth * frac_in
+                r_hi = span["target_r"] + depth * frac_out
+                alpha = mid
+            tris, _ = compute_wrinkle_influence_mesh(
+                origin, axis, normal, t_min, t_max, z0, z1,
+                r_hi, r_hi - r_lo, 0.0,
+                n_theta=32, n_z=4, with_lines=False,
+            )
+            if tris:
+                # 最外縁シェルにのみラインを付属させる
+                out.append((w_type, tris, band_lines if i == n_sh - 1 else [],
+                            max(0.12, min(1.0, alpha))))
     return out
 
 
@@ -1145,12 +1193,13 @@ def _draw_bone_proxy_cylinder(b_head, axis_n, n_vec, bone_rad: float, bone_len: 
 
 
 def draw_wrinkle_influence_meshes(
-    meshes_data: Sequence[Tuple[str, Sequence[Tuple[float, float, float]], Sequence[Tuple[float, float, float]]]],
+    meshes_data: Sequence[tuple],
     alpha_mul: float = 1.0,
 ):
     """
     シワカーブ群の影響範囲（角度・長さ帯と目標前後の厚み）を3D空間上に半透明表示する。
-    - meshes_data: (wrinkle_type, tris, lines) のリスト
+    - meshes_data: (wrinkle_type, tris, lines[, alpha]) のリスト。
+      alpha 省略時は 1.0。フェード分割シェルは dist_factor 比例の alpha を持つ。
     ドーナツ管表示の置換であり、軸まで埋めない。
     """
     if not meshes_data:
@@ -1169,9 +1218,15 @@ def draw_wrinkle_influence_meshes(
         gpu.state.depth_test_set('NONE')
         gpu.state.blend_set('ALPHA')
 
-        for w_type, tris, lines in meshes_data:
+        for entry in meshes_data:
+            if len(entry) == 4:
+                w_type, tris, lines, entry_alpha = entry
+            else:
+                w_type, tris, lines = entry
+                entry_alpha = 1.0
             if not tris:
                 continue
+            eff = max(0.0, min(1.0, float(entry_alpha))) * alpha_mul
 
             is_crest = str(w_type).lower() in ("crest", "ridge")
             is_proxy = str(w_type).lower() == "proxy"
@@ -1179,11 +1234,11 @@ def draw_wrinkle_influence_meshes(
                 face_color = (0.75, 0.8, 0.85, 0.10 * alpha_mul)
                 line_color = (0.8, 0.85, 0.9, 0.40 * alpha_mul)
             elif is_crest:
-                face_color = (1.0, 0.42, 0.08, 0.15 * alpha_mul)
-                line_color = (1.0, 0.55, 0.15, 0.65 * alpha_mul)
+                face_color = (1.0, 0.42, 0.08, 0.15 * eff)
+                line_color = (1.0, 0.55, 0.15, 0.65 * (0.35 + 0.65 * eff))
             else:
-                face_color = (0.08, 0.72, 1.0, 0.15 * alpha_mul)
-                line_color = (0.15, 0.85, 1.0, 0.65 * alpha_mul)
+                face_color = (0.08, 0.72, 1.0, 0.15 * eff)
+                line_color = (0.15, 0.85, 1.0, 0.65 * (0.35 + 0.65 * eff))
 
             # 面の描画 (TRIS)
             batch_tris = batch_for_shader(shader, 'TRIS', {"pos": tris})

@@ -242,6 +242,8 @@ pub struct GpuClothSimulator {
     pub(crate) wrinkle_texture_view: Option<wgpu::TextureView>,
     pub(crate) wrinkle_sampler: Option<wgpu::Sampler>,
     pub(crate) wrinkle_field_bind_group: Option<wgpu::BindGroup>,
+    /// 現在確保済みシワテクスチャの寸法（同一寸法の高速パス判定用）
+    pub(crate) wrinkle_texture_dims: Option<(u32, u32)>,
 
     pub solver_iterations: u32,
     pub gravity: [f32; 3],
@@ -433,6 +435,7 @@ impl GpuClothSimulator {
             wrinkle_texture_view: None,
             wrinkle_sampler: None,
             wrinkle_field_bind_group: None,
+            wrinkle_texture_dims: None,
             spatial_hash: res.spatial_hash,
             edge_spatial_hash: res.edge_spatial_hash,
             self_collision_bind_group: res.self_collision_bind_group,
@@ -2298,6 +2301,47 @@ impl GpuClothSimulator {
             self.wrinkle_texture = None;
             self.wrinkle_texture_view = None;
             self.wrinkle_field_bind_group = None;
+            self.wrinkle_texture_dims = None;
+            return;
+        }
+
+        // 同一寸法の高速パス: テクスチャ・ビュー・BindGroup を再生成せず中身だけ更新する。
+        // インタラクティブ編集中のフルベイク連打時のオブジェクト churn と hitch を除去する。
+        // BindGroup はテクスチャビューを参照しているため、ビュー不変＝再生成不要。
+        if self.wrinkle_texture_dims == Some((width, height))
+            && self.wrinkle_texture.is_some()
+            && self.wrinkle_field_bind_group.is_some()
+        {
+            let texture_size = wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            };
+            self.context.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: self.wrinkle_texture.as_ref().unwrap(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba_bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+                texture_size,
+            );
+            self.wrinkle_field_params.z_range = [z_min, z_max];
+            self.wrinkle_field_params.r_range = [r_min, r_max];
+            self.wrinkle_field_params.use_texture = 1;
+            if let Some(ref buffer) = self.wrinkle_field_params_buffer {
+                self.context.queue.write_buffer(
+                    buffer,
+                    0,
+                    bytemuck::bytes_of(&self.wrinkle_field_params),
+                );
+            }
             return;
         }
 
@@ -2401,6 +2445,7 @@ impl GpuClothSimulator {
         self.wrinkle_texture = Some(texture);
         self.wrinkle_texture_view = Some(texture_view);
         self.wrinkle_field_bind_group = Some(bind_group);
+        self.wrinkle_texture_dims = Some((width, height));
     }
 }
 

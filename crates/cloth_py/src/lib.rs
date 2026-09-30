@@ -2475,7 +2475,7 @@ impl ClothSimulator {
     }
 
     /// シワフィールドのメタパラメータを設定する
-    #[pyo3(signature = (origin, axis, normal, binormal, influence_radius=0.05, bone_radius=0.05, stiffness=1.0, blend_weight=1.0, z_min=None, z_max=None, r_min=None, r_max=None))]
+    #[pyo3(signature = (origin, axis, normal, binormal, influence_radius=0.05, bone_radius=0.05, stiffness=1.0, blend_weight=1.0, z_min=None, z_max=None, r_min=None, r_max=None, valley_window=0.015, crest_window=0.020))]
     fn set_wrinkle_field_params(
         &mut self,
         origin: [f32; 3],
@@ -2490,6 +2490,8 @@ impl ClothSimulator {
         z_max: Option<f32>,
         r_min: Option<f32>,
         r_max: Option<f32>,
+        valley_window: f32,
+        crest_window: f32,
     ) {
         let mut p = cloth_core::simulation::types::WrinkleFieldParams {
             bone_origin: [origin[0], origin[1], origin[2], influence_radius],
@@ -2500,8 +2502,8 @@ impl ClothSimulator {
             r_range: [r_min.unwrap_or(0.0), r_max.unwrap_or(0.0)],
             enabled: if self.simulator.wrinkle_field_enabled() { 1 } else { 0 },
             use_texture: 1,
-            _pad0: 0,
-            _pad1: 0,
+            valley_window: if valley_window > 0.0 { valley_window } else { 0.015 },
+            crest_window: if crest_window > 0.0 { crest_window } else { 0.020 },
         };
         // 既存のz_range / r_rangeが設定済みなら維持
         if z_min.is_none() && z_max.is_none() {

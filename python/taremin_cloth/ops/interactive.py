@@ -1195,6 +1195,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._slide_base_t = float(first_obj.get("wrinkle_t_param", 0.5))
         self._slide_current_t = self._slide_base_t
         self._slide_scale_radius = float(first_obj.get("wrinkle_scale_radius", 1.0))
+        self._slide_base_scale_radius = float(self._slide_scale_radius)
         self._slide_influence_radius = float(first_obj.get("wrinkle_influence_radius", 0.03))
         self._slide_strength = float(first_obj.get("wrinkle_strength", 1.0))
         self._slide_init_x = event.mouse_x
@@ -1221,6 +1222,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             source_t=self._slide_base_t,
             target_t=self._slide_current_t,
             scale_radius=self._slide_scale_radius,
+            base_scale_radius=self._slide_base_scale_radius,
         )
         for obj, pts in zip(self._sliding_curves, slid):
             obj["wrinkle_t_param"] = float(self._slide_current_t)
@@ -1284,6 +1286,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._slide_current_t = 0.5
         self._slide_init_x = 0
         self._slide_scale_radius = 1.0
+        self._slide_base_scale_radius = 1.0
         self._slide_influence_radius = 0.03
         self._slide_strength = 1.0
         drawing.clear_interactive_fps_info()

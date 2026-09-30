@@ -13,6 +13,44 @@ from taremin_cloth.engine.wrinkle_slide import (
 )
 
 
+def _rigid_resid(a, b):
+    """Kabsch整合後の真の形状変化 (回転・並進・一様スケールを除去)。"""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    ca = np.mean(a, axis=0)
+    cb = np.mean(b, axis=0)
+    A = a - ca
+    B = b - cb
+    H = A.T @ B
+    U, S, Vt = np.linalg.svd(H)
+    Rm = Vt.T @ U.T
+    if float(np.linalg.det(Rm)) < 0:
+        Vt[-1] *= -1
+        Rm = Vt.T @ U.T
+    denom = float(np.sum(A * A))
+    sc = float(np.sum(S) / denom) if denom > 1e-12 else 1.0
+    return float(np.mean(np.linalg.norm((A @ Rm.T) * sc + cb - b, axis=1)))
+
+
+def _bent_elbow_chain():
+    return BoneChain.from_bones([
+        ("Upper", [0.0, 0.0, -0.2], [0.0, 0.0, 0.0], (0.05, 0.05)),
+        ("Fore", [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], (0.05, 0.04)),
+    ])
+
+
+def _inner_arc(chain=None, s=0.18, radius=0.055, span=0.7, n=20):
+    """上腕軸直交の内側部分弧 (肘シワ想定)。"""
+    import math
+    ctr = np.array([0.0, 0.0, -0.02])
+    nrm = np.array([0.0, 1.0, 0.0])
+    bnm = np.array([-1.0, 0.0, 0.0])
+    th = np.linspace(math.pi - span, math.pi + span, n)
+    return np.stack(
+        [ctr + (math.cos(t) * nrm + math.sin(t) * bnm) * radius for t in th]
+    ).astype(np.float32)
+
+
 class TestWrinkleSlide(unittest.TestCase):
     """BoneChain および slide_curves_along_chain の幾何テスト"""
 
@@ -186,6 +224,81 @@ class TestWrinkleSlide(unittest.TestCase):
         # 頂点群が target_axis (+Y方向) と直交していること (内積がほぼ0)
         axis_dots = np.dot(diffs, ev_tgt.axis)
         np.testing.assert_allclose(axis_dots, 0.0, atol=1e-5)
+
+    def test_slide_partial_arc_across_bent_joint_preserves_shape(self):
+        """屈曲関節を跨ぐ部分弧スライドで形状が保存されること (slingshot回帰ガード)"""
+        chain = _bent_elbow_chain()
+        arc = _inner_arc()
+        c0 = np.mean(arc, axis=0)
+        r0 = float(np.mean(np.linalg.norm(arc - c0, axis=1)))
+        prev_shift = 0.0
+        for tgt in [0.47, 0.5, 0.53, 0.55, 0.6, 0.7]:
+            slid = slide_curves_along_chain(
+                [arc], chain, source_t=0.45, target_t=tgt, scale_radius=1.0)[0]
+            c1 = np.mean(slid, axis=0)
+            shift = float(np.linalg.norm(c1 - c0))
+            # 単調に並進すること (ジャンプなし: 1ステップ50mm以下)
+            self.assertGreaterEqual(shift, prev_shift - 1e-6)
+            self.assertLess(shift - prev_shift, 0.05)
+            prev_shift = shift
+            # 真の形状変化はほぼゼロ (剛体輸送)
+            self.assertLess(_rigid_resid(arc, slid), 0.002)
+        # 最終サイズはテーパーのみ (0.05 -> 0.04 方向へ縮小、急変なし)
+        r1 = float(np.mean(np.linalg.norm(slid - c1, axis=1)))
+        self.assertLess(r1 / r0, 1.0)
+        self.assertGreater(r1 / r0, 0.85)
+
+    def test_slide_source_invariance(self):
+        """同じΔsは source_t に依らず同一結果 (メタデータ陳腐化の排除)"""
+        chain = _bent_elbow_chain()
+        arc = _inner_arc()
+        a = slide_curves_along_chain(
+            [arc], chain, source_t=0.30, target_t=0.50, scale_radius=1.0)[0]
+        b = slide_curves_along_chain(
+            [arc], chain, source_t=0.45, target_t=0.65, scale_radius=1.0)[0]
+        np.testing.assert_allclose(a, b, atol=1e-6)
+
+    def test_blended_frame_continuity_at_joint(self):
+        """関節点前後でブレンドフレームが連続し正規直交を保つこと"""
+        chain = _bent_elbow_chain()
+        joint = float(chain.segments[0].cum_end)
+        L = float(chain.total_length)
+        tj = joint / L
+        prev = None
+        for dt in [-0.03, -0.01, -0.002, 0.0, 0.002, 0.01, 0.03]:
+            ax, n, bn = chain.blended_frame_at((tj + dt) * L)
+            self.assertAlmostEqual(float(np.linalg.norm(ax)), 1.0, places=5)
+            self.assertAlmostEqual(float(np.dot(ax, n)), 0.0, places=5)
+            if prev is not None:
+                # 連続性: 微小移動でフレームが跳ばないこと
+                self.assertLess(float(np.linalg.norm(n - prev)), 0.6)
+            prev = n
+
+    def test_no_double_scaling_across_sessions(self):
+        """2セッション目初動で配置時scaleが再乗算されないこと (二重拡縮回帰ガード)"""
+        chain = BoneChain.from_bones([("B", [0.0, 0.0, 0.0], [0.0, 0.0, 0.3], 0.05)])
+        n_pts = 16
+        angles = np.linspace(0, 2 * np.pi, n_pts, endpoint=False)
+        canonical = np.stack([0.05 * np.cos(angles), 0.05 * np.sin(angles),
+                              np.full_like(angles, 0.15)], axis=-1).astype(np.float32)
+        # セッション1: 配置時 scale=1.5 で実体化相当 (1.5倍が焼き込み済み)
+        placed = slide_curves_along_chain(
+            [canonical], chain, source_t=0.5, target_t=0.5,
+            scale_radius=1.5, base_scale_radius=1.0)[0]
+        r_placed = float(np.mean(np.linalg.norm(placed - np.mean(placed, axis=0), axis=1)))
+        self.assertAlmostEqual(r_placed, 0.075, places=5)
+        # セッション2: 初動 (Δs≒0、scale=1.5/base=1.5) は恒等であること
+        reopened = slide_curves_along_chain(
+            [placed], chain, source_t=0.5, target_t=0.502,
+            scale_radius=1.5, base_scale_radius=1.5)[0]
+        r_reopened = float(np.mean(np.linalg.norm(reopened - np.mean(reopened, axis=0), axis=1)))
+        self.assertAlmostEqual(r_reopened, r_placed, places=5)
+        # ホイール +0.1 (1.6/1.5) は相対分だけ成長すること
+        wheeled = slide_curves_along_chain(
+            [placed], chain, source_t=0.5, target_t=0.502,
+            scale_radius=1.6, base_scale_radius=1.5)[0]
+        r_wheeled = float(np.mean(np.linalg.norm(wheeled - np.mean(wheeled, axis=0), axis=1)))
+        self.assertAlmostEqual(r_wheeled / r_placed, 1.6 / 1.5, places=5)
 
 
 if __name__ == "__main__":

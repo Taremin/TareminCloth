@@ -804,6 +804,24 @@ class TareminClothObjectSettings(PropertyGroup):
         max=1.0,
         precision=4,
     )
+    wrinkle_valley_depth: FloatProperty(
+        name="Valley Depth",
+        description="Valley (Root) radial gradient window in meters: pull fades from edge to zero at target",
+        default=0.015,
+        min=0.001,
+        max=0.1,
+        precision=4,
+        unit='LENGTH',
+    )
+    wrinkle_crest_depth: FloatProperty(
+        name="Crest Depth",
+        description="Crest outward gradient window in meters: push fades from edge to zero at target",
+        default=0.020,
+        min=0.001,
+        max=0.1,
+        precision=4,
+        unit='LENGTH',
+    )
     wrinkle_preview_mode: EnumProperty(
         name="Preview Mode",
         description="Wrinkle influence preview: curve lines only, influence range only, or both",
