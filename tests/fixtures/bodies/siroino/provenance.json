@@ -1,0 +1,16 @@
+{
+  "source": "https://booth.pm/ja/items/8268676",
+  "asset": "SiroinoSotai v1.0 / SiroinoSotai_Mobile (full body)",
+  "license": "CC0 1.0 Universal (FBX/blend/textures). Logo/VRChat SDK/lilToonは対象外のため同梱しない",
+  "credit": "素体: しろいの (Siroino Works) 『SiroinoSotai』https://booth.pm/ja/items/8268676 / CC0 1.0",
+  "extraction": "shape_keys=0, ARMATURE modifier removed (rest shape), matrix_world applied, loop_triangles",
+  "measured_m": {
+    "xmin": -0.588,
+    "xmax": 0.588,
+    "zmin": 0.035,
+    "zmax": 1.143,
+    "chest_x_half": 0.111,
+    "chest_y_front": -0.093,
+    "chest_y_back": 0.057
+  }
+}

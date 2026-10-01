@@ -1,0 +1,23 @@
+{
+  "object_name": "TShirtOnSiroino",
+  "mesh_file": "tshirt_panels.obj",
+  "sewing_file": "tshirt_sewing.json",
+  "collider_mesh_file": "../../bodies/siroino/SiroinoSotai_Mobile_collider.obj",
+  "collider_type": "MESH",
+  "collider_thickness": 0.02,
+  "collider_single_sided": false,
+  "collider_friction": 0.8,
+  "config": {
+    "substeps": 20,
+    "solver_iterations": 10,
+    "tension_stiffness": 10000.0,
+    "bending_stiffness": 20.0,
+    "thickness": 0.005,
+    "sewing_shrink_speed": 0.8,
+    "sewing_priority_enabled": true,
+    "sewing_priority_threshold": 0.9,
+    "sewing_priority_merge_dist": 0.005,
+    "sewing_priority_ramp_frames": 3,
+    "sewing_priority_max_frames": 600
+  }
+}

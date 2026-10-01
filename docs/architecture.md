@@ -409,6 +409,8 @@ GPU上でデータ競合（Race Condition）を起こさずに拘束を更新す
    - メタデータ完全化: 頂点毎厚み・レイヤー、元メッシュ辺 (`original_edges`、せん断対角を除外してリプレイ再構築の型崩れを防止)、辺スケール差分 (`elastic_scales`)、BONE_SDF (テクスチャ＋姿勢。動的再ベイク有効時はテクスチャが古くなる旨を記録)、縫合現在自然長＋優先ラッチ状態を記録する。旧フィールドの剛性換算 (1000倍ズレ) も修正済み。
    - 再現性の既知の制限: stiffなスナップ遷移・活発な自己接触下ではGPU実行順序の非決定性がmm級に増幅される (双子実行同士でも再現しない)。穏やかな regime ではbit級に一致する。`make-test` の厳密一致判定は穏やかな区間に用い、激しい区間は `audit-pairs` とトポロジー検査で診断すること。
 
+7. **E2E garment fixtures**: OBJ-referenced manifests under tests/fixtures/bodies|garments feed Blender-free replay (tests/core/test_garment_standalone.py) and GUI InitScene transfer (utils/fixture_io.py). Body collider derives from SiroinoSotai Mobile rest shape; T-shirt has shaped bodice/sleeves with shoulder/side/cap seams and priority-held sewing.
+
 ---
 
 ## 6. Taremin Cloth GUI 独立高速プロセスアーキテクチャ

@@ -410,10 +410,21 @@ taremin_cloth/
 │   │   │   └── shaders/         # WGSL コンピュートシェーダー群
 │   └── cloth_py/                # PyO3 Python バインディング
 ├── tests/                       # 単体テスト & E2E テスト
+│   └── fixtures/bodies/siroino/   # E2E素体コライダーOBJ + 出所記録 (CC0派生)
+│   └── fixtures/garments/tshirt/  # Tシャツ型紙OBJ + 縫合JSON + scene.json
+├── tools/bake_siroino_fixtures.py # 素体OBJ化と型紙生成 (Blender 5.2使用)
+├── tools/check_sewing.py          # 縫合対応辺の辺長整合検査 (chains/orphans報告)
 ├── run_tests.py                 # Blender 自動テストランナー
 ├── Cargo.toml                   # Rust ワークスペース設定
 └── README.md
 ```
+
+---
+
+## クレジット (E2E素体)
+
+- 素体: しろいの (Siroino Works) 『SiroinoSotai』https://booth.pm/ja/items/8268676 / CC0 1.0
+- `tests/fixtures/bodies/siroino/` のコライダーOBJはMobile完全体の形状キー除去とレスト適用済み派生物です。出所と版は同階層の `provenance.json` に記録しています。
 
 ---
 
