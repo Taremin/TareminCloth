@@ -58,6 +58,30 @@ from ..utils.modal_event import PressDragTracker, is_left_release
 COLLECTION_NAME = "TareminCloth_Wrinkles"
 
 
+def _is_wrinkle_field_experimental_enabled(context=None) -> bool:
+    """シワフィールド実験フラグの有効判定（preferencesへ委譲）"""
+    try:
+        from ..preferences import is_wrinkle_field_enabled
+        return bool(is_wrinkle_field_enabled(context))
+    except Exception:
+        return True
+
+
+def _require_experimental_enabled(operator) -> bool:
+    """実験フラグOFF時に警告を出してTrue（ブロック要）を返す。"""
+    try:
+        ctx = getattr(operator, "_exec_context", None)
+    except Exception:
+        ctx = None
+    if _is_wrinkle_field_experimental_enabled(ctx):
+        return False
+    try:
+        operator.report({'WARNING'}, i18n.trans("Wrinkle Field is experimental. Enable it in Preferences > Experimental Features."))
+    except Exception:
+        pass
+    return True
+
+
 def _get_preset_items(self, context):
     """組み込みおよびユーザー保存プリセットのEnumPropertyアイテムリストを返す"""
     items = []
@@ -322,7 +346,10 @@ def find_nearest_bone_to_mouse(
 def _auto_setup_cloth_wrinkle_settings(context, col: bpy.types.Collection, armature: Optional[bpy.types.Object], bone_name: str):
     """
     対象の布オブジェクトにシワコレクションとシワフィールド設定を自動割り当てする。
+    実験フラグOFF時は誤有効化を防ぐため何もしない。
     """
+    if not _is_wrinkle_field_experimental_enabled(context):
+        return
     target_cloths = []
 
     act = getattr(context, "active_object", None)
@@ -391,6 +418,9 @@ class TAREMIN_CLOTH_OT_add_wrinkle_preset(Operator):
     _initial_picked_bone: str = ""
 
     def invoke(self, context, event):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
         self._initial_picked_bone = ""
         armature = _find_target_armature(context)
         if armature:
@@ -406,6 +436,9 @@ class TAREMIN_CLOTH_OT_add_wrinkle_preset(Operator):
         return self.execute(context)
 
     def execute(self, context):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
         # 1. アクティブなアーマチュアとボーンを特定
         armature = _find_target_armature(context)
         bone_name = getattr(self, "_initial_picked_bone", "")
@@ -1035,6 +1068,9 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         tag_redraw_view3d(context)
 
     def invoke(self, context, event):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
         self._init_state()
         self._phase = getattr(self, "initial_phase", 'SLIDE')
         self._is_new_addition = bool(getattr(self, "is_new_addition", False))
@@ -1222,6 +1258,9 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
     )
 
     def invoke(self, context, event):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
         # 選択カーブから基準ボーン名を自動検知
         for o in context.selected_objects:
             if o.type == 'CURVE' and "wrinkle_target_bone" in o:
@@ -1230,6 +1269,9 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
         return context.window_manager.invoke_props_dialog(self)
 
     def execute(self, context):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
         curves_to_save: List[WrinkleCurveItem] = []
         arm_name = ""
 

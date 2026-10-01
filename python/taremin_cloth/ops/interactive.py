@@ -1157,7 +1157,13 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         return self._brush_tools.get(active_tool_name(brush))
 
     def _start_interactive_wrinkle_slide(self, context, cloth_obj, event) -> bool:
-        """インタラクティブモード中にシワカーブのスライドを開始する"""
+        """インタラクティブモード中にシワカーブのスライドを開始する（実験的機能）"""
+        try:
+            from ..preferences import is_wrinkle_field_enabled
+            if not is_wrinkle_field_enabled(context):
+                return False
+        except Exception:
+            pass
         settings = getattr(cloth_obj, "taremin_cloth", None)
         target_col = getattr(settings, "wrinkle_collection", None) if settings else None
         if not target_col:

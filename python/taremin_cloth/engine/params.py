@@ -89,6 +89,15 @@ def _wrinkle_depths(settings):
     return max(v, 0.001), max(c, 0.001)
 
 
+def _is_wrinkle_field_experimental_enabled() -> bool:
+    """シワフィールド実験フラグの有効判定（preferencesへ委譲）"""
+    try:
+        from ..preferences import is_wrinkle_field_enabled
+        return bool(is_wrinkle_field_enabled())
+    except Exception:
+        return True
+
+
 def sync_wrinkle_field(sim, obj):
     """シワフィールド設定および2D-SDFテクスチャをGPUシミュレータに同期する。
 
@@ -102,6 +111,16 @@ def sync_wrinkle_field(sim, obj):
     """
     settings = getattr(obj, "taremin_cloth", None)
     if not hasattr(sim, "set_wrinkle_field_texture_2d") or not hasattr(sim, "set_enable_wrinkle_field"):
+        return
+
+    # 実験的機能ゲート: 無効時は旧ファイルの use_wrinkle_field=True でも強制無効化
+    if not _is_wrinkle_field_experimental_enabled():
+        if obj.name in _prev_wrinkle_signatures:
+            try:
+                sim.set_enable_wrinkle_field(False)
+            except Exception:
+                pass
+            del _prev_wrinkle_signatures[obj.name]
         return
 
     if not settings or not getattr(settings, "use_wrinkle_field", False):

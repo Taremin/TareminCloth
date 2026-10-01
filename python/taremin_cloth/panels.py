@@ -273,6 +273,15 @@ def _is_cloth_active_advanced(context):
     return scene is not None and getattr(scene, "taremin_cloth_ui_mode", "SIMPLE") == 'ADVANCED'
 
 
+def _is_wrinkle_field_experimental_enabled(context=None) -> bool:
+    """シワフィールド実験フラグが有効かを判定する（preferencesへ委譲）"""
+    try:
+        from .preferences import is_wrinkle_field_enabled
+        return bool(is_wrinkle_field_enabled(context))
+    except Exception:
+        return True
+
+
 class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
     """3Dビューポートのサイドバー（Nパネル）に表示されるGPU Cloth親パネル"""
     bl_label = "GPU Cloth"
@@ -770,8 +779,8 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
 
 
 class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
-    """イラスト風シワフィールド設定サブパネル"""
-    bl_label = "Wrinkle Field (Stylized)"
+    """イラスト風シワフィールド設定サブパネル（実験的機能）"""
+    bl_label = "Wrinkle Field (Stylized, Experimental)"
     bl_idname = "TAREMIN_CLOTH_PT_wrinkle_field"
     bl_parent_id = "TAREMIN_CLOTH_PT_main_panel"
     bl_space_type = 'VIEW_3D'
@@ -782,6 +791,8 @@ class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
+        if not _is_wrinkle_field_experimental_enabled(context):
+            return False
         return _is_cloth_active_advanced(context)
 
     def draw_header(self, context):
@@ -794,6 +805,10 @@ class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
         obj = context.active_object
         if not obj or not hasattr(obj, "taremin_cloth"):
             return
+
+        box_warn = layout.box()
+        box_warn.alert = True
+        box_warn.label(text=i18n.trans("Experimental: Wrinkle field is under tuning"), icon='ERROR')
 
         settings = obj.taremin_cloth
         layout.active = settings.use_wrinkle_field
@@ -871,8 +886,8 @@ class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
 
 
 class TAREMIN_CLOTH_PT_wrinkle_curve_item(bpy.types.Panel):
-    """シワカーブオブジェクト選択時の専用Nパネル"""
-    bl_label = "Wrinkle Curve Settings"
+    """シワカーブオブジェクト選択時の専用Nパネル（実験的機能）"""
+    bl_label = "Wrinkle Curve Settings (Experimental)"
     bl_idname = "TAREMIN_CLOTH_PT_wrinkle_curve_item"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -881,6 +896,8 @@ class TAREMIN_CLOTH_PT_wrinkle_curve_item(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
+        if not _is_wrinkle_field_experimental_enabled(context):
+            return False
         obj = context.active_object
         if not obj or obj.type != 'CURVE':
             return False
@@ -1410,7 +1427,9 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
 
 
 def draw_view3d_wrinkle_menu(self, context):
-    """3Dビューポートの右クリックコンテキストメニューにシワスライド項目を追加"""
+    """3Dビューポートの右クリックコンテキストメニューにシワスライド項目を追加（実験的機能）"""
+    if not _is_wrinkle_field_experimental_enabled(context):
+        return
     obj = context.active_object
     if obj and obj.type == 'CURVE' and "wrinkle_type" in obj:
         self.layout.separator()

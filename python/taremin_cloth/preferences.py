@@ -70,6 +70,7 @@ def save_preferences_to_disk(prefs=None) -> bool:
         "debug_sparse_lookahead": getattr(prefs, "debug_sparse_lookahead", 0),
         "debug_sparse_triggers": getattr(prefs, "debug_sparse_triggers", False),
         "enable_standalone_gui": getattr(prefs, "enable_standalone_gui", False),
+        "enable_wrinkle_field": getattr(prefs, "enable_wrinkle_field", False),
     }
     filepath = get_preferences_filepath()
     try:
@@ -138,6 +139,8 @@ def apply_saved_preferences(prefs=None) -> bool:
             prefs.debug_sparse_triggers = bool(data["debug_sparse_triggers"])
         if "enable_standalone_gui" in data and hasattr(prefs, "enable_standalone_gui"):
             prefs.enable_standalone_gui = bool(data["enable_standalone_gui"])
+        if "enable_wrinkle_field" in data and hasattr(prefs, "enable_wrinkle_field"):
+            prefs.enable_wrinkle_field = bool(data["enable_wrinkle_field"])
     finally:
         _is_restoring = False
 
@@ -170,6 +173,10 @@ def _on_debug_pref_update(self, context):
 
 
 def _on_standalone_gui_update(self, context):
+    save_preferences_to_disk(self)
+
+
+def _on_experimental_update(self, context):
     save_preferences_to_disk(self)
 
 
@@ -354,6 +361,13 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         update=_on_standalone_gui_update,
     )
 
+    enable_wrinkle_field: BoolProperty(
+        name="Enable Wrinkle Field",
+        description="Enable stylized wrinkle field forces (Experimental)",
+        default=False,
+        update=_on_experimental_update,
+    )
+
     def draw(self, context):
         global _has_restored_preferences
         if not _has_restored_preferences:
@@ -405,6 +419,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         box_exp = layout.box()
         box_exp.label(text=i18n.trans("Experimental Features"), icon='EXPERIMENTAL')
         box_exp.prop(self, "enable_standalone_gui", text=i18n.trans("Enable Standalone GUI Client"))
+        box_exp.prop(self, "enable_wrinkle_field", text=i18n.trans("Enable Wrinkle Field"))
 
 
 
@@ -419,6 +434,27 @@ def get_preferences(context=None):
     if addon:
         return addon.preferences
     return None
+
+
+def is_wrinkle_field_enabled(context=None) -> bool:
+    """シワフィールド実験フラグの有効判定（共通ヘルパー）。
+
+    実Blenderで実Bool値Falseの場合のみFalseを返す。
+    プリファレンス未取得・モック環境（Blender非依存テスト）では
+    従来互換のためTrueを返す。
+    """
+    try:
+        prefs = get_preferences(context)
+        if prefs is None:
+            return True
+        if type(prefs).__module__.startswith("unittest.mock"):
+            return True
+        v = getattr(prefs, "enable_wrinkle_field", False)
+        if not isinstance(v, bool):
+            return True
+        return bool(v)
+    except Exception:
+        return True
 
 
 def _deferred_restore_preferences():

@@ -600,10 +600,16 @@ def draw_callback_3d():
                     gpu.state.blend_set('NONE')
 
             # --- 3. シワフィールドの影響範囲の半透明描画 ---
-            # use_wrinkle_field が無効のときはプレビューも描画しない。
+            # use_wrinkle_field が無効・実験フラグOFFのときはプレビューも描画しない。
             try:
+                try:
+                    from ..preferences import is_wrinkle_field_enabled as _is_wf_enabled
+                    _exp_enabled = bool(_is_wf_enabled())
+                except Exception:
+                    _exp_enabled = True
                 preview_mode = getattr(settings, "wrinkle_preview_mode", "BOTH") if settings else "BOTH"
-                if preview_mode in ("RANGE", "BOTH") and getattr(settings, "use_wrinkle_field", False):
+                if _exp_enabled and preview_mode in ("RANGE", "BOTH") and getattr(settings, "use_wrinkle_field", False):
+                    # 実験フラグONかつ use_wrinkle_field 有効時のみ描画
                     wrinkle_curves_data = []
                     processed_objs = set()
 
