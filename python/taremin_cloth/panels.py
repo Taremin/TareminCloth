@@ -274,7 +274,7 @@ def _is_cloth_active_advanced(context):
 
 
 def _is_wrinkle_field_experimental_enabled(context=None) -> bool:
-    """シワフィールド実験フラグが有効かを判定する（preferencesへ委譲）"""
+    """ドレープガイド実験フラグが有効かを判定する（preferencesへ委譲）"""
     try:
         from .preferences import is_wrinkle_field_enabled
         return bool(is_wrinkle_field_enabled(context))
@@ -779,7 +779,7 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
 
 
 class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
-    """イラスト風シワフィールド設定サブパネル（実験的機能）"""
+    """ドレープガイド（シワ造形）設定サブパネル（実験的機能）"""
     bl_label = "Wrinkle Field (Stylized, Experimental)"
     bl_idname = "TAREMIN_CLOTH_PT_wrinkle_field"
     bl_parent_id = "TAREMIN_CLOTH_PT_main_panel"

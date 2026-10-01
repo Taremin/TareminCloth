@@ -1,5 +1,5 @@
 """
-シワフィールド操作・アセット管理・3Dビュースライドオペレーター (ops/wrinkle.py)
+ドレープガイド（シワ造形）操作・アセット管理・3Dビュースライドオペレーター (ops/wrinkle.py)
 
 1. プリセットからシワカーブをボーンに配置 (TAREMIN_CLOTH_OT_add_wrinkle_preset)
 2. 3Dビューポート上でボーンに沿ってシワを直感スライド (TAREMIN_CLOTH_OT_slide_wrinkle_curves)
@@ -59,7 +59,7 @@ COLLECTION_NAME = "TareminCloth_Wrinkles"
 
 
 def _is_wrinkle_field_experimental_enabled(context=None) -> bool:
-    """シワフィールド実験フラグの有効判定（preferencesへ委譲）"""
+    """ドレープガイド実験フラグの有効判定（preferencesへ委譲）"""
     try:
         from ..preferences import is_wrinkle_field_enabled
         return bool(is_wrinkle_field_enabled(context))
@@ -345,7 +345,7 @@ def find_nearest_bone_to_mouse(
 
 def _auto_setup_cloth_wrinkle_settings(context, col: bpy.types.Collection, armature: Optional[bpy.types.Object], bone_name: str):
     """
-    対象の布オブジェクトにシワコレクションとシワフィールド設定を自動割り当てする。
+    対象の布オブジェクトにシワコレクションとドレープガイド設定を自動割り当てする。
     実験フラグOFF時は誤有効化を防ぐため何もしない。
     """
     if not _is_wrinkle_field_experimental_enabled(context):
@@ -557,7 +557,7 @@ class TAREMIN_CLOTH_OT_add_wrinkle_preset(Operator):
         if created_objs:
             context.view_layer.objects.active = created_objs[0]
 
-        # 7. 布オブジェクトへのシワコレクション・シワフィールド自動割り当て
+        # 7. 布オブジェクトへのシワコレクション・ドレープガイド自動割り当て
         _auto_setup_cloth_wrinkle_settings(context, col, armature, bone_name)
 
         tag_redraw_view3d(context)

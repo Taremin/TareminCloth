@@ -813,7 +813,7 @@ def enter_isolated_view(context, cloth_obj):
             if mod.type == 'ARMATURE' and getattr(mod, "object", None):
                 target_objs.add(mod.object)
 
-        # 布オブジェクトのシワフィールド用カーブおよびアーマチュアも含める (ローカルビュー除外防止)
+        # 布オブジェクトのドレープガイド用カーブおよびアーマチュアも含める (ローカルビュー除外防止)
         settings = getattr(cloth_obj, "taremin_cloth", None)
         if settings:
             wrinkle_col = getattr(settings, "wrinkle_collection", None)

@@ -686,7 +686,7 @@ impl SharedPipelines {
         })
     }
 
-    /// シワフィールド拘束パイプラインを遅延生成・取得する。
+    /// ドレープガイド拘束パイプラインを遅延生成・取得する。
     pub fn ensure_wrinkle_field(&self) -> &wgpu::ComputePipeline {
         self.wrinkle_field.get_or_init(|| {
             let device = &self.context.device;

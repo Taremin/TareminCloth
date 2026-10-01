@@ -1,7 +1,7 @@
 """
-シワフィールド（Wrinkle Field）のスタンドアロン座屈検証テスト
+ドレープガイド（Wrinkle Field）のスタンドアロン座屈検証テスト
 Blender非依存で動作し、円柱コライダー＋円筒布メッシュに対して
-シワフィールド拘束を適用し、山・谷の自発的座屈、非貫通性、
+ドレープガイド拘束を適用し、山・谷の自発的座屈、非貫通性、
 およびレンダリング画像の生成を検証します。
 """
 
@@ -71,7 +71,7 @@ class TestWrinkleFieldStandalone(unittest.TestCase):
         os.makedirs(cls.artifact_dir, exist_ok=True)
 
     def test_wrinkle_field_buckling_and_render(self):
-        """シワフィールドによる自発的座屈・非貫通性および各ステップの画像生成"""
+        """ドレープガイドによる自発的座屈・非貫通性および各ステップの画像生成"""
         # 1. 円筒布メッシュ生成 (半径 6cm, 高さ 30cm)
         radius_cloth = 0.06
         radius_col = 0.05
@@ -161,7 +161,7 @@ class TestWrinkleFieldStandalone(unittest.TestCase):
             single_sided=False
         )
 
-        # シワフィールド設定 (影響半径 3.0cm、剛性 0.08で極めて安定した滑らかな座屈)
+        # ドレープガイド設定 (影響半径 3.0cm、剛性 0.08で極めて安定した滑らかな座屈)
         sim.set_wrinkle_field_params(
             origin=[origin[0], origin[1], origin[2]],
             axis=[axis[0], axis[1], axis[2]],

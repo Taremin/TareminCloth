@@ -753,7 +753,7 @@ mod tests {
         sim.set_enable_wrinkle_field(true);
         sim.set_sewing_priority_options(true, 0.9, 0.005, 2, 0);
 
-        // 1. 未結合 (priority_scale == 0.0): 縫合フェーズ中はシワフィールド外力がスキップされる
+        // 1. 未結合 (priority_scale == 0.0): 縫合フェーズ中はドレープガイド外力がスキップされる
         let (_, s0, lat0) = sim.update_sewing_priority_from_positions(&positions);
         assert_eq!(s0, 0.0);
         assert!(!lat0);

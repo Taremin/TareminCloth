@@ -44,7 +44,7 @@ def sync_cloth_parameters(sim, obj, scene=None):
     # 6. 伸縮グループ (Elastic Bands / Edge Scaling)
     sync_elastic_groups(sim, obj)
 
-    # 7. シワフィールド (Wrinkle Field 2D-SDF Texture)
+    # 7. ドレープガイド (Wrinkle Field / Drape Guide 2D-SDF Texture)
     sync_wrinkle_field(sim, obj)
 
 
@@ -90,7 +90,7 @@ def _wrinkle_depths(settings):
 
 
 def _is_wrinkle_field_experimental_enabled() -> bool:
-    """シワフィールド実験フラグの有効判定（preferencesへ委譲）"""
+    """ドレープガイド実験フラグの有効判定（preferencesへ委譲）"""
     try:
         from ..preferences import is_wrinkle_field_enabled
         return bool(is_wrinkle_field_enabled())
@@ -99,11 +99,11 @@ def _is_wrinkle_field_experimental_enabled() -> bool:
 
 
 def sync_wrinkle_field(sim, obj):
-    """シワフィールド設定および2D-SDFテクスチャをGPUシミュレータに同期する。
+    """ドレープガイド設定および2D-SDFテクスチャをGPUシミュレータに同期する。
 
     ベイク回避設計:
     - 照合は骨ローカル記述子のみで行うため、骨とカーブの剛体追従
-      （アニメ・スライド）ではベイクせず uniform 更新のみとなる。
+      （ポーズ追従・スライド）ではベイクせず uniform 更新のみとなる。
     - 純粋スライド (dz, r_scale) および一様強度変化は z_range/r_range/stiffness
       の uniform 更新のみで厳密等価のため再送しない。
     - texture upload は形状実変時のみ。これにより MOUSEMOVE 毎の数百ms

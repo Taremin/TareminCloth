@@ -1,5 +1,5 @@
 """
-イラスト風シワフィールド（Wrinkle Field）の幾何プロファイル抽出・管理モジュール
+ドレープガイド（Wrinkle Field / Drape Guide）の幾何プロファイル抽出・管理モジュール
 
 BlenderのCurveオブジェクト（山カーブ Crest / 谷カーブ Root）から、
 ボーン円柱座標系における1D角度プロファイルをサンプリング・正規化し、
@@ -648,7 +648,7 @@ def match_slide_transform(
 
 @dataclass
 class WrinkleTexture2D:
-    """円柱UV展開されたシワフィールド2D-SDFテクスチャコンテナ"""
+    """円柱UV展開されたドレープガイド2D-SDFテクスチャコンテナ"""
     width: int
     height: int
     texture_bytes: bytes       # RGBA8Unorm (width * height * 4 バイト)

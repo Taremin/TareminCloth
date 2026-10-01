@@ -1,5 +1,5 @@
 """
-イラスト風シワフィールド（Wrinkle Field）のプリセット管理・アセット化モジュール
+ドレープガイド（Wrinkle Field / Drape Guide）のプリセット管理・アセット化モジュール
 
 ボーン円柱座標系（θ, z/L, r/R）に基づき、
 山・谷カーブ群を正規化されたプリセットとして定義・保存・復元・管理します。
@@ -34,7 +34,7 @@ class WrinklePresetCurve:
 
 @dataclass
 class WrinklePreset:
-    """シワフィールドのプリセット定義データ"""
+    """ドレープガイドのプリセット定義データ"""
     name: str                                  # プリセット名 (例: "Pinch_and_Puff")
     category: str = "general"                  # カテゴリ ("elbow_knee", "wrist_ankle", "torso", "general")
     description: str = ""                      # 説明

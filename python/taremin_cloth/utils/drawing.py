@@ -599,7 +599,7 @@ def draw_callback_3d():
                         batch.draw(line_shader)
                     gpu.state.blend_set('NONE')
 
-            # --- 3. シワフィールドの影響範囲の半透明描画 ---
+            # --- 3. ドレープガイドの影響範囲の半透明描画 ---
             # use_wrinkle_field が無効・実験フラグOFFのときはプレビューも描画しない。
             try:
                 try:

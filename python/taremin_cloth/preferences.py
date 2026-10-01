@@ -437,7 +437,7 @@ def get_preferences(context=None):
 
 
 def is_wrinkle_field_enabled(context=None) -> bool:
-    """シワフィールド実験フラグの有効判定（共通ヘルパー）。
+    """ドレープガイド実験フラグの有効判定（共通ヘルパー）。
 
     実Blenderで実Bool値Falseの場合のみFalseを返す。
     プリファレンス未取得・モック環境（Blender非依存テスト）では

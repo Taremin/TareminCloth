@@ -2464,17 +2464,17 @@ impl ClothSimulator {
         self.simulator.config_hash_u64()
     }
 
-    /// シワフィールド有効フラグを設定する
+    /// ドレープガイド有効フラグを設定する
     fn set_enable_wrinkle_field(&mut self, enable: bool) {
         self.simulator.set_enable_wrinkle_field(enable);
     }
 
-    /// シワフィールド有効フラグを取得する
+    /// ドレープガイド有効フラグを取得する
     fn wrinkle_field_enabled(&self) -> bool {
         self.simulator.wrinkle_field_enabled()
     }
 
-    /// シワフィールドのメタパラメータを設定する
+    /// ドレープガイドのメタパラメータを設定する
     #[pyo3(signature = (origin, axis, normal, binormal, influence_radius=0.05, bone_radius=0.05, stiffness=1.0, blend_weight=1.0, z_min=None, z_max=None, r_min=None, r_max=None, valley_window=0.015, crest_window=0.020))]
     fn set_wrinkle_field_params(
         &mut self,
@@ -2514,7 +2514,7 @@ impl ClothSimulator {
         self.simulator.set_wrinkle_field_params(&p);
     }
 
-    /// シワフィールドの2D-SDFテクスチャ（RGBA8Unorm, bytes）を設定する
+    /// ドレープガイドの2D-SDFテクスチャ（RGBA8Unorm, bytes）を設定する
     #[pyo3(signature = (width, height, texture_bytes, z_min, z_max, r_min, r_max))]
     fn set_wrinkle_field_texture_2d(
         &mut self,

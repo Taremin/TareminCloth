@@ -45,7 +45,7 @@ impl GpuClothSimulator {
             self.write_pair_collect_params(dt);
         }
 
-        // 縫合優先モード: 縫合フェーズ中・ランプ中はシワフィールド外力の実効強度をスケール (外力と同等扱い)
+        // 縫合優先モード: 縫合フェーズ中・ランプ中はドレープガイド外力の実効強度をスケール (外力と同等扱い)
         if self.enable_wrinkle_field {
             if let Some(ref buffer) = self.wrinkle_field_params_buffer {
                 let mut p = self.wrinkle_field_params;
@@ -131,7 +131,7 @@ impl GpuClothSimulator {
                 self.profiler.end_pass(encoder, query);
             }
 
-            // 1.5 シワフィールド外力パス (Wrinkle Field: 風・重力のような外力加速度場による座屈誘発)
+            // 1.5 ドレープガイド外力パス (Wrinkle Field / Drape Guide: 風・重力のような外力加速度場による座屈誘発)
             // 縫合優先モード中 (priority_scale <= 0.0) は外力パス自体をスキップ (外力と同等扱い)
             if self.enable_wrinkle_field && priority_scale > 0.0 {
                 if let Some(ref bg) = self.wrinkle_field_bind_group {

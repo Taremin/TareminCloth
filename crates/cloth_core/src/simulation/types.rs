@@ -87,7 +87,7 @@ pub struct GpuBoneTriangleSource {
     pub _pad: f32,
 }
 
-/// シワフィールド旧1Dプロファイルサンプル（サイズ: 32バイト, 16Bアライメント準拠）
+/// ドレープガイド旧1Dプロファイルサンプル（サイズ: 32バイト, 16Bアライメント準拠）
 /// 注意: 旧1Dプロファイルパスの残骸であり、現行2D-SDFテクスチャ方式では未使用。
 /// WGSL・BGL・dispatchからの参照はない。alignmentテストの回帰検出用に型のみ保持する。
 #[repr(C)]
@@ -103,7 +103,7 @@ pub struct GpuWrinkleProfileSample {
     pub _pad1: f32,
 }
 
-/// シワフィールド Uniform パラメータ（サイズ: 96バイト, 16Bアライメント準拠）
+/// ドレープガイド Uniform パラメータ（サイズ: 96バイト, 16Bアライメント準拠）
 /// 注意: `bone_origin.w` は現在WGSL未読の予約フィールドである。
 /// `valley_window` / `crest_window` は径方向グラデーション窓 (m)。
 /// サイズ変更（96B→）は WGSL・Rust・Python・alignmentテストの同時変更になるため行わない。

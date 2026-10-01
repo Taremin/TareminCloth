@@ -767,7 +767,7 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Automatically execute post-processing on simulation stop",
         default=True,
     )
-    # シワフィールド設定 (Wrinkle Field: 実験的機能)
+    # ドレープガイド設定 (Wrinkle Field / Drape Guide: 実験的機能)
     use_wrinkle_field: BoolProperty(
         name="Wrinkle Field",
         description="Enable stylized wrinkle field forces (Experimental)",

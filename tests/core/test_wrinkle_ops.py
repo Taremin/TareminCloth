@@ -1,5 +1,5 @@
 """
-シワフィールドオペレーター層（ops/wrinkle.py）の単体・統合ロジックテスト (test_wrinkle_ops.py)
+ドレープガイドオペレーター層（ops/wrinkle.py）の単体・統合ロジックテスト (test_wrinkle_ops.py)
 """
 
 import os
@@ -19,7 +19,7 @@ from taremin_cloth import i18n
 
 
 class TestWrinkleOps(unittest.TestCase):
-    """シワフィールドオペレーター群の定義、データ抽出、幾何更新ロジックの検証"""
+    """ドレープガイドオペレーター群の定義、データ抽出、幾何更新ロジックの検証"""
 
     def test_operator_registered_and_properties(self):
         """オペレーターの bl_idname, bl_translation_context, プロパティ定義を確認"""
@@ -259,7 +259,7 @@ class TestWrinkleOps(unittest.TestCase):
             self.assertEqual(nearest2, "BoneBottom")
 
     def test_auto_setup_cloth_wrinkle_settings(self):
-        """未設定の布オブジェクトにシワコレクションとシワフィールドが自動設定されること"""
+        """未設定の布オブジェクトにシワコレクションとドレープガイドが自動設定されること"""
         mock_cloth = MagicMock()
         mock_cloth.type = 'MESH'
         mock_props = MagicMock()

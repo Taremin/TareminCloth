@@ -234,7 +234,7 @@ pub struct GpuClothSimulator {
     pub(crate) sew_shrink_bind_group: wgpu::BindGroup,
     pub(crate) update_vel_bind_group: wgpu::BindGroup,
 
-    // シワフィールド（イラスト風シワ拘束）用
+    // ドレープガイド（スタイライズドな折り目誘発）用
     pub enable_wrinkle_field: bool,
     pub wrinkle_field_params: WrinkleFieldParams,
     pub(crate) wrinkle_field_params_buffer: Option<wgpu::Buffer>,
@@ -2260,7 +2260,7 @@ impl GpuClothSimulator {
         self.workgroup_size = wg_size;
     }
 
-    /// シワフィールド有効フラグを設定する
+    /// ドレープガイド有効フラグを設定する
     pub fn set_enable_wrinkle_field(&mut self, enable: bool) {
         if enable {
             self.shared.ensure_wrinkle_field();
@@ -2272,12 +2272,12 @@ impl GpuClothSimulator {
         }
     }
 
-    /// シワフィールド有効フラグを取得する
+    /// ドレープガイド有効フラグを取得する
     pub fn wrinkle_field_enabled(&self) -> bool {
         self.enable_wrinkle_field
     }
 
-    /// シワフィールドのメタパラメータを設定する
+    /// ドレープガイドのメタパラメータを設定する
     pub fn set_wrinkle_field_params(&mut self, params: &WrinkleFieldParams) {
         self.wrinkle_field_params = *params;
         self.wrinkle_field_params.enabled = if self.enable_wrinkle_field { 1 } else { 0 };
@@ -2286,7 +2286,7 @@ impl GpuClothSimulator {
         }
     }
 
-    /// シワフィールドの2D-SDFテクスチャ（円柱UV展開テクスチャ: RGBA8Unorm）を設定し、GPUテクスチャおよびBindGroupを更新する
+    /// ドレープガイドの2D-SDFテクスチャ（円柱UV展開テクスチャ: RGBA8Unorm）を設定し、GPUテクスチャおよびBindGroupを更新する
     pub fn set_wrinkle_field_texture_2d(
         &mut self,
         width: u32,
