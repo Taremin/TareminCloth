@@ -37,6 +37,7 @@ def load_scene_manifest(path: str) -> Dict[str, Any]:
         "faces": gf,
         "edges": np.array(sj["normal_edges"], dtype=np.uint32),
         "sewing_springs": np.array(sj["sewing_springs"], dtype=np.uint32),
+        "seam_groups": sj.get("seam_groups", []),
         "config": scene.get("config", {}),
     }
     col_file = scene.get("collider_mesh_file")
@@ -51,11 +52,14 @@ def load_scene_manifest(path: str) -> Dict[str, Any]:
 
 
 def audit_seams(positions: np.ndarray, faces: np.ndarray,
-                sewing_springs: np.ndarray) -> Dict[str, Any]:
+                sewing_springs: np.ndarray,
+                seam_groups: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     """縫合ペアの辺長整合を検査する.
 
     境界辺で隣り合うペア同士を鎖 (chain) につなぎ、鎖ごとの両側ポリライン
     長を比べる。対応辺の長さが合わない型紙 (いせ込み過大・取付不可) を検出する。
+    seam_groups を渡すとグループ単位の辺長検査も行う。グループの ignore が
+    真の場合は検査を免除する (lint の ignore 宣言に相当。reason 必須)。
     """
     pos = np.asarray(positions, dtype=np.float64)
     tri = np.asarray(faces, dtype=np.int64)
@@ -82,6 +86,7 @@ def audit_seams(positions: np.ndarray, faces: np.ndarray,
         partner[b] = a
 
     gaps = [float(np.linalg.norm(pos[a] - pos[b])) for a, b in pairs]
+    pair_index = {tuple(sorted(p)): i for i, p in enumerate(pairs)}
     visited: set = set()
     chains: List[Dict[str, Any]] = []
     for a0, b0 in pairs:
@@ -113,11 +118,42 @@ def audit_seams(positions: np.ndarray, faces: np.ndarray,
         la = sum(float(np.linalg.norm(pos[run[i][0]] - pos[run[i + 1][0]])) for i in range(len(run) - 1))
         lb = sum(float(np.linalg.norm(pos[run[i][1]] - pos[run[i + 1][1]])) for i in range(len(run) - 1))
         chains.append({"length": len(run), "side_a_m": la, "side_b_m": lb,
-                       "diff_m": abs(la - lb)})
+                       "diff_m": abs(la - lb),
+                       "pairs": [pair_index[tuple(sorted(p))] for p in run]})
+    group_results: List[Dict[str, Any]] = []
+    if seam_groups:
+        pair_set = {tuple(sorted(p)) for p in pairs}
+        for g in seam_groups:
+            name = str(g.get("name", "?"))
+            tol = float(g.get("tolerance_mm", 5.0)) / 1000.0
+            ease = float(g.get("ease_mm", 0.0)) / 1000.0
+            if g.get("ignore"):
+                if not g.get("reason"):
+                    raise ValueError(f"seam group '{name}' ignores without reason")
+                group_results.append({"name": name, "status": "ignored",
+                                      "reason": str(g.get("reason", ""))})
+                continue
+            idx = [int(i) for i in g.get("pairs", [])]
+            missing = [i for i in idx if tuple(sorted(pairs[i])) not in pair_set] if idx else []
+            va, vb = set(), set()
+            for i in idx:
+                if 0 <= i < len(pairs):
+                    va.add(pairs[i][0])
+                    vb.add(pairs[i][1])
+            la = sum(float(np.linalg.norm(pos[u] - pos[v]))
+                     for u, v in boundary if u in va and v in va)
+            lb = sum(float(np.linalg.norm(pos[u] - pos[v]))
+                     for u, v in boundary if u in vb and v in vb)
+            diff = abs(la - lb)
+            group_results.append({"name": name, "status": "ok" if diff <= tol + ease else "ng",
+                                  "side_a_m": la, "side_b_m": lb, "diff_m": diff,
+                                  "tolerance_m": tol, "ease_m": ease,
+                                  "missing_pairs": missing})
     return {"num_pairs": len(pairs), "num_chains": len(chains),
             "gap_max_m": max(gaps) if gaps else 0.0,
             "gap_mean_m": sum(gaps) / len(gaps) if gaps else 0.0,
-            "orphan_pairs": orphans, "chains": chains}
+            "orphan_pairs": orphans, "chains": chains,
+            "groups": group_results}
 
 
 def to_gui_init_scene(m: Dict[str, Any]) -> Dict[str, Any]:
