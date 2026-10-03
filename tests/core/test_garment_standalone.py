@@ -29,13 +29,15 @@ def run_drape(m, steps=150):
     sim = core.ClothSimulator(
         m["positions"], m["edges"], m["faces"],
         sewing_springs=m["sewing_springs"],
-        sewing_shrink_speed=float(cfg.get("sewing_shrink_speed", 0.8)))
+        sewing_shrink_speed=float(cfg.get("sewing_shrink_speed", 0.8)),
+        stiffness=float(cfg.get("tension_stiffness", 10000.0)),
+        bending_stiffness=float(cfg.get("bending_stiffness", 20.0)))
     sim.set_sewing_priority_options(True, 0.9, 0.005, 3, 600)
     cp, cf = m["collider_positions"], m["collider_faces"]
     tris = np.stack([cp[cf[:, 0]], cp[cf[:, 1]], cp[cf[:, 2]]], axis=1).astype(np.float32)
     sim.set_mesh_collider_triangles(
         tris, float(m.get("collider_friction", 0.8)),
-        float(m.get("collider_thickness", 0.02)), 0.0,
+        float(m.get("collider_thickness", 0.008)), 0.0,
         bool(m.get("collider_single_sided", False)))
     coords = m["positions"].copy()
     for _ in range(steps):
@@ -58,14 +60,14 @@ class TestTShirtOnSiroino(unittest.TestCase):
 
     def test_manifest_resolves(self):
         m = self.m
-        self.assertEqual(m["positions"].shape, (582, 3))
-        self.assertEqual(m["faces"].shape, (952, 3))
+        self.assertEqual(m["positions"].shape, (3084, 3))
+        self.assertEqual(m["faces"].shape, (5736, 3))
         self.assertEqual(m["sewing_springs"].shape[1], 2)
         self.assertEqual(m["collider_positions"].shape[0], 1790)
 
     def test_seam_lengths_match(self):
         rep = audit_seams(self.m["positions"], self.m["faces"], self.m["sewing_springs"])
-        self.assertEqual(rep["num_pairs"], 88)
+        self.assertEqual(rep["num_pairs"], 156)
         for c in rep["chains"]:
             self.assertLessEqual(c["diff_m"], 0.005)
 
@@ -95,7 +97,7 @@ class TestTShirtOnSiroino(unittest.TestCase):
         self.assertGreater(float(coords[:, 2].min()), 0.30)
         # 袖は腕軸周りを全周覆うこと (筒化の成立: 最大角度間隙で判定)
         init_x = m["positions"][:, 0]
-        for xa, xb in ((0.17, 0.27), (-0.27, -0.17)):
+        for xa, xb in ((0.14, 0.22), (-0.22, -0.14)):
             idx = np.where((init_x >= xa) & (init_x <= xb))[0]
             self.assertGreater(len(idx), 20)
             pts = coords[idx]

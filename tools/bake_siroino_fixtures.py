@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""SiroinoSotai Mobile完全体のコライダーOBJ化 + Tシャツ型紙の生成.
+"""SiroinoSotai Mobile完全体のコライダーOBJ化 + 1cm正方格子Tシャツ型紙の生成.
+
+服飾造形のTシャツ原型理論およびClothシミュレーションの等方性格子設計に基づき、
+1cm間隔（0.01m）の正方形方眼紙ベースのQuad格子から切り出した4パーツ構成（前後身頃・左右1枚袖）
+のTシャツ型紙と、弧長完全整合の縫合スプリング群を生成する。
 
 入力: tmp/SiroinoSotai.blend (CC0, 要クレジット)
 出力:
@@ -11,6 +15,7 @@
 """
 import argparse
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -71,194 +76,296 @@ def export_obj(path: Path, positions: np.ndarray, faces: np.ndarray) -> None:
             np.ascontiguousarray(faces, dtype=np.int64))
 
 
-def load_obj(path: Path):
-    verts, faces = [], []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if line.startswith("v "):
-                verts.append([float(x) for x in line.split()[1:4]])
-            elif line.startswith("f "):
-                idx = [int(p.split("/")[0]) - 1 for p in line.split()[1:4]]
-                if len(idx) == 3:
-                    faces.append(idx)
-    return np.array(verts, dtype=np.float32), np.array(faces, dtype=np.uint32)
+# ==============================================================================
+# 1cm正方形方眼紙ベースのTシャツ型紙設計 (SiroinoSotai Mobile 実寸)
+# ==============================================================================
+Z_HEM = 0.650          # 裾高さ
+Z_ARMPIT = 0.930       # 脇下高さ (差 0.28m = 28cm)
+Z_SHOULDER = 1.040     # 肩先高さ (差 0.11m = 11cm)
+Z_NECK = 1.060         # ネックサイド高さ (差 0.02m = 2cm)
+Z_FNP = 0.990          # 前ネック中心 (深さ 7cm のラウンドネック)
+Z_BNP = 1.045          # 後ネック中心 (深さ 1.5cm のバックネック)
+
+W_HEM = 0.140          # 裾半幅 14cm (全幅 28cm)
+W_ARMPIT = 0.140       # 脇下半幅 14cm (全幅 28cm: 胴体は 28cm x 28cm の完全正方グリッド)
+W_SHOULDER = 0.120     # 肩先半幅 12cm
+W_NECK = 0.040         # ネックサイド半幅 4cm (首幅 8cm)
+
+DELTA_AH_FRONT = 0.020 # 前アームホール内側入り込み
+DELTA_AH_BACK = 0.010  # 後アームホール内側入り込み
+
+ARM_X_START = 0.122    # 袖付け根X
+ARM_X_END = 0.232      # 袖口X (袖丈 0.11m = 11cm)
+ARM_Y = 0.008          # 腕中心Y
+ARM_Z = 1.017          # 腕中心Z
+SLEEVE_RADIUS = 0.044  # 袖口半径 44mm (周長約 276mm: 腕コライダーに対する十分なゆとり)
+
+# 1cm方眼グリッド分割数
+N_SH = 8               # 肩線 8cm (8区間, 各1.0cm)
+N_NK = 12              # 衿ぐり 12cm (12区間, 各1.0cm)
+N_X = 2 * N_SH + N_NK  # 横合計 28区間 (全幅 28cm, 各1.0cm)
+
+N_BODY = 28            # 裾〜脇下 28cm (28区間, 各1.0cm)
+N_AH = 13              # アームホール 13区間 (各辺長 ~1.0cm)
+N_Y = N_BODY + N_AH    # 縦合計 41区間 (全高 41cm, 各1.0cm)
+
+N_SLEEVE_U = 2 * N_AH  # 袖周り 26区間 (各辺長 ~1.0cm)
+N_SLEEVE_V = 11        # 袖丈 11cm (11区間, 各1.0cm)
 
 
-def _ss(a: float, b: float, x: float) -> float:
-    t = min(1.0, max(0.0, (x - a) / (b - a)))
-    return t * t * (3.0 - 2.0 * t)
+def coons_bodice(is_front: bool):
+    """前身頃または後身頃を1cm正方格子ベースで生成する."""
+    u_neck_l = N_SH / N_X
+    u_neck_r = (N_SH + N_NK) / N_X
+    v_armpit = N_BODY / N_Y
+    z_center = Z_FNP if is_front else Z_BNP
+    delta_ah = DELTA_AH_FRONT if is_front else DELTA_AH_BACK
 
+    def c_bottom(u: float):
+        return np.array([-W_HEM + 2.0 * W_HEM * u, Z_HEM])
 
-# 実寸Tシャツ型紙 (前後身頃・袖前後パネル)。素体計測値に基づく平面型紙。
-# 前後身頃: 裾-脇-衿ぐり-肩傾斜-アームホールの輪郭を持つ格子 (armpit以下は平面)。
-# 袖: 腕の前後に置く平面パネル。天側・地側の縫合で筒化する。
-_NX, _NYU = 13, 14
-_Z0, _ZTOP_U = 0.55, 1.007
-_Z_ARMPIT = 0.905
-_TIP_X, _TIP_Z = 0.155, 1.035
-_NECK_X = 0.05
+    def c_top(u: float):
+        if u <= u_neck_l:
+            t = u / u_neck_l
+            x = -W_SHOULDER + (-W_NECK - (-W_SHOULDER)) * t
+            z = Z_SHOULDER + (Z_NECK - Z_SHOULDER) * t
+        elif u >= u_neck_r:
+            t = (u - u_neck_r) / (1.0 - u_neck_r)
+            x = W_NECK + (W_SHOULDER - W_NECK) * t
+            z = Z_NECK + (Z_SHOULDER - Z_NECK) * t
+        else:
+            t = (u - u_neck_l) / (u_neck_r - u_neck_l)
+            x = -W_NECK + 2.0 * W_NECK * t
+            z = Z_NECK - (Z_NECK - z_center) * (math.sin(math.pi * t) ** 2)
+        return np.array([x, z])
 
+    def c_left(v: float):
+        if v <= v_armpit:
+            t = v / v_armpit
+            x = -W_HEM + (-W_ARMPIT - (-W_HEM)) * t
+            z = Z_HEM + (Z_ARMPIT - Z_HEM) * t
+        else:
+            t = (v - v_armpit) / (1.0 - v_armpit)
+            x = -W_ARMPIT + (-W_SHOULDER - (-W_ARMPIT)) * t + delta_ah * math.sin(math.pi * t)
+            z = Z_ARMPIT + (Z_SHOULDER - Z_ARMPIT) * t
+        return np.array([x, z])
 
-def _half_width(z: float) -> float:
-    if z <= _Z_ARMPIT:
-        for (z0, w0), (z1, w1) in [((0.55, 0.140), (0.70, 0.135)),
-                                   ((0.70, 0.135), (0.85, 0.150)),
-                                   ((0.85, 0.150), (0.905, 0.150))]:
-            if z <= z1:
-                return w0 + (w1 - w0) * (z - z0) / (z1 - z0)
-        return 0.150
-    t = (z - _Z_ARMPIT) / (_TIP_Z - _Z_ARMPIT)
-    return 0.150 + 0.005 * t - 0.028 * np.sin(np.pi * min(max(t, 0.0), 1.0))
+    def c_right(v: float):
+        pt = c_left(v)
+        return np.array([-pt[0], pt[1]])
 
+    p00 = c_bottom(0.0)
+    p10 = c_bottom(1.0)
+    p01 = c_top(0.0)
+    p11 = c_top(1.0)
 
-def _bodice(is_front: bool):
-    nx, nyu = _NX, _NYU
-    zrows = np.linspace(_Z0, _ZTOP_U, nyu).tolist()
-    pos, faces, grid = [], [], set()
-    # 型紙は armpit 以下で平面。衿ぐり寄せ (collar ease) だけ中央上部を体側へ寄せる。
-    y0 = -0.145 if is_front else 0.110
-    y_neck = -0.075 if is_front else 0.042
+    u_vals = np.linspace(0.0, 1.0, N_X + 1)
+    v_vals = np.linspace(0.0, 1.0, N_Y + 1)
+    verts_2d = np.zeros((N_Y + 1, N_X + 1, 2), dtype=np.float32)
 
-    def top_z(x: float) -> float:
-        ax = abs(x)
-        if ax >= _NECK_X:
-            return _TIP_Z + (_TIP_X - ax) / (_TIP_X - _NECK_X) * 0.01
-        s = np.sin(ax / _NECK_X * np.pi / 2.0)
-        return (1.005 + 0.04 * s) if is_front else (1.03 + 0.015 * s)
+    for j, v in enumerate(v_vals):
+        cl = c_left(v)
+        cr = c_right(v)
+        for i, u in enumerate(u_vals):
+            cb = c_bottom(u)
+            ct = c_top(u)
+            p = ((1.0 - v) * cb + v * ct +
+                 (1.0 - u) * cl + u * cr -
+                 ((1.0 - u) * (1.0 - v) * p00 +
+                  u * (1.0 - v) * p10 +
+                  (1.0 - u) * v * p01 +
+                  u * v * p11))
+            verts_2d[j, i] = p
 
-    def ease(x: float, z: float) -> float:
-        return _ss(0.905, 1.06, z) * (1.0 - _ss(0.05, 0.15, abs(x)))
+    y_pos = -0.110 if is_front else 0.090
+    verts_3d = []
+    for j in range(N_Y + 1):
+        for i in range(N_X + 1):
+            xz = verts_2d[j, i]
+            verts_3d.append([float(xz[0]), y_pos, float(xz[1])])
+    verts_3d = np.array(verts_3d, dtype=np.float32)
 
-    for j in range(nyu + 1):
-        for i in range(nx):
-            if j < nyu:
-                z = zrows[j]
-                half = _half_width(z)
-                x = -half + 2.0 * half * i / (nx - 1)
-                if j == nyu - 1 and abs(x) < _NECK_X:
-                    s = np.sin(abs(x) / _NECK_X * np.pi / 2.0)
-                    z -= (0.4 * 0.04 * (1.0 - s)) if is_front else (0.4 * 0.015 * (1.0 - s))
+    faces = []
+    edges = set()
+    for j in range(N_Y):
+        for i in range(N_X):
+            v00 = j * (N_X + 1) + i
+            v10 = j * (N_X + 1) + (i + 1)
+            v01 = (j + 1) * (N_X + 1) + i
+            v11 = (j + 1) * (N_X + 1) + (i + 1)
+            # 交互対角線 (Alternating diagonals) でせん断異方性バイアスを完全排除
+            if (i + j) % 2 == 0:
+                if is_front:
+                    faces.append([v00, v10, v11])
+                    faces.append([v00, v11, v01])
+                else:
+                    faces.append([v00, v11, v10])
+                    faces.append([v00, v01, v11])
+                diag = (v00, v11)
             else:
-                half = _TIP_X + 0.005
-                x = -half + 2.0 * half * i / (nx - 1)
-                z = top_z(x)
-            pos.append([x, y0 + (y_neck - y0) * ease(x, z), z])
-    n = nx * (nyu + 1)
-    for j in range(nyu):
-        for i in range(nx - 1):
-            a, b, c, d = j * nx + i, j * nx + i + 1, (j + 1) * nx + i, (j + 1) * nx + i + 1
-            if is_front:
-                faces += [[a, b, d], [a, d, c]]
-            else:
-                # 後身頃は法線が+Y向きになるよう巻きを反転する
-                faces += [[a, d, b], [a, c, d]]
-            grid.update([(min(a, b), max(a, b)), (min(a, c), max(a, c))])
-    return (np.array(pos, dtype=np.float32), np.array(faces, dtype=np.uint32),
-            grid, nx, nyu + 1)
+                if is_front:
+                    faces.append([v00, v10, v01])
+                    faces.append([v10, v11, v01])
+                else:
+                    faces.append([v00, v01, v10])
+                    faces.append([v10, v01, v11])
+                diag = (v10, v01)
+            for a, b in [(v00, v10), (v10, v11), (v11, v01), (v01, v00), diag]:
+                edges.add((min(a, b), max(a, b)))
+
+    return verts_3d, np.array(faces, dtype=np.uint32), edges
 
 
-def _sleeve_panel(side: int, is_front: bool):
-    """袖の平面パネル (腕の前後に1枚ずつ。天側・地側の2辺で筒にする)。"""
-    ns, nz = 8, 6
-    xs = np.linspace(0.135, 0.295, ns)
-    zs = np.linspace(0.920, 1.110, nz)
-    y0 = -0.075 if is_front else 0.075
-    pos, faces, grid = [], [], set()
-    for s in range(ns):
-        for k in range(nz):
-            pos.append([side * xs[s], y0, zs[k]])
-    for s in range(ns - 1):
-        for k in range(nz - 1):
-            a, b = s * nz + k, s * nz + k + 1
-            c, d = (s + 1) * nz + k, (s + 1) * nz + k + 1
-            # X反転 (side<0) で幾何学的法線が裏返るため、表裏条件にsideを含める
-            if (side > 0) == is_front:
-                faces += [[a, d, b], [a, c, d]]
+def make_sleeve(side: int, ah_front_segs: np.ndarray, ah_back_segs: np.ndarray):
+    """アームホールの各辺長と整合した袖メッシュを円筒ラップ配置で生成する."""
+    tot_front = float(np.sum(ah_front_segs))
+    tot_back = float(np.sum(ah_back_segs))
+    tot_ah = tot_front + tot_back
+
+    delta_theta = 0.08 # 袖下の隙間
+    available_angle = 2.0 * math.pi - delta_theta
+
+    angles = [0.0]
+    for seg in ah_front_segs:
+        angles.append(angles[-1] + (seg / tot_ah) * available_angle)
+    for seg in reversed(ah_back_segs):
+        angles.append(angles[-1] + (seg / tot_ah) * available_angle)
+    angles = np.array(angles, dtype=np.float32)
+
+    theta_top = angles[N_AH]
+    theta_vals = (math.pi / 2.0) - (angles - theta_top)
+    v_vals = np.linspace(0.0, 1.0, N_SLEEVE_V + 1)
+
+    r_cap = tot_ah / available_angle # 袖山半径 (アームホール周長と厳密一致)
+    r_cuff = SLEEVE_RADIUS           # 袖口半径 (腕コライダーに対する十分なゆとり)
+
+    verts_3d = []
+    for j, v in enumerate(v_vals):
+        u_ratio = np.linspace(0.0, 1.0, N_SLEEVE_U + 1)
+        x_cap = ARM_X_START + 0.012 * (1.0 - np.sin(np.pi * u_ratio))
+        x_row = ARM_X_END - (ARM_X_END - x_cap) * v
+
+        # 袖口(r_cuff)から袖山(r_cap)への滑らかなテーパー
+        r = r_cuff + (r_cap - r_cuff) * v
+
+        for i in range(N_SLEEVE_U + 1):
+            th = float(theta_vals[i])
+            y = ARM_Y + r * math.cos(th)
+            z = ARM_Z + r * math.sin(th)
+            x = side * float(x_row[i])
+            verts_3d.append([x, y, z])
+
+    verts_3d = np.array(verts_3d, dtype=np.float32)
+
+    faces = []
+    edges = set()
+    for j in range(N_SLEEVE_V):
+        for i in range(N_SLEEVE_U):
+            v00 = j * (N_SLEEVE_U + 1) + i
+            v10 = j * (N_SLEEVE_U + 1) + (i + 1)
+            v01 = (j + 1) * (N_SLEEVE_U + 1) + i
+            v11 = (j + 1) * (N_SLEEVE_U + 1) + (i + 1)
+            if (i + j) % 2 == 0:
+                if side > 0:
+                    faces.append([v00, v10, v11])
+                    faces.append([v00, v11, v01])
+                else:
+                    faces.append([v00, v11, v10])
+                    faces.append([v00, v01, v11])
+                diag = (v00, v11)
             else:
-                faces += [[a, b, d], [a, d, c]]
-            grid.update([(min(a, b), max(a, b)), (min(a, c), max(a, c))])
-    return np.array(pos, dtype=np.float32), np.array(faces, dtype=np.uint32), grid
+                if side > 0:
+                    faces.append([v00, v10, v01])
+                    faces.append([v10, v11, v01])
+                else:
+                    faces.append([v00, v01, v10])
+                    faces.append([v10, v01, v11])
+                diag = (v10, v01)
+            for a, b in [(v00, v10), (v10, v11), (v11, v01), (v01, v00), diag]:
+                edges.add((min(a, b), max(a, b)))
+
+    return verts_3d, np.array(faces, dtype=np.uint32), edges
 
 
 def make_tshirt():
-    """6パーツ結合メッシュ (前後身頃 + 袖前後x左右) と縫合ペアを返す。"""
-    pf, ff, gf, nx, ny = _bodice(True)
-    pb, fb, gb, _, _ = _bodice(False)
-    prf, frf, grf = _sleeve_panel(1, True)
-    prb, frb, grb = _sleeve_panel(1, False)
-    plf, flf, glf = _sleeve_panel(-1, True)
-    plb, flb, glb = _sleeve_panel(-1, False)
-    parts = [pf, pb, prf, prb, plf, plb]
-    fparts = [ff, fb, frf, frb, flf, flb]
-    gparts = [gf, gb, grf, grb, glf, glb]
-    offs, o = [], 0
-    for p in parts:
-        offs.append(o)
-        o += len(p)
+    """1cm方眼ベースの4パーツ結合メッシュと縫合ペアおよびグループを返す."""
+    vf, ff, ef = coons_bodice(True)
+    vb, fb, eb = coons_bodice(False)
+
+    ah_front_pts = [vf[(N_BODY + k) * (N_X + 1) + N_X] for k in range(N_AH + 1)]
+    ah_front_segs = np.array([np.linalg.norm(ah_front_pts[k+1] - ah_front_pts[k]) for k in range(N_AH)])
+
+    ah_back_pts = [vb[(N_BODY + k) * (N_X + 1) + N_X] for k in range(N_AH + 1)]
+    ah_back_segs = np.array([np.linalg.norm(ah_back_pts[k+1] - ah_back_pts[k]) for k in range(N_AH)])
+
+    vr, fr, er = make_sleeve(1, ah_front_segs, ah_back_segs)
+    vl, fl, el = make_sleeve(-1, ah_front_segs, ah_back_segs)
+
+    parts = [vf, vb, vr, vl]
+    fparts = [ff, fb, fr, fl]
+    eparts = [ef, eb, er, el]
+
+    offs = [0]
+    for p in parts[:-1]:
+        offs.append(offs[-1] + len(p))
+
     positions = np.vstack(parts)
     faces = np.vstack([f + off for f, off in zip(fparts, offs)])
     normal_edges = set()
-    for g, off in zip(gparts, offs):
-        normal_edges.update((a + off, b + off) for a, b in g)
-    NS, NZ = 8, 6  # 袖パネル格子
+    for e, off in zip(eparts, offs):
+        normal_edges.update((a + off, b + off) for a, b in e)
 
-    sew = set()
-    top = (ny - 1) * nx
-    # 肩: 前後上端行 (首穴 |x|<0.045 を除く)
-    for i in range(nx):
-        x = pf[top + i][0]
-        if abs(float(x)) < 0.045:
-            continue
-        sew.add((min(offs[0] + top + i, offs[1] + top + i),
-                 max(offs[0] + top + i, offs[1] + top + i)))
-    # 脇: アームホール下の側端列
-    for j in range(ny):
-        z = float(pf[j * nx][2])
-        if z > _Z_ARMPIT + 1e-6:
-            continue
-        for c in (0, nx - 1):
-            a, b = offs[0] + j * nx + c, offs[1] + j * nx + c
-            sew.add((min(a, b), max(a, b)))
-    # 袖: 前後パネルの天側・地側どうしで筒にし、帽子辺をアームホールへ
-    # offs[2]=右前, [3]=右後, [4]=左前, [5]=左後
-    for (of, ob, sgn) in [(offs[2], offs[3], 1), (offs[4], offs[5], -1)]:
-        for s in range(NS):
-            a, b = of + s * NZ + (NZ - 1), ob + s * NZ + (NZ - 1)
-            sew.add((min(a, b), max(a, b)))
-            a, b = of + s * NZ + 0, ob + s * NZ + 0
-            sew.add((min(a, b), max(a, b)))
-        ah = []
-        for obb, pbb in [(offs[0], pf), (offs[1], pb)]:
-            for j in range(ny):
-                z = float(pbb[j * nx][2])
-                if z <= _Z_ARMPIT + 1e-6:
-                    continue
-                for c in (0, nx - 1):
-                    if float(pbb[j * nx + c][0]) * sgn > 0:
-                        ah.append(obb + j * nx + c)
-        for obb, pbb in [(offs[0], pf), (offs[1], pb)]:
-            for c in (0, nx - 1):
-                if float(pbb[top + c][0]) * sgn > 0:
-                    ah.append(obb + top + c)
-        cap = [of + 0 * NZ + k for k in range(NZ)] + [ob + 0 * NZ + k for k in range(NZ)]
-        used = set()
-        for c in cap:
-            best, bd = None, 1e9
-            for a in ah:
-                d = float(np.sum((positions[c] - positions[a]) ** 2))
-                if d < bd:
-                    best, bd = a, d
-            sew.add((min(c, best), max(c, best)))
-            used.add(best)
-        for a in ah:
-            if a not in used:
-                best, bd = None, 1e9
-                for c in cap:
-                    d = float(np.sum((positions[c] - positions[a]) ** 2))
-                    if d < bd:
-                        best, bd = c, d
-                sew.add((min(a, best), max(a, best)))
-    return positions, faces, normal_edges, sorted(sew)
+    off_f, off_b, off_r, off_l = offs
+
+    sew_pairs = []
+    group_map = {}
+
+    def add_pair(a: int, b: int, grp_name: str):
+        p = (min(a, b), max(a, b))
+        if p[0] != p[1] and p not in sew_pairs:
+            sew_pairs.append(p)
+            group_map.setdefault(grp_name, []).append(len(sew_pairs) - 1)
+
+    # 1. 脇線 (Side Seams)
+    for j in range(N_BODY + 1):
+        add_pair(off_f + j * (N_X + 1) + 0, off_b + j * (N_X + 1) + 0, "side_seams_left")
+        add_pair(off_f + j * (N_X + 1) + N_X, off_b + j * (N_X + 1) + N_X, "side_seams_right")
+
+    # 2. 肩線 (Shoulder Seams)
+    for i in range(N_SH + 1):
+        add_pair(off_f + N_Y * (N_X + 1) + i, off_b + N_Y * (N_X + 1) + i, "shoulder_left")
+    for k in range(N_SH + 1):
+        i = (N_X - N_SH) + k
+        add_pair(off_f + N_Y * (N_X + 1) + i, off_b + N_Y * (N_X + 1) + i, "shoulder_right")
+
+    # 3. 袖下線 (Underarm Seams)
+    for j in range(N_SLEEVE_V + 1):
+        add_pair(off_r + j * (N_SLEEVE_U + 1) + 0, off_r + j * (N_SLEEVE_U + 1) + N_SLEEVE_U, "sleeve_inseam_right")
+        add_pair(off_l + j * (N_SLEEVE_U + 1) + 0, off_l + j * (N_SLEEVE_U + 1) + N_SLEEVE_U, "sleeve_inseam_left")
+
+    # 4. アームホールと袖山
+    for k in range(N_AH + 1):
+        add_pair(off_f + (N_BODY + k) * (N_X + 1) + N_X,
+                 off_r + N_SLEEVE_V * (N_SLEEVE_U + 1) + k, "armhole_right")
+        add_pair(off_b + (N_BODY + k) * (N_X + 1) + N_X,
+                 off_r + N_SLEEVE_V * (N_SLEEVE_U + 1) + (2 * N_AH - k), "armhole_right")
+
+    for k in range(N_AH + 1):
+        add_pair(off_f + (N_BODY + k) * (N_X + 1) + 0,
+                 off_l + N_SLEEVE_V * (N_SLEEVE_U + 1) + k, "armhole_left")
+        add_pair(off_b + (N_BODY + k) * (N_X + 1) + 0,
+                 off_l + N_SLEEVE_V * (N_SLEEVE_U + 1) + (2 * N_AH - k), "armhole_left")
+
+    seam_groups = []
+    for gname, p_indices in group_map.items():
+        seam_groups.append({
+            "name": gname,
+            "pairs": p_indices,
+            "tolerance_mm": 5.0,
+            "ease_mm": 0.0,
+        })
+
+    return positions, faces, normal_edges, sew_pairs, seam_groups
 
 
 def main() -> None:
@@ -302,8 +409,8 @@ def main() -> None:
     }
     (BODY_DIR / "provenance.json").write_text(json.dumps(prov, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 2. Tシャツ型紙 (前身頃・後身頃・左右袖)
-    positions, faces, edge_set, sew_list = make_tshirt()
+    # 2. 1cm方眼ベースTシャツ型紙
+    positions, faces, edge_set, sew_list, seam_groups = make_tshirt()
     sew = np.array(sew_list, dtype=np.uint32)
     normal_edges = sorted(edge_set)
 
@@ -312,14 +419,15 @@ def main() -> None:
     (TSHIRT_DIR / "tshirt_sewing.json").write_text(
         json.dumps({"sewing_springs": sew.tolist(),
                     "normal_edges": [list(e) for e in normal_edges],
-                    "pieces": {"bodice": "front+back (neckline/shoulder/armhole shaped)",
-                               "sleeves": "L/R tapered tubes around arms",
+                    "seam_groups": seam_groups,
+                    "pieces": {"bodice": "front+back 1cm square grid (neckline/shoulder/armhole shaped by Coons Patch)",
+                               "sleeves": "L/R 1cm square grid 1-piece set-in sleeves wrapped around arms",
                                "open": ["neckline", "hem", "sleeve cuffs"]}},
                    ensure_ascii=False, indent=2), encoding="utf-8")
     scene = {"object_name": "TShirtOnSiroino",
              "mesh_file": "tshirt_panels.obj", "sewing_file": "tshirt_sewing.json",
              "collider_mesh_file": "../../bodies/siroino/SiroinoSotai_Mobile_collider.obj",
-             "collider_type": "MESH", "collider_thickness": 0.02,
+             "collider_type": "MESH", "collider_thickness": 0.008,
              "collider_single_sided": False, "collider_friction": 0.8,
              "config": {"substeps": 20, "solver_iterations": 10,
                         "tension_stiffness": 10000.0, "bending_stiffness": 20.0,
