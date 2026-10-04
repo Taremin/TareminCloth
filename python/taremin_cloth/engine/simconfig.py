@@ -40,6 +40,7 @@ SIGNATURE_KEYS = (
     "enable_normal_untangling",
     "self_collision_max_iterations",
     "coupled_mode",
+    "coupled_collider",
     "post_relaxation_iters",
     "substep_interval",
     "ee_substep_interval",
@@ -141,6 +142,7 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "enable_normal_untangling": bool(_get(settings, "enable_normal_untangling", True)),
         "self_collision_max_iterations": _i(settings, "self_collision_max_iterations", 256),
         "coupled_mode": coupled_mode,
+        "coupled_collider": bool(_get(settings, "coupled_collider_mode", False)),
         "post_relaxation_iters": relax_iters,
         "substep_interval": max(1, _i(settings, "self_collision_substep_interval", 1)),
         "ee_substep_interval": max(0, _i(settings, "self_collision_ee_substep_interval", 1)),
@@ -247,6 +249,8 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         sim.set_coupled_self_collision_options(
             int(cfg.get("coupled_mode", 1)), int(cfg.get("post_relaxation_iters", 2))
         )
+    if hasattr(sim, "set_coupled_collider"):
+        sim.set_coupled_collider(bool(cfg.get("coupled_collider", False)))
     if hasattr(sim, "set_self_collision_substep_interval"):
         sim.set_self_collision_substep_interval(max(1, int(cfg.get("substep_interval", 1))))
     if hasattr(sim, "set_self_collision_ee_substep_interval"):

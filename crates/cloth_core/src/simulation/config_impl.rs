@@ -37,6 +37,7 @@ impl GpuClothSimulator {
             enable_normal_untangling: self.enable_normal_untangling,
             self_collision_max_iterations: self.self_collision_max_iterations,
             coupled_mode: self.coupled_self_collision_mode,
+            coupled_collider: self.coupled_collider,
             post_relaxation_iters: self.post_collision_relaxation_iters,
             substep_interval: self.self_collision_substep_interval,
             ee_substep_interval: self.self_collision_ee_substep_interval,
@@ -114,6 +115,7 @@ impl GpuClothSimulator {
             c.self_collision_max_iterations,
         );
         self.set_coupled_self_collision_options(c.coupled_mode, c.post_relaxation_iters);
+        self.set_coupled_collider(c.coupled_collider);
         self.set_self_collision_substep_interval(c.substep_interval.max(1));
         self.set_self_collision_ee_substep_interval(c.ee_substep_interval);
         self.set_enable_pair_cache(c.enable_pair_cache);

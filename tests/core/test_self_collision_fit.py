@@ -99,8 +99,8 @@ class TestSelfCollisionFit(unittest.TestCase):
         self.assertEqual(params['self_collision_relief_factor'], 0.20)
         self.assertEqual(params['self_collision_max_displacement_ratio'], 0.20)
         self.assertEqual(params['self_collision_max_iterations'], '256')
-        self.assertEqual(params['coupled_self_collision_mode'], 'RELAXATION')
-        self.assertEqual(params['post_collision_relaxation_iters'], 2)
+        self.assertEqual(params['coupled_self_collision_mode'], 'OFF')
+        self.assertEqual(params['post_collision_relaxation_iters'], 0)
         self.assertTrue(params['enable_normal_untangling'])
 
     def test_compute_params_skirt(self):
@@ -134,7 +134,8 @@ class TestSelfCollisionFit(unittest.TestCase):
         self.assertEqual(params['self_collision_relief_factor'], 0.10)
         self.assertEqual(params['self_collision_max_displacement_ratio'], 0.10)
         self.assertEqual(params['self_collision_max_iterations'], '256')
-        self.assertEqual(params['coupled_self_collision_mode'], 'RELAXATION')
+        self.assertEqual(params['coupled_self_collision_mode'], 'OFF')
+        self.assertEqual(params['post_collision_relaxation_iters'], 0)
 
     def test_thickness_clamp_safety(self):
         """局所的に小エッジがある場合、最小エッジ長の40%に安全クランプされる"""

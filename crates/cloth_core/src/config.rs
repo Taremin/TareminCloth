@@ -77,6 +77,8 @@ pub struct SimConfig {
     pub self_collision_max_iterations: u32,
     #[serde(default)]
     pub coupled_mode: u32,
+    #[serde(default)]
+    pub coupled_collider: bool,
     #[serde(default = "d_relax_iters")]
     pub post_relaxation_iters: u32,
     #[serde(default = "d_substep_interval")]
@@ -145,6 +147,7 @@ impl Default for SimConfig {
             enable_normal_untangling: true,
             self_collision_max_iterations: d_max_iters(),
             coupled_mode: 0,
+            coupled_collider: false,
             post_relaxation_iters: 1,
             substep_interval: 1,
             ee_substep_interval: 1,

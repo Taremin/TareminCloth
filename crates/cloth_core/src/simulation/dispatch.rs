@@ -188,7 +188,7 @@ impl GpuClothSimulator {
 
                 // 5. コライダー衝突拘束 (Coupled XPBD: 押し出しと距離拘束の協調収束)
                 //    反復ループ内で距離拘束等と同調して解くことで、押し出しによるエッジの過剰伸長を防止
-                if has_colliders {
+                if has_colliders && self.coupled_collider {
                     cpass.set_pipeline(&self.shared.collision_pipeline);
                     cpass.set_bind_group(0, &self.collider_bind_group, &[]);
                     cpass.dispatch_workgroups(vert_workgroups, 1, 1);
@@ -203,6 +203,20 @@ impl GpuClothSimulator {
                     self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild, is_last_substep, should_run_ee);
                 }
             }
+
+        // 4.5 Decoupled コライダー衝突拘束 (反復外1回実行: 高速化・低ディスパッチオーバーヘッド)
+        if has_colliders && !self.coupled_collider {
+            let query = self.profiler.begin_pass("collider_decoupled", encoder);
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Decoupled Collider Collision Pass"),
+                timestamp_writes: self.profiler.pass_writes(&query),
+            });
+            cpass.set_pipeline(&self.shared.collision_pipeline);
+            cpass.set_bind_group(0, &self.collider_bind_group, &[]);
+            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+            drop(cpass);
+            self.profiler.end_pass(encoder, query);
+        }
 
         // 5. 反復終了後にピン位置を適用 (Grab等)
         if num_pins > 0 {

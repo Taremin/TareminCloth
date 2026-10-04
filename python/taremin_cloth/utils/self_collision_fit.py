@@ -104,19 +104,20 @@ def compute_self_collision_params(
         relief_factor = 0.10
         max_displacement_ratio = 0.10
         max_iterations = '256'
-        coupled_mode = 'RELAXATION'
-        relaxation_iters = 2
+        coupled_mode = 'OFF'
+        relaxation_iters = 0
     else:
         # STANDARD (一般の衣服) およびデフォルト:
         # 平均エッジ長の 20%（最小 1.5mm、最大 10mm）
+        # 物理質量化に伴い、シワの自縛ロック防止のため Coupled は OFF が標準推奨
         min_floor = 0.0015  # 1.5mm
         max_cap = 0.0100    # 10.0mm
         thickness = max(min_floor, min(max_cap, avg_edge_len * 0.20))
         relief_factor = 0.20
         max_displacement_ratio = 0.20
         max_iterations = '512' if num_vertices >= 2000 else '256'
-        coupled_mode = 'RELAXATION'
-        relaxation_iters = 2
+        coupled_mode = 'OFF'
+        relaxation_iters = 0
 
     # 安全策: 最小エッジ長の40%を超えないようにクランプ（自縄自縛・初期埋没防止）
     # ただし、外れ値や微小エッジによって用途ごとの下限フロア (min_floor) を破壊しないよう保護する

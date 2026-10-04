@@ -132,6 +132,7 @@ class TestConfigParity(unittest.TestCase):
             "set_enable_self_collision": ["enable_self_collision"],
             "set_self_collision_options": ["relief_factor", "max_displacement_ratio"],
             "set_coupled_self_collision_options": ["coupled_mode", "post_relaxation_iters"],
+            "set_coupled_collider": ["coupled_collider"],
             "set_self_collision_substep_interval": ["substep_interval"],
             "set_self_collision_ee_substep_interval": ["ee_substep_interval"],
             "set_enable_pair_cache": ["enable_pair_cache"],

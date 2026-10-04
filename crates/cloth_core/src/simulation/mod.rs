@@ -264,6 +264,7 @@ pub struct GpuClothSimulator {
     pub collider_sweep_margin_offset: f32,
     pub self_collision_max_iterations: u32,
     pub coupled_self_collision_mode: u32,
+    pub coupled_collider: bool,
     pub post_collision_relaxation_iters: u32,
     pub self_collision_substep_interval: u32,
     pub self_collision_ee_substep_interval: u32,
@@ -497,6 +498,7 @@ impl GpuClothSimulator {
             self_collision_exclude_neighbors: res.self_collision_exclude_neighbors,
             self_collision_max_iterations: res.self_collision_max_iterations,
             coupled_self_collision_mode: 0,
+            coupled_collider: false,
             post_collision_relaxation_iters: 1,
             self_collision_substep_interval: 1,
             self_collision_ee_substep_interval: 1,
@@ -789,6 +791,11 @@ impl GpuClothSimulator {
     pub fn set_coupled_self_collision_options(&mut self, mode: u32, relaxation_iters: u32) {
         self.coupled_self_collision_mode = mode;
         self.post_collision_relaxation_iters = relaxation_iters;
+    }
+
+    /// コライダー衝突拘束を反復ループ内で同調解決するか（Coupled XPBD）、反復外で1回解決するかを設定する
+    pub fn set_coupled_collider(&mut self, enabled: bool) {
+        self.coupled_collider = enabled;
     }
 
     /// 自己衝突判定を実行するサブステップ間隔を設定する (1: 毎サブステップ, 2: 2サブステップ毎)

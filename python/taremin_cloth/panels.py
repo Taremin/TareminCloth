@@ -656,6 +656,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
         box_col = layout.box()
         box_col.label(text=i18n.trans("Collider Interaction"), icon='PHYSICS')
         c_col = box_col.column(align=True)
+        c_col.prop(settings, "coupled_collider_mode", text=i18n.trans("Coupled Collider"))
         c_col.label(text=i18n.trans("Mesh Collider"), icon='MESH_DATA')
         col_mesh = c_col.column(align=True)
         col_mesh.prop(settings, "enable_edge_collision", text=i18n.trans("Edge-to-Edge Contact"))

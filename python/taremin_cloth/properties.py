@@ -499,7 +499,7 @@ class TareminClothObjectSettings(PropertyGroup):
             ('RELAXATION', "Relaxation (Anti-Stretch)", "Re-apply distance constraints after collision; suppresses stretching under heavy surface pressing"),
             ('FULL_COUPLED', "Full Coupled (High Quality)", "Coupled solve inside loop with finishing relaxation"),
         ],
-        default='RELAXATION',
+        default='OFF',
     )
     post_collision_relaxation_iters: IntProperty(
         name="Relaxation Steps",
@@ -521,6 +521,11 @@ class TareminClothObjectSettings(PropertyGroup):
         default=1,
         min=0,
         max=8,
+    )
+    coupled_collider_mode: BoolProperty(
+        name="Coupled Collider",
+        description="Solve collider collision inside solver iterations (Coupled XPBD). Turning off solves outside loop once per substep for higher performance",
+        default=False,
     )
     enable_edge_collision: BoolProperty(
         name="Edge-to-Edge Contact",
