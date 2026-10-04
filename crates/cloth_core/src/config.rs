@@ -15,6 +15,7 @@ fn d_safety_margin() -> f32 { 0.005 }
 fn d_pair_max() -> u32 { 65536 }
 fn d_margin_mode() -> u32 { 1 }
 fn d_sewing_stiffness() -> f32 { 10000.0 }
+fn d_sewing_lock_distance() -> f32 { 0.02 }
 fn d_merge_dist() -> f32 { 0.005 }
 fn d_threshold() -> f32 { 0.9 }
 fn d_ramp() -> u32 { 3 }
@@ -109,6 +110,8 @@ pub struct SimConfig {
     pub sewing_stiffness: f32,
     #[serde(default = "d_true")]
     pub enable_sewing_lock: bool,
+    #[serde(default = "d_sewing_lock_distance")]
+    pub sewing_lock_distance: f32,
     #[serde(default)]
     pub sewing_priority_enabled: bool,
     #[serde(default = "d_threshold")]
@@ -163,6 +166,7 @@ impl Default for SimConfig {
             edge_margin_offset: 0.0,
             sewing_stiffness: d_sewing_stiffness(),
             enable_sewing_lock: true,
+            sewing_lock_distance: d_sewing_lock_distance(),
             sewing_priority_enabled: false,
             sewing_priority_threshold: d_threshold(),
             sewing_priority_merge_dist: d_merge_dist(),

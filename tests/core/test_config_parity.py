@@ -93,7 +93,7 @@ class TestConfigParity(unittest.TestCase):
         # 欠落していた項目が含まれていること
         for key in [
             "coupled_mode", "post_relaxation_iters", "substep_interval",
-            "sewing_stiffness", "enable_sewing_lock",
+            "sewing_stiffness", "enable_sewing_lock", "sewing_lock_distance",
             "sewing_priority_enabled", "solver_mode", "workgroup_size",
             "enable_pair_cache", "pair_margin_mode",
         ]:
@@ -143,6 +143,7 @@ class TestConfigParity(unittest.TestCase):
             "set_edge_margin_offset": ["edge_margin_offset"],
             "set_sewing_stiffness": ["sewing_stiffness"],
             "set_enable_sewing_lock": ["enable_sewing_lock"],
+            "set_sewing_lock_distance": ["sewing_lock_distance"],
             "set_areal_density": ["areal_density"],
             "set_enable_compact_readback": [],  # 転送最適化のみで物理に無関係
             "set_profiling_enabled": [],  # 計測プロファイル用で物理に無関係

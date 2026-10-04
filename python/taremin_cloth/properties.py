@@ -577,6 +577,16 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Lock sewing edges rigidly once fully contracted, preventing gap reopen",
         default=True,
     )
+    sewing_lock_distance: FloatProperty(
+        name="Lock Distance",
+        description="Distance threshold below which sewing pairs snap closed rigidly (magnet lock)",
+        default=0.02,
+        min=0.001,
+        max=0.1,
+        step=0.1,
+        precision=4,
+        unit='LENGTH',
+    )
     enable_sewing_priority: BoolProperty(
         name="Sewing Priority",
         description="Suppress gravity until the specified share of sewing pairs has closed (garment assembly phase)",

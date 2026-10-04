@@ -368,6 +368,8 @@
   "Loading pins...": "ピン情報を読み込み中...",
   "Lock When Closed": "密着時にロック",
   "Lock sewing edges rigidly once fully contracted, preventing gap reopen": "収縮完了後に縫合エッジを剛体ロックし、隙間の再オープンを防ぐ",
+  "Lock Distance": "密着距離",
+  "Distance threshold below which sewing pairs snap closed rigidly (magnet lock)": "縫合ペアが剛体密着・吸着する近接距離閾値（マグネットロック）",
   "Sewing Priority": "縫合優先",
   "Phase: Sewing": "フェーズ: 縫合中",
   "Phase: Normal": "フェーズ: 通常",

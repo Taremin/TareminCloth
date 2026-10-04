@@ -214,6 +214,9 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                             if let Some(iters) = p.solver_iterations {
                                 sim.solver_iterations = iters;
                             }
+                            if let Some(dist) = p.sewing_lock_distance {
+                                sim.set_sewing_lock_distance(dist);
+                            }
                         }
                     }
                     GuiCommand::Quit => {
@@ -270,6 +273,7 @@ fn apply_simulation_parameters(sim: &mut GpuClothSimulator, data: &protocol::Sce
     cfg.workgroup_size = data.workgroup_size;
     cfg.sewing_stiffness = data.sewing_stiffness;
     cfg.enable_sewing_lock = data.enable_sewing_lock;
+    cfg.sewing_lock_distance = data.sewing_lock_distance;
     cfg.areal_density = data.areal_density;
     cfg.sewing_priority_enabled = data.sewing_priority_enabled;
     cfg.sewing_priority_threshold = data.sewing_priority_threshold;

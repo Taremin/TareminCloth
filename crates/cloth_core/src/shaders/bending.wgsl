@@ -28,6 +28,10 @@ struct SimParams {
     num_sewing_constraints: u32,
     sewing_compliance: f32,
     enable_sewing_lock: f32,
+    sewing_lock_distance: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 struct DispatchInfo {

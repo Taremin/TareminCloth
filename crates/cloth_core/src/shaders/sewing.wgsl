@@ -28,6 +28,10 @@ struct SimParams {
     num_sewing_constraints: u32,
     sewing_compliance: f32,
     enable_sewing_lock: f32,
+    sewing_lock_distance: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 struct DispatchInfo {
@@ -76,17 +80,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dt = params.gravity.w;
     let dir = delta / dist;
 
-    // 密着ロック (Lock When Closed)
-    // 自然長が目標自然長 (0.0) に達し、かつ距離が布厚み程度以下に近接している場合、
-    // enable_sewing_lock > 0.5 であれば実効コンプライアンスを 0.0 (完全非伸縮) として隙間の再開口を防止
+    // 密着ロック (Lock When Closed / Magnet Snap)
+    // 距離が密着距離 (sewing_lock_distance または布厚み合計) 以下に近接している場合、
+    // enable_sewing_lock > 0.5 であれば実効コンプライアンスを 0.0 (完全非伸縮) とし、
+    // 自然長待ち時間をスキップして目標長 (0.0) へ即座にラッチしてピタッと吸着
+    var target_len = c.current_rest_len;
     var effective_compliance = params.sewing_compliance;
-    let lock_thresh = max(vertices[c.v0].thickness + vertices[c.v1].thickness, 0.005);
-    if (params.enable_sewing_lock > 0.5 && c.current_rest_len <= c.target_rest_len + 1e-4 && dist <= lock_thresh) {
+    let lock_thresh = max(vertices[c.v0].thickness + vertices[c.v1].thickness, params.sewing_lock_distance);
+    if (params.enable_sewing_lock > 0.5 && dist <= lock_thresh) {
         effective_compliance = 0.0;
+        target_len = c.target_rest_len;
+        sewing_constraints[constraint_idx].current_rest_len = c.target_rest_len;
     }
 
     let alpha = effective_compliance / (dt * dt);
-    let c_val = dist - c.current_rest_len;
+    let c_val = dist - target_len;
     // 正規XPBD: ラムダを反復跨ぎで蓄積する
     let lambda = lambdas[constraint_idx];
     let delta_lambda = (-c_val - alpha * lambda) / (w_sum + alpha);

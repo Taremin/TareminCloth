@@ -103,9 +103,11 @@ class SingleGrabTool(BaseBrushTool):
         else:
             self.grab_initial_plane_hit = v_initial_world
 
-        # 縫合クラスタ（対向端点や中継点）の同期ピン留め
-        from ..engine.runner import get_seam_partners
-        partners = get_seam_partners(obj.name, best_idx)
+        # 縫合クラスタ（対向端点や中継点）の同期ピン留め:
+        # 未結合で離れているエッジは単独操作（手動引き寄せ）を可能にし、結合済みシームのみ一体同期する
+        from ..engine.runner import get_connected_seam_partners, get_seam_merge_threshold
+        threshold = get_seam_merge_threshold(obj)
+        partners = get_connected_seam_partners(obj.name, best_idx, pos_2d, threshold)
         all_grabbed = [best_idx] + [p for p in partners if p < len(pos_2d) and p != best_idx]
         self.grabbed_cluster = all_grabbed
 

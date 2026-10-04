@@ -32,6 +32,8 @@ impl GpuClothSimulator {
                 1.0 / (self.sewing_stiffness.max(1.0))
             },
             enable_sewing_lock: if self.enable_sewing_lock { 1.0 } else { 0.0 },
+            sewing_lock_distance: self.sewing_lock_distance,
+            _pad0: [0.0; 3],
         };
 
         self.context.queue.write_buffer(

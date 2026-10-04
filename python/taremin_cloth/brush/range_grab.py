@@ -163,11 +163,13 @@ class RangeGrabTool(BaseBrushTool):
             sim.set_pin(v_idx, [init.x, init.y, init.z], float(w))
 
         # 縫合クラスタパートナーの同期補完:
-        # デプスフィルタ等で脱落した対向側の縫合端点や中継点を同一ウェイトでグラブ対象に含める
-        from ..engine.runner import get_seam_partners
+        # デプスフィルタ等で脱落した対向側の結合済み縫合端点や中継点を同一ウェイトでグラブ対象に含める。
+        # 未結合で離れているエッジは除外して単独操作（手動引き寄せ）を可能にする。
+        from ..engine.runner import get_connected_seam_partners, get_seam_merge_threshold
+        threshold = get_seam_merge_threshold(obj)
         cluster_additions = {}
         for v_idx, (init, w) in list(grab.items()):
-            partners = get_seam_partners(obj.name, v_idx)
+            partners = get_connected_seam_partners(obj.name, v_idx, pos_2d, threshold)
             for p_idx in partners:
                 if p_idx < len(pos_2d) and p_idx not in grab and p_idx not in cluster_additions:
                     p_pos = pos_2d[p_idx]

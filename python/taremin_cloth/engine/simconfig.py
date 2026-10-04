@@ -56,6 +56,7 @@ SIGNATURE_KEYS = (
     "edge_margin_offset",
     "sewing_stiffness",
     "enable_sewing_lock",
+    "sewing_lock_distance",
     "sewing_priority_enabled",
     "sewing_priority_threshold",
     "sewing_priority_merge_dist",
@@ -158,6 +159,7 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "edge_margin_offset": _f(settings, "edge_margin_offset", 0.0),
         "sewing_stiffness": _f(settings, "sewing_stiffness", 10000.0),
         "enable_sewing_lock": bool(_get(settings, "enable_sewing_lock", True)),
+        "sewing_lock_distance": _f(settings, "sewing_lock_distance", 0.02),
         "sewing_priority_enabled": bool(_get(settings, "enable_sewing_priority", False)),
         "sewing_priority_threshold": _f(settings, "sewing_priority_threshold", 0.9),
         "sewing_priority_merge_dist": _f(settings, "sewing_priority_merge_dist", 0.005),
@@ -291,6 +293,8 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
             pass
     if hasattr(sim, "set_enable_sewing_lock"):
         sim.set_enable_sewing_lock(bool(cfg.get("enable_sewing_lock", True)))
+    if hasattr(sim, "set_sewing_lock_distance"):
+        sim.set_sewing_lock_distance(float(cfg.get("sewing_lock_distance", 0.02)))
     if hasattr(sim, "set_sewing_priority_options"):
         try:
             sim.set_sewing_priority_options(

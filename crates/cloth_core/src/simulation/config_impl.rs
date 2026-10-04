@@ -55,6 +55,7 @@ impl GpuClothSimulator {
             edge_margin_offset: self.edge_margin_offset,
             sewing_stiffness: self.sewing_stiffness,
             enable_sewing_lock: self.enable_sewing_lock,
+            sewing_lock_distance: self.sewing_lock_distance,
             areal_density: self.areal_density,
             sewing_priority_enabled: self.sewing_priority_enabled,
             sewing_priority_threshold: self.sewing_priority_threshold,
@@ -133,6 +134,7 @@ impl GpuClothSimulator {
         self.set_edge_margin_offset(c.edge_margin_offset);
         self.set_sewing_stiffness(c.sewing_stiffness);
         self.set_enable_sewing_lock(c.enable_sewing_lock);
+        self.set_sewing_lock_distance(c.sewing_lock_distance);
         self.set_areal_density(c.areal_density);
         self.set_sewing_priority_options(
             c.sewing_priority_enabled,

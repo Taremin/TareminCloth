@@ -120,6 +120,8 @@ pub struct SimParams {
     pub num_sewing_constraints: u32,
     pub sewing_compliance: f32,
     pub enable_sewing_lock: f32,
+    pub sewing_lock_distance: f32,
+    pub _pad0: [f32; 3],
 }
 
 #[repr(C)]
@@ -693,6 +695,9 @@ impl ClothMesh {
         };
         let max_edge_length = max_edge_len;
 
+        // 元のメッシュ（縫合考慮前）の隣接リストを保持（自己衝突レスト長判定用）
+        let orig_adj_lists = adj_lists.clone();
+
         // 縫合エッジ（sewing_springs）で結ばれた頂点ペアのトポロジー同一視（ホップ数0換算・完全縮約グラフ）
         // 縫合ペア (v0, v1) を同一結節点（縮約頂点）とみなし、完成形メッシュと同一の
         // 1ホップ・2ホップトポロジー隣接距離を自己衝突除外グラフ（adj_lists）に対称構築する。
@@ -815,15 +820,35 @@ impl ClothMesh {
             neighbors.sort_unstable();
             neighbors.dedup();
 
+            // 元のメッシュトポロジー（縫合拡張前）における2ホップ近傍を収集
+            let mut orig_neighbors = Vec::new();
+            orig_neighbors.push(i as u32);
+            for &u in &orig_adj_lists[i] {
+                orig_neighbors.push(u);
+                for &v in &orig_adj_lists[u as usize] {
+                    orig_neighbors.push(v);
+                }
+            }
+            orig_neighbors.sort_unstable();
+            orig_neighbors.dedup();
+
             two_hop_offsets.push(current_two_hop_offset);
             for &nbr in &neighbors {
                 two_hop_indices.push(nbr);
-                let p_i = positions[i];
-                let p_nbr = positions[nbr as usize];
-                let dx = p_i[0] - p_nbr[0];
-                let dy = p_i[1] - p_nbr[1];
-                let dz = p_i[2] - p_nbr[2];
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                // 元のメッシュ内の2ホップ近傍であれば初期レスト距離を記録（Bridson動的折り畳み検出用）。
+                // 縫合トポロジーによって追加されたペアは、本来の目標レスト長が0.0（密着）であるため、
+                // 0.0 を設定して動的折り畳み検出（current_dist < l0 * 0.5）による自己衝突除外解除を防止する。
+                let is_orig = orig_neighbors.binary_search(&nbr).is_ok();
+                let dist = if is_orig {
+                    let p_i = positions[i];
+                    let p_nbr = positions[nbr as usize];
+                    let dx = p_i[0] - p_nbr[0];
+                    let dy = p_i[1] - p_nbr[1];
+                    let dz = p_i[2] - p_nbr[2];
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                } else {
+                    0.0
+                };
                 two_hop_rest_lengths.push(dist);
             }
             current_two_hop_offset += neighbors.len() as u32;
@@ -1255,4 +1280,57 @@ mod tests {
         assert!(shared.is_some());
         assert_eq!(shared.unwrap().thickness, 0.02);
     }
+
+    #[test]
+    fn test_two_hop_rest_lengths_sewing() {
+        // 2つの離れたラインセグメント: パネルA (0 - 1) と パネルB (2 - 3)
+        // パネルA: x=0, y=0 と x=0.1, y=0 (長さ 0.1)
+        // パネルB: x=1.0, y=0 と x=1.1, y=0 (長さ 0.1、パネルAから約0.9m離れている)
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0],
+        ];
+        let edges = [[0, 1], [2, 3]];
+        let sewing_springs = [[1, 2]]; // 頂点1と2を縫合
+
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&sewing_springs), None, None,
+            0, 0.005, 1000.0, 1000.0, 1000.0, 10.0, 1.0,
+            None, None,
+        );
+
+        let get_two_hop = |v: usize| -> Vec<(u32, f32)> {
+            let start = mesh.two_hop_offsets[v] as usize;
+            let end = mesh.two_hop_offsets[v + 1] as usize;
+            let indices = &mesh.two_hop_indices[start..end];
+            let lens = &mesh.two_hop_rest_lengths[start..end];
+            indices.iter().copied().zip(lens.iter().copied()).collect()
+        };
+
+        // 頂点0の2ホップ:
+        // - 0自身: レスト長 0.0
+        // - 1 (同一パネルの元のエッジ): レスト長 0.1
+        // - 2 (縫合によって追加されたトポロジー近傍): レスト長 0.0 (自己衝突除外解除防止)
+        let v0_pairs = get_two_hop(0);
+        let nbr_1 = v0_pairs.iter().find(|(idx, _)| *idx == 1).unwrap();
+        assert!((nbr_1.1 - 0.1).abs() < 1e-5, "同一パネル内エッジは幾何長を保持: {}", nbr_1.1);
+
+        let nbr_2 = v0_pairs.iter().find(|(idx, _)| *idx == 2);
+        if let Some(p) = nbr_2 {
+            assert_eq!(p.1, 0.0, "縫合トポロジーで追加されたペアはレスト長0.0: {}", p.1);
+        }
+
+        // 頂点1の2ホップ:
+        // - 0 (元のエッジ): レスト長 0.1
+        // - 2 (縫合相手): レスト長 0.0
+        let v1_pairs = get_two_hop(1);
+        let nbr_0_from_1 = v1_pairs.iter().find(|(idx, _)| *idx == 0).unwrap();
+        assert!((nbr_0_from_1.1 - 0.1).abs() < 1e-5, "同一パネル内エッジは幾何長を保持: {}", nbr_0_from_1.1);
+
+        let nbr_2_from_1 = v1_pairs.iter().find(|(idx, _)| *idx == 2).unwrap();
+        assert_eq!(nbr_2_from_1.1, 0.0, "縫合相手ペアはレスト長0.0: {}", nbr_2_from_1.1);
+    }
 }
+

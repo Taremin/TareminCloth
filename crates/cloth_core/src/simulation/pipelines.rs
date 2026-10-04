@@ -371,6 +371,8 @@ pub fn build_simulation_resources(
         num_sewing_constraints,
         sewing_compliance: 0.0,
         enable_sewing_lock: 1.0,
+        sewing_lock_distance: 0.02,
+        _pad0: [0.0; 3],
     };
 
     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

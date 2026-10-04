@@ -368,6 +368,8 @@
   "Loading pins...": "Loading pins...",
   "Lock When Closed": "Lock When Closed",
   "Lock sewing edges rigidly once fully contracted, preventing gap reopen": "Lock sewing edges rigidly once fully contracted, preventing gap reopen",
+  "Lock Distance": "Lock Distance",
+  "Distance threshold below which sewing pairs snap closed rigidly (magnet lock)": "Distance threshold below which sewing pairs snap closed rigidly (magnet lock)",
   "Sewing Priority": "Sewing Priority",
   "Phase: Sewing": "Phase: Sewing",
   "Phase: Normal": "Phase: Normal",

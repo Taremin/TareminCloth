@@ -1298,7 +1298,7 @@ pub struct ClothSimulator {
 #[pymethods]
 impl ClothSimulator {
     #[new]
-    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None, areal_density=None, enable_coarse_constraints=None))]
+    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, sewing_lock_distance=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None, areal_density=None, enable_coarse_constraints=None))]
     fn new(
         positions: PyReadonlyArray2<f32>,
         edges: PyReadonlyArray2<u32>,
@@ -1314,6 +1314,7 @@ impl ClothSimulator {
         sewing_shrink_speed: f32,
         sewing_stiffness: Option<f32>,
         enable_sewing_lock: Option<bool>,
+        sewing_lock_distance: Option<f32>,
         compression_stiffness: Option<f32>,
         shear_stiffness: Option<f32>,
         workgroup_size: u32,
@@ -1415,6 +1416,9 @@ impl ClothSimulator {
         let mut simulator = GpuClothSimulator::with_options(ctx, mesh, workgroup_size, solver_mode);
         if let Some(density) = areal_density {
             simulator.set_areal_density(density);
+        }
+        if let Some(dist) = sewing_lock_distance {
+            simulator.set_sewing_lock_distance(dist);
         }
         if let Some(compact) = enable_compact_readback {
             simulator.set_enable_compact_readback(compact);
@@ -2269,6 +2273,17 @@ impl ClothSimulator {
     #[pyo3(signature = (enabled=true))]
     fn set_enable_sewing_lock(&mut self, enabled: bool) {
         self.simulator.set_enable_sewing_lock(enabled);
+    }
+
+    /// 縫合の密着・吸着判定距離 (m) を動的に設定する
+    #[pyo3(signature = (distance=0.02))]
+    fn set_sewing_lock_distance(&mut self, distance: f32) {
+        self.simulator.set_sewing_lock_distance(distance);
+    }
+
+    /// 縫合の密着・吸着判定距離 (m) を取得する
+    fn get_sewing_lock_distance(&self) -> f32 {
+        self.simulator.sewing_lock_distance
     }
 
     /// 布の面密度 (kg/m2) を設定する。記録・署名用の値。

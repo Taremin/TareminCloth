@@ -274,6 +274,7 @@ pub struct GpuClothSimulator {
 
     pub sewing_stiffness: f32,
     pub enable_sewing_lock: bool,
+    pub sewing_lock_distance: f32,
     /// 布の面密度 (kg/m2)。三角形面積と掛けて頂点質量を算出する条件の記録・再現用。
     /// 物理挙動自体は頂点逆質量バッファで決まり、本値は記録・署名用である。
     pub areal_density: f32,
@@ -515,6 +516,7 @@ impl GpuClothSimulator {
             edge_collision_bind_group: res.edge_collision_bind_group,
             sewing_stiffness: 10000.0,
             enable_sewing_lock: true,
+            sewing_lock_distance: 0.02,
             areal_density: 0.15,
             coarse_constraint_count: mesh.coarse_constraint_count,
             sewing_priority_enabled: false,
@@ -914,6 +916,11 @@ impl GpuClothSimulator {
     /// 縫合完了時の密着ロック有効/無効を設定する
     pub fn set_enable_sewing_lock(&mut self, enabled: bool) {
         self.enable_sewing_lock = enabled;
+    }
+
+    /// 縫合の密着・吸着判定距離 (m) を設定する
+    pub fn set_sewing_lock_distance(&mut self, dist: f32) {
+        self.sewing_lock_distance = dist.max(0.0);
     }
 
     /// 縫合優先モードのオプションを設定する (工程フェーズ制御)。

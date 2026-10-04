@@ -437,6 +437,7 @@ class ClothGuiClient:
                 "sewing_shrink_speed": float(cfg.get("sewing_shrink_speed", 0.5)),
                 "sewing_stiffness": float(cfg.get("sewing_stiffness", 10000.0)),
                 "enable_sewing_lock": bool(cfg.get("enable_sewing_lock", True)),
+                "sewing_lock_distance": float(cfg.get("sewing_lock_distance", 0.02)),
                 "sewing_priority_enabled": bool(cfg.get("sewing_priority_enabled", False)),
                 "sewing_priority_threshold": float(cfg.get("sewing_priority_threshold", 0.9)),
                 "sewing_priority_merge_dist": float(cfg.get("sewing_priority_merge_dist", 0.005)),
@@ -601,6 +602,7 @@ class ClothGuiClient:
         sewing_priority_merge_dist=None,
         sewing_priority_ramp_frames=None,
         sewing_priority_max_frames=None,
+        sewing_lock_distance=None,
     ) -> bool:
         """物理パラメータの動的更新コマンドを送信する"""
         params = {}
@@ -638,6 +640,8 @@ class ClothGuiClient:
             params["sewing_priority_ramp_frames"] = int(sewing_priority_ramp_frames)
         if sewing_priority_max_frames is not None:
             params["sewing_priority_max_frames"] = int(sewing_priority_max_frames)
+        if sewing_lock_distance is not None:
+            params["sewing_lock_distance"] = float(sewing_lock_distance)
 
         return self.send_command("SetParams", params)
 
@@ -668,6 +672,7 @@ class ClothGuiClient:
             "sewing_priority_merge_dist": float(cfg["sewing_priority_merge_dist"]),
             "sewing_priority_ramp_frames": int(cfg["sewing_priority_ramp_frames"]),
             "sewing_priority_max_frames": int(cfg["sewing_priority_max_frames"]),
+            "sewing_lock_distance": float(cfg["sewing_lock_distance"]),
         }
 
         # 差分検知: 前回送信したパラメータと完全一致している場合はスキップ

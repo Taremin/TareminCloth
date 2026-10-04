@@ -185,6 +185,7 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, SimParams, num_sewing_constraints);
             check_member!(filename, s, SimParams, sewing_compliance);
             check_member!(filename, s, SimParams, enable_sewing_lock);
+            check_member!(filename, s, SimParams, sewing_lock_distance);
         }
 
         if let Some(s) = structs.get("CollisionParams") {

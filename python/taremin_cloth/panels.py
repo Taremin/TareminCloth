@@ -412,6 +412,8 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 col_sew.prop(settings, "sewing_shrink_speed", text=i18n.trans("Shrink Speed"))
                 col_sew.prop(settings, "sewing_stiffness", text=i18n.trans("Stiffness"))
                 col_sew.prop(settings, "enable_sewing_lock", text=i18n.trans("Lock When Closed"))
+                if settings.enable_sewing_lock:
+                    col_sew.prop(settings, "sewing_lock_distance", text=i18n.trans("Lock Distance"))
                 col_sew.prop(settings, "enable_sewing_priority", text=i18n.trans("Sewing Priority"))
                 if settings.enable_sewing_priority:
                     col_sew.prop(settings, "sewing_priority_threshold", text=i18n.trans("Closure Threshold"))
@@ -791,6 +793,8 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
             s_col.prop(settings, "sewing_shrink_speed")
             s_col.prop(settings, "sewing_stiffness")
             s_col.prop(settings, "enable_sewing_lock")
+            if settings.enable_sewing_lock:
+                s_col.prop(settings, "sewing_lock_distance")
             s_col.prop(settings, "enable_sewing_priority")
             if settings.enable_sewing_priority:
                 s_col.prop(settings, "sewing_priority_threshold")

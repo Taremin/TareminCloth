@@ -190,6 +190,8 @@ pub struct SceneInitData {
     pub sewing_stiffness: f32,
     #[serde(default = "default_true")]
     pub enable_sewing_lock: bool,
+    #[serde(default = "default_sewing_lock_distance")]
+    pub sewing_lock_distance: f32,
     #[serde(default)]
     pub sewing_priority_enabled: bool,
     #[serde(default = "default_sewing_priority_threshold")]
@@ -223,6 +225,7 @@ pub struct SceneInitData {
 
 fn default_solver_iters() -> u32 { 10 }
 fn default_sewing_stiffness() -> f32 { 10000.0 }
+fn default_sewing_lock_distance() -> f32 { 0.02 }
 fn default_areal_density() -> f32 { 0.15 }
 fn default_substeps() -> u32 { 20 }
 fn default_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
@@ -262,6 +265,8 @@ pub struct GuiParamsUpdate {
     pub sewing_priority_ramp_frames: Option<u32>,
     #[serde(default)]
     pub sewing_priority_max_frames: Option<u32>,
+    #[serde(default)]
+    pub sewing_lock_distance: Option<f32>,
 }
 
 /// GUIからBlenderへ返送するレスポンスメッセージ (JSON)
@@ -325,6 +330,7 @@ mod tests {
         let init: SceneInitData = serde_json::from_str(init_json).unwrap();
         assert_eq!(init.sewing_stiffness, 10000.0);
         assert!(init.enable_sewing_lock);
+        assert_eq!(init.sewing_lock_distance, 0.02);
     }
 
     #[test]

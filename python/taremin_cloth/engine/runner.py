@@ -157,6 +157,7 @@ def create_simulator_from_state(obj, state):
         sewing_shrink_speed=settings.sewing_shrink_speed,
         sewing_stiffness=getattr(settings, "sewing_stiffness", 10000.0),
         enable_sewing_lock=getattr(settings, "enable_sewing_lock", True),
+        sewing_lock_distance=getattr(settings, "sewing_lock_distance", 0.02),
         workgroup_size=state["wg_size"],
         solver_mode=state["s_mode"],
         enable_compact_readback=state["compact_rb"],
@@ -231,6 +232,49 @@ def get_seam_partners(obj_name: str, vert_idx: int) -> list[int]:
     """オブジェクトの縫合クラスタマップから指定頂点のパートナー頂点一覧を取得する"""
     cluster_map = get_seam_cluster_map(obj_name)
     return cluster_map.get(int(vert_idx), [])
+
+
+def get_seam_merge_threshold(obj) -> float:
+    """オブジェクトの縫合密着距離および厚みに基づくシーム結合判定閾値を算出する。
+
+    縫合前の型紙エッジ同士（10cm以上離れている）は未結合として単独操作を許可し、
+    縫合後のシーム（数ミリ以下）は結合済みとして一体同期操作を許可する。
+    """
+    settings = getattr(obj, "taremin_cloth", None)
+    if settings:
+        try:
+            lock_dist = float(getattr(settings, "sewing_lock_distance", 0.005))
+            thickness = float(getattr(settings, "thickness", 0.005))
+            return max(lock_dist * 2.0, thickness * 2.0, 0.02)
+        except (TypeError, ValueError):
+            return 0.02
+    return 0.02
+
+
+def get_connected_seam_partners(
+    obj_name: str,
+    vert_idx: int,
+    coords: np.ndarray,
+    threshold: float = 0.02,
+) -> list[int]:
+    """指定頂点の縫合パートナーのうち、現在位置が密着閾値以内の結合済み頂点一覧を取得する。
+
+    未結合で離れている型紙エッジを単独で操作（手動引き寄せ）できるようにし、
+    結合済みのシームのみを一体として同期グラブ可能にする。
+    """
+    cluster_map = get_seam_cluster_map(obj_name)
+    partners = cluster_map.get(int(vert_idx), [])
+    if not partners or vert_idx >= len(coords):
+        return []
+
+    p_v = coords[vert_idx]
+    connected = []
+    for p in partners:
+        if p < len(coords):
+            d = float(np.linalg.norm(coords[p] - p_v))
+            if d <= threshold:
+                connected.append(p)
+    return connected
 
 
 def _gravity_active(settings, scene=None) -> bool:
