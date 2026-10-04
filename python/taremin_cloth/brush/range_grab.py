@@ -144,8 +144,7 @@ class RangeGrabTool(BaseBrushTool):
             # デプスフィルタ: 命中面より奥 (裏面) の頂点を除外する
             try:
                 wpos = np.array(
-                    [(obj.matrix_world @ mathutils.Vector(pos_2d[int(i)])).to_tuple()
-                     for i in np.asarray(found).tolist()],
+                    [tuple(pos_2d[int(i)]) for i in np.asarray(found).tolist()],
                     dtype=np.float32,
                 )
                 keep = depth_keep_mask(wpos, res["origin"], res["direction"], res["hit_t"], radius * 0.5)
@@ -162,6 +161,20 @@ class RangeGrabTool(BaseBrushTool):
             # ウェイトは減衰値そのまま: 中心は完全固定、裾野はソフト追従。
             # 全頂点を 1.0 固定すると裾野が運動学的壁となり周囲へ伝播しない。
             sim.set_pin(v_idx, [init.x, init.y, init.z], float(w))
+
+        # 縫合クラスタパートナーの同期補完:
+        # デプスフィルタ等で脱落した対向側の縫合端点や中継点を同一ウェイトでグラブ対象に含める
+        from ..engine.runner import get_seam_partners
+        cluster_additions = {}
+        for v_idx, (init, w) in list(grab.items()):
+            partners = get_seam_partners(obj.name, v_idx)
+            for p_idx in partners:
+                if p_idx < len(pos_2d) and p_idx not in grab and p_idx not in cluster_additions:
+                    p_pos = pos_2d[p_idx]
+                    p_init = mathutils.Vector((p_pos[0], p_pos[1], p_pos[2]))
+                    cluster_additions[p_idx] = (p_init, float(w))
+                    sim.set_pin(p_idx, [p_init.x, p_init.y, p_init.z], float(w))
+        grab.update(cluster_additions)
         self.grab = grab
         # 単一グラブと同一のビュー平面方式でドラッグする
         try:
@@ -169,7 +182,7 @@ class RangeGrabTool(BaseBrushTool):
             rv3d = ctx.context.region_data
             view_inv = rv3d.view_matrix.inverted()
             camera_forward = -view_inv.to_3x3().col[2].normalized()
-            center_world = obj.matrix_world @ mathutils.Vector(res["center"].tolist())
+            center_world = mathutils.Vector(res["center"].tolist())
             self.plane_point = center_world
             self.plane_normal = camera_forward
             origin, direction = res["origin"], res["direction"]
@@ -211,11 +224,6 @@ class RangeGrabTool(BaseBrushTool):
         t = (self.plane_point - origin).dot(self.plane_normal) / denom
         current_hit = origin + direction * t
         delta_world = current_hit - self.initial_plane_hit
-        try:
-            matrix_inv = obj.matrix_world.inverted()
-            delta_local = matrix_inv.to_3x3() @ delta_world
-        except Exception:
-            return False
         v_ids = list(self.grab.keys())
         try:
             init_mat = np.array(
@@ -224,7 +232,7 @@ class RangeGrabTool(BaseBrushTool):
             w_arr = np.array([self.grab[v][1] for v in v_ids], dtype=np.float32)
             targets = grab_drag_targets(
                 init_mat,
-                np.array([delta_local.x, delta_local.y, delta_local.z], dtype=np.float32),
+                np.array([delta_world.x, delta_world.y, delta_world.z], dtype=np.float32),
                 w_arr, strength)
         except Exception:
             return False

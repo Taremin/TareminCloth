@@ -2139,6 +2139,25 @@ impl ClothSimulator {
         Ok(())
     }
 
+    /// 指定された頂点インデックス群の逆質量 (inv_mass) を動的に更新する (GPUバッファへの即時反映)
+    #[pyo3(signature = (indices, inv_masses))]
+    fn set_vertex_inv_masses(
+        &mut self,
+        indices: PyReadonlyArray1<u32>,
+        inv_masses: PyReadonlyArray1<f32>,
+    ) -> PyResult<()> {
+        let idx_slice = indices.as_slice()?;
+        let inv_m_slice = inv_masses.as_slice()?;
+        self.simulator.set_vertex_inv_masses(idx_slice, inv_m_slice);
+        Ok(())
+    }
+
+    /// 現在の頂点基準逆質量 (original_inv_masses) の配列を取得する
+    fn get_vertex_inv_masses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let masses = self.simulator.get_vertex_inv_masses();
+        Ok(PyArray1::from_vec(py, masses))
+    }
+
     /// 初期状態にリセット
     fn reset(&mut self) {
         self.simulator.reset();

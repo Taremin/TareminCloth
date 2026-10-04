@@ -1837,7 +1837,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     pos_2d = coords.reshape((-1, 3))
                     best_dist = float('inf')
                     for i, p in enumerate(pos_2d):
-                        world_p = obj.matrix_world @ mathutils.Vector(p)
+                        world_p = mathutils.Vector(p)
                         screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_p)
                         if screen_co:
                             dist = (screen_co.x - mouse_pos[0]) ** 2 + (screen_co.y - mouse_pos[1]) ** 2

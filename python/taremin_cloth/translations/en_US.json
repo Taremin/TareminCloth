@@ -775,5 +775,15 @@
   "Enable Wrinkle Field": "Enable Wrinkle Field",
   "Enable stylized wrinkle field forces (Experimental)": "Enable stylized wrinkle field forces (Experimental)",
   "Experimental: Wrinkle field is under tuning": "Experimental: Wrinkle field is under tuning",
-  "Wrinkle Field is experimental. Enable it in Preferences > Experimental Features.": "Wrinkle Field is experimental. Enable it in Preferences > Experimental Features."
+  "Wrinkle Field is experimental. Enable it in Preferences > Experimental Features.": "Wrinkle Field is experimental. Enable it in Preferences > Experimental Features.",
+  "Invalid Sewing Topology Detected:": "Invalid Sewing Topology Detected:",
+  "Seam paths must be a single non-branching path.": "Seam paths must be a single non-branching path.",
+  "Branching detected (degree >= 3):": "Branching detected (degree >= 3):",
+  "Closed cycle detected:": "Closed cycle detected:",
+  "Dangling seam without 2 cloth endpoints:": "Dangling seam without 2 cloth endpoints:",
+  "Too many cloth endpoints connected:": "Too many cloth endpoints connected:",
+  "Invalid seam path topology:": "Invalid seam path topology:",
+  "Zero-area degenerate face(s) detected:": "Zero-area degenerate face(s) detected:",
+  "Please run 'Merge by Distance' to remove degenerate faces": "Please run 'Merge by Distance' to remove degenerate faces",
+  "Mesh Topology Issues": "Mesh Topology Issues"
 }

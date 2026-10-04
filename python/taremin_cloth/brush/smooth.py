@@ -198,8 +198,7 @@ class SmoothTool(BaseBrushTool):
         if len(found) > 0 and res["hit_t"] is not None:
             try:
                 wpos = np.array(
-                    [(obj.matrix_world @ mathutils.Vector(pos_2d[int(i)])).to_tuple()
-                     for i in np.asarray(found).tolist()],
+                    [tuple(pos_2d[int(i)]) for i in np.asarray(found).tolist()],
                     dtype=np.float32,
                 )
                 keep = depth_keep_mask(wpos, res["origin"], res["direction"], res["hit_t"], radius * 0.5)

@@ -41,6 +41,7 @@ STATE_EXCLUDE = {
     "set_wrinkle_field_params",   # ドレープガイド基底・剛性パラメータ
     # 注意: "set_wrinkle_field_profile" は旧1Dパスの残骸であり実装が存在しないため除外した
     "set_wrinkle_field_texture_2d",  # ドレープガイド2D-SDFテクスチャデータ
+    "set_vertex_inv_masses",  # 動的頂点質量・ピン解放 (状態系、SimConfig非依存)
 }
 
 

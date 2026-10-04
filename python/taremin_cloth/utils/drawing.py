@@ -505,9 +505,8 @@ def draw_callback_3d():
                         pass
 
                     if curr_coords_2d is not None and len(curr_coords_2d) >= vert_count:
-                        # 最新のシミュレーション座標をワールド変換
-                        mat_np = np.asarray(world_mat, dtype=np.float32)
-                        coords_world = curr_coords_2d @ mat_np[:3, :3].T + mat_np[:3, 3]
+                        # シミュレータの現在座標はすでにワールド座標系
+                        coords_world = curr_coords_2d
                         for v0_idx, v1_idx in loose_edge_pairs:
                             sew_lines.append(coords_world[v0_idx].tolist())
                             sew_lines.append(coords_world[v1_idx].tolist())

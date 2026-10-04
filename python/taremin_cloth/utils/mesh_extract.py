@@ -16,6 +16,20 @@ except Exception:
     _RUST_AREAL = False
 
 
+from dataclasses import dataclass
+from .logger import logger
+from .validation import detect_degenerate_faces, validate_sewing_topology
+
+
+@dataclass
+class WaypointSeam:
+    """中継点（Waypoint）を持つ縫合パス（折れ線スプリング）"""
+    vert_a: int                      # 布面頂点Aのインデックス
+    vert_b: int                      # 布面頂点Bのインデックス
+    waypoint_indices: list[int]      # 中継点頂点インデックス列 [W1, W2, ..., Wk] (順序付き)
+    waypoint_coords: np.ndarray      # 中継点の初期3D座標列 [K, 3], float32
+
+
 class ClothMeshData(NamedTuple):
     """布シミュレーション初期化に必要なメッシュデータコンテナ"""
     positions: np.ndarray          # shape [N, 3], float32
@@ -24,6 +38,8 @@ class ClothMeshData(NamedTuple):
     sewing_edges: Optional[np.ndarray]  # shape [S, 2], uint32 (存在しない場合は None)
     inv_masses: np.ndarray         # shape [N], float32
     layer_ids: Optional[np.ndarray] = None  # shape [N], uint32 (存在しない場合は None)
+    waypoint_seams: Optional[list] = None   # list[WaypointSeam] (存在しない場合は None)
+    seam_cluster_map: Optional[dict[int, list[int]]] = None  # 頂点インデックス -> 同一縫合クラスタの他頂点リスト (存在しない場合は None)
 
 
 def extract_mesh_vertices_and_triangles(mesh) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -169,7 +185,12 @@ def get_pin_weights(obj, settings=None, n_verts: Optional[int] = None) -> np.nda
     return weights
 
 
-def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = None) -> ClothMeshData:
+def extract_cloth_mesh_data(
+    obj,
+    settings=None,
+    enable_sewing: Optional[bool] = None,
+    apply_world_matrix: bool = True,
+) -> ClothMeshData:
     """
     Blenderメッシュオブジェクトから布シミュレータ初期化に必要な全データを一括抽出・分類する。
     
@@ -177,6 +198,7 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
         obj: bpy.types.Object (type == 'MESH')
         settings: オブジェクトの taremin_cloth プロパティ（未指定時は obj.taremin_cloth を自動参照）
         enable_sewing: 縫合エッジを分離するか（未指定時は settings.enable_sewing を参照）
+        apply_world_matrix: 頂点座標に obj.matrix_world を適用してワールド座標系に変換するか（デフォルト True）
     Returns:
         ClothMeshData: (positions, normal_edges, faces, sewing_edges, inv_masses)
     """
@@ -188,6 +210,15 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
     coords = np.empty(n_verts * 3, dtype=np.float32)
     mesh.vertices.foreach_get("co", coords)
     pos_2d = coords.reshape((n_verts, 3))
+
+    # ワールド座標系への変換 (コライダーや重力と空間を一致させる)
+    if apply_world_matrix and hasattr(obj, "matrix_world"):
+        try:
+            mat = np.array(obj.matrix_world, dtype=np.float32)
+            if mat.ndim == 2 and mat.shape == (4, 4):
+                pos_2d = (pos_2d @ mat[:3, :3].T) + mat[:3, 3]
+        except (ValueError, TypeError):
+            pass
 
     mesh.calc_loop_triangles()
     tri_list = [tri.vertices for tri in mesh.loop_triangles]
@@ -205,6 +236,21 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
             face_edge_set.add((min(f[1], f[2]), max(f[1], f[2])))
             face_edge_set.add((min(f[2], f[0]), max(f[2], f[0])))
 
+    # 面積0の縮退三角形の検出とシミュレーション用面からの除外
+    if faces_2d is not None and len(faces_2d) > 0:
+        degen_report = detect_degenerate_faces(pos_2d, faces_2d, mesh=mesh)
+        if degen_report.degenerate_tri_count > 0:
+            logger.warning(
+                f"Mesh '{getattr(obj, 'name', 'Cloth')}' has {degen_report.degenerate_tri_count} "
+                "degenerate triangle(s) with area ~ 0. "
+                "Excluding them from simulation faces to prevent numerical instability."
+            )
+            keep_mask = np.ones(len(faces_2d), dtype=bool)
+            keep_mask[degen_report.degenerate_tri_indices] = False
+            faces_2d = faces_2d[keep_mask]
+            if len(faces_2d) == 0:
+                faces_2d = None
+
     normal_edges = []
     sewing_edges = []
 
@@ -221,7 +267,21 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
                 normal_edges.append(e)
 
     edges_2d = np.array(normal_edges, dtype=np.uint32) if normal_edges else np.empty((0, 2), dtype=np.uint32)
-    sew_2d = np.array(sewing_edges, dtype=np.uint32) if sewing_edges else None
+
+    # 縫合エッジ（Loose Edges）から直線エッジとウェイポイント縫合パスを分類
+    simple_sewing, waypoint_seams = extract_sewing_topology(sewing_edges, faces_2d, pos_2d)
+
+    # 直線縫合と中継点パスの各セグメントを展開・統合
+    all_sewing = list(simple_sewing)
+    if waypoint_seams:
+        for ws in waypoint_seams:
+            all_sewing.append((ws.vert_a, ws.waypoint_indices[0]))
+            for k in range(len(ws.waypoint_indices) - 1):
+                all_sewing.append((ws.waypoint_indices[k], ws.waypoint_indices[k + 1]))
+            all_sewing.append((ws.vert_b, ws.waypoint_indices[-1]))
+
+    sew_2d = np.array(all_sewing, dtype=np.uint32) if all_sewing else None
+
 
     inv_masses = get_pin_inv_masses(obj, settings, n_verts)
     try:
@@ -232,7 +292,15 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
         pin_weights = get_pin_weights(obj, settings, n_verts)
         inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights, density)
 
+    # 中継点頂点（面を持たないガイディング頂点）は静止ガイドとして inv_mass = 0.0 に固定
+    if waypoint_seams:
+        for ws in waypoint_seams:
+            for wp_idx in ws.waypoint_indices:
+                if wp_idx < len(inv_masses):
+                    inv_masses[wp_idx] = 0.0
+
     layer_ids = get_cloth_layer_ids(obj, settings, n_verts, faces_2d)
+    seam_cluster_map = build_seam_cluster_map(simple_sewing, waypoint_seams) if (simple_sewing or waypoint_seams) else None
 
     return ClothMeshData(
         positions=pos_2d,
@@ -241,7 +309,158 @@ def extract_cloth_mesh_data(obj, settings=None, enable_sewing: Optional[bool] = 
         sewing_edges=sew_2d,
         inv_masses=inv_masses,
         layer_ids=layer_ids,
+        waypoint_seams=waypoint_seams if waypoint_seams else None,
+        seam_cluster_map=seam_cluster_map,
     )
+
+
+def build_seam_cluster_map(
+    simple_sewing_edges: Optional[list[tuple[int, int]]],
+    waypoint_seams: Optional[list[WaypointSeam]],
+) -> dict[int, list[int]]:
+    """縫合エッジおよび中継点縫合パスから、各頂点に対応する縫合パートナー頂点群のマップを構築する。
+
+    戻り値:
+        dict[int, list[int]]: 頂点インデックス -> その頂点と同一縫合線上にある他の頂点インデックスのリスト
+    """
+    clusters = []
+    if simple_sewing_edges:
+        for v0, v1 in simple_sewing_edges:
+            clusters.append({int(v0), int(v1)})
+
+    if waypoint_seams:
+        for ws in waypoint_seams:
+            cluster = {int(ws.vert_a), int(ws.vert_b)}
+            for wp in ws.waypoint_indices:
+                cluster.add(int(wp))
+            clusters.append(cluster)
+
+    partner_map: dict[int, list[int]] = {}
+    for cluster in clusters:
+        for v in cluster:
+            partners = [p for p in cluster if p != v]
+            if v in partner_map:
+                existing = set(partner_map[v])
+                for p in partners:
+                    if p not in existing:
+                        partner_map[v].append(p)
+            else:
+                partner_map[v] = partners
+
+    return partner_map
+
+
+def extract_sewing_topology(
+    loose_edges: list,
+    faces_2d: Optional[np.ndarray],
+    positions: np.ndarray,
+) -> tuple[list[tuple[int, int]], list[WaypointSeam]]:
+    """面を持たないエッジ（Loose Edges）から直線縫合エッジとウェイポイント付き縫合パスを分類・抽出する。
+
+    Args:
+        loose_edges: 面を持たないエッジ [(u, v), ...] のリスト
+        faces_2d: 三角形インデックス配列 [F, 3] または None
+        positions: 頂点座標配列 [N, 3]
+
+    Returns:
+        simple_sewing_edges: 単純直線縫合エッジ [(v0, v1), ...]
+        waypoint_seams: 中継点を持つ縫合パス [WaypointSeam, ...]
+    """
+    if not loose_edges:
+        return [], []
+
+    face_vertex_set = set()
+    if faces_2d is not None and len(faces_2d) > 0:
+        for f in faces_2d:
+            face_vertex_set.add(int(f[0]))
+            face_vertex_set.add(int(f[1]))
+            face_vertex_set.add(int(f[2]))
+
+    topo_report = validate_sewing_topology(loose_edges, face_vertex_set)
+    if topo_report.has_issues:
+        for issue in topo_report.branching_issues:
+            logger.warning(
+                f"Invalid sewing topology ({issue.issue_type}): {issue.message}. "
+                "Excluding invalid seam component from simulation to guarantee single-path seams."
+            )
+
+    from collections import defaultdict
+    adj = defaultdict(set)
+    for e in loose_edges:
+        u, v = int(e[0]), int(e[1])
+        if u != v:
+            adj[u].add(v)
+            adj[v].add(u)
+
+    visited = set()
+    simple_edges = []
+    waypoint_seams = []
+
+    for v in list(adj.keys()):
+        if v in visited:
+            continue
+        # 連結成分を探索 (BFS)
+        comp = []
+        queue = [v]
+        visited.add(v)
+        while queue:
+            curr = queue.pop(0)
+            comp.append(curr)
+            for neighbor in adj[curr]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+
+        # 連結成分内の面頂点（布端点）と中継点を分類
+        endpoints = [x for x in comp if x in face_vertex_set]
+        internal = [x for x in comp if x not in face_vertex_set]
+
+        # ケース 1: 単一エッジで両端が面頂点（通常の直接縫合）
+        if len(comp) == 2 and len(endpoints) == 2 and len(internal) == 0:
+            simple_edges.append((endpoints[0], endpoints[1]))
+            continue
+
+        # ケース 2: 両端が面頂点、中間が面を持たない頂点の単純パス（A - W1 - ... - Wk - B）
+        if len(endpoints) == 2 and len(internal) >= 1:
+            # 始点と終点の次数が1、中間の全頂点の次数が2であることを検証
+            deg_ok = (len(adj[endpoints[0]]) == 1 and
+                      len(adj[endpoints[1]]) == 1 and
+                      all(len(adj[m]) == 2 for m in internal))
+            if deg_ok:
+                # endpoints[0] から順序付けられたパスを辿る
+                start = endpoints[0]
+                goal = endpoints[1]
+                path = [start]
+                prev = None
+                curr = start
+                while curr != goal:
+                    nxt_candidates = [n for n in adj[curr] if n != prev]
+                    if not nxt_candidates:
+                        break
+                    nxt = nxt_candidates[0]
+                    path.append(nxt)
+                    prev = curr
+                    curr = nxt
+
+                if path[-1] == goal and len(path) == len(comp) and len(path) >= 3:
+                    wp_indices = path[1:-1]
+                    wp_coords = positions[wp_indices].astype(np.float32)
+                    waypoint_seams.append(WaypointSeam(
+                        vert_a=start,
+                        vert_b=goal,
+                        waypoint_indices=wp_indices,
+                        waypoint_coords=wp_coords,
+                    ))
+                    continue
+
+        # ケース 3: 不正トポロジー（枝分かれ、閉路、宙ぶらりん、複数端点等）
+        # 単一経路の保証を満たさないため、シミュレーション対象から安全に除外
+        logger.warning(
+            f"Excluding invalid seam component with vertices {comp} (endpoints: {endpoints}) "
+            "from simulation because it does not form a valid single-path seam."
+        )
+
+    return simple_edges, waypoint_seams
 
 
 def get_cloth_layer_ids(

@@ -11,6 +11,7 @@ from taremin_cloth.utils.mesh_extract import (
     ClothMeshData,
     extract_cloth_mesh_data,
     extract_mesh_vertices_and_triangles,
+    extract_sewing_topology,
     get_pin_inv_masses,
     get_cloth_layer_ids,
     get_mesh_face_layers_summary,
@@ -222,6 +223,27 @@ class TestMeshExtract(unittest.TestCase):
         self.assertEqual(summary["domain"], 'FACE')
         self.assertEqual(summary["unique_layers"], [0, 2])
         self.assertEqual(summary["count"], 2)
+
+    def test_extract_cloth_mesh_data_excludes_degenerate_faces(self):
+        """面積0の縮退三角形がシミュレーション用面データから安全に除外されること"""
+        lt0 = MagicMock(); lt0.vertices = (0, 1, 2)
+        lt1 = MagicMock(); lt1.vertices = (0, 1, 0)  # 同一頂点を含む面積0の面
+        self.mock_mesh.loop_triangles = [lt0, lt1]
+
+        data = extract_cloth_mesh_data(self.mock_obj)
+        self.assertIsNotNone(data.faces)
+        self.assertEqual(len(data.faces), 1)
+        np.testing.assert_array_equal(data.faces[0], [0, 1, 2])
+
+    def test_extract_sewing_topology_excludes_branching(self):
+        """枝分かれした縫合線が単一経路保証のために除外されること"""
+        loose_edges = [(0, 1), (1, 2), (1, 3)]
+        faces_2d = np.array([[0, 10, 11], [2, 12, 13], [3, 14, 15]], dtype=np.uint32)
+        positions = np.zeros((16, 3), dtype=np.float32)
+
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d, positions)
+        self.assertEqual(len(simple), 0)
+        self.assertEqual(len(waypoints), 0)
 
 
 if __name__ == "__main__":

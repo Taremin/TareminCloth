@@ -22,11 +22,13 @@ class SingleGrabTool(BaseBrushTool):
 
     def reset(self):
         self.grabbed_vert = None
-        self.grab_initial_pos_local = None
+        self.grabbed_cluster = []
+        self.grab_initial_positions = {}
+        self.grab_initial_pos_world = None
         self.grab_plane_point = None
         self.grab_plane_normal = None
         self.grab_initial_plane_hit = None
-        self.grab_current_target_local = None
+        self.grab_current_target_world = None
 
     @property
     def dragging(self):
@@ -68,7 +70,7 @@ class SingleGrabTool(BaseBrushTool):
         if best_idx is None:
             best_dist = float('inf')
             for i, p in enumerate(pos_2d):
-                world_p = obj.matrix_world @ mathutils.Vector(p)
+                world_p = mathutils.Vector(p)
                 screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_p)
                 if screen_co:
                     dist = (screen_co.x - mouse_pos[0]) ** 2 + (screen_co.y - mouse_pos[1]) ** 2
@@ -81,8 +83,7 @@ class SingleGrabTool(BaseBrushTool):
 
         self.grabbed_vert = best_idx
         p = pos_2d[best_idx]
-        v_initial_local = mathutils.Vector((p[0], p[1], p[2]))
-        v_initial_world = obj.matrix_world @ v_initial_local
+        v_initial_world = mathutils.Vector((p[0], p[1], p[2]))
 
         # カメラの視線前方向ベクトルを取得（ビュー平面の法線）
         view_inv = rv3d.view_matrix.inverted()
@@ -91,8 +92,8 @@ class SingleGrabTool(BaseBrushTool):
         # ビュー平面の通過点は「選択された頂点自身のワールド位置」
         self.grab_plane_point = v_initial_world
         self.grab_plane_normal = camera_forward
-        self.grab_initial_pos_local = v_initial_local
-        self.grab_current_target_local = v_initial_local
+        self.grab_initial_pos_world = v_initial_world
+        self.grab_current_target_world = v_initial_world
 
         # クリック時のレイとビュー平面との初期交点を計算・記録
         denom = direction.dot(camera_forward)
@@ -102,7 +103,19 @@ class SingleGrabTool(BaseBrushTool):
         else:
             self.grab_initial_plane_hit = v_initial_world
 
-        sim.set_pin(best_idx, [p[0], p[1], p[2]], 1.0)
+        # 縫合クラスタ（対向端点や中継点）の同期ピン留め
+        from ..engine.runner import get_seam_partners
+        partners = get_seam_partners(obj.name, best_idx)
+        all_grabbed = [best_idx] + [p for p in partners if p < len(pos_2d) and p != best_idx]
+        self.grabbed_cluster = all_grabbed
+
+        self.grab_initial_positions = {}
+        for v in all_grabbed:
+            pv = pos_2d[v]
+            init_v = mathutils.Vector((pv[0], pv[1], pv[2]))
+            self.grab_initial_positions[v] = init_v
+            sim.set_pin(v, [pv[0], pv[1], pv[2]], 1.0)
+
         drawing.set_active_grabbed_vertex(obj.name, best_idx, v_initial_world)
         return True
 
@@ -114,7 +127,7 @@ class SingleGrabTool(BaseBrushTool):
         if not (region and rv3d):
             return False
         if (self.grab_plane_point is None or self.grab_plane_normal is None
-                or self.grab_initial_plane_hit is None or self.grab_initial_pos_local is None):
+                or self.grab_initial_plane_hit is None or getattr(self, "grab_initial_pos_world", None) is None):
             return False
         obj, sim = ctx.obj, ctx.sim
         mouse_pos = ctx.mouse_pos
@@ -138,38 +151,38 @@ class SingleGrabTool(BaseBrushTool):
         # ビュー平面上のワールド移動差分（オフセット）
         delta_world = current_plane_hit - self.grab_initial_plane_hit
 
-        # オブジェクトローカル空間の移動差分に変換
-        matrix_inv = obj.matrix_world.inverted()
-        delta_local = matrix_inv.to_3x3() @ delta_world
+        # 目標のワールド頂点位置にオフセットを加算
+        target_world = self.grab_initial_pos_world + delta_world
+        self.grab_current_target_world = target_world
 
-        # 初期のローカル頂点位置にオフセットを加算
-        target_pos_local = self.grab_initial_pos_local + delta_local
-        self.grab_current_target_local = target_pos_local
-        sim.set_pin(self.grabbed_vert, [target_pos_local.x, target_pos_local.y, target_pos_local.z], 1.0)
-        target_world = obj.matrix_world @ target_pos_local
+        # クラスタ内の全頂点に同一オフセットを適用してピン位置更新
+        for v in getattr(self, "grabbed_cluster", [self.grabbed_vert]):
+            init_v = self.grab_initial_positions.get(v, self.grab_initial_pos_world)
+            t_v = init_v + delta_world
+            sim.set_pin(v, [t_v.x, t_v.y, t_v.z], 1.0)
+
         drawing.set_active_grabbed_vertex(obj.name, self.grabbed_vert, target_world)
         return True
 
     def on_release(self, ctx, pinned_verts):
         if self.grabbed_vert is None:
             return False
-        # NOTE: クリック/ドラッグ区別が必要になった場合は
-        # utils.modal_event.PressDragTracker の on_release() 結果
-        # ("click" | "drag") で分岐する。現状は挙動変更なし。
         # ピン留めされていない頂点のみ物理解放
-        if self.grabbed_vert not in pinned_verts:
-            try:
-                ctx.sim.release_pin(self.grabbed_vert)
-            except Exception:
-                pass
+        for v in getattr(self, "grabbed_cluster", [self.grabbed_vert]):
+            if v not in pinned_verts:
+                try:
+                    ctx.sim.release_pin(v)
+                except Exception:
+                    pass
         drawing.clear_active_grabbed_vertex()
         self.reset()
         return True
 
     def abort(self, sim, pinned_verts):
-        if self.grabbed_vert is not None and self.grabbed_vert not in pinned_verts:
-            try:
-                sim.release_pin(self.grabbed_vert)
-            except Exception:
-                pass
+        for v in getattr(self, "grabbed_cluster", []):
+            if v not in pinned_verts:
+                try:
+                    sim.release_pin(v)
+                except Exception:
+                    pass
         self.reset()

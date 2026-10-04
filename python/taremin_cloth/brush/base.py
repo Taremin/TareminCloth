@@ -97,7 +97,7 @@ class BaseBrushTool:
 
 
 def resolve_brush_center(context, obj, coords, mouse_pos):
-    """ブラシ中心 (ローカル) とレイ情報の解決。レイ外れ時は最近傍頂点にフォールバックする"""
+    """ブラシ中心 (ワールド) とレイ情報の解決。レイ外れ時は最近傍頂点にフォールバックする"""
     region = context.region
     rv3d = context.region_data
     if not (region and rv3d):
@@ -106,7 +106,7 @@ def resolve_brush_center(context, obj, coords, mouse_pos):
     direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse_pos)
     if not (origin and direction):
         return None
-    center_local = None
+    center_world = None
     hit_t = None
     try:
         matrix_inv = obj.matrix_world.inverted()
@@ -114,17 +114,17 @@ def resolve_brush_center(context, obj, coords, mouse_pos):
         ray_d = (matrix_inv.to_3x3() @ direction).normalized()
         hit, hit_loc, _, _ = obj.ray_cast(ray_o, ray_d)
         if hit:
-            center_local = np.array(hit_loc, dtype=np.float32)
             hit_world = obj.matrix_world @ mathutils.Vector(hit_loc)
+            center_world = np.array([hit_world.x, hit_world.y, hit_world.z], dtype=np.float32)
             hit_t = float((hit_world - origin).dot(direction))
     except Exception:
-        center_local = None
+        center_world = None
     pos_2d = np.asarray(coords, dtype=np.float32).reshape((-1, 3))
-    if center_local is None:
+    if center_world is None:
         try:
             best_idx, best_d = None, float('inf')
             for i, p in enumerate(pos_2d):
-                world_p = obj.matrix_world @ mathutils.Vector(p)
+                world_p = mathutils.Vector(p)
                 screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_p)
                 if screen_co:
                     d = (screen_co.x - mouse_pos[0]) ** 2 + (screen_co.y - mouse_pos[1]) ** 2
@@ -132,11 +132,11 @@ def resolve_brush_center(context, obj, coords, mouse_pos):
                         best_d, best_idx = d, i
             if best_idx is None:
                 return None
-            center_local = pos_2d[best_idx]
+            center_world = pos_2d[best_idx]
         except Exception:
             return None
     return {
-        "center": center_local,
+        "center": center_world,
         "origin": origin,
         "direction": direction,
         "hit_t": hit_t,
@@ -144,12 +144,12 @@ def resolve_brush_center(context, obj, coords, mouse_pos):
     }
 
 
-def update_brush_circle(context, obj, center_local, radius, mouse_pos):
+def update_brush_circle(context, obj, center, radius, mouse_pos):
     """ブラシカーソル円を更新する"""
     region = context.region
     rv3d = context.region_data
     try:
-        _center_world = obj.matrix_world @ mathutils.Vector(np.asarray(center_local).tolist())
+        _center_world = mathutils.Vector(np.asarray(center).tolist())
         _c2d = view3d_utils.location_3d_to_region_2d(region, rv3d, _center_world)
         _radius_px = 40.0
         if _c2d is not None:

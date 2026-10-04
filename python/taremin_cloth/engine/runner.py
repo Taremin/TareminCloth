@@ -14,6 +14,9 @@ from .cache import (
     _collider_prev_locs_cache,
     _timeline_frame_cache,
     _buffered_start_frames,
+    _waypoint_managers,
+    set_seam_cluster_map,
+    get_seam_cluster_map,
     cache_rest_positions,
     restore_rest_positions,
     clear_simulators,
@@ -104,7 +107,14 @@ def begin_simulator_init(obj):
     if is_deformed and "_taremin_cloth_rest_positions" in obj:
         raw_rest = obj["_taremin_cloth_rest_positions"]
         if len(raw_rest) == n_verts * 3 * 4:
-            rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3))
+            rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3)).copy()
+            if hasattr(obj, "matrix_world"):
+                try:
+                    mat = np.array(obj.matrix_world, dtype=np.float32)
+                    if mat.ndim == 2 and mat.shape == (4, 4):
+                        rest_pos_2d = (rest_pos_2d @ mat[:3, :3].T) + mat[:3, 3]
+                except (ValueError, TypeError, AttributeError):
+                    pass
 
     return {
         "cached": False,
@@ -121,6 +131,8 @@ def begin_simulator_init(obj):
         "compact_rb": compact_rb,
         "rest_pos_2d": rest_pos_2d,
         "sim_init_pos": rest_pos_2d if rest_pos_2d is not None else pos_2d,
+        "waypoint_seams": cloth_data.waypoint_seams,
+        "seam_cluster_map": cloth_data.seam_cluster_map,
     }
 
 
@@ -187,6 +199,18 @@ def finalize_simulator_init(obj, sim, state, scene=None):
     sync_colliders(sim, sc, cloth_obj=obj)
     sync_cloth_parameters(sim, obj, sc)
 
+    if state.get("waypoint_seams"):
+        from .waypoint import WaypointManager
+        _waypoint_managers[obj.name] = WaypointManager(
+            waypoint_seams=state["waypoint_seams"],
+            initial_inv_masses=state["inv_masses"],
+            merge_dist=max(0.01, float(thickness) * 2.0),
+            pass_dist=max(0.015, float(thickness) * 3.0),
+        )
+
+    if state.get("seam_cluster_map"):
+        set_seam_cluster_map(obj.name, state["seam_cluster_map"])
+
     _simulators[obj.name] = (sim, coords)
     n_faces = len(faces_2d) if faces_2d is not None else 0
     logger.debug(f"[Simulator] Initialized ClothSimulator for '{obj.name}' (verts={len(pos_2d)}, faces={n_faces})")
@@ -201,6 +225,12 @@ def get_or_create_simulator(obj):
     state = begin_simulator_init(obj)
     sim = create_simulator_from_state(obj, state)
     return finalize_simulator_init(obj, sim, state)
+
+
+def get_seam_partners(obj_name: str, vert_idx: int) -> list[int]:
+    """オブジェクトの縫合クラスタマップから指定頂点のパートナー頂点一覧を取得する"""
+    cluster_map = get_seam_cluster_map(obj_name)
+    return cluster_map.get(int(vert_idx), [])
 
 
 def _gravity_active(settings, scene=None) -> bool:
@@ -354,9 +384,28 @@ def step_cloth_object(
 
     if update_mesh:
         sim.get_positions(coords)
-        obj.data.vertices.foreach_set("co", coords)
+        pos_world = coords.reshape(-1, 3)
+        pos_local = None
+        if hasattr(obj, "matrix_world"):
+            try:
+                inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
+                if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                    pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
+            except (ValueError, TypeError, AttributeError):
+                pos_local = None
+        if pos_local is not None:
+            obj.data.vertices.foreach_set("co", pos_local.flatten())
+        else:
+            obj.data.vertices.foreach_set("co", coords)
         obj.data.update()
         obj["_taremin_cloth_is_deformed"] = True
+
+    # 中継点縫合の動的通過＆結合完了時ピン解放判定
+    wp_mgr = _waypoint_managers.get(obj.name)
+    if wp_mgr and wp_mgr.has_active_seams:
+        if not update_mesh:
+            sim.get_positions(coords)
+        wp_mgr.update(coords, sim=sim)
 
     return sim, coords
 
@@ -624,7 +673,18 @@ def bake_step_frame(bake_ctx, frame):
             substeps=actual_substeps,
             solver_iterations=settings.solver_iterations,
         )
-        _timeline_frame_cache[obj.name][frame] = coords.copy()
+        local_coords = None
+        if hasattr(obj, "matrix_world"):
+            try:
+                inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
+                if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                    local_coords = ((pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]).flatten()
+            except (ValueError, TypeError, AttributeError):
+                local_coords = None
+        if local_coords is not None:
+            _timeline_frame_cache[obj.name][frame] = local_coords
+        else:
+            _timeline_frame_cache[obj.name][frame] = coords.copy()
         obj["_taremin_cloth_is_deformed"] = True
 
     bake_ctx["baked_count"] += 1

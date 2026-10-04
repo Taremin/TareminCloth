@@ -33,6 +33,23 @@ _cloth_param_signatures = {}
 _attachment_pin_indices_cache = {}
 # アタッチメントピンの前回ローカルターゲット位置キャッシュ (obj_name -> (local_target_tuple, target_mat_tuple))
 _prev_attachment_pin_targets = {}
+# 中継点縫合コントローラーキャッシュ (obj_name -> WaypointManager)
+_waypoint_managers = {}
+# 縫合クラスタマップキャッシュ (obj_name -> dict[int, list[int]])
+_seam_cluster_maps = {}
+
+
+def get_seam_cluster_map(obj_name: str) -> dict[int, list[int]]:
+    """オブジェクトの縫合クラスタマップ (頂点 -> パートナー頂点群) を取得する"""
+    return _seam_cluster_maps.get(obj_name, {})
+
+
+def set_seam_cluster_map(obj_name: str, cluster_map: dict[int, list[int]]):
+    """オブジェクトの縫合クラスタマップをキャッシュに登録する"""
+    if cluster_map:
+        _seam_cluster_maps[obj_name] = cluster_map
+    else:
+        _seam_cluster_maps.pop(obj_name, None)
 
 
 def _get_mesh_topology_signature(mesh):
@@ -170,7 +187,7 @@ def restore_rest_positions(obj, clear=False, clear_timeline=True):
 def clear_simulator_for_object(obj_name, clear_timeline=True):
     """特定オブジェクトに対応するシミュレータおよび関連キャッシュを破棄する"""
     global _simulators, _prev_coords_cache, _mesh_char_len_cache
-    global _effective_substeps_cache, _prev_elastic_scales
+    global _effective_substeps_cache, _prev_elastic_scales, _waypoint_managers, _seam_cluster_maps
     had_sim = obj_name in _simulators
     _simulators.pop(obj_name, None)
     _prev_coords_cache.pop(obj_name, None)
@@ -179,6 +196,8 @@ def clear_simulator_for_object(obj_name, clear_timeline=True):
     _collider_prev_locs_cache.pop(obj_name, None)
     _prev_elastic_scales.pop(obj_name, None)
     _prev_attachment_pin_targets.pop(obj_name, None)
+    _waypoint_managers.pop(obj_name, None)
+    _seam_cluster_maps.pop(obj_name, None)
     purge_applied_signature(obj_name)
     for k in list(_attachment_pin_indices_cache.keys()):
         if isinstance(k, tuple) and k[0] == obj_name:
@@ -198,7 +217,7 @@ def clear_simulators():
     global _simulators, _prev_coords_cache
     global _mesh_char_len_cache, _effective_substeps_cache, _collider_prev_locs_cache
     global _prev_elastic_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
-    global _attachment_pin_indices_cache, _prev_attachment_pin_targets
+    global _attachment_pin_indices_cache, _prev_attachment_pin_targets, _waypoint_managers, _seam_cluster_maps
     restore_fast_playback()
     clear_collider_cache()
     purge_applied_signature(None)
@@ -214,6 +233,8 @@ def clear_simulators():
     _cloth_param_signatures.clear()
     _attachment_pin_indices_cache.clear()
     _prev_attachment_pin_targets.clear()
+    _waypoint_managers.clear()
+    _seam_cluster_maps.clear()
     logger.debug(f"[Simulator] Cleared all {count} simulators and caches")
 
 

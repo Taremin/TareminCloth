@@ -2215,6 +2215,34 @@ impl GpuClothSimulator {
         self.upload_pins();
     }
 
+    /// 特定頂点の逆質量 (inv_mass) を動的に更新する (GPUバッファへの即時反映)。
+    /// original_inv_masses も更新され、動的ピン解除時の基準値となる。
+    pub fn set_vertex_inv_masses(&mut self, indices: &[u32], inv_masses: &[f32]) {
+        let count = indices.len().min(inv_masses.len());
+        for i in 0..count {
+            let v_idx = indices[i];
+            let inv_m = inv_masses[i];
+            if (v_idx as usize) < self.num_vertices as usize {
+                if (v_idx as usize) < self.original_inv_masses.len() {
+                    self.original_inv_masses[v_idx as usize] = inv_m;
+                }
+                let effective_inv_m = if let Some(pin) = self.dynamic_pins.get(&v_idx) {
+                    let clamped_w = if pin.weight.is_finite() { pin.weight.clamp(0.0, 1.0) } else { 0.0 };
+                    inv_m * (1.0 - clamped_w)
+                } else {
+                    inv_m
+                };
+                let offset = (v_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+                self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&effective_inv_m));
+            }
+        }
+    }
+
+    /// 頂点の現在の基準逆質量 (original_inv_masses) を取得する
+    pub fn get_vertex_inv_masses(&self) -> Vec<f32> {
+        self.original_inv_masses.clone()
+    }
+
     pub(crate) fn upload_pins(&self) {
         let pin_vec: Vec<GpuPinConstraint> = self.dynamic_pins.values().copied().collect();
         let num_pins = pin_vec.len() as u32;

@@ -775,5 +775,15 @@
   "Enable Wrinkle Field": "ドレープガイドを有効化",
   "Enable stylized wrinkle field forces (Experimental)": "スタイライズドな折り目のドレープガイド外力を有効化します（実験的機能）",
   "Experimental: Wrinkle field is under tuning": "実験的機能: ドレープガイドは調整中です",
-  "Wrinkle Field is experimental. Enable it in Preferences > Experimental Features.": "ドレープガイドは実験的機能です。プリファレンス > 実験的機能で有効化してください。"
+  "Wrinkle Field is experimental. Enable it in Preferences > Experimental Features.": "ドレープガイドは実験的機能です。プリファレンス > 実験的機能で有効化してください。",
+  "Invalid Sewing Topology Detected:": "不正な縫合トポロジーが検出されました:",
+  "Seam paths must be a single non-branching path.": "縫合線は枝分かれや閉路のない単一経路である必要があります。",
+  "Branching detected (degree >= 3):": "枝分かれが検出されました (次数3以上):",
+  "Closed cycle detected:": "閉ループ (閉路) が検出されました:",
+  "Dangling seam without 2 cloth endpoints:": "宙ぶらりんのエッジが検出されました (端点が不足):",
+  "Too many cloth endpoints connected:": "3つ以上の布端点に接続されています:",
+  "Invalid seam path topology:": "不正な縫合パス構造です:",
+  "Zero-area degenerate face(s) detected:": "初期面積0の縮退面が検出されました:",
+  "Please run 'Merge by Distance' to remove degenerate faces": "「距離でマージ」を実行して縮退面を削除してください",
+  "Mesh Topology Issues": "メッシュトポロジーの警告・エラー"
 }

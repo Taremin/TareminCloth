@@ -2,6 +2,7 @@ import bpy
 from . import i18n
 from .operators import is_interactive_running
 from .utils import topology
+from .utils.validation import validate_cloth_mesh
 
 
 def _sewing_priority_status_text(obj):
@@ -74,6 +75,41 @@ def _draw_diagnostics_box(layout, context):
     row_log = box_diag.row(align=True)
     row_log.label(text=i18n.trans("Log Level:"), icon='CONSOLE')
     row_log.prop(prefs, "log_level", text="")
+
+
+def _draw_mesh_validation_warnings(layout, obj):
+    """メッシュの縮退面や縫合トポロジー異常の警告ボックスを描画する共通ヘルパー"""
+    v_report = validate_cloth_mesh(obj)
+    if not v_report or not (v_report.has_warnings or v_report.has_errors):
+        return
+
+    box = layout.box()
+    box.alert = True
+    box.label(text=i18n.trans("Mesh Topology Issues"), icon='ERROR')
+
+    if v_report.has_errors:
+        box.label(text=i18n.trans("Invalid Sewing Topology Detected:"), icon='ERROR')
+        for issue in v_report.sewing_topology.branching_issues:
+            if issue.issue_type == "branching":
+                box.label(text=f"  {i18n.trans('Branching detected (degree >= 3):')} {issue.vertices}")
+            elif issue.issue_type == "cycle":
+                box.label(text=f"  {i18n.trans('Closed cycle detected:')} {issue.vertices}")
+            elif issue.issue_type == "dangling":
+                box.label(text=f"  {i18n.trans('Dangling seam without 2 cloth endpoints:')} {issue.vertices}")
+            elif issue.issue_type == "multi_endpoints":
+                box.label(text=f"  {i18n.trans('Too many cloth endpoints connected:')} {issue.vertices}")
+            else:
+                box.label(text=f"  {i18n.trans('Invalid seam path topology:')} {issue.vertices}")
+        box.label(text=i18n.trans("Seam paths must be a single non-branching path."), icon='INFO')
+
+    if v_report.has_warnings:
+        deg = v_report.degenerate_faces
+        deg_count = deg.zero_area_poly_count or deg.degenerate_tri_count
+        box.label(
+            text=f"{i18n.trans('Zero-area degenerate face(s) detected:')} {deg_count}",
+            icon='ERROR',
+        )
+        box.label(text=i18n.trans("Please run 'Merge by Distance' to remove degenerate faces"), icon='INFO')
 
 
 class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
@@ -305,12 +341,12 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             layout.label(text=i18n.trans("Please select a mesh object"), icon='INFO')
             return
 
-        # スケール未適用警告 (Scale != 1.0)
+        # 非均等スケール警告 (Non-uniform Scale: Scale.x != Scale.y or Scale.y != Scale.z)
         scale = obj.scale
-        if abs(scale.x - 1.0) > 1e-3 or abs(scale.y - 1.0) > 1e-3 or abs(scale.z - 1.0) > 1e-3:
+        if abs(scale.x - scale.y) > 1e-3 or abs(scale.y - scale.z) > 1e-3:
             box_warn = layout.box()
-            box_warn.alert = True
-            box_warn.label(text=f"{i18n.trans('Unapplied Scale:')} ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='ERROR')
+            box_warn.alert = False
+            box_warn.label(text=f"{i18n.trans('Unapplied Scale:')} ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='INFO')
             box_warn.label(text=i18n.trans("Please apply scale to avoid simulation instability"))
             op_scale = box_warn.operator("object.transform_apply", text=i18n.trans("Apply Scale (Ctrl+A)"), icon='CHECKMARK')
             op_scale.location = False
@@ -327,6 +363,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             return
 
         col.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Disable Cloth"), icon='CANCEL')
+
+        # メッシュトポロジーバリデーション警告（シンプル/詳細問わず最上部に表示）
+        _draw_mesh_validation_warnings(layout, obj)
 
         ui_mode = getattr(scene, "taremin_cloth_ui_mode", "SIMPLE") if scene else "SIMPLE"
 
@@ -383,6 +422,25 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                     if _phase_text:
                         col_sew.label(text=_phase_text, icon='INFO')
                 col_sew.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam (Select 2 Verts)"), icon='EDGESEL')
+
+                # 縫合トポロジー異常の警告表示
+                v_report = validate_cloth_mesh(obj)
+                if v_report and v_report.sewing_topology.has_issues:
+                    err_box = col_sew.box()
+                    err_box.alert = True
+                    err_box.label(text=i18n.trans("Invalid Sewing Topology Detected:"), icon='ERROR')
+                    for issue in v_report.sewing_topology.branching_issues:
+                        if issue.issue_type == "branching":
+                            err_box.label(text=f"  {i18n.trans('Branching detected (degree >= 3):')} {issue.vertices}")
+                        elif issue.issue_type == "cycle":
+                            err_box.label(text=f"  {i18n.trans('Closed cycle detected:')} {issue.vertices}")
+                        elif issue.issue_type == "dangling":
+                            err_box.label(text=f"  {i18n.trans('Dangling seam without 2 cloth endpoints:')} {issue.vertices}")
+                        elif issue.issue_type == "multi_endpoints":
+                            err_box.label(text=f"  {i18n.trans('Too many cloth endpoints connected:')} {issue.vertices}")
+                        else:
+                            err_box.label(text=f"  {i18n.trans('Invalid seam path topology:')} {issue.vertices}")
+                    err_box.label(text=i18n.trans("Seam paths must be a single non-branching path."), icon='INFO')
 
             # 3. 素材プリセット (Fabric Material)
             box_mat = layout_params.box()
@@ -743,6 +801,35 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
                     s_col.label(text=_phase_text, icon='INFO')
             s_col.operator("taremin_cloth.create_seam", text=i18n.trans("Create Seam Between 2 Verts"), icon='EDGESEL')
 
+            # メッシュトポロジーバリデーション結果の警告表示
+            v_report = validate_cloth_mesh(obj)
+            if v_report:
+                if v_report.sewing_topology.has_issues:
+                    err_box = s_col.box()
+                    err_box.alert = True
+                    err_box.label(text=i18n.trans("Invalid Sewing Topology Detected:"), icon='ERROR')
+                    for issue in v_report.sewing_topology.branching_issues:
+                        if issue.issue_type == "branching":
+                            err_box.label(text=f"  {i18n.trans('Branching detected (degree >= 3):')} {issue.vertices}")
+                        elif issue.issue_type == "cycle":
+                            err_box.label(text=f"  {i18n.trans('Closed cycle detected:')} {issue.vertices}")
+                        elif issue.issue_type == "dangling":
+                            err_box.label(text=f"  {i18n.trans('Dangling seam without 2 cloth endpoints:')} {issue.vertices}")
+                        elif issue.issue_type == "multi_endpoints":
+                            err_box.label(text=f"  {i18n.trans('Too many cloth endpoints connected:')} {issue.vertices}")
+                        else:
+                            err_box.label(text=f"  {i18n.trans('Invalid seam path topology:')} {issue.vertices}")
+                    err_box.label(text=i18n.trans("Seam paths must be a single non-branching path."), icon='INFO')
+                if v_report.degenerate_faces.has_issues:
+                    warn_box = s_col.box()
+                    warn_box.alert = True
+                    deg_count = v_report.degenerate_faces.zero_area_poly_count or v_report.degenerate_faces.degenerate_tri_count
+                    warn_box.label(
+                        text=f"{i18n.trans('Zero-area degenerate face(s) detected:')} {deg_count}",
+                        icon='ERROR',
+                    )
+                    warn_box.label(text=i18n.trans("Please run 'Merge by Distance' to remove degenerate faces"), icon='INFO')
+
         # 伸縮グループ (Elastic Bands)
         box_elastic = layout.box()
         box_elastic.label(text=i18n.trans("Elastic Bands / Edge Scaling"), icon='MOD_SHRINKWRAP')
@@ -1013,6 +1100,17 @@ class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):
         obj = context.active_object
         settings = obj.taremin_cloth
 
+        v_report = validate_cloth_mesh(obj)
+        if v_report and v_report.degenerate_faces.has_issues:
+            deg_count = v_report.degenerate_faces.zero_area_poly_count or v_report.degenerate_faces.degenerate_tri_count
+            warn_box = layout.box()
+            warn_box.alert = True
+            warn_box.label(
+                text=f"{i18n.trans('Zero-area degenerate face(s) detected:')} {deg_count}",
+                icon='ERROR',
+            )
+            warn_box.label(text=i18n.trans("Please run 'Merge by Distance' to remove degenerate faces"), icon='INFO')
+
         t_col = layout.column(align=True)
         t_col.prop(settings, "triangulation_mode", text=i18n.trans("Mode"))
 
@@ -1168,12 +1266,12 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             layout.label(text=i18n.trans("Please select an object"), icon='INFO')
             return
 
-        # スケール未適用警告 (Scale != 1.0)
+        # 非均等スケール警告 (Non-uniform Scale: Scale.x != Scale.y or Scale.y != Scale.z)
         scale = obj.scale
-        if abs(scale.x - 1.0) > 1e-3 or abs(scale.y - 1.0) > 1e-3 or abs(scale.z - 1.0) > 1e-3:
+        if abs(scale.x - scale.y) > 1e-3 or abs(scale.y - scale.z) > 1e-3:
             box_warn = layout.box()
-            box_warn.alert = True
-            box_warn.label(text=f"{i18n.trans('Unapplied Scale:')} ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='ERROR')
+            box_warn.alert = False
+            box_warn.label(text=f"{i18n.trans('Unapplied Scale:')} ({scale.x:.2f}, {scale.y:.2f}, {scale.z:.2f})", icon='INFO')
             box_warn.label(text=i18n.trans("Please apply scale to avoid contact detection errors"))
             op_scale = box_warn.operator("object.transform_apply", text=i18n.trans("Apply Scale (Ctrl+A)"), icon='CHECKMARK')
             op_scale.location = False
