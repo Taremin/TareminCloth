@@ -41,8 +41,8 @@ _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 _DOLLAR_BACKTICK_RE = re.compile(r"\$`([^`\n]+?)`\$")
 # プレーンな $...$ に含まれていた場合にMarkdownと干渉する文字
 # GitHub Docs「Writing mathematical expressions」より: バッククォート形式を使うべき
-# 重なり文字 (\: エスケープ, _: 強調, *: 強調, |: テーブル, `: コード, < >: HTML, [ ]: リンク)
-_GFM_RISKY_MATH_CHARS = frozenset({"\\", "_", "*", "|", "`", "<", ">", "[", "]"})
+# 重なり文字 (\: エスケープ, _: 強調, *: 強調, |: テーブル, `: コード, < >: HTML, [ ]: リンク, -: リスト・マイナス)
+_GFM_RISKY_MATH_CHARS = frozenset({"\\", "_", "*", "|", "`", "<", ">", "[", "]", "-"})
 
 # Windows cp932 環境対策
 if hasattr(sys.stdout, "reconfigure"):
@@ -177,26 +177,42 @@ def lint_markdown_content(file_path: str, lines: List[str]) -> Tuple[List[Tuple[
         if in_math_block:
             math_segments.append(code_stripped.replace("$", " "))
         else:
-            plain_inlines = re.findall(r"\$([^$\n]+?)\$", tmp)
+            # プレーン $...$ の検索（前後に $ が連続していない単一 $ で囲まれた式）
+            plain_matches = list(re.finditer(r"(?<!\$)\$([^$\n]+?)\$(?!\$)", tmp))
+            for pm in plain_matches:
+                m_expr = pm.group(1)
+                plain_inlines.append(m_expr)
+                start = pm.start()
+                end = pm.end()
+                left_char = tmp[start - 1] if start > 0 else " "
+                right_char = tmp[end] if end < len(tmp) else " "
+
+                # 3-0: GFMデリミタミス検知 (プレーン $...$)
+                # GitHub Docs「Writing mathematical expressions」より:
+                # 1) 全角/非ASCII文字に隣接: GitHub GFM パーサーは ASCII 境界のみを認識するため、
+                #    全角括弧「（」「）」や日本語等に隣接すると数式レンダリングが発火せず生テキストになる
+                # 2) 数式内に空白を含む: 複合数式はインライン数式トークン境界で誤認されやすい
+                # 3) Markdown干渉文字 (\ _ * | ` < > [ ] -) を含む
+                # 4) $ 直前・直後に空白がある
+                err_reasons: List[str] = []
+                if ord(left_char) > 127 or ord(right_char) > 127:
+                    err_reasons.append("全角/非ASCII文字に直接隣接している")
+                if " " in m_expr.strip():
+                    err_reasons.append("数式内に空白を含んでいる")
+                risky = sorted({c for c in m_expr if c in _GFM_RISKY_MATH_CHARS})
+                if risky:
+                    risky_disp = "".join(risky).replace("\\", "\\\\")
+                    err_reasons.append(f"Markdown干渉文字 [{risky_disp}] を含んでいる")
+                if m_expr != m_expr.strip():
+                    err_reasons.append("$ 直前・直後に空白がある")
+
+                if err_reasons:
+                    reasons_str = "、かつ".join(err_reasons)
+                    math_errors.append((
+                        line_no,
+                        f"GFM数式デリミタミス: プレーン '${m_expr.strip()}$' が{reasons_str}ため、GitHub上でレンダリングに失敗します。$`{m_expr.strip()}`$ 形式 (ドル・バッククォート) に修正してください"
+                    ))
             math_segments.extend(plain_inlines)
-        # 3-0: GFMデリミタミス検知 (プレーン $...$ 内のMarkdown干渉文字)
-        # GitHub Docs「Writing mathematical expressions」より、数式内にMarkdownと
-        # 重なる文字 (\ _ * | ` < > [ ]) を含む場合は $`...`$ 形式が必須。
-        # 例: $\alpha = 1/k$ -> $`\alpha = 1/k`$ (\ がエスケープ処理で消えるため)
-        for m_expr in plain_inlines:
-            risky = sorted({c for c in m_expr if c in _GFM_RISKY_MATH_CHARS})
-            if risky:
-                risky_disp = "".join(risky).replace("\\", "\\\\")
-                math_errors.append((
-                    line_no,
-                    f"GFM数式デリミタミス: プレーン '${m_expr.strip()}$' 内にMarkdown干渉文字 [{risky_disp}] が含まれています。$`{m_expr.strip()}`$ 形式 (ドル・バッククォート) に修正してください"
-                ))
-            # 前後の空白チェック (GFMは $ の直内外に空白があると数式として認識しない)
-            if m_expr != m_expr.strip():
-                math_errors.append((
-                    line_no,
-                    f"GFM数式デリミタミス: '${m_expr}$' の $ 直後に空白があります。'$`{m_expr.strip()}`$' のように空白を除去してください"
-                ))
         for m_expr in math_segments:
             # \text{...} 内のアンダースコア検知
             text_blocks = re.findall(r'\\text\{([^}]+)\}', m_expr)
