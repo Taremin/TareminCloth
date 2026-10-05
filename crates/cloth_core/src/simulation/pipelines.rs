@@ -831,13 +831,16 @@ pub fn build_simulation_resources(
     let effective_untangling = enable_normal_untangling && has_multiple_layers;
 
     let thickness = mesh.vertices.first().map(|v| v.thickness).unwrap_or(0.005);
-    // 幾何学的見逃し防止のためのセルサイズ自動決定:
+    // 幾何学的見逃し（死角）の排除と粗大メッシュでのバッファ溢れ防止:
     // 1. 厚みベース: 衝突境界 (thickness * 4.0) をカバー
-    // 2. メッシュ解像度ベース: エッジ端点接触時の中点間最大距離 (L + d) を 27 セル探索で確実に捕捉するため、
-    //    エッジ幾何半径 (mean_edge_length * 0.5) を下限として保証する (粗いメッシュや極薄の布での抜け落ち防止)
+    // 2. メッシュ解像度ベース: 密なメッシュで三角形中央の死角を排除しつつ、
+    //    粗いメッシュでセルが巨大化してペア収集枠 (quota) が溢れるのを防ぐため上限 (2.5cm) を設ける。
     // 3. 最小値クランプ: 0.01 (1cm)
+    let edge_based_size = (mesh.max_edge_length * 0.85)
+        .max(mesh.mean_edge_length * 1.0)
+        .min(0.025);
     let cell_size = (thickness * 4.0)
-        .max(mesh.mean_edge_length * 0.5)
+        .max(edge_based_size)
         .max(0.01);
     let hash_capacity = num_total_particles;
     let table_size = (hash_capacity * 4).next_power_of_two().max(1024);

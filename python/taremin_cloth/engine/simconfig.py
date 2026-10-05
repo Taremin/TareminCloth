@@ -160,8 +160,8 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "solver_mode": 1 if _get(settings, "solver_mode", "COLORING") == "ATOMIC" else 0,
         "workgroup_size": _i(settings, "workgroup_size", 32),
         "enable_self_collision": bool(_get(settings, "enable_self_collision", False)),
-        "relief_factor": _f(settings, "self_collision_relief_factor", 0.2),
-        "max_displacement_ratio": _f(settings, "self_collision_max_displacement_ratio", 0.2),
+        "relief_factor": _f(settings, "self_collision_relief_factor", 1.0),
+        "max_displacement_ratio": _f(settings, "self_collision_max_displacement_ratio", 0.5),
         "exclude_neighbors": bool(_get(settings, "self_collision_exclude_neighbors", True)),
         "enable_normal_untangling": bool(_get(settings, "enable_normal_untangling", True)),
         "self_collision_max_iterations": _i(settings, "self_collision_max_iterations", 256),
@@ -265,8 +265,8 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         sim.set_enable_self_collision(bool(cfg.get("enable_self_collision", False)))
     if hasattr(sim, "set_self_collision_options"):
         sim.set_self_collision_options(
-            relief_factor=float(cfg.get("relief_factor", 0.2)),
-            max_displacement_ratio=float(cfg.get("max_displacement_ratio", 0.2)),
+            relief_factor=float(cfg.get("relief_factor", 1.0)),
+            max_displacement_ratio=float(cfg.get("max_displacement_ratio", 0.5)),
             exclude_neighbors=bool(cfg.get("exclude_neighbors", True)),
             enable_normal_untangling=bool(cfg.get("enable_normal_untangling", True)),
             max_iterations=int(cfg.get("self_collision_max_iterations", 256)),

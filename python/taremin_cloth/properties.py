@@ -409,7 +409,7 @@ class TareminClothObjectSettings(PropertyGroup):
     self_collision_relief_factor: FloatProperty(
         name="Relief Factor",
         description="Penetration relief factor (1.0 for instant response, smaller for smooth resolution)",
-        default=0.2,
+        default=1.0,
         min=0.01,
         max=1.0,
         precision=2,
@@ -417,7 +417,7 @@ class TareminClothObjectSettings(PropertyGroup):
     self_collision_max_displacement_ratio: FloatProperty(
         name="Max Step Ratio",
         description="Maximum correction displacement per substep as a ratio of edge length",
-        default=0.2,
+        default=0.5,
         min=0.01,
         max=1.0,
         precision=2,
