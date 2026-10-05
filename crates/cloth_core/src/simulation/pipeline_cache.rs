@@ -468,6 +468,7 @@ impl SharedPipelines {
                 uniform_entry(3),
                 storage_rw_at(4),
                 storage_ro(5),
+                storage_ro(6),
             ],
         });
 

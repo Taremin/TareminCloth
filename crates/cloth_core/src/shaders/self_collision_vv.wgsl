@@ -1,6 +1,12 @@
 // 純粋球対球（Vertex-Vertex）自己衝突解決シェーダー
 // 仮想コライダー粒子（スレーブ粒子）を含む全粒子に対してV-V判定を行い、
 // 衝突反発変位を重心座標重みで親頂点へ固定小数点アトミック加算する。
+//
+// 1. 同一面（同一三角形）内の粒子ペアは自爆防止のため無条件除外。
+// 2. 親頂点を共有するトポロジー近傍要素（エッジ共有・頂点共有・同一エッジ）に対しては、
+//    レスト距離スケーリング（Rest-Distance Folded Thresholding / Bridson 2002）を適用。
+//    平坦時の自爆・座屈ノイズを100%防止しつつ、シワ・折り畳み接触（初期距離の50%未満に圧縮された急峻な折り目）を確実に検知・遮断する。
+// 3. 親頂点を共有しない独立した面同士は、常に通常の厚み min_dist で反発する。
 
 struct GpuVertex {
     position: vec3<f32>,
@@ -44,6 +50,7 @@ struct SelfCollisionAccum {
 @group(0) @binding(3) var<uniform> params: SelfCollisionVvParams;
 @group(0) @binding(4) var<storage, read_write> accum: array<SelfCollisionAccum>;
 @group(0) @binding(5) var<storage, read> virt_defs: array<GpuVirtualVertexDef>;
+@group(0) @binding(6) var<storage, read> rest_positions: array<vec4<f32>>;
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -66,32 +73,43 @@ fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
     return n % table_size;
 }
 
-// 粒子idxから親頂点インデックス3つと重心座標を取得する
+// 粒子idxから親頂点インデックス3つ、重心座標、親face_id、初期レスト座標を取得する
 struct ParticleInfo {
     parents: vec3<u32>,
     bary: vec3<f32>,
+    parent_face_id: u32,
+    rest_pos: vec3<f32>,
     is_virtual: bool,
 };
 
 fn get_particle_info(idx: u32) -> ParticleInfo {
     if (idx < params.num_real_vertices) {
+        let r_pos = rest_positions[idx].xyz;
         return ParticleInfo(
             vec3<u32>(idx, idx, idx),
             vec3<f32>(1.0, 0.0, 0.0),
+            0xFFFFFFFFu,
+            r_pos,
             false
         );
     } else {
         let virt_idx = idx - params.num_real_vertices;
         let def = virt_defs[virt_idx];
+        let p0 = rest_positions[def.parent_indices.x].xyz;
+        let p1 = rest_positions[def.parent_indices.y].xyz;
+        let p2 = rest_positions[def.parent_indices.z].xyz;
+        let r_pos = p0 * def.bary_weights.x + p1 * def.bary_weights.y + p2 * def.bary_weights.z;
         return ParticleInfo(
             def.parent_indices.xyz,
             def.bary_weights.xyz,
+            def.parent_indices.w,
+            r_pos,
             true
         );
     }
 }
 
-// 2つの粒子が親頂点を1つでも共有しているかを判定（同一面・エッジ隣接面・頂点共有面の自爆除外）
+// 2つの粒子が親頂点を1つでも共有しているかを判定（トポロジー隣接判定）
 fn share_any_parent(info_a: ParticleInfo, info_b: ParticleInfo) -> bool {
     let a0 = info_a.parents.x;
     let a1 = info_a.parents.y;
@@ -102,21 +120,17 @@ fn share_any_parent(info_a: ParticleInfo, info_b: ParticleInfo) -> bool {
     let b2 = info_b.parents.z;
 
     if (!info_a.is_virtual && !info_b.is_virtual) {
-        // 両方が元頂点の場合、同一頂点のみ除外 (隣接エッジ判定は距離で自然解決)
         return a0 == b0;
     }
 
     if (!info_a.is_virtual) {
-        // a が元頂点、b が仮想頂点の場合: b の親に a0 が含まれていれば除外
         return (a0 == b0) || (a0 == b1) || (a0 == b2);
     }
 
     if (!info_b.is_virtual) {
-        // b が元頂点、a が仮想頂点の場合: a の親に b0 が含まれていれば除外
         return (b0 == a0) || (b0 == a1) || (b0 == a2);
     }
 
-    // 両方が仮想頂点の場合: 3x3 比較で親頂点を1つでも共有していれば除外
     return (a0 == b0) || (a0 == b1) || (a0 == b2)
         || (a1 == b0) || (a1 == b1) || (a1 == b2)
         || (a2 == b0) || (a2 == b1) || (a2 == b2);
@@ -184,18 +198,44 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                     let info_j = get_particle_info(j);
 
-                    // トポロジー除外（親頂点共有判定）
-                    if (share_any_parent(info_i, info_j)) {
+                    // 1. 同一面（Same Face）の除外（同一三角形内の要素は自己交差しない）
+                    // (a) 仮想頂点同士で親面が同一
+                    if (info_i.is_virtual && info_j.is_virtual && info_i.parent_face_id == info_j.parent_face_id) {
                         continue;
                     }
+                    // (b) 元頂点と仮想頂点で、仮想頂点の親三角形にその元頂点が含まれている
+                    if (!info_i.is_virtual && info_j.is_virtual) {
+                        let v_idx = info_i.parents.x;
+                        if (v_idx == info_j.parents.x || v_idx == info_j.parents.y || v_idx == info_j.parents.z) {
+                            continue;
+                        }
+                    }
+                    if (info_i.is_virtual && !info_j.is_virtual) {
+                        let v_idx = info_j.parents.x;
+                        if (v_idx == info_i.parents.x || v_idx == info_i.parents.y || v_idx == info_i.parents.z) {
+                            continue;
+                        }
+                    }
 
+                    let min_dist = thick_i + v_j.thickness;
+                    var threshold = min_dist;
+
+                    // 2. 親頂点を共有するトポロジー近傍要素に対するレスト距離スケーリング (Rest-Distance Folded Thresholding)
+                    if (share_any_parent(info_i, info_j)) {
+                        let delta_rest = info_i.rest_pos - info_j.rest_pos;
+                        let rest_dist_sq = dot(delta_rest, delta_rest);
+                        let l0 = sqrt(rest_dist_sq);
+                        // レスト長の 50% 未満に圧縮された場合のみシワ・折り畳みとして反発を許可
+                        threshold = min(min_dist, l0 * 0.5);
+                    }
+
+                    // 3. 現在の距離による衝突判定
                     let delta = p_i - p_j;
                     let dist_sq = dot(delta, delta);
-                    let min_dist = thick_i + v_j.thickness;
 
-                    if (dist_sq < min_dist * min_dist && dist_sq > EPSILON) {
+                    if (dist_sq < threshold * threshold && dist_sq > EPSILON) {
                         let dist_val = sqrt(dist_sq);
-                        let pen = min_dist - dist_val;
+                        let pen = threshold - dist_val;
                         let normal = delta / dist_val;
 
                         // 衝突反発変位（作用・反作用）

@@ -103,6 +103,7 @@ pub struct SimulationResources {
     pub virt_defs_buffer: wgpu::Buffer,
     pub virt_forward_params_buffer: wgpu::Buffer,
     pub virt_forward_bind_group: wgpu::BindGroup,
+    pub rest_positions_buffer: wgpu::Buffer,
     pub self_collision_vv_params_buffer: wgpu::Buffer,
     pub self_collision_vv_bind_group: wgpu::BindGroup,
 }
@@ -165,7 +166,7 @@ pub fn build_simulation_resources(
 
     // 仮想コライダー頂点の事前サンプリング生成
     let default_thick = mesh.vertices.first().map(|v| v.thickness).unwrap_or(0.003);
-    let target_spacing = default_thick * 2.5;
+    let target_spacing = default_thick * 1.5;
     let mesh_faces_slice: Vec<[u32; 3]> = mesh.triangles.iter().map(|tri| [tri.v0, tri.v1, tri.v2]).collect();
     let mesh_edges_slice: Vec<[u32; 2]> = mesh.distance_constraints.iter().map(|dc| [dc.v0, dc.v1]).collect();
     let positions_slice: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
@@ -1482,6 +1483,13 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
+    let rest_positions_vec: Vec<[f32; 4]> = positions_slice.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect();
+    let rest_positions_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("TareminCloth Rest Positions Buffer"),
+        contents: bytemuck::cast_slice(&rest_positions_vec),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
     let self_collision_vv_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Self Collision VV Bind Group"),
         layout: &shared.self_collision_vv_bgl,
@@ -1509,6 +1517,10 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 5,
                 resource: virt_defs_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: rest_positions_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1604,6 +1616,7 @@ pub fn build_simulation_resources(
         virt_defs_buffer,
         virt_forward_params_buffer,
         virt_forward_bind_group,
+        rest_positions_buffer,
         self_collision_vv_params_buffer,
         self_collision_vv_bind_group,
     }

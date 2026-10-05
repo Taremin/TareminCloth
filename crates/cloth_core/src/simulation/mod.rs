@@ -310,6 +310,8 @@ pub struct GpuClothSimulator {
     #[allow(dead_code)]
     pub(crate) virt_forward_params_buffer: wgpu::Buffer,
     pub(crate) virt_forward_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
+    pub(crate) rest_positions_buffer: wgpu::Buffer,
     pub(crate) self_collision_vv_params_buffer: wgpu::Buffer,
     pub(crate) self_collision_vv_bind_group: wgpu::BindGroup,
 }
@@ -550,6 +552,7 @@ impl GpuClothSimulator {
             virt_defs_buffer: res.virt_defs_buffer,
             virt_forward_params_buffer: res.virt_forward_params_buffer,
             virt_forward_bind_group: res.virt_forward_bind_group,
+            rest_positions_buffer: res.rest_positions_buffer,
             self_collision_vv_params_buffer: res.self_collision_vv_params_buffer,
             self_collision_vv_bind_group: res.self_collision_vv_bind_group,
         };
