@@ -93,6 +93,7 @@ pub struct GuiApp {
     grab_target_pos: Option<glam::Vec3>,
     pinned_verts: HashMap<u32, [f32; 3]>,
     cached_positions: Vec<[f32; 3]>,
+    initial_positions: Vec<[f32; 3]>,
 }
 
 
@@ -167,6 +168,7 @@ impl GuiApp {
             grab_target_pos: None,
             pinned_verts: HashMap::new(),
             cached_positions: Vec::new(),
+            initial_positions: Vec::new(),
         }
     }
 
@@ -496,6 +498,7 @@ impl GuiApp {
         self.frame_seq = 0;
         self.is_running = true;
         self.cached_positions = data.positions.clone();
+        self.initial_positions = data.positions.clone();
         self.grabbed_vert = None;
         self.grab_target_pos = None;
         self.pinned_verts.clear();
@@ -815,12 +818,26 @@ impl GuiApp {
                             sim.step(1.0 / 60.0, self.substeps);
                         }
                     }
-                    if ui.button("🔄 Reset").clicked() {
-                        if self.current_demo != DemoSceneType::None {
-                            demo_to_load = Some(self.current_demo);
-                        } else if let Some(ref mut sim) = self.simulator {
+                    if ui.button("🔄 Reset").on_hover_text("Reset cloth position to initial pose while keeping current parameters").clicked() {
+                        if let Some(ref mut sim) = self.simulator {
                             sim.reset();
+                            sim.solver_iterations = self.solver_iterations;
+                            sim.set_self_collision_algorithm(self.self_collision_algorithm);
+                            sim.set_enable_self_collision(self.self_collision_enabled);
                             self.frame_seq = 0;
+                            self.grabbed_vert = None;
+                            self.grab_target_pos = None;
+                            self.pinned_verts.clear();
+                            self.cached_positions = self.initial_positions.clone();
+                            if let Ok(mut state) = self.server.shared_state.write() {
+                                state.latest_coords = self.initial_positions.clone();
+                                state.frame_seq = 0;
+                            }
+                        }
+                    }
+                    if self.current_demo != DemoSceneType::None {
+                        if ui.button("↺ Defaults").on_hover_text("Reload scene with default demo parameters").clicked() {
+                            demo_to_load = Some(self.current_demo);
                         }
                     }
                 });
