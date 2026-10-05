@@ -948,6 +948,69 @@ impl GpuClothSimulator {
         let parent = self
             .profiler
             .begin_scope(format!("self_collision_{prefix}"), encoder);
+
+        if self.self_collision_algorithm == 2 {
+            // =========================================================================
+            // 仮想頂点サンプリング + 純粋球対球 (VERTEX_VERTEX) 方式
+            // =========================================================================
+            let total_particles = self.num_vertices + self.num_virtual_vertices;
+            let total_workgroups = (total_particles + wg_size - 1) / wg_size;
+
+            // 1. 仮想頂点の順方向補間パス (親頂点の現在座標から仮想頂点座標を更新)
+            if self.num_virtual_vertices > 0 {
+                let query = self.profiler.begin_pass_with_parent("vv_forward", encoder, parent.as_ref());
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Virtual Forward Pass")),
+                    timestamp_writes: self.profiler.pass_writes(&query),
+                });
+                cpass.set_pipeline(&self.shared.ensure_virtual_forward());
+                cpass.set_bind_group(0, &self.virt_forward_bind_group, &[]);
+                let virt_workgroups = (self.num_virtual_vertices + wg_size - 1) / wg_size;
+                cpass.dispatch_workgroups(virt_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
+            }
+
+            // 2. 空間ハッシュのクリア＆構築 (全粒子 N + M を登録)
+            self.spatial_hash.dispatch_build(
+                encoder,
+                total_particles,
+                self.shared.ensure_hash(),
+                &self.profiler,
+                parent.as_ref(),
+            );
+
+            // 3. V-V 衝突判定・親頂点への変位アトミック加算
+            {
+                let query = self.profiler.begin_pass_with_parent("vv_solve", encoder, parent.as_ref());
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Self Collision VV Pass")),
+                    timestamp_writes: self.profiler.pass_writes(&query),
+                });
+                cpass.set_pipeline(&self.shared.ensure_self_collision_vv());
+                cpass.set_bind_group(0, &self.self_collision_vv_bind_group, &[]);
+                cpass.dispatch_workgroups(total_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
+            }
+
+            // 4. 変位の適用 (元頂点 N 個のみに対して適用)
+            {
+                let query = self.profiler.begin_pass_with_parent("sc_apply", encoder, parent.as_ref());
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Self Collision Apply Pass")),
+                    timestamp_writes: self.profiler.pass_writes(&query),
+                });
+                cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
+                cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
+            }
+
+            self.profiler.end_scope(encoder, parent);
+            return;
+        }
         // 1. Compute Normals Pass (P4: 法線展開処理が無効の場合は省略する。
         // 法線バッファの読み手は自己衝突シェーダーの展開分岐のみであり、
         // いずれも enable_normal_untangling 取得値で保護されている。

@@ -678,17 +678,21 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
             row_p.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
 
             self_sub = l_col.column(align=True)
+            self_sub.prop(settings, "self_collision_algorithm", text=i18n.trans("Algorithm"))
             self_sub.prop(settings, "self_collision_relief_factor", text=i18n.trans("Relief Factor"))
             self_sub.prop(settings, "self_collision_max_displacement_ratio", text=i18n.trans("Max Step Ratio"))
             self_sub.prop(settings, "self_collision_max_iterations", text=i18n.trans("Search Limit"))
-            self_sub.prop(settings, "enable_normal_untangling", text=i18n.trans("Normal Untangling"))
             self_sub.prop(settings, "coupled_self_collision_mode", text=i18n.trans("Coupled Mode"))
             if settings.coupled_self_collision_mode != 'OFF':
                 self_sub.prop(settings, "post_collision_relaxation_iters", text=i18n.trans("Relax Steps"))
             self_sub.prop(settings, "self_collision_substep_interval", text=i18n.trans("Substep Interval"))
-            self_sub.prop(settings, "self_collision_ee_substep_interval", text=i18n.trans("EE Substep Interval"))
-            self_sub.prop(settings, "enable_pair_cache", text=i18n.trans("Active Pair Cache (Fast)"))
-            if settings.enable_pair_cache:
+
+            if settings.self_collision_algorithm != 'VERTEX_VERTEX':
+                self_sub.prop(settings, "enable_normal_untangling", text=i18n.trans("Normal Untangling"))
+                self_sub.prop(settings, "self_collision_ee_substep_interval", text=i18n.trans("EE Substep Interval"))
+
+            if settings.self_collision_algorithm == 'PAIR_CACHE':
+                self_sub.label(text=i18n.trans("Active Pair Cache (Fast)"), icon='TIME')
                 self_sub.prop(settings, "pair_cache_margin_mode", text=i18n.trans("Pair Margin Mode"))
                 self_sub.prop(settings, "pair_cache_safety_margin", text=i18n.trans("Pair Base Margin"))
                 self_sub.prop(settings, "pair_cache_horizon_scale", text=i18n.trans("Horizon Scale"))
@@ -720,6 +724,8 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
                         text=i18n.trans(f"Pair Buffers (VRAM): {_mem_str}"),
                         icon='MEMORY')
                 self_sub.prop(settings, "enable_pair_cache_final_fallback", text=i18n.trans("Final Fallback"))
+            elif settings.self_collision_algorithm == 'VERTEX_VERTEX':
+                self_sub.label(text=i18n.trans("Virtual Collider Vertices & Pure Sphere-Sphere SC"), icon='INFO')
         l_col.separator()
         box_layer = l_col.box()
         box_layer.label(text=i18n.trans("Layer & Collision Hierarchy"), icon='OVERLAY')

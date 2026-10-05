@@ -44,6 +44,7 @@ SIGNATURE_KEYS = (
     "post_relaxation_iters",
     "substep_interval",
     "ee_substep_interval",
+    "self_collision_algorithm",
     "enable_pair_cache",
     "pair_margin_mode",
     "pair_safety_margin",
@@ -117,10 +118,32 @@ def gravity_from_settings(settings: Any, scene: Any = None) -> Tuple[list, float
     return [0.0, 0.0, -9.81 * scale], scale
 
 
+def resolve_self_collision_algorithm(settings: Any) -> Tuple[int, bool]:
+    """Blender設定から自己衝突アルゴリズム (algo_int, is_pair_cache) を解決する。
+
+    self_collision_algorithm を主キーとし、未設定の旧blendファイル時のみ
+    enable_pair_cache からフォールバックする。
+
+    Returns:
+        (0: DIRECT, 1: PAIR_CACHE, 2: VERTEX_VERTEX), is_pair_cache
+    """
+    algo_str = _get(settings, "self_collision_algorithm", None)
+    if algo_str == "VERTEX_VERTEX":
+        return 2, False
+    if algo_str == "PAIR_CACHE":
+        return 1, True
+    if algo_str == "DIRECT":
+        return 0, False
+    # 旧バージョン設定 (.blend) からのフォールバック
+    is_pair = bool(_get(settings, "enable_pair_cache", False))
+    return (1, True) if is_pair else (0, False)
+
+
 def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
     """Blender設定からSimConfig互換辞書を組み立てる (付帯キー付き)。"""
     gravity_vec, scale = gravity_from_settings(settings, scene)
     coupled_mode, relax_iters = coupled_mode_from_settings(settings)
+    sc_algo, enable_pair_cache = resolve_self_collision_algorithm(settings)
     return {
         "version": 1,
         "gravity": gravity_vec,
@@ -147,7 +170,8 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "post_relaxation_iters": relax_iters,
         "substep_interval": max(1, _i(settings, "self_collision_substep_interval", 1)),
         "ee_substep_interval": max(0, _i(settings, "self_collision_ee_substep_interval", 1)),
-        "enable_pair_cache": bool(_get(settings, "enable_pair_cache", False)),
+        "self_collision_algorithm": sc_algo,
+        "enable_pair_cache": enable_pair_cache,
         "pair_margin_mode": 0 if _get(settings, "pair_cache_margin_mode", "AUTO") == "FIXED" else 1,
         "pair_safety_margin": _f(settings, "pair_cache_safety_margin", 0.005),
         "pair_horizon_scale": _f(settings, "pair_cache_horizon_scale", 1.3),
@@ -257,6 +281,8 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         sim.set_self_collision_substep_interval(max(1, int(cfg.get("substep_interval", 1))))
     if hasattr(sim, "set_self_collision_ee_substep_interval"):
         sim.set_self_collision_ee_substep_interval(max(0, int(cfg.get("ee_substep_interval", 1))))
+    if hasattr(sim, "set_self_collision_algorithm"):
+        sim.set_self_collision_algorithm(int(cfg.get("self_collision_algorithm", 0)))
     if hasattr(sim, "set_enable_pair_cache"):
         sim.set_enable_pair_cache(bool(cfg.get("enable_pair_cache", False)))
     if hasattr(sim, "set_pair_cache_options"):

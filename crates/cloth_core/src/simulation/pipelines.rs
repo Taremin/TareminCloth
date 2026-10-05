@@ -99,6 +99,12 @@ pub struct SimulationResources {
     /// 頂点レイヤーが2種類以上あるか (自動判定。単一レイヤーでは
     /// Untangling分岐が発火し得ないため法線パスとシェーダー分岐を省略する)。
     pub has_multiple_layers: bool,
+    pub num_virtual_vertices: u32,
+    pub virt_defs_buffer: wgpu::Buffer,
+    pub virt_forward_params_buffer: wgpu::Buffer,
+    pub virt_forward_bind_group: wgpu::BindGroup,
+    pub self_collision_vv_params_buffer: wgpu::Buffer,
+    pub self_collision_vv_bind_group: wgpu::BindGroup,
 }
 
 pub fn build_simulation_resources(
@@ -157,10 +163,51 @@ pub fn build_simulation_resources(
         }
     }
 
+    // 仮想コライダー頂点の事前サンプリング生成
+    let default_thick = mesh.vertices.first().map(|v| v.thickness).unwrap_or(0.003);
+    let target_spacing = default_thick * 2.5;
+    let mesh_faces_slice: Vec<[u32; 3]> = mesh.triangles.iter().map(|tri| [tri.v0, tri.v1, tri.v2]).collect();
+    let mesh_edges_slice: Vec<[u32; 2]> = mesh.distance_constraints.iter().map(|dc| [dc.v0, dc.v1]).collect();
+    let positions_slice: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+
+    let virtual_sampling = crate::virtual_mesh::generate_virtual_vertices(
+        &positions_slice,
+        &mesh_faces_slice,
+        &mesh_edges_slice,
+        default_thick,
+        target_spacing,
+    );
+    let num_virtual_vertices = virtual_sampling.virtual_defs.len() as u32;
+    let num_total_particles = num_vertices + num_virtual_vertices;
+
+    let mut all_initial_vertices = mesh.vertices.clone();
+    for def in &virtual_sampling.virtual_defs {
+        let v0 = &mesh.vertices[def.parent_indices[0] as usize];
+        let v1 = &mesh.vertices[def.parent_indices[1] as usize];
+        let v2 = &mesh.vertices[def.parent_indices[2] as usize];
+        let w0 = def.bary_weights[0];
+        let w1 = def.bary_weights[1];
+        let w2 = def.bary_weights[2];
+
+        let pos = [
+            v0.position[0] * w0 + v1.position[0] * w1 + v2.position[0] * w2,
+            v0.position[1] * w0 + v1.position[1] * w1 + v2.position[1] * w2,
+            v0.position[2] * w0 + v1.position[2] * w1 + v2.position[2] * w2,
+        ];
+        all_initial_vertices.push(GpuVertex {
+            position: pos,
+            inv_mass: 0.0,
+            prev_pos: pos,
+            layer_id: v0.layer_id,
+            velocity: [0.0; 3],
+            thickness: def.thickness,
+        });
+    }
+
     // 1. GPU バッファの作成
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth Vertex Buffer"),
-        contents: bytemuck::cast_slice(&mesh.vertices),
+        contents: bytemuck::cast_slice(&all_initial_vertices),
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST
@@ -791,8 +838,9 @@ pub fn build_simulation_resources(
     let cell_size = (thickness * 4.0)
         .max(mesh.mean_edge_length * 0.5)
         .max(0.01);
-    let table_size = (num_vertices * 4).next_power_of_two().max(1024);
-    let spatial_hash = GpuSpatialHash::new(context, &shared.hash_bgl, &vertex_buffer, num_vertices, cell_size, table_size);
+    let hash_capacity = num_total_particles;
+    let table_size = (hash_capacity * 4).next_power_of_two().max(1024);
+    let spatial_hash = GpuSpatialHash::new(context, &shared.hash_bgl, &vertex_buffer, hash_capacity, cell_size, table_size);
 
     let self_col_params = SelfCollisionParams {
         cell_size,
@@ -1375,6 +1423,96 @@ pub fn build_simulation_resources(
         ],
     });
 
+    let dummy_virt_def = crate::virtual_mesh::GpuVirtualVertexDef::default();
+    let virt_defs_contents: &[u8] = if virtual_sampling.virtual_defs.is_empty() {
+        bytemuck::bytes_of(&dummy_virt_def)
+    } else {
+        bytemuck::cast_slice(&virtual_sampling.virtual_defs)
+    };
+    let virt_defs_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Virtual Vertices Defs Buffer"),
+        contents: virt_defs_contents,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let virt_fwd_params = crate::virtual_mesh::VirtualForwardParams {
+        num_real_vertices: num_vertices,
+        num_virtual_vertices,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let virt_forward_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Virtual Forward Params Buffer"),
+        contents: bytemuck::bytes_of(&virt_fwd_params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let virt_forward_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Virtual Forward Bind Group"),
+        layout: &shared.virtual_forward_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: virt_defs_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: virt_forward_params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let sc_vv_params = crate::virtual_mesh::SelfCollisionVvParams {
+        cell_size,
+        table_size,
+        num_real_vertices: num_vertices,
+        num_total_particles,
+        relief_factor: self_collision_relief_factor,
+        max_displacement_ratio: self_collision_max_displacement_ratio,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let self_collision_vv_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Self Collision VV Params Buffer"),
+        contents: bytemuck::bytes_of(&sc_vv_params),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let self_collision_vv_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Self Collision VV Bind Group"),
+        layout: &shared.self_collision_vv_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vertex_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: spatial_hash.cell_starts_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: spatial_hash.sorted_indices_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: self_collision_vv_params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: self_collision_accum_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: virt_defs_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
     let bind_groups_ms = t_bindgroups.elapsed().as_secs_f32() * 1000.0;
     let build_timings = vec![
         ("shared_cache_ms".to_string(), shared_ms),
@@ -1462,5 +1600,11 @@ pub fn build_simulation_resources(
         self_collision_max_iterations,
         enable_normal_untangling,
         has_multiple_layers,
+        num_virtual_vertices,
+        virt_defs_buffer,
+        virt_forward_params_buffer,
+        virt_forward_bind_group,
+        self_collision_vv_params_buffer,
+        self_collision_vv_bind_group,
     }
 }

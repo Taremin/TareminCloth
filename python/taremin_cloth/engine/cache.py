@@ -281,6 +281,7 @@ def get_cloth_params_signature(obj):
         round(float(getattr(settings, "areal_density", 0.15)), 5),
         bool(getattr(settings, "enable_coarse_constraints", False)),
         bool(getattr(settings, "enable_self_collision", False)),
+        str(getattr(settings, "self_collision_algorithm", "DIRECT")),
         str(getattr(settings, "self_collision_purpose", "STANDARD")),
         bool(getattr(settings, "enable_pair_cache", False)),
         str(getattr(settings, "pair_cache_margin_mode", "AUTO")),

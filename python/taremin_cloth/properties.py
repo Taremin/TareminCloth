@@ -149,6 +149,11 @@ class TareminClothBrushSettings(PropertyGroup):
     )
 
 
+def _on_self_collision_algorithm_update(self, context):
+    """自己衝突アルゴリズム変更時に enable_pair_cache を連動更新する"""
+    self.enable_pair_cache = (self.self_collision_algorithm == 'PAIR_CACHE')
+
+
 class TareminClothObjectSettings(PropertyGroup):
     is_cloth: BoolProperty(
         name="Cloth Enabled",
@@ -428,6 +433,17 @@ class TareminClothObjectSettings(PropertyGroup):
             ('4096', "4096 (No Limit)", "Virtually unlimited to thoroughly prevent penetration"),
         ],
         default='256',
+    )
+    self_collision_algorithm: EnumProperty(
+        name="Algorithm",
+        description="Self-collision detection algorithm",
+        items=[
+            ('DIRECT', "Direct (V-T + E-E)", "Standard point-triangle and edge-edge continuous evaluation (accurate, heavy)"),
+            ('PAIR_CACHE', "Pair Cache (Active Pairs)", "I-Cloth contact pair caching for dynamic meshes"),
+            ('VERTEX_VERTEX', "Vertex-Vertex (Fast Spheres)", "Virtual collider vertices with pure sphere-sphere collisions (fastest, lightweight)"),
+        ],
+        default='DIRECT',
+        update=_on_self_collision_algorithm_update,
     )
     enable_pair_cache: BoolProperty(
         name="Active Pair Cache",

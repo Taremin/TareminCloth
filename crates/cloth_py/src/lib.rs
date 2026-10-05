@@ -1298,7 +1298,7 @@ pub struct ClothSimulator {
 #[pymethods]
 impl ClothSimulator {
     #[new]
-    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, sewing_lock_distance=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None, areal_density=None, enable_coarse_constraints=None))]
+    #[pyo3(signature = (positions, edges, faces=None, inv_masses=None, sewing_springs=None, layer_ids=None, thicknesses=None, layer_id=0, thickness=0.005, stiffness=1000.0, bending_stiffness=10.0, sewing_shrink_speed=1.0, sewing_stiffness=None, enable_sewing_lock=None, sewing_lock_distance=None, compression_stiffness=None, shear_stiffness=None, workgroup_size=32, solver_mode=0, enable_compact_readback=None, enable_pair_cache=None, areal_density=None, enable_coarse_constraints=None, self_collision_algorithm=None))]
     fn new(
         positions: PyReadonlyArray2<f32>,
         edges: PyReadonlyArray2<u32>,
@@ -1323,6 +1323,7 @@ impl ClothSimulator {
         enable_pair_cache: Option<bool>,
         areal_density: Option<f32>,
         enable_coarse_constraints: Option<bool>,
+        self_collision_algorithm: Option<u32>,
     ) -> PyResult<Self> {
 
         let pos_view = positions.as_array();
@@ -1425,6 +1426,9 @@ impl ClothSimulator {
         }
         if let Some(pair_cache) = enable_pair_cache {
             simulator.set_enable_pair_cache(pair_cache);
+        }
+        if let Some(algo) = self_collision_algorithm {
+            simulator.set_self_collision_algorithm(algo);
         }
 
         Ok(Self { simulator })
@@ -1625,6 +1629,21 @@ impl ClothSimulator {
     /// 現在の接触候補ペアキャッシュ設定を取得
     fn get_enable_pair_cache(&self) -> bool {
         self.simulator.enable_pair_cache()
+    }
+
+    /// 自己衝突アルゴリズムを設定 (0: DIRECT, 1: PAIR_CACHE, 2: VERTEX_VERTEX)
+    fn set_self_collision_algorithm(&mut self, algo: u32) {
+        self.simulator.set_self_collision_algorithm(algo);
+    }
+
+    /// 現在の自己衝突アルゴリズムを取得
+    fn get_self_collision_algorithm(&self) -> u32 {
+        self.simulator.get_self_collision_algorithm()
+    }
+
+    /// 仮想頂点数を取得
+    fn get_num_virtual_vertices(&self) -> u32 {
+        self.simulator.num_virtual_vertices
     }
 
     /// ペアキャッシュ詳細オプションを設定

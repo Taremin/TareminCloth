@@ -301,6 +301,17 @@ pub struct GpuClothSimulator {
     pub original_inv_masses: Vec<f32>,
     // 診断専用のGPU時刻問い合わせ計装 (既定で無効)
     pub(crate) profiler: GpuProfiler,
+
+    // 自己衝突アルゴリズム選択 (0: DIRECT, 1: PAIR_CACHE, 2: VERTEX_VERTEX)
+    pub self_collision_algorithm: u32,
+    pub num_virtual_vertices: u32,
+    #[allow(dead_code)]
+    pub(crate) virt_defs_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    pub(crate) virt_forward_params_buffer: wgpu::Buffer,
+    pub(crate) virt_forward_bind_group: wgpu::BindGroup,
+    pub(crate) self_collision_vv_params_buffer: wgpu::Buffer,
+    pub(crate) self_collision_vv_bind_group: wgpu::BindGroup,
 }
 
 
@@ -534,12 +545,42 @@ impl GpuClothSimulator {
             debug_recorder: SimulationDebugRecorder::default(),
             original_inv_masses: mesh.vertices.iter().map(|v| v.inv_mass).collect(),
             profiler: GpuProfiler::new(&context),
+            self_collision_algorithm: 0, // デフォルト: DIRECT (0)
+            num_virtual_vertices: res.num_virtual_vertices,
+            virt_defs_buffer: res.virt_defs_buffer,
+            virt_forward_params_buffer: res.virt_forward_params_buffer,
+            virt_forward_bind_group: res.virt_forward_bind_group,
+            self_collision_vv_params_buffer: res.self_collision_vv_params_buffer,
+            self_collision_vv_bind_group: res.self_collision_vv_bind_group,
         };
         // ATOMIC モード指定時は初回から必要なため、ここで先行生成する
         if solver_mode == 1 {
             sim.shared.ensure_atomic();
         }
         sim
+    }
+
+    /// 自己衝突アルゴリズムを設定する
+    /// - 0: DIRECT (従来のV-T + E-E)
+    /// - 1: PAIR_CACHE (I-Cloth 接触候補ペアキャッシュ)
+    /// - 2: VERTEX_VERTEX (仮想頂点サンプリング + 純粋球対球V-V)
+    pub fn set_self_collision_algorithm(&mut self, algo: u32) {
+        if algo == 1 {
+            self.shared.ensure_pair();
+            self.enable_pair_cache = true;
+        } else if algo == 2 {
+            self.shared.ensure_virtual_forward();
+            self.shared.ensure_self_collision_vv();
+            self.enable_pair_cache = false;
+        } else {
+            self.enable_pair_cache = false;
+        }
+        self.self_collision_algorithm = algo;
+    }
+
+    /// 現在の自己衝突アルゴリズムを取得する
+    pub fn get_self_collision_algorithm(&self) -> u32 {
+        self.self_collision_algorithm
     }
 
     /// 接触候補ペアキャッシュ (Active Pair Caching) の有効/無効を切り替える
@@ -737,6 +778,22 @@ impl GpuClothSimulator {
             &self.pair_solve_params_buffer,
             0,
             bytemuck::bytes_of(&solve_params),
+        );
+
+        let sc_vv_params = crate::virtual_mesh::SelfCollisionVvParams {
+            cell_size: self.spatial_hash.cell_size,
+            table_size: self.spatial_hash.table_size,
+            num_real_vertices: self.num_vertices,
+            num_total_particles: self.num_vertices + self.num_virtual_vertices,
+            relief_factor,
+            max_displacement_ratio,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.context.queue.write_buffer(
+            &self.self_collision_vv_params_buffer,
+            0,
+            bytemuck::bytes_of(&sc_vv_params),
         );
     }
 

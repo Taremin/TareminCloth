@@ -87,6 +87,8 @@ pub struct SimConfig {
     #[serde(default = "d_substep_interval")]
     pub ee_substep_interval: u32,
     #[serde(default)]
+    pub self_collision_algorithm: u32,
+    #[serde(default)]
     pub enable_pair_cache: bool,
     #[serde(default = "d_margin_mode")]
     pub pair_margin_mode: u32,
@@ -154,6 +156,7 @@ impl Default for SimConfig {
             post_relaxation_iters: 1,
             substep_interval: 1,
             ee_substep_interval: 1,
+            self_collision_algorithm: 0,
             enable_pair_cache: false,
             pair_margin_mode: d_margin_mode(),
             pair_safety_margin: d_safety_margin(),

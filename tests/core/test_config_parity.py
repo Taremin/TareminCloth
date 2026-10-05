@@ -135,6 +135,7 @@ class TestConfigParity(unittest.TestCase):
             "set_coupled_collider": ["coupled_collider"],
             "set_self_collision_substep_interval": ["substep_interval"],
             "set_self_collision_ee_substep_interval": ["ee_substep_interval"],
+            "set_self_collision_algorithm": ["self_collision_algorithm"],
             "set_enable_pair_cache": ["enable_pair_cache"],
             "set_pair_cache_options": ["pair_max_pairs", "pair_margin_mode"],
             "set_enable_pair_cache_final_fallback": ["enable_pair_final_fallback"],

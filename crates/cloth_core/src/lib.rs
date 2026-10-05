@@ -10,6 +10,7 @@ pub use pair_audit::{audit_pairs, AuditResult};
 pub mod smooth;
 pub mod spatial_hash;
 pub mod simulation;
+pub mod virtual_mesh;
 pub mod debug_recorder;
 pub mod renderer;
 pub mod sdf_baker;

@@ -108,6 +108,8 @@ pub struct SharedPipelines {
     pub edge_hash_bgl: wgpu::BindGroupLayout,
     pub sew_shrink_bgl: wgpu::BindGroupLayout,
     pub wrinkle_field_bgl: wgpu::BindGroupLayout,
+    pub virtual_forward_bgl: wgpu::BindGroupLayout,
+    pub self_collision_vv_bgl: wgpu::BindGroupLayout,
 
     // --- 常時パイプライン (eager・8 本) ---
     pub predict_pipeline: wgpu::ComputePipeline,
@@ -128,6 +130,8 @@ pub struct SharedPipelines {
     edge_hash: OnceLock<HashPipelines>,
     sew_shrink: OnceLock<wgpu::ComputePipeline>,
     wrinkle_field: OnceLock<wgpu::ComputePipeline>,
+    virtual_forward: OnceLock<wgpu::ComputePipeline>,
+    self_collision_vv: OnceLock<wgpu::ComputePipeline>,
 
     /// ビルド計測ログ (パイプライン名, ミリ秒)。eager + 遅延分を追記する。
     timings: Mutex<Vec<(String, f32)>>,
@@ -451,6 +455,21 @@ impl SharedPipelines {
                 uniform_entry(4),
             ],
         });
+        let virtual_forward_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Virtual Forward Bind Group Layout"),
+            entries: &[storage_rw, storage_ro(1), uniform_entry(2)],
+        });
+        let self_collision_vv_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Self Collision VV Bind Group Layout"),
+            entries: &[
+                storage_rw,
+                storage_ro(1),
+                storage_ro(2),
+                uniform_entry(3),
+                storage_rw_at(4),
+                storage_ro(5),
+            ],
+        });
 
         // --- 常時シェーダ (eager・8 本) ---
         let predict_shader = create_shader_with_wg_size(
@@ -583,6 +602,8 @@ impl SharedPipelines {
             edge_hash_bgl,
             sew_shrink_bgl,
             wrinkle_field_bgl,
+            virtual_forward_bgl,
+            self_collision_vv_bgl,
             predict_pipeline,
             distance_pipeline,
             bending_pipeline,
@@ -599,6 +620,8 @@ impl SharedPipelines {
             edge_hash: OnceLock::new(),
             sew_shrink: OnceLock::new(),
             wrinkle_field: OnceLock::new(),
+            virtual_forward: OnceLock::new(),
+            self_collision_vv: OnceLock::new(),
             timings,
             eager_ms,
         }
@@ -838,6 +861,40 @@ impl SharedPipelines {
         })
     }
 
+    /// 仮想頂点座標更新パイプラインを遅延生成・取得する。
+    pub fn ensure_virtual_forward(&self) -> &wgpu::ComputePipeline {
+        self.virtual_forward.get_or_init(|| {
+            let device = &self.context.device;
+            let shader = create_shader_with_wg_size(
+                device,
+                "Virtual Vertices Forward Shader",
+                include_str!("../shaders/virtual_vertices_forward.wgsl"),
+                self.workgroup_size,
+            );
+            let pl = pipeline_layout(device, "Virtual Forward Pipeline Layout", &self.virtual_forward_bgl);
+            timed(&self.timings, "virtual_forward", || {
+                compute_pipeline(device, "Virtual Forward Pipeline", &pl, &shader, "main")
+            })
+        })
+    }
+
+    /// 純粋球対球（V-V）自己衝突パイプラインを遅延生成・取得する。
+    pub fn ensure_self_collision_vv(&self) -> &wgpu::ComputePipeline {
+        self.self_collision_vv.get_or_init(|| {
+            let device = &self.context.device;
+            let shader = create_shader_with_wg_size(
+                device,
+                "Self Collision VV Shader",
+                include_str!("../shaders/self_collision_vv.wgsl"),
+                self.workgroup_size,
+            );
+            let pl = pipeline_layout(device, "Self Collision VV Pipeline Layout", &self.self_collision_vv_bgl);
+            timed(&self.timings, "self_collision_vv", || {
+                compute_pipeline(device, "Self Collision VV Pipeline", &pl, &shader, "main")
+            })
+        })
+    }
+
     /// 遅延パイプラインのビルド済み名一覧 (診断用)
     pub fn lazy_built_names(&self) -> Vec<String> {
         let mut names = Vec::new();
@@ -864,6 +921,12 @@ impl SharedPipelines {
         }
         if self.wrinkle_field.get().is_some() {
             names.push("wrinkle_field".to_string());
+        }
+        if self.virtual_forward.get().is_some() {
+            names.push("virtual_forward".to_string());
+        }
+        if self.self_collision_vv.get().is_some() {
+            names.push("self_collision_vv".to_string());
         }
         names
     }

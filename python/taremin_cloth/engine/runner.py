@@ -25,6 +25,7 @@ from .cache import (
 )
 from .collider import sync_colliders
 from .params import sync_cloth_parameters, sync_attachment_pins
+from .simconfig import resolve_self_collision_algorithm
 from .profiling import format_profile_table
 from ..utils import anim_driver
 from ..utils.logger import logger
@@ -141,6 +142,7 @@ def create_simulator_from_state(obj, state):
     import taremin_cloth_core
 
     settings = obj.taremin_cloth
+    sc_algo, enable_pair_cache = resolve_self_collision_algorithm(settings)
     sim = taremin_cloth_core.ClothSimulator(
         positions=state["sim_init_pos"],
         edges=state["edges_2d"],
@@ -161,9 +163,10 @@ def create_simulator_from_state(obj, state):
         workgroup_size=state["wg_size"],
         solver_mode=state["s_mode"],
         enable_compact_readback=state["compact_rb"],
-        enable_pair_cache=getattr(settings, "enable_pair_cache", False),
+        enable_pair_cache=enable_pair_cache,
         areal_density=getattr(settings, "areal_density", 0.15),
         enable_coarse_constraints=bool(getattr(settings, "enable_coarse_constraints", False)),
+        self_collision_algorithm=sc_algo,
     )
 
     # Cold Resume: レスト座標で自然長を初期化した後、現在の変形頂点座標をGPUにセットして停止位置から再開

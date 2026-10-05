@@ -12,6 +12,7 @@ use cloth_core::simulation::types::{
 };
 use cloth_core::sdf_baker::{GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams};
 use cloth_core::spatial_hash::SpatialHashParams;
+use cloth_core::virtual_mesh::{GpuVirtualVertexDef, SelfCollisionVvParams, VirtualForwardParams};
 
 use naga::front::wgsl;
 use naga::proc::Layouter;
@@ -456,5 +457,32 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, WrinkleFieldParams, valley_window);
             check_member!(filename, s, WrinkleFieldParams, crest_window);
         }
+
+        if let Some(s) = structs.get("GpuVirtualVertexDef") {
+            check_struct_size!(filename, s, GpuVirtualVertexDef);
+            check_member!(filename, s, GpuVirtualVertexDef, parent_indices);
+            check_member!(filename, s, GpuVirtualVertexDef, bary_weights);
+        }
+
+        if let Some(s) = structs.get("VirtualForwardParams") {
+            check_struct_size!(filename, s, VirtualForwardParams);
+            check_member!(filename, s, VirtualForwardParams, num_real_vertices);
+            check_member!(filename, s, VirtualForwardParams, num_virtual_vertices);
+            check_member!(filename, s, VirtualForwardParams, _pad0);
+            check_member!(filename, s, VirtualForwardParams, _pad1);
+        }
+
+        if let Some(s) = structs.get("SelfCollisionVvParams") {
+            check_struct_size!(filename, s, SelfCollisionVvParams);
+            check_member!(filename, s, SelfCollisionVvParams, cell_size);
+            check_member!(filename, s, SelfCollisionVvParams, table_size);
+            check_member!(filename, s, SelfCollisionVvParams, num_real_vertices);
+            check_member!(filename, s, SelfCollisionVvParams, num_total_particles);
+            check_member!(filename, s, SelfCollisionVvParams, relief_factor);
+            check_member!(filename, s, SelfCollisionVvParams, max_displacement_ratio);
+            check_member!(filename, s, SelfCollisionVvParams, _pad0);
+            check_member!(filename, s, SelfCollisionVvParams, _pad1);
+        }
     }
 }
+

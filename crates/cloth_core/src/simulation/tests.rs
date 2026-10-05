@@ -834,5 +834,71 @@ mod tests {
         let mid_z = (verts[0].position[2] + verts[1].position[2]) * 0.5;
         assert!(mid_z > 0.0, "エッジ同士の接触により布がZ+方向に押し出されるべき (mid_z = {})", mid_z);
     }
+
+    #[test]
+    fn test_vertex_vertex_self_collision() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 2つの対向する独立した三角形パッチ
+        // パッチ1 (Z=0.0): (0,0,0), (0.1, 0, 0), (0, 0.1, 0)
+        // パッチ2 (Z=0.015): (0,0,0.015), (0.1, 0, 0.015), (0, 0.1, 0.015)
+        // 厚み thickness = 0.02 のため、初期距離 0.015 は衝突範囲内 (min_dist = 0.04)
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [0.0, 0.1, 0.0],
+            [0.0, 0.0, 0.015],
+            [0.1, 0.0, 0.015],
+            [0.0, 0.1, 0.015],
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0],
+            [3, 4], [4, 5], [5, 3],
+        ];
+        let faces = vec![[0, 1, 2], [3, 4, 5]];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.02,
+            1000.0,
+            10.0,
+            10.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.gravity = [0.0, 0.0, 0.0];
+        sim.set_enable_self_collision(true);
+        // V-V モードに設定
+        sim.set_self_collision_algorithm(2);
+        assert_eq!(sim.get_self_collision_algorithm(), 2);
+
+        // 仮想頂点が生成されていることを確認
+        assert!(sim.num_virtual_vertices > 0, "仮想頂点が生成されているべき (num_virtual = {})", sim.num_virtual_vertices);
+
+        // 1ステップ実行
+        sim.step(0.016, 5);
+
+        let verts = sim.read_vertices();
+        assert_eq!(verts.len(), 6);
+
+        // パッチ1のZ座標は下(Z-)へ、パッチ2のZ座標は上(Z+)へ押し離されていることを確認
+        let z_lower = (verts[0].position[2] + verts[1].position[2] + verts[2].position[2]) / 3.0;
+        let z_upper = (verts[3].position[2] + verts[4].position[2] + verts[5].position[2]) / 3.0;
+        let final_sep = z_upper - z_lower;
+        assert!(final_sep > 0.015, "V-V自己衝突により対向パッチが押し離されるべき (初期0.015 -> 実行後{})", final_sep);
+    }
 }
 
