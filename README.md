@@ -378,6 +378,34 @@ Taremin Cloth では、目的に応じて **「インタラクティブモード
     python -m taremin_cloth.log_tools audit cache.jsonl.gz direct.jsonl.gz --tolerance 1.0
    ```
 
+### 16. 独立GUIによる高速対話検証 & 定番デモスイート (Standalone GUI & Demos)
+
+Blenderを起動することなく、数ミリ秒で即座にリアルタイム（60FPS以上）の物理挙動を確認・対話操作できる独立GUIツールです。
+物理シミュレーションで定番の **全7種のデモシーン（プロシージャル生成）** を内蔵しており、マウスによる布の掴み（Grab）・ピン留め（Pキー）・パラメータ調整スライダーを即座に試行できます。
+
+```bash
+# 1. 独立GUIの起動 (デフォルト: 1. Sphere Draping)
+cargo run -p cloth_gui
+
+# 2. 任意のデモシーンを直接指定して起動
+cargo run -p cloth_gui -- --demo folding   # 3. Ground Folding（長い布の地面折り畳み）
+cargo run -p cloth_gui -- --demo curtain   # 2. Two-Point Curtain（2点吊りカーテン）
+cargo run -p cloth_gui -- --demo layer     # 4. Multi-Layer Cloth（多層レイヤー）
+cargo run -p cloth_gui -- --demo twisting  # 5. Cloth Twisting（布のねじり絞り）
+cargo run -p cloth_gui -- --demo funnel    # 6. Funnel Pass（漏斗通過）
+cargo run -p cloth_gui -- --demo sewing    # 7. Garment Sewing（衣服縫合）
+
+# 3. CI最小隔離環境での自動回帰テスト実行（Blender不要）
+python run_tests.py --ci -t tests/physics/test_demo_scenes.py
+```
+
+- **操作方法**:
+  - **Demo Scene ComboBox**: UI上部のドロップダウンから全7種のシーンを瞬時に切り替え。
+  - **左ドラッグ**: 布頂点を掴んで引っ張る（Grab）。
+  - **[P] キー**: マウス直下の頂点をピン留め / 解除。
+  - **🔄 Reset**: 現在のデモシーンを初期配置に巻き戻し。
+  - **Stiffness / Gravity / Damping**: スライダー操作がリアルタイムに反映。
+  - **Self-Collision**: 自己衝突（V-T）、エッジ衝突（E-E）、Untangling、Coupled Mode（OFF / Relaxation / Full）をリアルタイムに変更可能。
 
 ---
 

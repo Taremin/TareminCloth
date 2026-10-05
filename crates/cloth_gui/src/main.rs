@@ -8,6 +8,7 @@ mod protocol;
 mod server;
 mod camera;
 mod mesh_render;
+mod demo_scenes;
 mod app;
 
 use cloth_core::mesh::ClothMesh;
@@ -16,6 +17,7 @@ use cloth_core::GpuContext;
 use protocol::GuiCommand;
 use server::TcpServerHandle;
 use app::GuiApp;
+use demo_scenes::DemoSceneType;
 
 #[cfg(target_os = "windows")]
 #[link(name = "winmm")]
@@ -36,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut port = 9055u16;
     let mut headless = false;
+    let mut initial_demo = DemoSceneType::SphereDraping;
 
     let args: Vec<String> = env::args().collect();
     let mut i = 1;
@@ -52,6 +55,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--headless" => {
                 headless = true;
             }
+            "--demo" | "-d" => {
+                if i + 1 < args.len() {
+                    let d = args[i + 1].to_lowercase();
+                    initial_demo = match d.as_str() {
+                        "none" => DemoSceneType::None,
+                        "sphere" | "sphere_draping" | "1" => DemoSceneType::SphereDraping,
+                        "curtain" | "two_point_curtain" | "2" => DemoSceneType::TwoPointCurtain,
+                        "folding" | "ground_folding" | "accordion" | "3" => DemoSceneType::GroundFolding,
+                        "layer" | "multi_layer" | "4" => DemoSceneType::MultiLayerCloth,
+                        "twisting" | "twist" | "5" => DemoSceneType::ClothTwisting,
+                        "funnel" | "funnel_pass" | "6" => DemoSceneType::FunnelPass,
+                        "sewing" | "garment_sewing" | "7" => DemoSceneType::GarmentSewing,
+                        _ => {
+                            log::warn!("Unknown demo name: {}, falling back to SphereDraping", d);
+                            DemoSceneType::SphereDraping
+                        }
+                    };
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -64,14 +87,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("[Headless] Running in headless server mode on {}", bind_addr);
         run_headless_loop(server_handle)?;
     } else {
-        log::info!("[GUI] Launching GUI window...");
+        log::info!("[GUI] Launching GUI window with initial demo: {:?}", initial_demo);
         let event_loop = EventLoop::new()?;
-        let mut app = GuiApp::new(server_handle);
+        let mut app = GuiApp::new(server_handle, initial_demo);
         event_loop.run_app(&mut app)?;
+        app.cleanup();
     }
 
+    // 共有パイプラインキャッシュとグローバルGPUコンテキストを明示的に解放
+    cloth_core::simulation::pipeline_cache::clear_cache();
+    cloth_core::GpuContext::clear_global_context();
+
     log::info!("=== Taremin Cloth GUI Exited Normally ===");
-    std::process::exit(0);
+    Ok(())
 }
 
 /// ヘッドレスサーバーモード（ウィンドウなし・テストおよびバッチ処理用）

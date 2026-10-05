@@ -12,12 +12,14 @@ use cloth_core::simulation::GpuClothSimulator;
 use cloth_core::GpuContext;
 
 use crate::camera::OrbitCamera;
+use crate::demo_scenes::DemoSceneType;
 use crate::mesh_render::MeshRenderer;
 use crate::protocol::{GuiCommand, GuiResponse, SceneInitData};
 use crate::server::{MainThreadTask, TcpServerHandle};
 
 pub struct GuiApp {
     server: TcpServerHandle,
+    current_demo: DemoSceneType,
     window: Option<Arc<Window>>,
     gpu_context: Option<Arc<GpuContext>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -71,6 +73,13 @@ pub struct GuiApp {
     scene_fps: f32,
     next_frame_time: Instant,
 
+    // 自己衝突設定
+    self_collision_enabled: bool,
+    edge_collision_enabled: bool,
+    coupled_mode: u32,
+    enable_normal_untangling: bool,
+    relief_factor: f32,
+
     // マウス入力 & インタラクティブ操作 (Grab / Pin)
     is_orbiting: bool,
     is_panning: bool,
@@ -87,10 +96,11 @@ pub struct GuiApp {
 
 
 impl GuiApp {
-    pub fn new(server: TcpServerHandle) -> Self {
+    pub fn new(server: TcpServerHandle, initial_demo: DemoSceneType) -> Self {
         let egui_ctx = egui::Context::default();
         Self {
             server,
+            current_demo: initial_demo,
             window: None,
             gpu_context: None,
             surface: None,
@@ -139,6 +149,11 @@ impl GuiApp {
             target_fps: 60.0,
             scene_fps: 60.0,
             next_frame_time: Instant::now(),
+            self_collision_enabled: true,
+            edge_collision_enabled: true,
+            coupled_mode: 1, // RELAXATION
+            enable_normal_untangling: true,
+            relief_factor: 0.2,
             is_orbiting: false,
             is_panning: false,
             last_mouse_pos: (0.0, 0.0),
@@ -151,6 +166,30 @@ impl GuiApp {
             pinned_verts: HashMap::new(),
             cached_positions: Vec::new(),
         }
+    }
+
+    /// アプリケーション終了時に全 GPU リソースを明示的かつ安全な順序で解放する
+    pub fn cleanup(&mut self) {
+        log::info!("[App] Cleaning up GPU resources...");
+        // 1. シミュレータの明示的破棄（バッファ、BindGroup、内部パイプライン等の子リソースを解放）
+        self.simulator = None;
+        // 2. レンダラー、深度テクスチャ、egui描画リソースの破棄
+        self.egui_renderer = None;
+        self.egui_state = None;
+        self.renderer = None;
+        self.depth_texture = None;
+        // 3. サーフェスとウィンドウの関連付け解除
+        self.surface = None;
+        self.surface_config = None;
+        // 4. 残存コマンドの完了を待機
+        if let Some(ref ctx) = self.gpu_context {
+            ctx.device.poll(wgpu::Maintain::Wait);
+        }
+        // 5. GPUコンテキストの参照を破棄
+        self.gpu_context = None;
+        self.window = None;
+        // 6. TCPサーバースレッドを停止
+        self.server.stop();
     }
 
     fn init_gpu(&mut self, window: Arc<Window>) {
@@ -221,6 +260,13 @@ impl GuiApp {
         self.renderer = Some(renderer);
         self.egui_renderer = Some(egui_renderer);
         self.egui_state = Some(egui_state);
+
+        // 初期デモシーンの自動ロード
+        if let Some(scene_data) = self.current_demo.create_scene() {
+            log::info!("[App] Auto-loading initial demo scene: {:?}", self.current_demo);
+            self.init_scene_from_data(scene_data);
+            self.is_running = true;
+        }
     }
 
     fn pick_vertex(&mut self, screen_pos: (f32, f32), screen_size: (f32, f32)) -> Option<u32> {
@@ -263,11 +309,25 @@ impl GuiApp {
         let faces_opt = if !data.faces.is_empty() { Some(data.faces.as_slice()) } else { None };
         let sew_opt = data.sewing_springs.as_deref();
 
+        let inv_masses_storage;
+        let inv_masses_slice = if data.inv_masses.len() == data.positions.len() && !data.inv_masses.iter().all(|&m| (m - 1.0).abs() < 1e-5) {
+            data.inv_masses.as_slice()
+        } else {
+            log::warn!("[App] inv_masses が未設定またはすべて 1.0 です。areal_density ({:.3}) から物理逆質量を自動補正します。", data.areal_density);
+            inv_masses_storage = cloth_core::mesh::areal_inv_masses(
+                &data.positions,
+                faces_opt,
+                None,
+                data.areal_density.max(0.01),
+            );
+            inv_masses_storage.as_slice()
+        };
+
         let mesh = ClothMesh::from_raw_with_opts(
             &data.positions,
             &data.edges,
             faces_opt,
-            Some(&data.inv_masses),
+            Some(inv_masses_slice),
             sew_opt,
             data.layer_ids.as_deref(),
             None,
@@ -358,6 +418,12 @@ impl GuiApp {
 
         // 自己衝突オプション
         if let Some(ref sc) = data.self_collision {
+            self.self_collision_enabled = sc.enabled;
+            self.edge_collision_enabled = sc.enable_edge_collision;
+            self.coupled_mode = sc.coupled_mode;
+            self.enable_normal_untangling = sc.enable_normal_untangling;
+            self.relief_factor = sc.relief_factor;
+
             sim.set_enable_self_collision(sc.enabled);
             sim.set_self_collision_options(
                 sc.relief_factor,
@@ -405,14 +471,21 @@ impl GuiApp {
             r.update_voxels(&context.device, &data.voxels);
         }
 
-        // カメラターゲットをメッシュ中心に自動フィット
+        // カメラターゲットおよび距離をメッシュ中心とサイズに自動フィット
         if !data.positions.is_empty() {
             let mut center = glam::Vec3::ZERO;
+            let mut min_p = glam::Vec3::splat(f32::MAX);
+            let mut max_p = glam::Vec3::splat(f32::MIN);
             for p in &data.positions {
-                center += glam::Vec3::from_array(*p);
+                let v = glam::Vec3::from_array(*p);
+                center += v;
+                min_p = min_p.min(v);
+                max_p = max_p.max(v);
             }
             center /= data.positions.len() as f32;
             self.camera.target = center;
+            let diag = (max_p - min_p).length();
+            self.camera.distance = (diag * 1.8).max(0.8);
         }
 
         self.simulator = Some(sim);
@@ -587,31 +660,31 @@ impl GuiApp {
         }
     }
 
-    fn render_frame(&mut self) {
+    fn render_frame(&mut self) -> Option<DemoSceneType> {
         let render_t0 = Instant::now();
 
-        let Some(ref window) = self.window else { return };
-        let Some(ref surface) = self.surface else { return };
-        let Some(ref gpu_context) = self.gpu_context else { return };
-        let Some(ref config) = self.surface_config else { return };
-        let Some(ref depth_view) = self.depth_texture else { return };
-        let Some(ref renderer) = self.renderer else { return };
-        let Some(ref mut egui_renderer) = self.egui_renderer else { return };
-        let Some(ref mut egui_state) = self.egui_state else { return };
+        let Some(ref window) = self.window else { return None; };
+        let Some(ref surface) = self.surface else { return None; };
+        let Some(ref gpu_context) = self.gpu_context else { return None; };
+        let Some(ref config) = self.surface_config else { return None; };
+        let Some(ref depth_view) = self.depth_texture else { return None; };
+        let Some(ref renderer) = self.renderer else { return None; };
+        let Some(ref mut egui_renderer) = self.egui_renderer else { return None; };
+        let Some(ref mut egui_state) = self.egui_state else { return None; };
 
         let output = match surface.get_current_texture() {
             Ok(output) => output,
             Err(wgpu::SurfaceError::Lost) => {
                 surface.configure(&gpu_context.device, config);
-                return;
+                return None;
             }
             Err(wgpu::SurfaceError::OutOfMemory) => {
                 log::error!("[App] Surface OutOfMemory");
-                return;
+                return None;
             }
             Err(e) => {
                 log::warn!("[App] Surface texture error: {}", e);
-                return;
+                return None;
             }
         };
 
@@ -627,12 +700,20 @@ impl GuiApp {
         let mut damping_changed = false;
         let mut gravity_changed = false;
         let mut iterations_changed = false;
+        let mut sc_enabled_changed = false;
+        let mut sc_edge_changed = false;
+        let mut sc_opts_changed = false;
+        let mut sc_coupled_changed = false;
+        let mut demo_to_load: Option<DemoSceneType> = None;
 
         let raw_input = egui_state.take_egui_input(window);
         self.egui_ctx.begin_pass(raw_input);
 
         egui::Window::new("Taremin Cloth GUI")
-            .default_width(280.0)
+            .default_width(300.0)
+            .default_height(650.0)
+            .vscroll(true)
+            .resizable(true)
             .show(&self.egui_ctx, |ui| {
                 ui.heading("Performance");
                 ui.horizontal(|ui| {
@@ -701,6 +782,20 @@ impl GuiApp {
                 });
 
                 ui.separator();
+                ui.heading("Demo Scene");
+                let mut next_demo = self.current_demo;
+                egui::ComboBox::from_id_salt("demo_scene_select")
+                    .selected_text(self.current_demo.label())
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for &demo in DemoSceneType::ALL {
+                            if ui.selectable_value(&mut next_demo, demo, demo.label()).clicked() {
+                                demo_to_load = Some(demo);
+                            }
+                        }
+                    });
+
+                ui.separator();
                 ui.heading("Control");
                 ui.horizontal(|ui| {
                     if ui.button(if self.is_running { "⏸ Pause" } else { "▶ Play" }).clicked() {
@@ -716,7 +811,9 @@ impl GuiApp {
                         }
                     }
                     if ui.button("🔄 Reset").clicked() {
-                        if let Some(ref mut sim) = self.simulator {
+                        if self.current_demo != DemoSceneType::None {
+                            demo_to_load = Some(self.current_demo);
+                        } else if let Some(ref mut sim) = self.simulator {
                             sim.reset();
                             self.frame_seq = 0;
                         }
@@ -780,6 +877,38 @@ impl GuiApp {
                     if ui.add(egui::Slider::new(&mut self.bending_damping, 0.0..=20.0).text("Bending")).changed() {
                         damping_changed = true;
                     }
+                });
+
+                ui.separator();
+                egui::CollapsingHeader::new("Self-Collision").default_open(true).show(ui, |ui| {
+                    if ui.checkbox(&mut self.self_collision_enabled, "Enable Self-Collision").changed() {
+                        sc_enabled_changed = true;
+                    }
+                    if ui.checkbox(&mut self.edge_collision_enabled, "Edge Collision (E-E)").changed() {
+                        sc_edge_changed = true;
+                    }
+                    if ui.checkbox(&mut self.enable_normal_untangling, "Normal Untangling").changed() {
+                        sc_opts_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.relief_factor, 0.0..=1.0).text("Relief Factor")).changed() {
+                        sc_opts_changed = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Coupled Mode:");
+                        let prev = self.coupled_mode;
+                        if ui.selectable_label(self.coupled_mode == 0, "OFF").clicked() {
+                            self.coupled_mode = 0;
+                        }
+                        if ui.selectable_label(self.coupled_mode == 1, "Relaxation").clicked() {
+                            self.coupled_mode = 1;
+                        }
+                        if ui.selectable_label(self.coupled_mode == 2, "Full").clicked() {
+                            self.coupled_mode = 2;
+                        }
+                        if self.coupled_mode != prev {
+                            sc_coupled_changed = true;
+                        }
+                    });
                 });
 
                 ui.separator();
@@ -854,6 +983,24 @@ impl GuiApp {
             }
             if iterations_changed {
                 sim.solver_iterations = self.solver_iterations;
+            }
+            if sc_enabled_changed {
+                sim.set_enable_self_collision(self.self_collision_enabled);
+            }
+            if sc_edge_changed {
+                sim.set_enable_edge_collision(self.edge_collision_enabled);
+            }
+            if sc_opts_changed {
+                sim.set_self_collision_options(
+                    self.relief_factor,
+                    0.2, // max_displacement_ratio
+                    true, // exclude_neighbors
+                    self.enable_normal_untangling,
+                    256,
+                );
+            }
+            if sc_coupled_changed {
+                sim.set_coupled_self_collision_options(self.coupled_mode, 2);
             }
         }
 
@@ -993,6 +1140,8 @@ impl GuiApp {
         if pres_ms > 5.0 {
             log::debug!("[GPU] output.present took {:.2} ms", pres_ms);
         }
+
+        demo_to_load
     }
 
     fn process_tasks(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -1001,6 +1150,7 @@ impl GuiApp {
             had_tasks = true;
             match task {
                 MainThreadTask::InitScene { data, respond_to } => {
+                    self.current_demo = DemoSceneType::None;
                     self.init_scene_from_data(data);
                     let _ = respond_to.send(GuiResponse::Ack { message: "OK".to_string() });
                 }
@@ -1189,6 +1339,7 @@ impl ApplicationHandler for GuiApp {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.cleanup();
                 event_loop.exit();
             }
             WindowEvent::Resized(new_size) => {
@@ -1397,8 +1548,17 @@ impl ApplicationHandler for GuiApp {
 
                 // フレーム描画
                 let t_render_start = Instant::now();
-                self.render_frame();
+                let demo_to_load = self.render_frame();
                 let t_render = t_render_start.elapsed().as_secs_f32() * 1000.0;
+
+                // デモシーン変更またはリセット要求の適用
+                if let Some(demo) = demo_to_load {
+                    self.current_demo = demo;
+                    if let Some(scene_data) = demo.create_scene() {
+                        self.init_scene_from_data(scene_data);
+                        self.is_running = true;
+                    }
+                }
 
                 // FPS集計 (0.5秒間隔)
                 let fps_elapsed = self.last_fps_calc_time.elapsed().as_secs_f32();
@@ -1475,4 +1635,10 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
         view_formats: &[],
     });
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+impl Drop for GuiApp {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
 }

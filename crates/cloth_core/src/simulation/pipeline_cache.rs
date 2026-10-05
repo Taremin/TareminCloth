@@ -1023,3 +1023,9 @@ pub fn cache_info() -> Vec<SharedCacheEntry> {
         })
         .collect()
 }
+
+/// 共有パイプラインキャッシュをすべて解放する（プロセス終了時・明示的クリーンアップ用）
+pub fn clear_cache() {
+    let mut map = lock_cache();
+    map.clear();
+}

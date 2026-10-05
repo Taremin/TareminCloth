@@ -806,6 +806,111 @@ graph TD
    - ベイク完了後は、不用意なパラメータ変更による結果の齟齬を防ぐため、UIパネル上の物理設定を自動的にロック（`layout.active = False`）。
    - パラメータを再調整したい場合は `Free Bake` ボタンを押してロックを解除するワークフローを徹底。
 
+---
+
+## 9. 独立GUIおよびスタンドアロン・デモスイート設計 (Standalone GUI & Demo Suite Architecture)
+
+### 9.1 課題と設計思想：Blender非依存の高速検証と定番ベンチマーク
+布物理シミュレーションの開発・デバッグ・リファクタリングにおいて、Blenderの起動（数秒〜十数秒）を介さずにミリ秒単位でリアルタイム（60FPS以上）に対話検証できる環境が不可欠です。
+また、学術論文や物理エンジンの標準テストベンチに準拠した定番シーンを備えることで、アルゴリズムの正当性と回帰耐性を客観的に評価できます。
+
+Taremin Cloth では、Rust製スタンドアロンGUI（`crates/cloth_gui`）内に **全7種のプロシージャル・デモスイート (`demo_scenes.rs`)** を内蔵し、さらに同一の物理条件をヘッドレスCI自動回帰テスト（`tests/physics/test_demo_scenes.py`）と共有する統合検証基盤を配備しています。
+
+```mermaid
+flowchart TD
+    subgraph DemoRegistry ["内蔵デモスイート (demo_scenes.rs)"]
+        D1["1. Sphere Draping<br>(球体落下・ドレープ・摩擦)"]
+        D2["2. Two-Point Curtain<br>(2点吊りカーテン・伸び耐性)"]
+        D3["3. Ground Folding<br>(地面折り畳み・多層自己衝突)"]
+        D4["4. Multi-Layer Cloth<br>(多層レイヤー・外側維持)"]
+        D5["5. Cloth Twisting<br>(布のねじり絞り・極限接触)"]
+        D6["6. Funnel Pass<br>(漏斗・挟み込み通過)"]
+        D7["7. Garment Sewing<br>(衣服縫合・マネキン着用)"]
+    end
+
+    subgraph StandaloneGUI ["独立GUI (taremin_cloth_gui)"]
+        GUI["winit + egui + wgpu<br>・60FPSリアルタイム描画<br>・ComboBoxで即時シーン切替<br>・マウスGrab / Pin操作<br>・剛性/重力/FPSスライダー"]
+    end
+
+    subgraph HeadlessCI ["CI自動回帰テスト (test_demo_scenes.py)"]
+        CI["Python unittest (.venv_ci)<br>・球体貫通深さチェック<br>・エッジ最大伸び率 (<= 5%)<br>・地面下めり込み防止<br>・放射距離差分 (Outer >= Inner)"]
+    end
+
+    DemoRegistry -->|Standalone 実行| StandaloneGUI
+    DemoRegistry -->|同一物理パラメータ| HeadlessCI
+```
+
+### 9.2 デモスイート全7種の検証仕様
+
+| # | デモシーン | 構成概要 | 検証・アサーション指標 |
+|---|---|---|---|
+| **1** | **Sphere Draping**<br>（球体落下・ドレープ） | 球体コライダー（$R=0.16$m）の上方に水平正方形布（$35 \times 35$）を自重落下。 | ・球体表面へのドレープとシワ形成<br>・球体内部への貫通深さマージン維持（貫通なし）<br>・エッジ歪み率 $\le 1.12$<br>・NaN/発散の非発生 |
+| **2** | **Two-Point Curtain**<br>（2点吊りカーテン） | 上端左右角頂点をピン固定した垂直布（$35 \times 25$）が自重で垂れ下がる。 | ・ピン位置の完全固定維持<br>・完全非伸縮剛性（Inextensible PBD: 伸び率 5% 以内）<br>・自然なカテナリー曲線（中央垂れ下がり・横幅収縮） |
+| **3** | **Ground Folding**<br>（地面折り畳み） | 地面平面コライダー（$Z=0$）の上方に縦長布（$15 \times 75$）を初期正弦波たわみ付きで配置し落下。 | ・地面下（$Z < 0$）へのめり込み防止（厚みマージン内）<br>・アコーディオン状（蛇腹）の規則的な折り重なり<br>・多層自己衝突（V-T, E-E）による反発と安定スタック |
+| **4** | **Multi-Layer Cloth**<br>（多層レイヤー布） | 球体上にインナー（`layer_id=0`）とアウター（`layer_id=1`）の2枚を重ねて配置。 | ・球体中心からの放射距離比較（$d_{\text{outer}} \ge d_{\text{inner}}$）<br>・アウター層の内側潜り込み防止（Untangling） |
+| **5** | **Cloth Twisting**<br>（布のねじり絞り） | 長方形布の上下端をピン固定し、下端を逆方向に約270度ねじった初期変形を付与。 | ・極限の高密度自己接触下でのトポロジーCCD安定性<br>・ピン端の幾何固定維持<br>・局所ラプラシアン突起（トゲトゲ）なし |
+| **6** | **Funnel Pass**<br>（漏斗・スリット通過） | カプセルコライダーで構成された円錐漏斗の開口部から布を自重通過。 | ・狭小空間における挟み込み・すり抜け耐性<br>・布全体の落下通過（重心 $Z$ の進行）<br>・コライダーと自己衝突の協調収束 |
+| **7** | **Garment Sewing**<br>（衣服縫合・着用） | 人体胴体コライダーの前後から2枚の身頃布を縫合バネ（`sewing_springs`）で引き寄せる。 | ・縫合バネ収縮と密着剛体ロック（`enable_sewing_lock`）<br>・縫合優先モード（`sewing_priority`）による皺抑制とフィット<br>・過渡期過大歪みの回復と最終タイトフィット（歪み率 $\le 1.80$、自然長復元率 1.025） |
+
+### 9.3 物理質量スケール（`areal_inv_masses`）とトゲトゲ・暴れ検知仕様
+
+XPBD物理シミュレーションにおいて、頂点質量とコンプライアンス（$\alpha = \frac{1}{k \Delta t^2}$）の比率は拘束補正比率（$\frac{\sum w}{\sum w + \alpha}$）を決定づける最重要ファクターです。
+デモスイートおよびCIテストでは、Blender本番環境と同一の `cloth_core::mesh::areal_inv_masses`（三角形面積 $\times$ 面密度 $0.15 \sim 0.22\,\text{kg/m}^2$）によるグラム単位（$m \approx 0.1\,\text{g}$）の物理質量を全シーンで統一適用しています。
+
+また、局所的な高周波ジッター・トゲトゲ化・エッジ引き裂かれを確実に不合格とするため、CIテスト（`tests/physics/test_demo_scenes.py`）では以下の3重アサーションが毎ステップ実行されます：
+1. **エッジ歪み率（Edge Strain Ratio）**: $\max(L / L_0) < 1.30$（通常デモ）、縫合時過渡期許容と結合後収束判定
+2. **離散ラプラシアン（局所曲率・トゲトゲ度）**: 各頂点と接続隣接頂点群の平均位置とのズレが局所エッジ長平均に対して一定比率を超えて突出していないこと
+3. **高周波速度スパイク検知**: 自由落下終端速度を大きく逸脱する異常加速（ジッター）の検知
+
+### 9.4 布のしなやかさ適正化仕様（せん断柔軟性・座屈シワ・自然な薄さと減衰）
+
+初期のデモシーンでは「布全体がプラスチック板のように硬く突っ張る」という課題が存在しました。物理的・幾何学的な根本原因を解明し、以下の4原則に基づいて全デモシーンのしなやかさを適正化しています：
+
+1. **格子対角線の基本エッジ除外とせん断柔軟性（Shear Compliance）の確保**:
+   - 織物（布）の本質は直交する縦糸・横糸であり、対角方向には容易に菱形変形（せん断）できる異方性を持ちます。
+   - `generate_grid_mesh` において対角線 `(v00, v11)` を基本エッジ（Tension/Compression）から除外。対角方向の拘束は `ClothMesh` 内部で自動生成される対向頂点間のせん断拘束（`shear_stiffness: 50.0 ~ 80.0 N/m`）に委ねることで、剛体トラス化を防ぎ布らしいしなやかなせん断変形を実現しています。
+2. **圧縮剛性（`compression_stiffness`）の低減とオイラー座屈シワの許容**:
+   - 糸は圧縮荷重を受けると直ちに座屈してシワになります。圧縮剛性を過大（400〜600 N/m）に設定すると板のように突っ張るため、`50.0 ~ 60.0 N/m` に設定し、着地や覆いかぶさり時の自然な細かいシワ・アコーディオン折り畳みを可能にしました。
+3. **曲げ剛性（`bending_stiffness`）の適正化**:
+   - 秒間1500回（25サブステップ×4反復）のXPBDループにおいて、`bending_stiffness: 1.5 ~ 2.5` は毎フレーム約88%の曲がりを平坦へ強制復元する過大な値でした。これを `0.3 ~ 0.4 N/m` に調整し、重力に逆らわず曲面に美しく沿うドレープを獲得しました。
+4. **布厚（`thickness`）と拘束減衰（`damping`）の自然化**:
+   - 自己衝突の幾何学的厚みを 6〜7mm から `0.0035 m`（3.5mm）へと薄型化し、折り重なり時の不自然な大回り・浮き上がりを解消。
+   - 折れ曲がり運動への粘性ブレーキ（`bending_damping: 1.0 -> 0.2`）を抑制し、布の軽快な揺れ・ヒラヒラ感を回復しました。
+
+### 9.5 独立GUI自己衝突リアルタイム設定UI (Self-Collision Controls)
+
+スタンドアロンGUI（`crates/cloth_gui`）の左ペインに `Self-Collision` CollapsingHeader を新設し、Blender UIと同等の詳細な自己衝突挙動をGUI実行中に動的リアルタイム変更可能です：
+
+- **Enable Self-Collision (チェックボックス)**: V-T（頂点対面）および自己衝突パイプライン全体の有効化/無効化。
+- **Edge Collision (E-E) (チェックボックス)**: エッジ同士の交差防止（Edge-Centric E-E Directパス）の有効化/無効化。
+- **Untangling (チェックボックス)**: レイヤー階層（`layer_id`）に基づく外層への自動押し出し機能の切り替え。
+- **Relief Factor (スライダー: 0.05 〜 1.00)**: 自己衝突変位の反復あたり適用緩和係数。
+- **Coupled Mode (ComboBox)**:
+  - `OFF`: 緩和なし（標準推奨・自縛ロック防止）
+  - `Relaxation`: 自己衝突後に距離拘束を再適用（対向押し付け時の過剰伸長抑制）
+  - `Full Coupled`: 各反復で自己衝突と距離拘束を同調解決（多重プリーツ等向け高精度設定）
+
+変更は `sim.set_enable_self_collision()`、`sim.set_enable_edge_collision()`、`sim.set_self_collision_options()`、`sim.set_coupled_self_collision_options()` を介して即座にGPU物理コアへ送信され、シミュレーションをリセットすることなく挙動差分を確認できます。
+
+### 9.6 起動と運用
+```bash
+# デフォルト（Sphere Draping）で独立GUIを起動
+cargo run -p cloth_gui
+
+# 指定デモシーンを直接起動
+cargo run -p cloth_gui -- --demo folding   # 地面折り畳み（アコーディオン）
+cargo run -p cloth_gui -- --demo curtain   # カーテン（カテナリードレープ）
+cargo run -p cloth_gui -- --demo layer     # 多層レイヤー布
+cargo run -p cloth_gui -- --demo twist     # ねじり絞り
+cargo run -p cloth_gui -- --demo funnel    # 漏斗通過
+cargo run -p cloth_gui -- --demo sewing    # 衣服縫合
+
+# CI最小隔離環境での自動回帰テスト実行
+python run_tests.py --ci -t tests/physics/test_demo_scenes.py
+```
+
+
+
 
 
 

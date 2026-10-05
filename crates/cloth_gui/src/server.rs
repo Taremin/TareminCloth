@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -39,7 +40,8 @@ pub enum MainThreadTask {
 pub struct TcpServerHandle {
     pub shared_state: Arc<RwLock<SharedSimState>>,
     pub task_rx: mpsc::Receiver<MainThreadTask>,
-    _thread: thread::JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl TcpServerHandle {
@@ -50,17 +52,28 @@ impl TcpServerHandle {
 
         let shared_state = Arc::new(RwLock::new(SharedSimState::default()));
         let (task_tx, task_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
 
         let state_clone = Arc::clone(&shared_state);
+        let shutdown_clone = Arc::clone(&shutdown);
         let thread = thread::spawn(move || {
-            server_loop(listener, state_clone, task_tx);
+            server_loop(listener, state_clone, task_tx, shutdown_clone);
         });
 
         Ok(Self {
             shared_state,
             task_rx,
-            _thread: thread,
+            shutdown,
+            thread: Some(thread),
         })
+    }
+
+    pub fn stop(&mut self) {
+        log::info!("[Server] Stopping TCP server thread...");
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -68,11 +81,12 @@ fn server_loop(
     listener: TcpListener,
     shared_state: Arc<RwLock<SharedSimState>>,
     task_tx: mpsc::Sender<MainThreadTask>,
+    shutdown: Arc<AtomicBool>,
 ) {
     let mut active_stream: Option<TcpStream> = None;
     let mut read_buf = Vec::with_capacity(65536);
 
-    loop {
+    while !shutdown.load(Ordering::Relaxed) {
         // 新規接続の受け入れ
         if active_stream.is_none() {
             match listener.accept() {
@@ -113,7 +127,7 @@ fn server_loop(
                     read_buf.extend_from_slice(&temp_buf[..n]);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // データ待機
+                    thread::sleep(Duration::from_millis(5));
                 }
                 Err(e) => {
                     log::warn!("[Server] Read error: {}", e);

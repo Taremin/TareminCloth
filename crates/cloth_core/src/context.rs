@@ -39,10 +39,13 @@ pub struct GpuBufferLimits {
 }
 
 pub struct GpuContext {
-    pub instance: wgpu::Instance,
-    pub adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
+    // RustのDrop順序はフィールド定義順（先頭から末尾）。
+    // 子オブジェクト（Queue, Device）を親オブジェクト（Adapter, Instance）より先にDropさせるため、
+    // 依存順序の逆順（Queue -> Device -> Adapter -> Instance）で宣言する。
     pub queue: wgpu::Queue,
+    pub device: wgpu::Device,
+    pub adapter: wgpu::Adapter,
+    pub instance: wgpu::Instance,
     /// 生成時点のデバイス世代 (`DEVICE_EPOCH` のスナップショット)。
     /// 共有パイプラインキャッシュのキーに使用する。
     pub epoch: u64,
@@ -240,10 +243,10 @@ impl GpuContext {
             .await?;
 
         Ok(Self {
-            instance,
-            adapter,
-            device,
             queue,
+            device,
+            adapter,
+            instance,
             epoch: DEVICE_EPOCH.load(Ordering::SeqCst),
         })
     }
@@ -309,6 +312,12 @@ impl GpuContext {
         self.device
             .features()
             .contains(wgpu::Features::TIMESTAMP_QUERY)
+    }
+
+    /// グローバルに保持されている GPU Context を解放する（プロセス終了時・明示的クリーンアップ用）
+    pub fn clear_global_context() {
+        let mut write_lock = GLOBAL_CONTEXT.write().unwrap();
+        *write_lock = None;
     }
 }
 
