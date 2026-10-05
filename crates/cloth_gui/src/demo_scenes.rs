@@ -170,6 +170,7 @@ fn default_self_collision(enable_edge: bool) -> GuiSelfCollisionData {
         pair_cache_max_horizon: 0.02,
         pair_cache_max_pairs: 65536,
         enable_pair_cache_final_fallback: true,
+        self_collision_algorithm: 0,
     }
 }
 

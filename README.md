@@ -405,7 +405,7 @@ python run_tests.py --ci -t tests/physics/test_demo_scenes.py
   - **[P] キー**: マウス直下の頂点をピン留め / 解除。
   - **🔄 Reset**: 現在のデモシーンを初期配置に巻き戻し。
   - **Stiffness / Gravity / Damping**: スライダー操作がリアルタイムに反映。
-  - **Self-Collision**: 自己衝突（V-T）、エッジ衝突（E-E）、Untangling、Coupled Mode（OFF / Relaxation / Full）をリアルタイムに変更可能。
+  - **Self-Collision**: 自己衝突アルゴリズム（Direct / Pair Cache / V-V (Virtual)）、エッジ衝突（E-E）、Untangling、Coupled Mode（OFF / Relaxation / Full）をリアルタイムに変更可能。
 
 ---
 

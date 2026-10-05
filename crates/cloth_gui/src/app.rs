@@ -75,6 +75,7 @@ pub struct GuiApp {
 
     // 自己衝突設定
     self_collision_enabled: bool,
+    self_collision_algorithm: u32,
     edge_collision_enabled: bool,
     coupled_mode: u32,
     enable_normal_untangling: bool,
@@ -150,6 +151,7 @@ impl GuiApp {
             scene_fps: 60.0,
             next_frame_time: Instant::now(),
             self_collision_enabled: true,
+            self_collision_algorithm: 0,
             edge_collision_enabled: true,
             coupled_mode: 1, // RELAXATION
             enable_normal_untangling: true,
@@ -419,12 +421,14 @@ impl GuiApp {
         // 自己衝突オプション
         if let Some(ref sc) = data.self_collision {
             self.self_collision_enabled = sc.enabled;
+            self.self_collision_algorithm = sc.self_collision_algorithm;
             self.edge_collision_enabled = sc.enable_edge_collision;
             self.coupled_mode = sc.coupled_mode;
             self.enable_normal_untangling = sc.enable_normal_untangling;
             self.relief_factor = sc.relief_factor;
 
             sim.set_enable_self_collision(sc.enabled);
+            sim.set_self_collision_algorithm(sc.self_collision_algorithm);
             sim.set_self_collision_options(
                 sc.relief_factor,
                 sc.max_displacement_ratio,
@@ -701,6 +705,7 @@ impl GuiApp {
         let mut gravity_changed = false;
         let mut iterations_changed = false;
         let mut sc_enabled_changed = false;
+        let mut sc_algo_changed = false;
         let mut sc_edge_changed = false;
         let mut sc_opts_changed = false;
         let mut sc_coupled_changed = false;
@@ -884,12 +889,40 @@ impl GuiApp {
                     if ui.checkbox(&mut self.self_collision_enabled, "Enable Self-Collision").changed() {
                         sc_enabled_changed = true;
                     }
-                    if ui.checkbox(&mut self.edge_collision_enabled, "Edge Collision (E-E)").changed() {
-                        sc_edge_changed = true;
+
+                    ui.horizontal(|ui| {
+                        ui.label("Algorithm:");
+                        let prev_algo = self.self_collision_algorithm;
+                        if ui.selectable_label(self.self_collision_algorithm == 0, "Direct").clicked() {
+                            self.self_collision_algorithm = 0;
+                        }
+                        if ui.selectable_label(self.self_collision_algorithm == 1, "Pair Cache").clicked() {
+                            self.self_collision_algorithm = 1;
+                        }
+                        if ui.selectable_label(self.self_collision_algorithm == 2, "V-V (Virtual)").clicked() {
+                            self.self_collision_algorithm = 2;
+                        }
+                        if self.self_collision_algorithm != prev_algo {
+                            sc_algo_changed = true;
+                        }
+                    });
+
+                    if self.self_collision_algorithm == 2 {
+                        let n_virt = self.simulator.as_ref().map(|s| s.num_virtual_vertices).unwrap_or(0);
+                        ui.label(
+                            egui::RichText::new(format!("Virtual Collider Vertices: {} (Sphere-Sphere)", n_virt))
+                                .small()
+                                .color(egui::Color32::from_rgb(100, 200, 255)),
+                        );
+                    } else {
+                        if ui.checkbox(&mut self.edge_collision_enabled, "Edge Collision (E-E)").changed() {
+                            sc_edge_changed = true;
+                        }
+                        if ui.checkbox(&mut self.enable_normal_untangling, "Normal Untangling").changed() {
+                            sc_opts_changed = true;
+                        }
                     }
-                    if ui.checkbox(&mut self.enable_normal_untangling, "Normal Untangling").changed() {
-                        sc_opts_changed = true;
-                    }
+
                     if ui.add(egui::Slider::new(&mut self.relief_factor, 0.0..=1.0).text("Relief Factor")).changed() {
                         sc_opts_changed = true;
                     }
@@ -986,6 +1019,9 @@ impl GuiApp {
             }
             if sc_enabled_changed {
                 sim.set_enable_self_collision(self.self_collision_enabled);
+            }
+            if sc_algo_changed {
+                sim.set_self_collision_algorithm(self.self_collision_algorithm);
             }
             if sc_edge_changed {
                 sim.set_enable_edge_collision(self.edge_collision_enabled);

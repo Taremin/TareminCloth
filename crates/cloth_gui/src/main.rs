@@ -310,6 +310,7 @@ fn apply_simulation_parameters(sim: &mut GpuClothSimulator, data: &protocol::Sce
     cfg.sewing_priority_max_frames = data.sewing_priority_max_frames;
     if let Some(ref sc) = data.self_collision {
         cfg.enable_self_collision = sc.enabled;
+        cfg.self_collision_algorithm = sc.self_collision_algorithm;
         cfg.relief_factor = sc.relief_factor;
         cfg.max_displacement_ratio = sc.max_displacement_ratio;
         cfg.exclude_neighbors = sc.exclude_neighbors;

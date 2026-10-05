@@ -881,16 +881,20 @@ XPBD物理シミュレーションにおいて、頂点質量とコンプライ�
 
 スタンドアロンGUI（`crates/cloth_gui`）の左ペインに `Self-Collision` CollapsingHeader を新設し、Blender UIと同等の詳細な自己衝突挙動をGUI実行中に動的リアルタイム変更可能です：
 
-- **Enable Self-Collision (チェックボックス)**: V-T（頂点対面）および自己衝突パイプライン全体の有効化/無効化。
-- **Edge Collision (E-E) (チェックボックス)**: エッジ同士の交差防止（Edge-Centric E-E Directパス）の有効化/無効化。
-- **Untangling (チェックボックス)**: レイヤー階層（`layer_id`）に基づく外層への自動押し出し機能の切り替え。
+- **Enable Self-Collision (チェックボックス)**: 自己衝突パイプライン全体の有効化/無効化。
+- **Algorithm (切り替えボタン: Direct / Pair Cache / V-V (Virtual))**:
+  - `Direct`: 従来のV-T（頂点対面）+ E-E（辺対辺）直接探索方式。
+  - `Pair Cache`: 接近ペアキャッシュ方式（I-Cloth 2018）。
+  - `V-V (Virtual)`: 仮想コライダー粒子サンプリング＋純粋球対球反発方式。選択時は生成された仮想頂点数をリアルタイム表示し、不要なE-E/Untangling項目を自動省略。
+- **Edge Collision (E-E) (チェックボックス)**: エッジ同士の交差防止（Edge-Centric E-E Directパス）の有効化/無効化（Direct / Pair Cache時のみ）。
+- **Untangling (チェックボックス)**: レイヤー階層（`layer_id`）に基づく外層への自動押し出し機能の切り替え（Direct / Pair Cache時のみ）。
 - **Relief Factor (スライダー: 0.05 〜 1.00)**: 自己衝突変位の反復あたり適用緩和係数。
 - **Coupled Mode (ComboBox)**:
   - `OFF`: 緩和なし（標準推奨・自縛ロック防止）
   - `Relaxation`: 自己衝突後に距離拘束を再適用（対向押し付け時の過剰伸長抑制）
   - `Full Coupled`: 各反復で自己衝突と距離拘束を同調解決（多重プリーツ等向け高精度設定）
 
-変更は `sim.set_enable_self_collision()`、`sim.set_enable_edge_collision()`、`sim.set_self_collision_options()`、`sim.set_coupled_self_collision_options()` を介して即座にGPU物理コアへ送信され、シミュレーションをリセットすることなく挙動差分を確認できます。
+変更は `sim.set_enable_self_collision()`、`sim.set_self_collision_algorithm()`、`sim.set_enable_edge_collision()`、`sim.set_self_collision_options()`、`sim.set_coupled_self_collision_options()` を介して即座にGPU物理コアへ送信され、シミュレーションをリセットすることなく挙動差分を確認できます。
 
 ### 9.6 起動と運用
 ```bash

@@ -113,6 +113,8 @@ pub struct GuiSelfCollisionData {
     pub pair_cache_max_pairs: u32,
     #[serde(default = "default_true")]
     pub enable_pair_cache_final_fallback: bool,
+    #[serde(default)]
+    pub self_collision_algorithm: u32,
 }
 
 fn default_pair_margin_mode() -> u32 { 1 }
@@ -355,11 +357,13 @@ mod tests {
             pair_cache_max_horizon: 0.02,
             pair_cache_max_pairs: 32768,
             enable_pair_cache_final_fallback: true,
+            self_collision_algorithm: 2,
         };
         let s = serde_json::to_string(&sc).unwrap();
         let d: GuiSelfCollisionData = serde_json::from_str(&s).unwrap();
         assert_eq!(d.max_iterations, 512);
         assert_eq!(d.substep_interval, 2);
+        assert_eq!(d.self_collision_algorithm, 2);
     }
 }
 
