@@ -653,6 +653,8 @@
   "Show elastic line tension colors in 3D viewport": "3Dビューポート上に伸縮ラインの張力カラーを表示",
   "Show pin highlight overlay only during interactive mode": "インタラクティブモード中のみピン強調オーバーレイを表示",
   "Shrink Speed": "収縮速度",
+  "Strain Tolerance": "許容歪み率",
+  "Strain-driven Quality": "歪み適応品質向上",
   "Sim not started": "シミュレーション未開始",
   "Simple": "シンプル",
   "Simplified UI for beginners with key presets and basic settings": "主要なプリセットと基本設定のみを表示する初心者向けUI",

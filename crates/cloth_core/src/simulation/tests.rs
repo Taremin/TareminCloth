@@ -977,5 +977,56 @@ mod tests {
         }
         assert!(sim.effective_substeps() >= 4, "自由落下中は min 以上を維持 (got {})", sim.effective_substeps());
     }
+
+    #[test]
+    fn test_strain_driven_adaptive_substep() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.0, 0.05, 0.0],
+        ];
+        let edges = vec![[0, 1], [1, 2], [2, 0]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None,
+            None, None, 0, 0.005, 1000.0, 10.0, 1000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_adaptive_substep_options(true, 4, 32);
+        sim.base_substeps = 20;
+        sim.solver_iterations = 2;
+        sim.set_auto_compensate_iterations(true);
+        sim.set_strain_adaptive_options(true, 0.008); // 0.8% 許容
+
+        // 1. 歪みが正常範囲内 (0.2%): 通常の反復数補償 (target_solves 20 / 4 = 5)
+        sim.last_step_max_strain = 0.002;
+        let iters_normal = sim.compute_effective_iterations(4);
+        assert_eq!(iters_normal, 5, "正常歪み時は通常の伝播補償値 (got {})", iters_normal);
+
+        // 2. 歪みが超過 (1.6% = 許容値の2.0倍): 歪みブーストが発動 (target_solves 20*2 = 40 / 4 = 10 -> maxクランプ 8)
+        sim.last_step_max_strain = 0.016;
+        let iters_boosted = sim.compute_effective_iterations(4);
+        assert_eq!(iters_boosted, 8, "歪み超過時は反復数が引き上げられ上限クランプ (8) に達するべき (got {})", iters_boosted);
+
+        // solver_iterations = 4 の場合 (max_iters = 16)
+        sim.solver_iterations = 4;
+        let iters_strain_boost = sim.compute_effective_iterations(4);
+        assert!(iters_strain_boost > 5, "歪み超過時はイテレーション数が引き上げられるべき (got {})", iters_strain_boost);
+
+        // 3. サブステップ数の歪みフロア引き上げ: 深刻な歪み超過 (0.016 / 0.008 = 2.0倍)
+        sim.last_step_max_displacement = 0.0;
+        sim.effective_substeps = 4;
+        let s_strain = sim.compute_effective_substeps(0.016, 20);
+        assert!(s_strain >= 6, "歪み深刻超過時はサブステップ数も引き上げられるべき (got {})", s_strain);
+
+        // 4. 無効時 (enable_strain_adaptive = false): 歪み超過があってもブーストされない
+        sim.set_strain_adaptive_options(false, 0.008);
+        sim.effective_substeps = 4;
+        let s_disabled = sim.compute_effective_substeps(0.016, 20);
+        assert_eq!(s_disabled, 4, "無効時は歪み超過による引き上げが発生しないべき (got {})", s_disabled);
+    }
 }
 

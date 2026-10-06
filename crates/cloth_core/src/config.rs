@@ -29,6 +29,7 @@ fn d_stiffness() -> f32 { 500.0 }
 fn d_bending() -> f32 { 5.0 }
 fn d_min_substeps() -> u32 { 4 }
 fn d_max_substeps() -> u32 { 64 }
+fn d_strain_tolerance() -> f32 { 0.008 }
 
 /// シミュレーション可変パラメータの Single Source of Truth.
 ///
@@ -138,6 +139,10 @@ pub struct SimConfig {
     pub auto_coupled_on_low_substeps: bool,
     #[serde(default = "d_true")]
     pub auto_compensate_iterations: bool,
+    #[serde(default = "d_true")]
+    pub enable_strain_adaptive: bool,
+    #[serde(default = "d_strain_tolerance")]
+    pub strain_tolerance: f32,
 }
 
 impl Default for SimConfig {
@@ -193,6 +198,8 @@ impl Default for SimConfig {
             max_substeps: d_max_substeps(),
             auto_coupled_on_low_substeps: true,
             auto_compensate_iterations: true,
+            enable_strain_adaptive: true,
+            strain_tolerance: d_strain_tolerance(),
         }
     }
 }

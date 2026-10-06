@@ -69,6 +69,8 @@ SIGNATURE_KEYS = (
     "max_substeps",
     "auto_coupled_on_low_substeps",
     "auto_compensate_iterations",
+    "enable_strain_adaptive",
+    "strain_tolerance",
     "gravity_scale",
     "sewing_shrink_speed",
 )
@@ -200,6 +202,8 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "min_substeps": _i(settings, "min_substeps", 4),
         "max_substeps": _i(settings, "max_substeps", 64),
         "auto_compensate_iterations": bool(_get(settings, "auto_compensate_iterations", True)),
+        "enable_strain_adaptive": bool(_get(settings, "enable_strain_adaptive", True)),
+        "strain_tolerance": _f(settings, "strain_tolerance", 0.008),
         # 付帯キー (転送・署名専用、Rust apply時は除外)
         "gravity_scale": scale,
         "sewing_shrink_speed": _f(settings, "sewing_shrink_speed", 1.0),

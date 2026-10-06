@@ -311,6 +311,20 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Automatically increase solver iterations when substeps are low to maintain cloth stiffness and prevent stretching",
         default=True,
     )
+    enable_strain_adaptive: BoolProperty(
+        name="Strain-driven Quality",
+        description="Dynamically boost substeps and iterations when cloth stretching (strain) exceeds tolerance to prevent gravity sagging",
+        default=True,
+    )
+    strain_tolerance: FloatProperty(
+        name="Strain Tolerance",
+        description="Allowed stretch ratio relative to rest edge length before triggering adaptive quality boost (e.g. 0.008 = 0.8%)",
+        default=0.008,
+        min=0.001,
+        max=0.05,
+        step=0.1,
+        precision=3,
+    )
     solver_iterations: IntProperty(
         name="Solver Iterations",
         description="Constraint solve iterations per substep",

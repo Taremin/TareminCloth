@@ -1080,6 +1080,9 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
             if not settings.coupled_collider_mode:
                 sim_col.prop(settings, "auto_coupled_on_low_substeps", text=i18n.trans("Auto Coupled on Low Steps"))
             sim_col.prop(settings, "auto_compensate_iterations", text=i18n.trans("Compensate Iterations"))
+            sim_col.prop(settings, "enable_strain_adaptive", text=i18n.trans("Strain-driven Quality"))
+            if settings.enable_strain_adaptive:
+                sim_col.prop(settings, "strain_tolerance", text=i18n.trans("Strain Tolerance"))
 
         # ソルバー & パフォーマンス
         box_perf = layout.box()

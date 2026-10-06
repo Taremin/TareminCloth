@@ -324,8 +324,12 @@ pub struct GpuClothSimulator {
     pub base_substeps: u32,
     pub(crate) effective_substeps: u32,
     pub(crate) mesh_char_len: f32,
+    pub(crate) mesh_avg_edge_len: f32,
     pub(crate) mesh_diameter_hops: u32,
     pub auto_compensate_iterations: bool,
+    pub enable_strain_adaptive: bool,
+    pub strain_tolerance: f32,
+    pub(crate) last_step_max_strain: f32,
     pub(crate) effective_solver_iterations: u32,
     pub(crate) cloth_thickness: f32,
     pub(crate) prev_step_positions: Vec<[f32; 3]>,
@@ -627,8 +631,12 @@ impl GpuClothSimulator {
             base_substeps: 20,
             effective_substeps: 0,
             mesh_char_len,
+            mesh_avg_edge_len: avg_edge_len,
             mesh_diameter_hops,
             auto_compensate_iterations: true,
+            enable_strain_adaptive: true,
+            strain_tolerance: 0.008,
+            last_step_max_strain: 0.0,
             effective_solver_iterations: 0,
             cloth_thickness,
             prev_step_positions,
@@ -695,6 +703,22 @@ impl GpuClothSimulator {
     /// 低サブステップ時のイテレーション自動補償 (Auto Compensate Iterations) を設定する
     pub fn set_auto_compensate_iterations(&mut self, enabled: bool) {
         self.auto_compensate_iterations = enabled;
+    }
+
+    /// 直近フレームで観測された最大引張歪み率 (Strain) を取得する
+    pub fn last_step_max_strain(&self) -> f32 {
+        self.last_step_max_strain
+    }
+
+    /// メッシュの平均エッジ長を取得する
+    pub fn mesh_avg_edge_len(&self) -> f32 {
+        self.mesh_avg_edge_len
+    }
+
+    /// 歪み駆動型の適応制御オプションを設定する
+    pub fn set_strain_adaptive_options(&mut self, enabled: bool, tolerance: f32) {
+        self.enable_strain_adaptive = enabled;
+        self.strain_tolerance = tolerance.clamp(0.0001, 0.1);
     }
 
     /// 布の厚みを設定し、CFL特性長を再計算する

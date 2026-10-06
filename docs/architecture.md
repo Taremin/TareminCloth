@@ -278,6 +278,10 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
      - ユーザー基準予算 $T_{\text{user}} = S_{\text{base}} \times I_{\text{base}}$ と直径フロアから目標総反復数 $T_{\text{target}}$ を導出し、サブステップ $S_{\text{eff}}$ 低下時に $I_{\text{eff}} = \text{clamp}(\lceil T_{\text{target}} / S_{\text{eff}} \rceil, I_{\text{base}}, \max(I_{\text{base}} \times 3, 6))$ として自動補償。静止時の低サブステップ下でも布の伸び・垂れ下がりを固定20ステップ同等に抑えつつ、70〜85 FPS を達成。
    - **力学的 Coupled 自動判定 (`auto_coupled_on_low_substeps`, 既定ON)**:
      - 固定の境界値（$S \le 8$）を撤廃し、1サブステップあたりの重力自由落下変位 $\Delta x_{\text{grav}} = 0.5 g (dt / S)^2$ および直前最大変位から算出した $\Delta x_{\text{step}}$ がコライダー安全マージンの 25% を超えた場合に自動的に Coupled Collider 解決を発動。30 FPS / 60 FPS / 120 FPS などのフレームレート変動に対しても物理的に一貫して貫通・滑落を完全防止。
+   - **残差・歪み駆動型品質補正 (enable_strain_adaptive, 既定ON)**:
+     - 物理的な材料弾性（コンプライアンス）による本来の伸びと、反復不足・ステップ不足による数値的未収束を切り分けるため、非同期回収バッファから実測引張歪み率 $\epsilon = \frac{L - L_0}{\max(L_0, 0.5 L_{\text{avg}})}$ を高速算出。
+     - 極小エッジによる発散を防ぐ分母下限保護（$\min(0.5 L_{\text{avg}}, 2\text{mm})$）と、コライダー押し出し等の外れ値を除外する **P95（95パーセンタイル）代表値** を採用。
+     - 許容歪み率 $\tau_{\text{strain}} \approx 0.8\%$ を超過した場合、伝播不足と判断して目標総反復数 $T_{\text{target}}$ を動的に最大 2.0 倍までブーストし、深刻な超過時はサブステップ数も引き上げ。静止時の高FPSと布剛性の維持を両立。
 
 ---
 

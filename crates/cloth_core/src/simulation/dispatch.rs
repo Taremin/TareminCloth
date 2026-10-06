@@ -387,6 +387,41 @@ impl GpuClothSimulator {
                         self.prev_step_positions.resize(n_verts, [0.0; 3]);
                     }
 
+                    // 引張歪み率 (Strain) の集計:
+                    // 極小エッジによる特異点発散を防ぐため、特性長 (0.5 * mesh_avg_edge_len) を分母下限として保護。
+                    // また、外れ値1本（コライダー押し出し等）に引きずられないよう、P95 (95パーセンタイル) を代表値とする。
+                    let mut rep_strain = 0.0f32;
+                    if !self.distance_constraints.is_empty() {
+                        let min_ref = (0.5 * self.mesh_avg_edge_len).max(0.002);
+                        let mut positive_strains = Vec::with_capacity(self.distance_constraints.len());
+                        for (dc, &l0) in self.distance_constraints.iter().zip(&self.initial_distance_rest_lengths) {
+                            if l0 <= 1e-6 {
+                                continue;
+                            }
+                            let v0 = (dc.v0 as usize) * 3;
+                            let v1 = (dc.v1 as usize) * 3;
+                            if v0 + 2 >= floats.len() || v1 + 2 >= floats.len() {
+                                continue;
+                            }
+                            let dx = floats[v0] - floats[v1];
+                            let dy = floats[v0 + 1] - floats[v1 + 1];
+                            let dz = floats[v0 + 2] - floats[v1 + 2];
+                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                            let strain = (dist - l0) / l0.max(min_ref);
+                            if strain > 0.0 {
+                                positive_strains.push(strain);
+                            }
+                        }
+                        if !positive_strains.is_empty() {
+                            let p95_idx = ((positive_strains.len() as f32) * 0.95) as usize;
+                            let p95_idx = p95_idx.min(positive_strains.len() - 1);
+                            rep_strain = *positive_strains.select_nth_unstable_by(p95_idx, |a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            }).1;
+                        }
+                    }
+                    self.last_step_max_strain = rep_strain;
+
                     if self.cached_cpu_positions.len() != n_verts {
                         self.cached_cpu_positions.resize(n_verts, [0.0; 3]);
                     }
@@ -461,7 +496,20 @@ impl GpuClothSimulator {
             1
         };
 
-        let target_steps = cfl_steps.max(grav_steps).clamp(min_steps, max_steps);
+        // 歪み超過フロア (Strain-driven Floor):
+        // 許容歪み率を超過している場合、未収束による垂れ下がり・伸びと判断しステップ下限を引き上げ
+        let strain_steps = if self.enable_strain_adaptive && self.strain_tolerance > 1e-5 {
+            let ratio = self.last_step_max_strain / self.strain_tolerance;
+            if ratio > 1.25 {
+                ((min_steps as f32) * ratio.min(2.0)).ceil() as u32
+            } else {
+                min_steps
+            }
+        } else {
+            min_steps
+        };
+
+        let target_steps = cfl_steps.max(grav_steps).max(strain_steps).clamp(min_steps, max_steps);
 
         // ヒステリシス制御 (急変によるジッター・剛性変動リミットサイクル発振防止)
         let current_steps = if self.effective_substeps == 0 {
@@ -475,11 +523,11 @@ impl GpuClothSimulator {
                 prev_steps
             } else if diff > 0 {
                 // 上昇時制御:
-                // マウスドラッグ等の外部操作(external_disp > 0)や、危険な巨大変位時は
+                // マウスドラッグ等の外部操作(external_disp > 0)や、危険な巨大変位・深刻な歪み超過時は
                 // 安全重視で即時引き上げ（Emergency Boost）を許可。
-                // それ以外の自然運動時は1フレームあたり最大 +2 のレート制限を適用し、
-                // XPBD反復回数急増による「急激な剛性跳ね上がり（引き戻しショック）」を防ぐ。
-                let is_emergency = external_disp > 1e-4 || max_disp > cfl_margin * 4.0;
+                let is_emergency = external_disp > 1e-4
+                    || max_disp > cfl_margin * 4.0
+                    || (self.enable_strain_adaptive && self.last_step_max_strain > self.strain_tolerance * 3.0);
                 if is_emergency {
                     target_steps
                 } else {
@@ -508,10 +556,24 @@ impl GpuClothSimulator {
         // メッシュ直径に基づく最低保証伝播数 (20〜30ホップ程度)
         let diameter_floor = self.mesh_diameter_hops.clamp(15, 30);
         // 目標総反復数: ユーザー予算と直径保証の適切な調和点 (高ステップ時はユーザー値、低ステップ時はフロア保証)
-        let target_solves = user_budget.min(diameter_floor.max(20));
+        let base_target_solves = user_budget.min(diameter_floor.max(20));
+
+        // 歪み駆動フィードバック (Strain Feedback):
+        // 実測引張歪み率が許容値を超過している場合、伝播不足・剛性未達と判断し目標反復数を動的にブースト
+        let target_solves = if self.enable_strain_adaptive && self.strain_tolerance > 1e-5 {
+            let ratio = self.last_step_max_strain / self.strain_tolerance;
+            if ratio > 1.0 {
+                let boost = ratio.min(2.0);
+                ((base_target_solves as f32) * boost).ceil() as u32
+            } else {
+                base_target_solves
+            }
+        } else {
+            base_target_solves
+        };
 
         let compensated = (target_solves + substeps - 1) / substeps.max(1);
-        let max_iters = (self.solver_iterations * 3).max(6);
+        let max_iters = (self.solver_iterations * 4).max(8);
         let eff_iters = compensated.clamp(self.solver_iterations.max(1), max_iters);
 
         self.effective_solver_iterations = eff_iters;

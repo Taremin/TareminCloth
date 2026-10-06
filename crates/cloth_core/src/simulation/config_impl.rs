@@ -68,6 +68,8 @@ impl GpuClothSimulator {
             max_substeps: self.max_substeps,
             auto_coupled_on_low_substeps: self.auto_coupled_on_low_substeps,
             auto_compensate_iterations: self.auto_compensate_iterations,
+            enable_strain_adaptive: self.enable_strain_adaptive,
+            strain_tolerance: self.strain_tolerance,
         }
     }
 
@@ -158,6 +160,7 @@ impl GpuClothSimulator {
         );
         self.set_auto_coupled_on_low_substeps(c.auto_coupled_on_low_substeps);
         self.set_auto_compensate_iterations(c.auto_compensate_iterations);
+        self.set_strain_adaptive_options(c.enable_strain_adaptive, c.strain_tolerance);
     }
 
     /// 現在設定のハッシュ (フレーム途中変更検出用)

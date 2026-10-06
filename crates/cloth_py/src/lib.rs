@@ -1591,6 +1591,17 @@ impl ClothSimulator {
         self.simulator.set_auto_compensate_iterations(enabled);
     }
 
+    /// 直近フレームで観測された最大引張歪み率 (Strain) を取得する
+    fn get_last_step_max_strain(&self) -> f32 {
+        self.simulator.last_step_max_strain()
+    }
+
+    /// 歪み駆動型の適応制御オプションを設定する
+    #[pyo3(signature = (enabled=true, tolerance=0.008))]
+    fn set_strain_adaptive_options(&mut self, enabled: bool, tolerance: f32) {
+        self.simulator.set_strain_adaptive_options(enabled, tolerance);
+    }
+
     /// 自己衝突判定を実行するサブステップ間隔を設定 (1: 毎サブステップ, 2: 2サブステップ毎)
     fn set_self_collision_substep_interval(&mut self, interval: u32) {
         self.simulator.set_self_collision_substep_interval(interval);
