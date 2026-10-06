@@ -64,6 +64,9 @@ SIGNATURE_KEYS = (
     "sewing_priority_ramp_frames",
     "sewing_priority_max_frames",
     "areal_density",
+    "enable_adaptive_substep",
+    "min_substeps",
+    "max_substeps",
     "gravity_scale",
     "sewing_shrink_speed",
 )
@@ -190,6 +193,9 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "sewing_priority_ramp_frames": _i(settings, "sewing_priority_ramp_frames", 3),
         "sewing_priority_max_frames": _i(settings, "sewing_priority_max_frames", 600),
         "areal_density": _f(settings, "areal_density", 0.15),
+        "enable_adaptive_substep": bool(_get(settings, "enable_adaptive_substep", False)),
+        "min_substeps": _i(settings, "min_substeps", 4),
+        "max_substeps": _i(settings, "max_substeps", 64),
         # 付帯キー (転送・署名専用、Rust apply時は除外)
         "gravity_scale": scale,
         "sewing_shrink_speed": _f(settings, "sewing_shrink_speed", 1.0),

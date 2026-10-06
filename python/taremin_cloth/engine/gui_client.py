@@ -447,6 +447,9 @@ class ClothGuiClient:
                 "solver_mode": int(cfg.get("solver_mode", 0)),
                 "solver_iterations": int(cfg.get("solver_iterations", 10)),
                 "substeps": int(getattr(settings, "substeps", 20)) if settings else 20,
+                "enable_adaptive_substep": bool(cfg.get("enable_adaptive_substep", False)),
+                "min_substeps": int(cfg.get("min_substeps", 1)),
+                "max_substeps": int(cfg.get("max_substeps", 40)),
                 "fps": float(scene.render.fps) if scene and hasattr(scene, "render") else 60.0,
                 "self_collision": self_col,
                 "bone_sdf": bone_sdf_dict,
@@ -603,6 +606,9 @@ class ClothGuiClient:
         sewing_priority_ramp_frames=None,
         sewing_priority_max_frames=None,
         sewing_lock_distance=None,
+        enable_adaptive_substep=None,
+        min_substeps=None,
+        max_substeps=None,
     ) -> bool:
         """物理パラメータの動的更新コマンドを送信する"""
         params = {}
@@ -642,6 +648,12 @@ class ClothGuiClient:
             params["sewing_priority_max_frames"] = int(sewing_priority_max_frames)
         if sewing_lock_distance is not None:
             params["sewing_lock_distance"] = float(sewing_lock_distance)
+        if enable_adaptive_substep is not None:
+            params["enable_adaptive_substep"] = bool(enable_adaptive_substep)
+        if min_substeps is not None:
+            params["min_substeps"] = int(min_substeps)
+        if max_substeps is not None:
+            params["max_substeps"] = int(max_substeps)
 
         return self.send_command("SetParams", params)
 
@@ -673,6 +685,9 @@ class ClothGuiClient:
             "sewing_priority_ramp_frames": int(cfg["sewing_priority_ramp_frames"]),
             "sewing_priority_max_frames": int(cfg["sewing_priority_max_frames"]),
             "sewing_lock_distance": float(cfg["sewing_lock_distance"]),
+            "enable_adaptive_substep": bool(cfg.get("enable_adaptive_substep", False)),
+            "min_substeps": int(cfg.get("min_substeps", 1)),
+            "max_substeps": int(cfg.get("max_substeps", 40)),
         }
 
         # 差分検知: 前回送信したパラメータと完全一致している場合はスキップ

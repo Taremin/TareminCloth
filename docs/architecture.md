@@ -36,13 +36,13 @@ graph TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as モーダルUI / タイムライン / テスト
-    participant Runner as step_cloth_scene / step_cloth_object
+    actor User as モーダルUI / タイムライン / テスト / 独立GUI
+    participant Runner as step_cloth_scene / cloth_gui
     participant Anim as anim_driver
     participant SyncCol as sync_colliders
     participant SyncParam as sync_cloth_parameters & pins
     participant GPU as ClothSimulator (wgpu)
-    participant Mesh as Blender Mesh
+    participant Mesh as Blender Mesh / egui
 
     User->>Runner: 呼び出し (dt, anim_frame, ...)
     Runner->>Anim: コライダーアニメーション駆動
@@ -51,11 +51,11 @@ sequenceDiagram
     end
     Runner->>SyncCol: コライダーSDF / メッシュ同期
     Runner->>SyncParam: パラメータ・剛性・ピン同期
-    Runner->>Runner: CFL適応サブステップ動的算出
-    Runner->>GPU: sim.step(dt, substeps, solver_iterations)
+    Runner->>GPU: sim.step(dt, substeps=None)
+    Note over GPU: コア内部で CFL / 重力 / 外力による適応サブステップ自動判定
     opt update_mesh=True
-        Runner->>GPU: sim.get_positions(coords)
-        Runner->>Mesh: foreach_set("co") & update()
+        Runner->>GPU: sim.get_positions(coords) [ゼロオーバーヘッドキャッシュ]
+        Runner->>Mesh: foreach_set("co") / egui 描画
     end
     Runner-->>User: (sim, coords) を返却
 ```
@@ -64,6 +64,8 @@ sequenceDiagram
   単一布オブジェクトに対する完全な同期・物理ステップ・メッシュ更新ライフサイクル。
 - **`step_cloth_scene(scene, dt, anim_frame, ...)`**:
   シーン内のコライダーアニメーションを一括更新し、指定（または全）布オブジェクトに対して `step_cloth_object` を実行。テストや検証スクリプトでもこの関数を呼ぶことで、UI実行時と100%同一の物理・パラメータ同期環境で検証が可能。
+- **コア一元管理の適応サブステップ**:
+  サブステップ数の動的判定は Python 層ではなく Rust 物理コア（`cloth_core`）内で CFL 条件・重力フロア・ヒステリシスに基づいて自動計算されます。Blender アドオンと独立 GUI（`cloth_gui`）の双方が同一のコアロジックを共有し、`sim.step(dt, substeps=None)` の単一呼び出しで最適化されたステップ数が自動適用されます。
 
 ### 1.3 タイムライン再生とポイントキャッシュ管理 (Timeline & Point Cache)
 
@@ -117,9 +119,52 @@ sequenceDiagram
 > [!TIP]
 > 各アルゴリズムの詳細な選定理由、Coupled XPBDの協調収束設計、V-T/E-E/CCD接触判定、却下されたアンチパターン、および理想アルゴリズムとの乖離分析については、[docs/algorithms.md](algorithms.md) を参照してください。
 
-本システムは、**XPBD (Extended Position Based Dynamics)** に基づく時間積分および拘束解消アルゴリズムを実装しています。各フレーム（$`\Delta t \approx 1/60`$ 秒）において複数回のサブステップ（$`N_{sub} = 10 \sim 30`$）を実行し、トンネリングや発散を抑制した高剛性布シミュレーションを実行します。
+### 2.1 適応サブステップ動的制御 (Adaptive Substeps Engine)
 
-### 2.1 サブステップ内の処理シーケンス
+高剛性な布シミュレーションや接触・自己衝突処理において、サブステップ数 $N_{\text{sub}}$ の選定は安定性と計算パフォーマンスのトレードオフを決定づけます。Taremin Cloth では、これまで Blender Python 層（`runner.py`）に存在していた動的判定ロジックを **Rust 物理コア（`cloth_core`）へ移管・一元化** し、Blender アドオンと独立 GUI（`cloth_gui`）の双方が同一の判定ロジックを利用する統合アーキテクチャを採用しています。
+
+#### 2.1.1 判定ロジックと数理モデル
+
+1. **CFL 条件（Courant-Friedrichs-Lewy Condition）**:
+   1サブステップ内の最大頂点変位がメッシュ厚みおよび幾何学的解像度に基づく特性長 $\ell_{\text{char}}$ を超えないよう、前フレームの最大頂点変位 $d_{\max}$ に基づいて必要サブステップ数を算出します。
+   $$\ell_{\text{char}} = \min\left( h_{\text{thickness}}, \; \ell_{\min} \times 0.25 \right)$$
+   $$N_{\text{cfl}} = \left\lceil \frac{d_{\max}}{\ell_{\text{char}}} \right\rceil$$
+   （$\ell_{\min}$ はメッシュ内の最小エッジ長、$h_{\text{thickness}}$ は布の物理厚み）
+
+2. **重力自由落下フロア (Gravity Free-Fall Floor)**:
+   静止状態からの自由落下開始直後など、前フレームの変位が小さい状態から急激な加速が発生する局面での貫通・トンネリングを未然に防ぐため、重力加速度ベクトル $\mathbf{g}$ による1フレームあたりの自由落下変位量を下限フロアとして保証します。
+   $$N_{\text{grav}} = \left\lceil \sqrt{\frac{0.5 \cdot \|\mathbf{g}\| \cdot \Delta t^2}{\ell_{\text{char}}}} \right\rceil$$
+
+3. **外力変位通知機構 (`note_external_displacement`)**:
+   マウスドラッグ（Grab）やアタッチメントピン、ボーンアニメーション等の急激な外部変位が発生した際、ホスト側から即座に変位量 $d_{\text{ext}}$ をコアへ通知し、次フレームの判定対象変位に反映させます。
+   $$d_{\max} \leftarrow \max(d_{\max}, \; d_{\text{ext}})$$
+
+4. **ヒステリシス制御（チャタリング防止）**:
+   毎フレームのサブステップ数が乱高下（チャタリング）してレンダリングやシミュレーション時間配分が不安定化するのを防ぐため、非対称ヒステリシスフィルタを適用します：
+   - **急加速時（増加）**: 安全性を最優先し、上限なく即座に目標値へ引き上げ。
+   - **減速時（減少）**: 1フレームあたり最大2ステップ（$-2$）のレート制限を課し、段階的・滑らかに減少。
+
+5. **範囲クランプ**:
+   $$N_{\text{effective}} = \text{clamp}\left( N_{\text{filtered}}, \; N_{\min}, \; N_{\max} \right)$$
+   （既定値: $N_{\min} = 1, \; N_{\max} = 40$）
+
+#### 2.1.2 非同期ダブルバッファリングとゼロストールリードバック (Zero-Stall Async Readback)
+
+適応サブステップの変位計測には頂点座標のリードバックが必要ですが、従来の同期的リードバック（`Maintain::Wait`）を毎フレーム挟むと、GPUパイプラインが完全にフラッシュされCPU側で数ミリ秒〜十数ミリ秒の待機ストールが発生し、固定サブステップ時よりもフレームレートが著しく劣化する問題がありました。
+
+Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_buffers: [wgpu::Buffer; 2]`）と `Arc<AtomicU8>` による**完全非同期・ゼロストール回収機構**を採用しています：
+1. **シミュレーション提出時の同一エンコーダ統合**:
+   シミュレーションパスと同一の `CommandEncoder` 内で専用ステージングバッファへのコンパクトコピー（12B/頂点）をエンコードして `queue.submit()` し、提出直後に `slice.map_async()` を発行して一切待機（`Wait`）せずに即座にCPU制御を返却します。
+2. **次フレーム先頭でのノンブロッキング回収**:
+   次フレームの `compute_effective_substeps()` 先頭で `device.poll(Maintain::Poll)` とアトミックステータス確認を行い、GPU処理完了済み（`Ready`）のバッファのみ即座に変位差分を計算してアンマップします。
+3. **ダブルバッファ衝突の自動スキップ安全弁**:
+   連続ステップなどで候補バッファがまだ GPU 実行中の場合、無理な同期待機を行わず、当該フレームの抽出コピーをスキップして前回の安全変位量を維持することで、GPU・CPU間のパイプライン並列性を 100% 維持します。
+4. **上限・下限クランプの厳守**:
+   ユーザーが指定した `max_substeps`（例: 25）を最優先の上限ガードとして厳守し、静止時・整定時には `min_substeps`（例: 4〜5）までスムーズにステップ数が低下してGPU負荷を大幅削減します。
+5. **CPUキャッシュ再利用**:
+   回収された座標は `cached_cpu_positions` にキャッシュされ、Blenderメッシュ反映（`foreach_set("co")`）等で再利用されるため、重複したGPUリードバックを完全に排除します。
+
+### 2.2 サブステップ内の処理シーケンス
 
 1. **位置予測 (Predict Positions)**:
    $$v_i \leftarrow v_i + dt \cdot M^{-1} f_{ext}$$

@@ -210,6 +210,12 @@ pub struct SceneInitData {
     pub solver_iterations: u32,
     #[serde(default = "default_substeps")]
     pub substeps: u32,
+    #[serde(default)]
+    pub enable_adaptive_substep: bool,
+    #[serde(default = "default_min_substeps")]
+    pub min_substeps: u32,
+    #[serde(default = "default_max_substeps")]
+    pub max_substeps: u32,
     pub self_collision: Option<GuiSelfCollisionData>,
     pub bone_sdf: Option<GuiBoneSdfData>,
     #[serde(default)]
@@ -230,6 +236,8 @@ fn default_sewing_stiffness() -> f32 { 10000.0 }
 fn default_sewing_lock_distance() -> f32 { 0.02 }
 fn default_areal_density() -> f32 { 0.15 }
 fn default_substeps() -> u32 { 20 }
+fn default_min_substeps() -> u32 { 1 }
+fn default_max_substeps() -> u32 { 40 }
 fn default_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
 fn default_sewing_priority_threshold() -> f32 { 0.9 }
 fn default_sewing_priority_merge_dist() -> f32 { 0.005 }
@@ -254,6 +262,12 @@ pub struct GuiParamsUpdate {
     pub bending_stiffness: Option<f32>,
     #[serde(default)]
     pub substeps: Option<u32>,
+    #[serde(default)]
+    pub enable_adaptive_substep: Option<bool>,
+    #[serde(default)]
+    pub min_substeps: Option<u32>,
+    #[serde(default)]
+    pub max_substeps: Option<u32>,
     pub solver_iterations: Option<u32>,
     #[serde(default)]
     pub target_fps: Option<f32>,
@@ -333,6 +347,9 @@ mod tests {
         assert_eq!(init.sewing_stiffness, 10000.0);
         assert!(init.enable_sewing_lock);
         assert_eq!(init.sewing_lock_distance, 0.02);
+        assert!(!init.enable_adaptive_substep);
+        assert_eq!(init.min_substeps, 1);
+        assert_eq!(init.max_substeps, 40);
     }
 
     #[test]

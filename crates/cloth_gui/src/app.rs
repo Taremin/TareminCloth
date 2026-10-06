@@ -68,6 +68,9 @@ pub struct GuiApp {
     shear_damping: f32,
     bending_damping: f32,
     substeps: u32,
+    enable_adaptive_substep: bool,
+    min_substeps: u32,
+    max_substeps: u32,
     solver_iterations: u32,
     target_fps: f32,
     scene_fps: f32,
@@ -91,6 +94,7 @@ pub struct GuiApp {
     grab_plane_normal: glam::Vec3,
     grab_initial_hit: glam::Vec3,
     grab_target_pos: Option<glam::Vec3>,
+    last_grab_target_pos: Option<glam::Vec3>,
     pinned_verts: HashMap<u32, [f32; 3]>,
     cached_positions: Vec<[f32; 3]>,
     initial_positions: Vec<[f32; 3]>,
@@ -147,6 +151,9 @@ impl GuiApp {
             shear_damping: 5.0,
             bending_damping: 0.5,
             substeps: 20,
+            enable_adaptive_substep: false,
+            min_substeps: 1,
+            max_substeps: 40,
             solver_iterations: 2,
             target_fps: 60.0,
             scene_fps: 60.0,
@@ -166,6 +173,7 @@ impl GuiApp {
             grab_plane_normal: glam::Vec3::Z,
             grab_initial_hit: glam::Vec3::ZERO,
             grab_target_pos: None,
+            last_grab_target_pos: None,
             pinned_verts: HashMap::new(),
             cached_positions: Vec::new(),
             initial_positions: Vec::new(),
@@ -412,6 +420,14 @@ impl GuiApp {
         sim.set_areal_density(data.areal_density);
         self.solver_iterations = data.solver_iterations;
         self.substeps = data.substeps;
+        self.enable_adaptive_substep = data.enable_adaptive_substep;
+        self.min_substeps = data.min_substeps;
+        self.max_substeps = data.max_substeps;
+        sim.set_adaptive_substep_options(
+            data.enable_adaptive_substep,
+            data.min_substeps,
+            data.max_substeps,
+        );
         if let Some(fps) = data.fps {
             if fps > 0.0 {
                 self.scene_fps = fps;
@@ -707,6 +723,7 @@ impl GuiApp {
         let mut damping_changed = false;
         let mut gravity_changed = false;
         let mut iterations_changed = false;
+        let mut adaptive_changed = false;
         let mut sc_enabled_changed = false;
         let mut sc_algo_changed = false;
         let mut sc_edge_changed = false;
@@ -778,6 +795,19 @@ impl GuiApp {
                             .color(egui::Color32::from_rgb(150, 150, 150)),
                     );
                 });
+                if let Some(ref sim) = self.simulator {
+                    ui.horizontal(|ui| {
+                        ui.label("Substeps:");
+                        if self.enable_adaptive_substep {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 180, 50),
+                                format!("{} (Adaptive: {}..{})", sim.effective_substeps(), self.min_substeps, self.max_substeps),
+                            );
+                        } else {
+                            ui.label(format!("{} (Fixed)", self.substeps));
+                        }
+                    });
+                }
 
                 let is_connected = self.server.shared_state.read().map(|s| s.is_connected).unwrap_or(false);
                 ui.horizontal(|ui| {
@@ -827,6 +857,7 @@ impl GuiApp {
                             self.frame_seq = 0;
                             self.grabbed_vert = None;
                             self.grab_target_pos = None;
+                            self.last_grab_target_pos = None;
                             self.pinned_verts.clear();
                             self.cached_positions = self.initial_positions.clone();
                             if let Ok(mut state) = self.server.shared_state.write() {
@@ -975,7 +1006,26 @@ impl GuiApp {
                     }
                     grav_slider.on_hover_text(format!("Effective Gravity: [{:.2}, {:.2}, {:.2}] m/s²", self.gravity[0], self.gravity[1], self.gravity[2]));
 
-                    ui.add(egui::Slider::new(&mut self.substeps, 1..=60).text("Substeps"));
+                    if ui.checkbox(&mut self.enable_adaptive_substep, "Adaptive Substeps").changed() {
+                        adaptive_changed = true;
+                    }
+                    if self.enable_adaptive_substep {
+                        if ui.add(egui::Slider::new(&mut self.min_substeps, 1..=self.max_substeps).text("Min Substeps")).changed() {
+                            adaptive_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.max_substeps, self.min_substeps..=100).text("Max Substeps")).changed() {
+                            adaptive_changed = true;
+                        }
+                        if let Some(ref sim) = self.simulator {
+                            ui.label(
+                                egui::RichText::new(format!("Effective: {} steps", sim.effective_substeps()))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(255, 200, 100)),
+                            );
+                        }
+                    } else {
+                        ui.add(egui::Slider::new(&mut self.substeps, 1..=60).text("Substeps"));
+                    }
                     if ui.add(egui::Slider::new(&mut self.solver_iterations, 1..=10).text("Iterations")).changed() {
                         iterations_changed = true;
                     }
@@ -1033,6 +1083,13 @@ impl GuiApp {
             }
             if iterations_changed {
                 sim.solver_iterations = self.solver_iterations;
+            }
+            if adaptive_changed {
+                sim.set_adaptive_substep_options(
+                    self.enable_adaptive_substep,
+                    self.min_substeps,
+                    self.max_substeps,
+                );
             }
             if sc_enabled_changed {
                 sim.set_enable_self_collision(self.self_collision_enabled);
@@ -1285,6 +1342,18 @@ impl GuiApp {
                         if let Some(sub) = p.substeps {
                             self.substeps = sub;
                         }
+                        if p.enable_adaptive_substep.is_some() || p.min_substeps.is_some() || p.max_substeps.is_some() {
+                            if let Some(v) = p.enable_adaptive_substep { self.enable_adaptive_substep = v; }
+                            if let Some(v) = p.min_substeps { self.min_substeps = v; }
+                            if let Some(v) = p.max_substeps { self.max_substeps = v; }
+                            if let Some(ref mut sim) = self.simulator {
+                                sim.set_adaptive_substep_options(
+                                    self.enable_adaptive_substep,
+                                    self.min_substeps,
+                                    self.max_substeps,
+                                );
+                            }
+                        }
                         if let Some(iters) = p.solver_iterations {
                             self.solver_iterations = iters;
                             if let Some(ref mut sim) = self.simulator {
@@ -1444,6 +1513,7 @@ impl ApplicationHandler for GuiApp {
                                     if let Some(ref mut sim) = self.simulator {
                                         sim.set_pin_target(v_idx, [v_pos.x, v_pos.y, v_pos.z], 1.0);
                                     }
+                                    self.last_grab_target_pos = Some(v_pos);
                                 }
                             }
                         } else if state == ElementState::Released {
@@ -1454,6 +1524,7 @@ impl ApplicationHandler for GuiApp {
                                     }
                                 }
                                 self.grab_target_pos = None;
+                                self.last_grab_target_pos = None;
                             }
                         }
                     }
@@ -1483,8 +1554,17 @@ impl ApplicationHandler for GuiApp {
                             let delta = current_hit - self.grab_initial_hit;
                             let target = self.grab_initial_pos + delta;
                             self.grab_target_pos = Some(target);
+                            let grab_disp = if let Some(last_pos) = self.last_grab_target_pos {
+                                (target - last_pos).length()
+                            } else {
+                                (target - self.grab_initial_pos).length()
+                            };
+                            self.last_grab_target_pos = Some(target);
                             if let Some(ref mut sim) = self.simulator {
                                 sim.set_pin_target(v_idx, [target.x, target.y, target.z], 1.0);
+                                if grab_disp > 1e-4 {
+                                    sim.note_external_displacement(grab_disp);
+                                }
                             }
                             if self.pinned_verts.contains_key(&v_idx) {
                                 self.pinned_verts.insert(v_idx, target.to_array());

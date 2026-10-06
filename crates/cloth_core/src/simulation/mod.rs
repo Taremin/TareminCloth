@@ -112,6 +112,7 @@ pub struct GpuClothSimulator {
     pub enable_compact_readback: bool,
     pub(crate) compact_position_buffer: wgpu::Buffer,
     pub(crate) compact_staging_buffers: [wgpu::Buffer; 2],
+    pub(crate) adaptive_staging_buffers: [wgpu::Buffer; 2],
     pub(crate) extract_positions_bind_group: wgpu::BindGroup,
 
     // フレームバッファリング用 (直近NフレームをGPU上で保持し一括転送)
@@ -314,6 +315,23 @@ pub struct GpuClothSimulator {
     pub(crate) rest_positions_buffer: wgpu::Buffer,
     pub(crate) self_collision_vv_params_buffer: wgpu::Buffer,
     pub(crate) self_collision_vv_bind_group: wgpu::BindGroup,
+
+    // 適応サブステップ (Adaptive Substeps)
+    pub enable_adaptive_substep: bool,
+    pub min_substeps: u32,
+    pub max_substeps: u32,
+    pub base_substeps: u32,
+    pub(crate) effective_substeps: u32,
+    pub(crate) mesh_char_len: f32,
+    pub(crate) cloth_thickness: f32,
+    pub(crate) prev_step_positions: Vec<[f32; 3]>,
+    pub(crate) last_step_max_displacement: f32,
+    pub(crate) pending_external_displacement: f32,
+    pub(crate) cached_cpu_positions: Vec<[f32; 3]>,
+    pub(crate) cached_positions_frame_seq: u64,
+    pub(crate) current_frame_seq: u64,
+    pub(crate) adaptive_staging_idx: usize,
+    pub(crate) adaptive_status: [Option<std::sync::Arc<std::sync::atomic::AtomicU8>>; 2],
 }
 
 
@@ -339,6 +357,28 @@ impl GpuClothSimulator {
         let initial_vertices = mesh.vertices.clone();
         let mesh_edges: Vec<[u32; 2]> = mesh.distance_constraints.iter().map(|dc| [dc.v0, dc.v1]).collect();
         let mesh_faces: Vec<[u32; 3]> = mesh.triangles.iter().map(|tri| [tri.v0, tri.v1, tri.v2]).collect();
+
+        // メッシュ特性長 (最小エッジ長と布厚み) の事前算出
+        let mut min_edge_len_sq = f32::MAX;
+        for dc in &mesh.distance_constraints {
+            let p0 = mesh.vertices[dc.v0 as usize].position;
+            let p1 = mesh.vertices[dc.v1 as usize].position;
+            let dx = p0[0] - p1[0];
+            let dy = p0[1] - p1[1];
+            let dz = p0[2] - p1[2];
+            let d2 = dx * dx + dy * dy + dz * dz;
+            if d2 > 1e-8 && d2 < min_edge_len_sq {
+                min_edge_len_sq = d2;
+            }
+        }
+        let min_edge_len = if min_edge_len_sq < f32::MAX {
+            min_edge_len_sq.sqrt()
+        } else {
+            0.02
+        };
+        let cloth_thickness = 0.005f32;
+        let mesh_char_len = (cloth_thickness * 2.0).min(min_edge_len).max(0.001);
+        let prev_step_positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
 
         let sim = Self {
             context: Arc::clone(&context),
@@ -398,6 +438,7 @@ impl GpuClothSimulator {
             enable_compact_readback: true,
             compact_position_buffer: res.compact_position_buffer,
             compact_staging_buffers: res.compact_staging_buffers,
+            adaptive_staging_buffers: res.adaptive_staging_buffers,
             extract_positions_bind_group: res.extract_positions_bind_group,
             buffered_position_buffer: res.buffered_position_buffer,
             buffered_staging_buffer: res.buffered_staging_buffer,
@@ -555,6 +596,22 @@ impl GpuClothSimulator {
             rest_positions_buffer: res.rest_positions_buffer,
             self_collision_vv_params_buffer: res.self_collision_vv_params_buffer,
             self_collision_vv_bind_group: res.self_collision_vv_bind_group,
+
+            enable_adaptive_substep: false,
+            min_substeps: 4,
+            max_substeps: 64,
+            base_substeps: 20,
+            effective_substeps: 0,
+            mesh_char_len,
+            cloth_thickness,
+            prev_step_positions,
+            last_step_max_displacement: 0.0,
+            pending_external_displacement: 0.0,
+            cached_cpu_positions: Vec::new(),
+            cached_positions_frame_seq: 0,
+            current_frame_seq: 1,
+            adaptive_staging_idx: 0,
+            adaptive_status: [None, None],
         };
         // ATOMIC モード指定時は初回から必要なため、ここで先行生成する
         if solver_mode == 1 {
@@ -579,6 +636,37 @@ impl GpuClothSimulator {
             self.enable_pair_cache = false;
         }
         self.self_collision_algorithm = algo;
+    }
+
+    /// 適応サブステップ設定を更新する
+    pub fn set_adaptive_substep_options(
+        &mut self,
+        enabled: bool,
+        min_substeps: u32,
+        max_substeps: u32,
+    ) {
+        self.enable_adaptive_substep = enabled;
+        self.min_substeps = min_substeps.max(1);
+        self.max_substeps = max_substeps.max(self.min_substeps);
+        self.effective_substeps = 0;
+    }
+
+    /// 直近の物理ステップで使用された実効サブステップ数を取得する
+    pub fn effective_substeps(&self) -> u32 {
+        self.effective_substeps
+    }
+
+    /// 布の厚みを設定し、CFL特性長を再計算する
+    pub fn set_thickness(&mut self, thickness: f32) {
+        self.cloth_thickness = thickness.max(0.0001);
+        self.mesh_char_len = (self.cloth_thickness * 2.0).min(self.mesh_char_len.max(0.001)).max(0.001);
+    }
+
+    /// マウスドラッグやコライダー移動など外部から生じた変位量を通知する (次ステップのCFL計算に加算)
+    pub fn note_external_displacement(&mut self, disp: f32) {
+        if disp > self.pending_external_displacement {
+            self.pending_external_displacement = disp;
+        }
     }
 
     /// 現在の自己衝突アルゴリズムを取得する

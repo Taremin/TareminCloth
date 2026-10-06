@@ -293,83 +293,22 @@ def _gravity_active(settings, scene=None) -> bool:
     return True
 
 
-def get_effective_substeps(obj, coords, dt, scene=None):
-    """布およびコライダーの運動速度とCFL条件に基づき、最適なサブステップ数を動的に算出する"""
+def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None):
+    """布およびコライダーの運動速度とCFL条件に基づき、最適なサブステップ数を動的に算出する。
+
+    物理コア (cloth_core) への移管に伴い、コアから実効サブステップ数を取得するか、
+    フォールバックとしての基本値を返却する。
+    """
     settings = getattr(obj, "taremin_cloth", None)
+    base_steps = getattr(settings, "substeps", 20) if settings else 20
     if not settings or not getattr(settings, "enable_adaptive_substep", False):
-        return getattr(settings, "substeps", 20)
-
-    obj_name = obj.name
-    prev_coords = _prev_coords_cache.get(obj_name)
-    _prev_coords_cache[obj_name] = coords.copy()
-
-    base_steps = getattr(settings, "substeps", 20)
-    min_steps = getattr(settings, "min_substeps", 4)
-
-    if prev_coords is None or prev_coords.shape != coords.shape or dt <= 0:
-        _effective_substeps_cache[obj_name] = base_steps
         return base_steps
 
-    # 1. 布頂点の最大変位量 (NumPy L_inf ノルムで高速算出)
-    cloth_max_disp = float(np.max(np.abs(coords - prev_coords)))
+    sim = _simulators.get(obj.name) if hasattr(obj, "name") else None
+    if sim is not None and hasattr(sim, "get_effective_substeps"):
+        return sim.get_effective_substeps()
 
-    # 2. コライダーの最大変位量の算出 (フレーム単位での安全なキャッシュ管理)
-    collider_max_disp = 0.0
-    sc = scene or getattr(bpy.context, "scene", None)
-    cur_f = getattr(sc, "frame_current", 0) if sc else 0
-    if sc:
-        for c_obj in sc.objects:
-            if hasattr(c_obj, "taremin_cloth_collider") and c_obj.taremin_cloth_collider.is_collider and getattr(c_obj.taremin_cloth_collider, "enabled", True):
-                curr_loc = np.array(c_obj.matrix_world.translation, dtype=np.float32)
-                entry = _collider_prev_locs_cache.get(c_obj.name)
-                if entry is None:
-                    _collider_prev_locs_cache[c_obj.name] = (curr_loc, curr_loc, cur_f)
-                elif not isinstance(entry, tuple) or len(entry) != 3 or entry[2] != cur_f:
-                    prev_l = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else (entry if isinstance(entry, np.ndarray) else curr_loc)
-                    _collider_prev_locs_cache[c_obj.name] = (prev_l, curr_loc, cur_f)
-                    disp = float(np.linalg.norm(curr_loc - prev_l))
-                    if disp > collider_max_disp:
-                        collider_max_disp = disp
-                else:
-                    prev_l = entry[0]
-                    disp = float(np.linalg.norm(curr_loc - prev_l))
-                    if disp > collider_max_disp:
-                        collider_max_disp = disp
-    max_disp = max(cloth_max_disp, collider_max_disp)
-
-    # 3. メッシュ特性長および厚み (CFL条件) による目標ステップ数の決定
-    char_len = _mesh_char_len_cache.get(obj_name, 0.01)
-    thickness = getattr(settings, "thickness", 0.01)
-    # 安全係数: 1サブステップあたりの移動量が、エッジ長だけでなく布の厚み（貫通閾値）に対しても過大にならないよう考慮
-    # 厚みが極端に薄い場合でも、最低限の安全マージンを確保
-    cfl_margin = min(0.5 * char_len, max(thickness * 1.5, 0.002))
-    max_steps = getattr(settings, "max_substeps", max(base_steps, 64))
-
-    if max_disp <= 1e-6:
-        target_steps = min_steps
-    else:
-        computed_steps = int(np.ceil(max_disp / cfl_margin))
-        target_steps = max(min_steps, min(max_steps, computed_steps))
-
-    # 重力フロア: 静止時も重力荷重の釣り合いには基底予算が必要なため、
-    # 重力有効時は適応低下の下限を基底段数に保つ (基底品質の保証)。
-    # 高速運動時の増段 (上限方向) は従来通り有効。
-    if _gravity_active(settings, scene):
-        target_steps = max(target_steps, min(base_steps, max_steps))
-
-    # 4. ヒステリシス制御（スムージング / ジッター防止）
-    # 急激なステップ降下による剛性・ダンピングの揺らぎや布のピクつき、および急上昇による極端なFPSドロップを防止
-    prev_steps = _effective_substeps_cache.get(obj_name, base_steps)
-    if target_steps >= prev_steps:
-        # 上昇時: 局所的な微小振動で一度に跳ね上がらないよう最大+4ステップずつ滑らかに追従
-        current_steps = min(target_steps, prev_steps + 4)
-    else:
-        # 下降時: 減速・整定時は最大2ステップずつ緩やかに降下
-        current_steps = max(target_steps, prev_steps - 2)
-
-    current_steps = max(min_steps, min(max_steps, current_steps))
-    _effective_substeps_cache[obj_name] = current_steps
-    return current_steps
+    return base_steps
 
 
 def step_cloth_object(
@@ -413,7 +352,8 @@ def step_cloth_object(
         sync_cloth_parameters(sim, obj, scene)
         sync_attachment_pins(sim, obj, scene)
 
-    actual_substeps = substeps if substeps is not None else get_effective_substeps(obj, coords, dt, scene=scene)
+    # substeps未指定(None)時はコア側で適応サブステップまたは既定値を自動判定
+    actual_substeps = substeps
     actual_iters = solver_iterations if solver_iterations is not None else (getattr(settings, "solver_iterations", 1) if settings else 1)
 
     # 縫合優先モード: 直近座標で結合率を測定し、step 前にラッチ状態を更新する。
@@ -708,8 +648,6 @@ def bake_step_frame(bake_ctx, frame):
     for obj in cloth_objs:
         sim, coords = get_or_create_simulator(obj)
         settings = obj.taremin_cloth
-        actual_substeps = get_effective_substeps(obj, coords, dt, scene=scene)
-
         sim, coords = step_cloth_object(
             obj,
             scene,
@@ -717,7 +655,7 @@ def bake_step_frame(bake_ctx, frame):
             depsgraph=depsgraph,
             force_sync_colliders=any_collider_deformed,
             update_mesh=True,
-            substeps=actual_substeps,
+            substeps=None,
             solver_iterations=settings.solver_iterations,
         )
         local_coords = None

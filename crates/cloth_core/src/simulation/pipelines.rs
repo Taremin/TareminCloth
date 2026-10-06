@@ -36,6 +36,7 @@ pub struct SimulationResources {
     pub distance_atomic_bind_group: wgpu::BindGroup,
     pub compact_position_buffer: wgpu::Buffer,
     pub compact_staging_buffers: [wgpu::Buffer; 2],
+    pub adaptive_staging_buffers: [wgpu::Buffer; 2],
     pub extract_positions_bind_group: wgpu::BindGroup,
     pub buffered_position_buffer: wgpu::Buffer,
     pub buffered_staging_buffer: wgpu::Buffer,
@@ -503,6 +504,18 @@ pub fn build_simulation_resources(
     });
     let compact_staging_1 = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Compact Staging Buffer 1"),
+        size: compact_buffer_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let adaptive_staging_0 = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Adaptive Staging Buffer 0"),
+        size: compact_buffer_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let adaptive_staging_1 = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TareminCloth Adaptive Staging Buffer 1"),
         size: compact_buffer_size,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -1553,6 +1566,7 @@ pub fn build_simulation_resources(
         distance_atomic_bind_group,
         compact_position_buffer,
         compact_staging_buffers: [compact_staging_0, compact_staging_1],
+        adaptive_staging_buffers: [adaptive_staging_0, adaptive_staging_1],
         extract_positions_bind_group,
         buffered_position_buffer,
         buffered_staging_buffer,

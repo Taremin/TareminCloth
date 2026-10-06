@@ -27,6 +27,8 @@ fn d_substep_interval() -> u32 { 1 }
 fn d_edge_scale() -> f32 { 1.0 }
 fn d_stiffness() -> f32 { 500.0 }
 fn d_bending() -> f32 { 5.0 }
+fn d_min_substeps() -> u32 { 4 }
+fn d_max_substeps() -> u32 { 64 }
 
 /// シミュレーション可変パラメータの Single Source of Truth.
 ///
@@ -126,6 +128,12 @@ pub struct SimConfig {
     pub sewing_priority_max_frames: u32,
     #[serde(default = "d_areal_density")]
     pub areal_density: f32,
+    #[serde(default)]
+    pub enable_adaptive_substep: bool,
+    #[serde(default = "d_min_substeps")]
+    pub min_substeps: u32,
+    #[serde(default = "d_max_substeps")]
+    pub max_substeps: u32,
 }
 
 impl Default for SimConfig {
@@ -176,6 +184,9 @@ impl Default for SimConfig {
             sewing_priority_ramp_frames: d_ramp(),
             sewing_priority_max_frames: d_max_frames(),
             areal_density: d_areal_density(),
+            enable_adaptive_substep: false,
+            min_substeps: d_min_substeps(),
+            max_substeps: d_max_substeps(),
         }
     }
 }
@@ -209,5 +220,8 @@ mod tests {
     fn config_old_json_with_missing_fields() {
         let d: SimConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(d.version, 1);
+        assert_eq!(d.enable_adaptive_substep, false);
+        assert_eq!(d.min_substeps, 4);
+        assert_eq!(d.max_substeps, 64);
     }
 }

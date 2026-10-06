@@ -63,6 +63,9 @@ impl GpuClothSimulator {
             sewing_priority_merge_dist: self.sewing_priority_merge_dist,
             sewing_priority_ramp_frames: self.sewing_priority_ramp_frames,
             sewing_priority_max_frames: self.sewing_priority_max_frames,
+            enable_adaptive_substep: self.enable_adaptive_substep,
+            min_substeps: self.min_substeps,
+            max_substeps: self.max_substeps,
         }
     }
 
@@ -144,6 +147,11 @@ impl GpuClothSimulator {
             c.sewing_priority_merge_dist,
             c.sewing_priority_ramp_frames,
             c.sewing_priority_max_frames,
+        );
+        self.set_adaptive_substep_options(
+            c.enable_adaptive_substep,
+            c.min_substeps,
+            c.max_substeps,
         );
     }
 

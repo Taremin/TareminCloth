@@ -900,5 +900,82 @@ mod tests {
         let final_sep = z_upper - z_lower;
         assert!(final_sep > 0.015, "V-V自己衝突により対向パッチが押し離されるべき (初期0.015 -> 実行後{})", final_sep);
     }
+
+    #[test]
+    fn test_adaptive_substeps_cfl_and_gravity_floor() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.0, 0.05, 0.0],
+        ];
+        let edges = vec![[0, 1], [1, 2], [2, 0]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None,
+            None, None, 0, 0.005, 1000.0, 10.0, 1000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_adaptive_substep_options(true, 4, 64);
+        sim.base_substeps = 20;
+
+        // 1. 静止時: 重力があっても変位がゼロなら min_substeps (4) に収束する（無駄なGPU負荷を排除）
+        sim.gravity = [0.0, 0.0, -9.81];
+        sim.last_step_max_displacement = 0.0;
+        sim.effective_substeps = 4;
+        let s = sim.compute_effective_substeps(0.016, 20);
+        assert_eq!(s, 4, "静止時はmin_substepsになるべき (got {})", s);
+
+        // 2. 高速移動時: 変位20cm (cfl_margin 5mm に対して40ステップ要求) で即座に40へ上昇
+        sim.last_step_max_displacement = 0.20;
+        let s_fast = sim.compute_effective_substeps(0.016, 20);
+        assert_eq!(s_fast, 40, "危険変位時は安全重視で即座に40へ上昇すべき (got {})", s_fast);
+
+        // 3. 上限クランプの厳守: max_substeps を 25 に設定した場合、40要求でも25で確実にキャップされること
+        sim.set_adaptive_substep_options(true, 4, 25);
+        sim.effective_substeps = 20;
+        sim.last_step_max_displacement = 0.20;
+        let s_clamped = sim.compute_effective_substeps(0.016, 20);
+        assert_eq!(s_clamped, 25, "ユーザー指定のmax_substeps(25)を絶対に超えてはならない (got {})", s_clamped);
+
+        // 4. 急停止時: ヒステリシス下降リミット(-2)により 25 -> 23 へ滑らかに減少
+        sim.last_step_max_displacement = 0.0;
+        let s_slow = sim.compute_effective_substeps(0.016, 20);
+        assert_eq!(s_slow, 23, "ヒステリシス下降リミット(-2)により25->23になるべき (got {})", s_slow);
+    }
+
+    #[test]
+    fn test_adaptive_substeps_step_loop() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![
+            [0.0, 0.0, 1.0],
+            [0.05, 0.0, 1.0],
+            [0.0, 0.05, 1.0],
+        ];
+        let edges = vec![[0, 1], [1, 2], [2, 0]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None,
+            None, None, 0, 0.005, 1000.0, 10.0, 1000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_adaptive_substep_options(true, 4, 40);
+        sim.base_substeps = 10;
+        sim.gravity = [0.0, 0.0, -9.81];
+
+        // 1ステップ目 (落下開始前): 静止時は min_substeps (4)
+        sim.step(0.016, 10);
+        assert_eq!(sim.effective_substeps(), 4);
+
+        // 自由落下により変位が増加し、ステップ数が上限方向に追従することを確認
+        for _ in 0..10 {
+            sim.step(0.016, 10);
+        }
+        assert!(sim.effective_substeps() >= 4, "自由落下中は min 以上を維持 (got {})", sim.effective_substeps());
+    }
 }
 

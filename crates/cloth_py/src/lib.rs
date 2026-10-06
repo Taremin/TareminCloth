@@ -1436,12 +1436,31 @@ impl ClothSimulator {
     }
 
     /// シミュレーションを 1 フレーム進める（同期）
-    #[pyo3(signature = (dt=0.016666667, substeps=20, solver_iterations=None))]
-    fn step(&mut self, dt: f32, substeps: u32, solver_iterations: Option<u32>) {
+    /// substeps が None の場合、コアの適応サブステップ設定（または既定値）に基づき実効ステップ数を自動算出
+    /// 戻り値: 実際に実行された実効サブステップ数
+    #[pyo3(signature = (dt=0.016666667, substeps=None, solver_iterations=None))]
+    fn step(&mut self, dt: f32, substeps: Option<u32>, solver_iterations: Option<u32>) -> u32 {
         if let Some(iters) = solver_iterations {
             self.simulator.set_solver_iterations(iters);
         }
-        self.simulator.step(dt, substeps);
+        let requested = substeps.unwrap_or(0);
+        self.simulator.step(dt, requested);
+        self.simulator.effective_substeps()
+    }
+
+    /// 直近の物理ステップで使用された実効サブステップ数を取得する
+    fn get_effective_substeps(&self) -> u32 {
+        self.simulator.effective_substeps()
+    }
+
+    /// 適応サブステップ設定を更新する
+    fn set_adaptive_substep_options(&mut self, enabled: bool, min_substeps: u32, max_substeps: u32) {
+        self.simulator.set_adaptive_substep_options(enabled, min_substeps, max_substeps);
+    }
+
+    /// 外部変位量（マウスドラッグやコライダー移動等）を通知する
+    fn note_external_displacement(&mut self, disp: f32) {
+        self.simulator.note_external_displacement(disp);
     }
 
     /// 単一サブステップのみ計算を進める（オンデマンド・サブステップ顕微鏡解析用）

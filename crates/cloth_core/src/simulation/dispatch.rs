@@ -338,11 +338,142 @@ impl GpuClothSimulator {
         }
     }
 
+    /// 非同期に提出された適応サブステップ用の頂点座標を回収し、最大変位を更新する（ノンブロッキング）
+    pub(crate) fn poll_adaptive_displacement(&mut self) {
+        if !self.enable_adaptive_substep {
+            return;
+        }
+
+        // ノンブロッキングでGPU状態を確認
+        self.context.device.poll(wgpu::Maintain::Poll);
+
+        let n_verts = self.num_vertices as usize;
+        let compact_size = (n_verts as u64) * 3 * 4;
+
+        for read_idx in 0..2 {
+            let Some(status) = self.adaptive_status[read_idx].take() else {
+                continue;
+            };
+
+            match status.load(std::sync::atomic::Ordering::Acquire) {
+                1 => {
+                    // 完了 (Ok)
+                    let slice = self.adaptive_staging_buffers[read_idx].slice(..compact_size);
+                    let data = slice.get_mapped_range();
+                    let floats: &[f32] = bytemuck::cast_slice(&data);
+
+                    let mut max_d = 0.0f32;
+                    if self.prev_step_positions.len() == n_verts {
+                        for (chunk, prev) in floats.chunks_exact(3).zip(&self.prev_step_positions) {
+                            let dx = (chunk[0] - prev[0]).abs();
+                            let dy = (chunk[1] - prev[1]).abs();
+                            let dz = (chunk[2] - prev[2]).abs();
+                            let d = dx.max(dy).max(dz);
+                            if d > max_d {
+                                max_d = d;
+                            }
+                        }
+                    } else {
+                        self.prev_step_positions.resize(n_verts, [0.0; 3]);
+                    }
+
+                    if self.cached_cpu_positions.len() != n_verts {
+                        self.cached_cpu_positions.resize(n_verts, [0.0; 3]);
+                    }
+                    for (i, chunk) in floats.chunks_exact(3).enumerate() {
+                        let p = [chunk[0], chunk[1], chunk[2]];
+                        self.prev_step_positions[i] = p;
+                        self.cached_cpu_positions[i] = p;
+                    }
+                    self.cached_positions_frame_seq = self.current_frame_seq;
+                    self.last_step_max_displacement = max_d;
+
+                    drop(data);
+                    self.adaptive_staging_buffers[read_idx].unmap();
+                }
+                0 => {
+                    // まだGPU実行中の場合は戻す（Waitしない！）
+                    self.adaptive_status[read_idx] = Some(status);
+                }
+                _ => {
+                    // エラー発生時はアンマップ
+                    self.adaptive_staging_buffers[read_idx].unmap();
+                }
+            }
+        }
+    }
+
+    /// 適応サブステップ数または指定サブステップ数から実効ステップ数を算出する
+    pub fn compute_effective_substeps(&mut self, dt: f32, requested_substeps: u32) -> u32 {
+        if !self.enable_adaptive_substep {
+            self.effective_substeps = if requested_substeps > 0 {
+                requested_substeps
+            } else {
+                self.base_substeps
+            };
+            return self.effective_substeps;
+        }
+
+        // 前フレームの非同期変位を回収（ノンブロッキング）
+        self.poll_adaptive_displacement();
+
+        let min_steps = self.min_substeps.max(1);
+        let max_steps = self.max_substeps.max(min_steps);
+
+        if dt <= 0.0 || self.num_vertices == 0 {
+            self.effective_substeps = min_steps;
+            return min_steps;
+        }
+
+        // 直近フレームの変位量と外部変位量（マウスドラッグ等）の最大値
+        let max_disp = self.last_step_max_displacement.max(self.pending_external_displacement);
+        self.pending_external_displacement = 0.0;
+
+        // CFL安全許容変位 (特性長と布厚み)
+        let cfl_margin = (0.5 * self.mesh_char_len).min((self.cloth_thickness * 1.5).max(0.002));
+
+        // CFL条件に基づく必要サブステップ数
+        let cfl_steps = if cfl_margin > 1e-6 && max_disp > 1e-6 {
+            (max_disp / cfl_margin).ceil() as u32
+        } else {
+            min_steps
+        };
+
+        // 重力自由落下フロア: 重力による1フレームあたりの自由落下変位量を下限フロアとする
+        let g_accel = (self.gravity[0].powi(2) + self.gravity[1].powi(2) + self.gravity[2].powi(2)).sqrt();
+        let freefall_disp = 0.5 * g_accel * dt * dt;
+        let grav_steps = if cfl_margin > 1e-6 && freefall_disp > 1e-6 {
+            (freefall_disp / cfl_margin).sqrt().ceil() as u32
+        } else {
+            1
+        };
+
+        let target_steps = cfl_steps.max(grav_steps).clamp(min_steps, max_steps);
+
+        // ヒステリシス制御 (急変によるジッター防止: 初回はダイレクト適用、上昇時は即時引き上げ、下降時は最大-2のレート制限)
+        let current_steps = if self.effective_substeps == 0 {
+            target_steps
+        } else {
+            let prev_steps = self.effective_substeps.clamp(min_steps, max_steps);
+            if target_steps >= prev_steps {
+                target_steps
+            } else {
+                target_steps.max(prev_steps.saturating_sub(2))
+            }
+        };
+
+        let current_steps = current_steps.clamp(min_steps, max_steps);
+        self.effective_substeps = current_steps;
+        current_steps
+    }
+
     /// シミュレーションを同期的に 1 フレーム進行する
     pub fn step(&mut self, dt: f32, substeps: u32) {
         if self.num_vertices == 0 {
             return;
         }
+
+        let actual_substeps = self.compute_effective_substeps(dt, substeps);
 
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {
@@ -352,13 +483,50 @@ impl GpuClothSimulator {
 
         self.dispatch_dynamic_bone_sdf_update(&mut encoder);
         self.profiler.frame_begin();
-        self.encode_simulation_steps(&mut encoder, dt, substeps);
+        self.encode_simulation_steps(&mut encoder, dt, actual_substeps);
         self.profiler.frame_end(&mut encoder);
+
+        // 適応サブステップ有効時は、同じエンコーダ内で専用ステージングバッファへのコピーをエンコード
+        let mut staging_idx_to_map = None;
+        if self.enable_adaptive_substep && self.enable_compact_readback {
+            let candidate_idx = self.adaptive_staging_idx;
+            // 候補バッファが未マップ・空き状態である場合のみ抽出コピーを発行（ダブルバッファ衝突を完全回避）
+            if self.adaptive_status[candidate_idx].is_none() {
+                self.encode_extract_positions(&mut encoder);
+                let compact_size = (self.num_vertices as u64) * 3 * 4;
+                let active_staging = &self.adaptive_staging_buffers[candidate_idx];
+                encoder.copy_buffer_to_buffer(
+                    &self.compact_position_buffer,
+                    0,
+                    active_staging,
+                    0,
+                    compact_size,
+                );
+                staging_idx_to_map = Some(candidate_idx);
+                self.adaptive_staging_idx = 1 - candidate_idx;
+            }
+        }
+
         self.context.queue.submit(Some(encoder.finish()));
         self.profiler.frame_submitted();
 
+        self.current_frame_seq = self.current_frame_seq.wrapping_add(1);
+
+        if let Some(read_idx) = staging_idx_to_map {
+            let compact_size = (self.num_vertices as u64) * 3 * 4;
+            let slice = self.adaptive_staging_buffers[read_idx].slice(..compact_size);
+            let status = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+            let status_clone = status.clone();
+            slice.map_async(wgpu::MapMode::Read, move |v| {
+                let code = if v.is_ok() { 1 } else { 2 };
+                status_clone.store(code, std::sync::atomic::Ordering::Release);
+            });
+            self.adaptive_status[read_idx] = Some(status);
+            // CPUは一切待機しない！ブロッキングゼロで即座にリターン！
+        }
+
         if self.debug_recorder.is_recording() {
-            self.record_current_frame(dt, substeps);
+            self.record_current_frame(dt, actual_substeps);
         }
     }
 
@@ -615,6 +783,31 @@ impl GpuClothSimulator {
 
     /// 頂点座標を flat array に直接書き込む（ヒープアロケーションなし）
     pub fn get_positions_flat(&self, out: &mut [f32]) {
+        if self.num_vertices == 0 {
+            return;
+        }
+
+        // 最新フレームのキャッシュが存在する場合はGPUリードバックをバイパスして即座にメモリコピー
+        if self.cached_positions_frame_seq == self.current_frame_seq
+            && self.cached_cpu_positions.len() == self.num_vertices as usize
+        {
+            let copy_count = self.num_vertices as usize;
+            for (i, p) in self.cached_cpu_positions[..copy_count].iter().enumerate() {
+                let base = i * 3;
+                if base + 2 < out.len() {
+                    out[base] = p[0];
+                    out[base + 1] = p[1];
+                    out[base + 2] = p[2];
+                }
+            }
+            return;
+        }
+
+        self.read_positions_gpu(out);
+    }
+
+    /// GPUから直接頂点座標を読み出す
+    pub(crate) fn read_positions_gpu(&self, out: &mut [f32]) {
         if self.num_vertices == 0 {
             return;
         }
