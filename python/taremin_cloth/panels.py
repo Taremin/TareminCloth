@@ -1,6 +1,6 @@
 import bpy
 from . import i18n
-from .operators import is_interactive_running
+from .operators import is_interactive_running, get_interactive_cloth_object_name
 from .utils import topology
 from .utils.validation import validate_cloth_mesh
 
@@ -119,7 +119,7 @@ class TAREMIN_CLOTH_PT_objects_panel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
-    bl_order = 0
+    bl_order = 1
     bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
@@ -325,21 +325,90 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
-    bl_order = 1
+    bl_order = 0
     bl_translation_context = i18n.CONTEXT
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-        if scene:
-            row_mode = layout.row(align=True)
-            row_mode.prop(scene, "taremin_cloth_ui_mode", expand=True)
+        if not scene:
+            return
+
+        row_mode = layout.row(align=True)
+        row_mode.prop(scene, "taremin_cloth_ui_mode", expand=True)
 
         obj = context.active_object
 
+        # シーン内の全布オブジェクトを取得
+        cloth_objs = [
+            o for o in scene.objects
+            if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH'
+        ]
+
+        # --- 常時表示シミュレーション制御 (Simulation Controls) ---
+        box_sim = layout.box()
+        if is_interactive_running():
+            box_sim.alert = True
+            row_stop = box_sim.row(align=True)
+            row_stop.scale_y = 1.3
+            row_stop.operator("taremin_cloth.interactive", text=i18n.trans("Stop Interactive Mode"), icon='CANCEL', depress=True)
+
+            box_sim.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
+
+            running_name = get_interactive_cloth_object_name()
+            status_txt = f"{i18n.trans('Running:')} {running_name}" if running_name else i18n.trans("Simulation Running")
+            if obj and obj.name != running_name:
+                status_txt += f" ({i18n.trans('Active:')} {obj.name})"
+            box_sim.label(text=status_txt, icon='PHYSICS')
+        else:
+            if cloth_objs:
+                row_start = box_sim.row(align=True)
+                row_start.scale_y = 1.3
+                row_start.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
+
+                box_sim.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
+            else:
+                box_sim.label(text=i18n.trans("No cloth objects in scene"), icon='INFO')
+
+        # --- オブジェクト未選択またはメッシュ以外 ---
         if not obj or obj.type != 'MESH':
-            layout.label(text=i18n.trans("Please select a mesh object"), icon='INFO')
+            box_info = layout.box()
+            box_info.label(text=i18n.trans("Please select a mesh object"), icon='INFO')
+            if obj:
+                box_info.label(text=f"{i18n.trans('Active:')} {obj.name} ({obj.type})", icon='OBJECT_DATA')
+                if obj.type == 'ARMATURE':
+                    box_info.label(text=i18n.trans("Armature / Bone can be posed interactively"), icon='INFO')
+            if cloth_objs:
+                box_info.separator()
+                box_info.label(text=i18n.trans("Cloth Objects in Scene:"), icon='MOD_CLOTH')
+                col_sel = box_info.column(align=True)
+                for c_obj in cloth_objs[:5]:
+                    op = col_sel.operator("taremin_cloth.select_object", text=c_obj.name, icon='MOD_CLOTH')
+                    op.object_name = c_obj.name
             return
+
+        settings = getattr(obj, "taremin_cloth", None)
+        if not settings:
+            return
+
+        # メッシュだが布ではないオブジェクト
+        if not settings.is_cloth:
+            box_info = layout.box()
+            row_act = box_info.row(align=True)
+            row_act.label(text=f"{i18n.trans('Selected:')} {obj.name}", icon='OBJECT_DATAMODE')
+            row_act.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Enable Cloth"), icon='MOD_CLOTH')
+            if cloth_objs:
+                box_info.separator()
+                box_info.label(text=i18n.trans("Cloth Objects in Scene:"), icon='MOD_CLOTH')
+                col_sel = box_info.column(align=True)
+                for c_obj in cloth_objs[:5]:
+                    op = col_sel.operator("taremin_cloth.select_object", text=c_obj.name, icon='MOD_CLOTH')
+                    op.object_name = c_obj.name
+            return
+
+        # --- 布オブジェクトがアクティブな場合 ---
+        col = layout.column(align=True)
+        col.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Disable Cloth"), icon='CANCEL')
 
         # 非均等スケール警告 (Non-uniform Scale: Scale.x != Scale.y or Scale.y != Scale.z)
         scale = obj.scale
@@ -353,21 +422,10 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             op_scale.rotation = False
             op_scale.scale = True
 
-        settings = getattr(obj, "taremin_cloth", None)
-        if not settings:
-            return
-
-        col = layout.column(align=True)
-        if not settings.is_cloth:
-            col.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Enable Cloth"), icon='MOD_CLOTH')
-            return
-
-        col.operator("taremin_cloth.toggle_cloth", text=i18n.trans("Disable Cloth"), icon='CANCEL')
-
         # メッシュトポロジーバリデーション警告（シンプル/詳細問わず最上部に表示）
         _draw_mesh_validation_warnings(layout, obj)
 
-        ui_mode = getattr(scene, "taremin_cloth_ui_mode", "SIMPLE") if scene else "SIMPLE"
+        ui_mode = getattr(scene, "taremin_cloth_ui_mode", "SIMPLE")
 
         if ui_mode == 'SIMPLE':
             # --- 簡単モード (Simple Mode) ---
@@ -390,7 +448,29 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             if is_scene_baked(context.scene):
                 layout_params.active = False
 
-            # 1. 固定 (Attachment & Pinning)
+            # 1. シミュレーション品質プリセット (Simulation Quality) 【最上位に配置】
+            box_qual = layout_params.box()
+            box_qual.label(text=i18n.trans("Simulation Quality"), icon='PREFERENCES')
+            row_q = box_qual.row(align=True)
+            sim_preset_title = f"{i18n.trans('Quality:')} {settings.last_simulation_preset}" if settings.last_simulation_preset else i18n.trans("Quality Preset")
+            row_q.menu("TAREMIN_CLOTH_MT_simulation_presets", text=sim_preset_title, icon='SETTINGS')
+            row_sub = box_qual.row(align=True)
+            row_sub.prop(settings, "substeps")
+            row_sub.prop(settings, "solver_iterations")
+
+            # 2. 素材プリセット (Fabric Material)
+            box_mat = layout_params.box()
+            box_mat.label(text=i18n.trans("Fabric Material"), icon='MATERIAL')
+            row_preset = box_mat.row(align=True)
+            preset_title = f"{i18n.trans('Material:')} {settings.last_fabric_preset}" if settings.last_fabric_preset else i18n.trans("Material Preset")
+            row_preset.menu("TAREMIN_CLOTH_MT_fabric_presets", text=preset_title, icon='MATERIAL')
+            row_thick = box_mat.row(align=True)
+            row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
+            row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+            row_dens = box_mat.row(align=True)
+            row_dens.prop(settings, "areal_density", text=i18n.trans("Areal Density"))
+
+            # 3. 固定 (Attachment & Pinning)
             box_pin = layout_params.box()
             box_pin.label(text=i18n.trans("Attachment & Pinning"), icon='PINNED')
             col_pin = box_pin.column(align=True)
@@ -403,7 +483,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             if settings.pin_target_object and settings.pin_target_object.type == 'ARMATURE':
                 col_pin.prop_search(settings, "pin_target_bone", settings.pin_target_object.data, "bones", text=i18n.trans("Bone"))
 
-            # 2. 縫合 (Sewing)
+            # 4. 縫合 (Sewing)
             box_sew = layout_params.box()
             box_sew.label(text=i18n.trans("Sewing"), icon='MOD_CLOTH')
             col_sew = box_sew.column(align=True)
@@ -444,19 +524,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                             err_box.label(text=f"  {i18n.trans('Invalid seam path topology:')} {issue.vertices}")
                     err_box.label(text=i18n.trans("Seam paths must be a single non-branching path."), icon='INFO')
 
-            # 3. 素材プリセット (Fabric Material)
-            box_mat = layout_params.box()
-            box_mat.label(text=i18n.trans("Fabric Material"), icon='MATERIAL')
-            row_preset = box_mat.row(align=True)
-            preset_title = f"{i18n.trans('Material:')} {settings.last_fabric_preset}" if settings.last_fabric_preset else i18n.trans("Material Preset")
-            row_preset.menu("TAREMIN_CLOTH_MT_fabric_presets", text=preset_title, icon='MATERIAL')
-            row_thick = box_mat.row(align=True)
-            row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
-            row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
-            row_dens = box_mat.row(align=True)
-            row_dens.prop(settings, "areal_density", text=i18n.trans("Areal Density"))
-
-            # 4. 自己衝突 (Self Collision)
+            # 5. 自己衝突 (Self Collision)
             box_sc = layout_params.box()
             box_sc.label(text=i18n.trans("Self Collision"), icon='PHYSICS')
             col_sc = box_sc.column(align=True)
@@ -467,18 +535,12 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 row_sc.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
                 col_sc.prop(settings, "thickness", text=i18n.trans("Thickness"))
 
-            # 4. 重力 (Forces & Gravity)
+            # 6. 重力 (Forces & Gravity)
             box_grav = layout_params.box()
             box_grav.label(text=i18n.trans("Forces & Gravity"), icon='FORCE_VORTEX')
             col_grav = box_grav.column(align=True)
             col_grav.prop(settings, "gravity", slider=True)
 
-            # 5. シミュレーション品質プリセット (Simulation Quality)
-            box_qual = layout_params.box()
-            box_qual.label(text=i18n.trans("Simulation Quality"), icon='PREFERENCES')
-            row_q = box_qual.row(align=True)
-            sim_preset_title = f"{i18n.trans('Quality:')} {settings.last_simulation_preset}" if settings.last_simulation_preset else i18n.trans("Quality Preset")
-            row_q.menu("TAREMIN_CLOTH_MT_simulation_presets", text=sim_preset_title, icon='SETTINGS')
         else:
             # --- 詳細モード (Advanced Mode) ---
             box_selected = layout.box()
@@ -505,6 +567,7 @@ class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 2
     bl_translation_context = i18n.CONTEXT
 
     @classmethod
@@ -544,6 +607,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 1
     bl_translation_context = i18n.CONTEXT
 
     @classmethod
@@ -604,6 +668,7 @@ class TAREMIN_CLOTH_PT_forces(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 4
     bl_translation_context = i18n.CONTEXT
 
     @classmethod
@@ -639,6 +704,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 3
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -777,6 +843,7 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 5
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -886,6 +953,7 @@ class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 6
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -1042,6 +1110,7 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 0
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -1107,6 +1176,7 @@ class TAREMIN_CLOTH_PT_topology(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 8
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -1166,6 +1236,7 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 9
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -1208,6 +1279,7 @@ class TAREMIN_CLOTH_PT_gui_experimental(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 10
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -1251,6 +1323,7 @@ class TAREMIN_CLOTH_PT_diagnostics(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Taremin Cloth"
+    bl_order = 11
     bl_options = {'DEFAULT_CLOSED'}
     bl_translation_context = i18n.CONTEXT
 
@@ -1555,20 +1628,20 @@ def draw_view3d_wrinkle_menu(self, context):
 
 classes = (
     TAREMIN_CLOTH_UL_elastic_groups,
-    TAREMIN_CLOTH_PT_objects_panel,
     TAREMIN_CLOTH_PT_main_panel,
-    TAREMIN_CLOTH_PT_pinning,
+    TAREMIN_CLOTH_PT_quality,
     TAREMIN_CLOTH_PT_fabric,
-    TAREMIN_CLOTH_PT_forces,
+    TAREMIN_CLOTH_PT_pinning,
     TAREMIN_CLOTH_PT_collisions,
+    TAREMIN_CLOTH_PT_forces,
     TAREMIN_CLOTH_PT_pattern,
     TAREMIN_CLOTH_PT_wrinkle_field,
     TAREMIN_CLOTH_PT_wrinkle_curve_item,
-    TAREMIN_CLOTH_PT_quality,
     TAREMIN_CLOTH_PT_topology,
     TAREMIN_CLOTH_PT_interactive_opts,
     TAREMIN_CLOTH_PT_gui_experimental,
     TAREMIN_CLOTH_PT_diagnostics,
+    TAREMIN_CLOTH_PT_objects_panel,
     TAREMIN_CLOTH_PT_collider_panel,
 )
 

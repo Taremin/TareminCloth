@@ -27,6 +27,7 @@ from .interactive import (
     TAREMIN_CLOTH_OT_confirm_debug_save,
     is_interactive_running,
     stop_interactive_if_running,
+    get_interactive_cloth_object_name,
     resolve_debug_filepath,
     get_last_benchmark_summary,
     get_pending_debug_save,

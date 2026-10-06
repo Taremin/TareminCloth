@@ -668,6 +668,7 @@ def bake_step_frame(bake_ctx, frame):
             try:
                 inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
                 if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                    pos_world = coords.reshape(-1, 3)
                     local_coords = ((pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]).flatten()
             except (ValueError, TypeError, AttributeError):
                 local_coords = None

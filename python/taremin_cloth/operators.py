@@ -92,6 +92,7 @@ from .ops import (
     FPSCounter,
     is_interactive_running,
     stop_interactive_if_running,
+    get_interactive_cloth_object_name,
     resolve_debug_filepath,
     get_pending_debug_save,
     clear_pending_debug_save,

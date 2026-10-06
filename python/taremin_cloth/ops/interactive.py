@@ -60,6 +60,14 @@ def stop_interactive_if_running():
         _interactive_operator_instance._stop_requested = True
 
 
+def get_interactive_cloth_object_name() -> str:
+    """現在インタラクティブモードで動作中の布オブジェクト名を取得する"""
+    global _interactive_running, _interactive_operator_instance
+    if _interactive_running and _interactive_operator_instance is not None:
+        return getattr(_interactive_operator_instance, "_cloth_obj_name", "")
+    return ""
+
+
 def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "jsonl.gz") -> str:
     """プレファレンスの設定値と現在のオブジェクト名・日時からデバッグ出力先ファイルパスを解決・生成する"""
     now = datetime.now()
@@ -1007,14 +1015,27 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        if is_interactive_running():
+            return True
         obj = context.active_object
-        return (
+        if (
             obj
             and obj.type == 'MESH'
             and getattr(obj, "taremin_cloth", None)
             and obj.taremin_cloth.is_cloth
             and getattr(obj.taremin_cloth, "enabled", True)
-        )
+        ):
+            return True
+        scene = getattr(context, "scene", None)
+        if scene:
+            return any(
+                getattr(o, "taremin_cloth", None)
+                and o.taremin_cloth.is_cloth
+                and getattr(o.taremin_cloth, "enabled", True)
+                for o in scene.objects
+                if o.type == 'MESH'
+            )
+        return False
 
     def step_simulation(self, context):
         """シミュレーションを実時間同期で進め、メッシュとオーバーレイを更新する"""
@@ -1377,11 +1398,48 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             except Exception:
                 pass
 
+    def _get_target_cloth_object(self, context):
+        """シミュレーション対象の布オブジェクトを特定して返す"""
+        cloth_name = getattr(self, "_cloth_obj_name", "")
+        if cloth_name:
+            obj = bpy.data.objects.get(cloth_name)
+            if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
+                return obj
+
+        # 1. アクティブオブジェクトが布の場合
+        act = getattr(context, "active_object", None)
+        if act and act.type == 'MESH' and getattr(act, "taremin_cloth", None) and act.taremin_cloth.is_cloth:
+            self._cloth_obj_name = act.name
+            return act
+
+        # 2. 選択オブジェクト群の中に有効な布がある場合
+        for sel in getattr(context, "selected_objects", []):
+            if sel.type == 'MESH' and getattr(sel, "taremin_cloth", None) and sel.taremin_cloth.is_cloth and getattr(sel.taremin_cloth, "enabled", True):
+                self._cloth_obj_name = sel.name
+                return sel
+
+        # 3. シーン内の有効な布を探索
+        scene = getattr(context, "scene", None)
+        if scene:
+            for obj in scene.objects:
+                if obj.type == 'MESH' and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth and getattr(obj.taremin_cloth, "enabled", True):
+                    self._cloth_obj_name = obj.name
+                    return obj
+
+            # enabledがFalseでもis_clothなオブジェクトがあればフォールバック
+            for obj in scene.objects:
+                if obj.type == 'MESH' and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
+                    self._cloth_obj_name = obj.name
+                    return obj
+
+        return None
+
     def _run_init_stage(self, context):
         """現在の準備段階を1つだけ実行し、次段階へ進める（段階所要時間も記録する）"""
-        obj = context.active_object
-        if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
-            self._cloth_obj_name = obj.name
+        obj = self._get_target_cloth_object(context)
+        if not obj:
+            raise RuntimeError(i18n.trans("No valid cloth object found to simulate."))
+        self._cloth_obj_name = obj.name
         stage = self._init_stage or 0
         t0 = time.perf_counter()
         if stage == 0:
@@ -1923,8 +1981,12 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         except Exception:
             pass
         self._reset_run_state()
-        if context.active_object and getattr(context.active_object, "taremin_cloth", None) and context.active_object.taremin_cloth.is_cloth:
-            self._cloth_obj_name = context.active_object.name
+        target_obj = self._get_target_cloth_object(context)
+        if target_obj:
+            self._cloth_obj_name = target_obj.name
+        else:
+            self.report({'WARNING'}, i18n.trans("No valid cloth object found in scene."))
+            return {'CANCELLED'}
         self._begin_init_ui(context)
         wm = context.window_manager
         try:
@@ -1949,10 +2011,13 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 _interactive_operator_instance._stop_requested = True
             return {'FINISHED'}
 
-        obj = context.active_object
         self._reset_run_state()
-        if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth:
-            self._cloth_obj_name = obj.name
+        target_obj = self._get_target_cloth_object(context)
+        if target_obj:
+            self._cloth_obj_name = target_obj.name
+        else:
+            self.report({'WARNING'}, i18n.trans("No valid cloth object found in scene."))
+            return {'CANCELLED'}
         # 同期パス（バックグラウンド/テスト用）: 全段階を一括実行
         try:
             while self._init_stage is not None and self._init_stage < self._init_progress_total():

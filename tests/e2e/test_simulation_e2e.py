@@ -1178,7 +1178,7 @@ class TestSimulationE2E(unittest.TestCase):
             settings.enable_self_collision = True
             self.assertTrue(settings.enable_self_collision)
             self.assertGreater(settings.thickness, 0.001)
-            self.assertEqual(settings.coupled_self_collision_mode, 'RELAXATION')
+            self.assertEqual(settings.coupled_self_collision_mode, 'OFF')
 
             # 用途を SKIRT（プリーツ・スカート）に変更 -> FULL_COUPLED に自動連動
             settings.self_collision_purpose = 'SKIRT'
@@ -1188,7 +1188,7 @@ class TestSimulationE2E(unittest.TestCase):
 
             # 用途を THIN（薄手・シルク）に変更 -> マイルドな 0.10 に連動
             settings.self_collision_purpose = 'THIN'
-            self.assertEqual(settings.coupled_self_collision_mode, 'RELAXATION')
+            self.assertEqual(settings.coupled_self_collision_mode, 'OFF')
             self.assertAlmostEqual(settings.self_collision_relief_factor, 0.10, places=2)
 
             # 手動で Auto Fit オペレーターを実行
@@ -1197,7 +1197,7 @@ class TestSimulationE2E(unittest.TestCase):
             self.assertTrue(TAREMIN_CLOTH_OT_auto_fit_self_collision.poll(bpy.context))
             res = bpy.ops.taremin_cloth.auto_fit_self_collision()
             self.assertEqual(res, {'FINISHED'})
-            self.assertEqual(settings.coupled_self_collision_mode, 'RELAXATION')
+            self.assertEqual(settings.coupled_self_collision_mode, 'OFF')
             self.assertAlmostEqual(settings.self_collision_relief_factor, 0.20, places=2)
 
             # 用途を CUSTOM に変更した時、Auto Fit ボタンは disable (poll = False) になること

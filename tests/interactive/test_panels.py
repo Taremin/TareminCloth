@@ -399,6 +399,71 @@ class TestPanels(unittest.TestCase):
         res_invalid = bpy.ops.taremin_cloth.select_object(object_name="NonExistentObject_12345")
         self.assertEqual(res_invalid, {'CANCELLED'})
 
+    def test_main_panel_with_armature_active_when_cloth_exists(self):
+        """シーン内に布が存在し、アーマチュアがアクティブな状態でのメインパネル描画テスト"""
+        # self.obj を布として設定
+        self.obj.taremin_cloth.is_cloth = True
+        self.obj.taremin_cloth.enabled = True
+
+        # アーマチュアを作成してアクティブにする
+        arm_data = bpy.data.armatures.new(name="TestArmature")
+        arm_obj = bpy.data.objects.new(name="TestArmatureObj", object_data=arm_data)
+        bpy.context.collection.objects.link(arm_obj)
+        self.created_objects.append(arm_obj)
+        bpy.context.view_layer.objects.active = arm_obj
+
+        # メインパネル描画
+        layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
+        operators = layout.get_operators()
+        labels = layout.get_labels()
+
+        # シミュレーション制御（Interactive Mode, Reset All）が最上部に描画されていること
+        self.assertIn("taremin_cloth.interactive", operators)
+        self.assertIn("taremin_cloth.reset_all", operators)
+
+        # アーマチュアに関する情報と、布オブジェクトへのクイック選択ボタンが存在すること
+        self.assertTrue(any("TestArmatureObj" in lbl for lbl in labels))
+        self.assertIn("taremin_cloth.select_object", operators)
+
+    def test_interactive_poll_with_non_cloth_active(self):
+        """非布オブジェクトがアクティブでも、シーン内に布が存在すればinteractiveのpollが通ることの検証"""
+        from taremin_cloth.ops import TAREMIN_CLOTH_OT_interactive
+
+        # シーン内の布を有効化
+        self.obj.taremin_cloth.is_cloth = True
+        self.obj.taremin_cloth.enabled = True
+
+        # カメラを作成してアクティブにする
+        cam_data = bpy.data.cameras.new(name="TestPollCam")
+        cam_obj = bpy.data.objects.new(name="TestPollCamObj", object_data=cam_data)
+        bpy.context.collection.objects.link(cam_obj)
+        self.created_objects.append(cam_obj)
+        bpy.context.view_layer.objects.active = cam_obj
+
+        # 非布オブジェクトがアクティブでもシーン内に布があるため poll は True
+        self.assertTrue(TAREMIN_CLOTH_OT_interactive.poll(bpy.context))
+
+    def test_panel_order_structure(self):
+        """メインパネルが最上位(0)に配置され、Qualityサブパネルがトップ(0)に配置されていることの検証"""
+        from taremin_cloth.panels import (
+            TAREMIN_CLOTH_PT_quality,
+            TAREMIN_CLOTH_PT_fabric,
+            TAREMIN_CLOTH_PT_pinning,
+            TAREMIN_CLOTH_PT_collisions,
+            TAREMIN_CLOTH_PT_forces,
+        )
+        # トップレベルパネルの順序
+        self.assertEqual(TAREMIN_CLOTH_PT_main_panel.bl_order, 0)
+        self.assertEqual(TAREMIN_CLOTH_PT_objects_panel.bl_order, 1)
+        self.assertEqual(TAREMIN_CLOTH_PT_collider_panel.bl_order, 2)
+
+        # サブパネルの順序: Quality がトップ(0)
+        self.assertEqual(TAREMIN_CLOTH_PT_quality.bl_order, 0)
+        self.assertEqual(TAREMIN_CLOTH_PT_fabric.bl_order, 1)
+        self.assertEqual(TAREMIN_CLOTH_PT_pinning.bl_order, 2)
+        self.assertEqual(TAREMIN_CLOTH_PT_collisions.bl_order, 3)
+        self.assertEqual(TAREMIN_CLOTH_PT_forces.bl_order, 4)
+
 
 if __name__ == "__main__":
     unittest.main()
