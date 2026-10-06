@@ -136,6 +136,9 @@ class TestStagedInitStateMachine(unittest.TestCase):
         op._INIT_STAGE_MESSAGES = TAREMIN_CLOTH_OT_interactive._INIT_STAGE_MESSAGES
         op._SLOW_STARTUP_SEC = TAREMIN_CLOTH_OT_interactive._SLOW_STARTUP_SEC
         op.report = MagicMock()
+        mock_cloth = MagicMock()
+        mock_cloth.name = "TestCloth"
+        op._get_target_cloth_object = MagicMock(return_value=mock_cloth)
         # 内部呼出し解決用に実メソッドを束縛（個別テストで必要に応じ上書き）
         for name in (
             "_init_progress_total",

@@ -2739,3 +2739,12 @@ fn mat4_transpose(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
     }
     out
 }
+
+impl Drop for GpuClothSimulator {
+    fn drop(&mut self) {
+        // GPUキューの未完了コマンド（特にWARP/ソフトウェアアダプタ環境下での非同期実行）
+        // を待機し、バッファ破棄時のuse-after-freeアクセス違反（SIGSEGV）を防止する
+        self.context.device.poll(wgpu::Maintain::Wait);
+    }
+}
+

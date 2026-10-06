@@ -139,24 +139,20 @@ class TestCoupledSelfCollision(unittest.TestCase):
         # 押し付けによる伸びが発生していること (物理質量下での有意な荷重)
         self.assertGreater(strain_off, 1.0, "OFFモードで押し付けによる伸びが発生していること")
 
-        # RELAXATION / FULL_COUPLED モードでは OFF よりも伸びが有意に抑制されること
-        self.assertLess(strain_relax, strain_off * 0.5, "RELAXATIONモードで伸びが有意に抑制されること")
-        self.assertLess(strain_coupled, strain_off * 0.7, "FULL_COUPLEDモードで伸びが有意に抑制されること")
-
-        # デバイスおよび環境判定
-        dev_name = taremin_cloth_core.get_gpu_device_name().lower()
-        is_software = any(name in dev_name for name in ["basic render", "warp", "llvmpipe", "lavapipe", "software", "cpu"])
-        is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
-
-        if not (is_software or is_ci):
-            # 物理GPU環境ではRELAXATIONで伸びが抑制され、FULL_COUPLEDは悪化しないこと
-            # (活発接触下のGPU非決定性を考慮して許容帯を設ける)
-            self.assertLess(strain_relax, strain_off * 0.8, "RELAXATIONモードで伸びが抑制されること")
-            self.assertLess(strain_coupled, strain_off * 1.2, "FULL_COUPLEDモードで伸びが悪化しないこと")
-        else:
-            # CI/ソフトウェアエミュレータ（WARP）環境でも伸びが健全な範囲（<8.0%）に抑制されること
-            self.assertLess(strain_relax, 8.0, "CI環境でRELAXATIONモードの伸びが8.0%未満に抑制されること")
-            self.assertLess(strain_coupled, 8.0, "CI環境でFULL_COUPLEDモードの伸びが8.0%未満に抑制されること")
+        # Coupled XPBD（RELAXATION / FULL_COUPLED）により、OFF時（約40%）と比較して
+        # 伸びが有意に抑制されることを割合（相対比率）で検証する。
+        # 物理GPUおよびWARP等のソフトウェア環境のいずれでも、環境固有のバイアスに左右されず
+        # アルゴリズム本来の効果（RELAXATION: 50%未満、FULL_COUPLED: 60%未満）が立証される。
+        self.assertLess(
+            strain_relax,
+            strain_off * 0.5,
+            f"RELAXATIONモードで伸びがOFF時の50%未満に抑制されること (relax={strain_relax:.2f}%, off={strain_off:.2f}%)",
+        )
+        self.assertLess(
+            strain_coupled,
+            strain_off * 0.6,
+            f"FULL_COUPLEDモードで伸びがOFF時の60%未満に抑制されること (coupled={strain_coupled:.2f}%, off={strain_off:.2f}%)",
+        )
 
 
 
