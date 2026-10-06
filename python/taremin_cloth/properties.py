@@ -306,6 +306,11 @@ class TareminClothObjectSettings(PropertyGroup):
         min=10,
         max=200,
     )
+    auto_compensate_iterations: BoolProperty(
+        name="Compensate Iterations",
+        description="Automatically increase solver iterations when substeps are low to maintain cloth stiffness and prevent stretching",
+        default=True,
+    )
     solver_iterations: IntProperty(
         name="Solver Iterations",
         description="Constraint solve iterations per substep",
@@ -542,6 +547,11 @@ class TareminClothObjectSettings(PropertyGroup):
         name="Coupled Collider",
         description="Solve collider collision inside solver iterations (Coupled XPBD). Turning off solves outside loop once per substep for higher performance",
         default=False,
+    )
+    auto_coupled_on_low_substeps: BoolProperty(
+        name="Auto Coupled on Low Steps",
+        description="Automatically force Coupled Collider mode when substeps are low or penetration risk is detected to prevent falling through",
+        default=True,
     )
     enable_edge_collision: BoolProperty(
         name="Edge-to-Edge Contact",

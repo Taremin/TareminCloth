@@ -1538,6 +1538,18 @@ pub fn build_simulation_resources(
                 binding: 6,
                 resource: rest_positions_buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: two_hop_offsets_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: two_hop_indices_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: two_hop_rest_lengths_buffer.as_entire_binding(),
+            },
         ],
     });
 

@@ -134,6 +134,10 @@ pub struct SimConfig {
     pub min_substeps: u32,
     #[serde(default = "d_max_substeps")]
     pub max_substeps: u32,
+    #[serde(default = "d_true")]
+    pub auto_coupled_on_low_substeps: bool,
+    #[serde(default = "d_true")]
+    pub auto_compensate_iterations: bool,
 }
 
 impl Default for SimConfig {
@@ -187,6 +191,8 @@ impl Default for SimConfig {
             enable_adaptive_substep: false,
             min_substeps: d_min_substeps(),
             max_substeps: d_max_substeps(),
+            auto_coupled_on_low_substeps: true,
+            auto_compensate_iterations: true,
         }
     }
 }

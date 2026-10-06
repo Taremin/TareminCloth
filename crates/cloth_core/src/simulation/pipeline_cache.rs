@@ -469,6 +469,9 @@ impl SharedPipelines {
                 storage_rw_at(4),
                 storage_ro(5),
                 storage_ro(6),
+                storage_ro(7),
+                storage_ro(8),
+                storage_ro(9),
             ],
         });
 

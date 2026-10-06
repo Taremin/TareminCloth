@@ -86,6 +86,16 @@ impl GpuClothSimulator {
             );
         }
 
+        // 1サブステップあたりの重力・運動変位スケールを評価し、コライダー安全マージンに対する侵入リスクを判定
+        let g_accel = (self.gravity[0].powi(2) + self.gravity[1].powi(2) + self.gravity[2].powi(2)).sqrt();
+        let freefall_disp = 0.5 * g_accel * substep_dt * substep_dt;
+        let step_disp = freefall_disp.max(self.last_step_max_displacement / (substeps as f32).max(1.0));
+        let safe_margin = (self.cloth_thickness * 0.8).max(0.002);
+        let is_penetration_risk = step_disp > safe_margin * 0.25;
+
+        let effective_coupled_collider = self.coupled_collider
+            || (self.auto_coupled_on_low_substeps && is_penetration_risk);
+
         for sub_idx in 0..substeps {
             let is_last_substep = sub_idx + 1 == substeps;
             let should_solve_self_collision = self.enable_self_collision
@@ -151,7 +161,7 @@ impl GpuClothSimulator {
             }
 
             // 拘束解決反復ループ (Solver Iterations)
-            for _ in 0..self.solver_iterations {
+            for _ in 0..self.effective_solver_iterations() {
                 let query = self.profiler.begin_pass("solver_iter", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Solver Iteration Pass"),
@@ -190,7 +200,7 @@ impl GpuClothSimulator {
 
                 // 5. コライダー衝突拘束 (Coupled XPBD: 押し出しと距離拘束の協調収束)
                 //    反復ループ内で距離拘束等と同調して解くことで、押し出しによるエッジの過剰伸長を防止
-                if has_colliders && self.coupled_collider {
+                if has_colliders && effective_coupled_collider {
                     cpass.set_pipeline(&self.shared.collision_pipeline);
                     cpass.set_bind_group(0, &self.collider_bind_group, &[]);
                     cpass.dispatch_workgroups(vert_workgroups, 1, 1);
@@ -207,7 +217,7 @@ impl GpuClothSimulator {
             }
 
         // 4.5 Decoupled コライダー衝突拘束 (反復外1回実行: 高速化・低ディスパッチオーバーヘッド)
-        if has_colliders && !self.coupled_collider {
+        if has_colliders && !effective_coupled_collider {
             let query = self.profiler.begin_pass("collider_decoupled", encoder);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Decoupled Collider Collision Pass"),
@@ -426,11 +436,14 @@ impl GpuClothSimulator {
         }
 
         // 直近フレームの変位量と外部変位量（マウスドラッグ等）の最大値
-        let max_disp = self.last_step_max_displacement.max(self.pending_external_displacement);
+        let external_disp = self.pending_external_displacement;
+        let max_disp = self.last_step_max_displacement.max(external_disp);
         self.pending_external_displacement = 0.0;
 
-        // CFL安全許容変位 (特性長と布厚み)
-        let cfl_margin = (0.5 * self.mesh_char_len).min((self.cloth_thickness * 1.5).max(0.002));
+        // CFL安全許容変位 (衝突マージンとしての布厚みと特性長)
+        // 極小エッジ（1mm以下）に引きずられてマージンが過剰縮小（0.5mm以下）し過敏発振するのを防止しつつ、
+        // 落下等の高速運動で適切なステップ数引き上げを行えるよう、下限マージン 0.0025 (2.5mm) を保証。
+        let cfl_margin = (0.5 * self.mesh_char_len).min(self.cloth_thickness * 1.0).max(0.0025);
 
         // CFL条件に基づく必要サブステップ数
         let cfl_steps = if cfl_margin > 1e-6 && max_disp > 1e-6 {
@@ -450,14 +463,30 @@ impl GpuClothSimulator {
 
         let target_steps = cfl_steps.max(grav_steps).clamp(min_steps, max_steps);
 
-        // ヒステリシス制御 (急変によるジッター防止: 初回はダイレクト適用、上昇時は即時引き上げ、下降時は最大-2のレート制限)
+        // ヒステリシス制御 (急変によるジッター・剛性変動リミットサイクル発振防止)
         let current_steps = if self.effective_substeps == 0 {
             target_steps
         } else {
             let prev_steps = self.effective_substeps.clamp(min_steps, max_steps);
-            if target_steps >= prev_steps {
-                target_steps
+            let diff = target_steps as i32 - prev_steps as i32;
+
+            if diff.abs() <= 1 {
+                // 不感帯 (Deadband): 目標値と現在値の差が微小(±1)な時はステップ数を維持して量子化チャタリングを完全防止
+                prev_steps
+            } else if diff > 0 {
+                // 上昇時制御:
+                // マウスドラッグ等の外部操作(external_disp > 0)や、危険な巨大変位時は
+                // 安全重視で即時引き上げ（Emergency Boost）を許可。
+                // それ以外の自然運動時は1フレームあたり最大 +2 のレート制限を適用し、
+                // XPBD反復回数急増による「急激な剛性跳ね上がり（引き戻しショック）」を防ぐ。
+                let is_emergency = external_disp > 1e-4 || max_disp > cfl_margin * 4.0;
+                if is_emergency {
+                    target_steps
+                } else {
+                    target_steps.min(prev_steps + 2)
+                }
             } else {
+                // 下降時制御: 急激な剛性低下を防ぐため最大 -2 のレート制限
                 target_steps.max(prev_steps.saturating_sub(2))
             }
         };
@@ -467,6 +496,28 @@ impl GpuClothSimulator {
         current_steps
     }
 
+    /// 実効サブステップ数とトポロジー伝播深度から実効イテレーション数を算出する
+    pub fn compute_effective_iterations(&mut self, substeps: u32) -> u32 {
+        if !self.enable_adaptive_substep || !self.auto_compensate_iterations {
+            self.effective_solver_iterations = self.solver_iterations;
+            return self.solver_iterations;
+        }
+
+        // 基準伝播予算 (ユーザー指定の base_substeps * solver_iterations)
+        let user_budget = self.base_substeps.max(1) * self.solver_iterations.max(1);
+        // メッシュ直径に基づく最低保証伝播数 (20〜30ホップ程度)
+        let diameter_floor = self.mesh_diameter_hops.clamp(15, 30);
+        // 目標総反復数: ユーザー予算と直径保証の適切な調和点 (高ステップ時はユーザー値、低ステップ時はフロア保証)
+        let target_solves = user_budget.min(diameter_floor.max(20));
+
+        let compensated = (target_solves + substeps - 1) / substeps.max(1);
+        let max_iters = (self.solver_iterations * 3).max(6);
+        let eff_iters = compensated.clamp(self.solver_iterations.max(1), max_iters);
+
+        self.effective_solver_iterations = eff_iters;
+        eff_iters
+    }
+
     /// シミュレーションを同期的に 1 フレーム進行する
     pub fn step(&mut self, dt: f32, substeps: u32) {
         if self.num_vertices == 0 {
@@ -474,6 +525,7 @@ impl GpuClothSimulator {
         }
 
         let actual_substeps = self.compute_effective_substeps(dt, substeps);
+        let _actual_iters = self.compute_effective_iterations(actual_substeps);
 
         let mut encoder = self.context.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor {

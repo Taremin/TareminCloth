@@ -659,6 +659,8 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
         box_col.label(text=i18n.trans("Collider Interaction"), icon='PHYSICS')
         c_col = box_col.column(align=True)
         c_col.prop(settings, "coupled_collider_mode", text=i18n.trans("Coupled Collider"))
+        if not settings.coupled_collider_mode:
+            c_col.prop(settings, "auto_coupled_on_low_substeps", text=i18n.trans("Auto Coupled on Low Steps"))
         c_col.label(text=i18n.trans("Mesh Collider"), icon='MESH_DATA')
         col_mesh = c_col.column(align=True)
         col_mesh.prop(settings, "enable_edge_collision", text=i18n.trans("Edge-to-Edge Contact"))
@@ -1075,6 +1077,9 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
             row_steps = sim_col.row(align=True)
             row_steps.prop(settings, "min_substeps", text=i18n.trans("Min"))
             row_steps.prop(settings, "max_substeps", text=i18n.trans("Max"))
+            if not settings.coupled_collider_mode:
+                sim_col.prop(settings, "auto_coupled_on_low_substeps", text=i18n.trans("Auto Coupled on Low Steps"))
+            sim_col.prop(settings, "auto_compensate_iterations", text=i18n.trans("Compensate Iterations"))
 
         # ソルバー & パフォーマンス
         box_perf = layout.box()

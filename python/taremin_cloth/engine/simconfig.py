@@ -67,6 +67,8 @@ SIGNATURE_KEYS = (
     "enable_adaptive_substep",
     "min_substeps",
     "max_substeps",
+    "auto_coupled_on_low_substeps",
+    "auto_compensate_iterations",
     "gravity_scale",
     "sewing_shrink_speed",
 )
@@ -170,6 +172,7 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "self_collision_max_iterations": _i(settings, "self_collision_max_iterations", 256),
         "coupled_mode": coupled_mode,
         "coupled_collider": bool(_get(settings, "coupled_collider_mode", False)),
+        "auto_coupled_on_low_substeps": bool(_get(settings, "auto_coupled_on_low_substeps", True)),
         "post_relaxation_iters": relax_iters,
         "substep_interval": max(1, _i(settings, "self_collision_substep_interval", 1)),
         "ee_substep_interval": max(0, _i(settings, "self_collision_ee_substep_interval", 1)),
@@ -196,6 +199,7 @@ def collect_sim_config(settings: Any, scene: Any = None) -> Dict[str, Any]:
         "enable_adaptive_substep": bool(_get(settings, "enable_adaptive_substep", False)),
         "min_substeps": _i(settings, "min_substeps", 4),
         "max_substeps": _i(settings, "max_substeps", 64),
+        "auto_compensate_iterations": bool(_get(settings, "auto_compensate_iterations", True)),
         # 付帯キー (転送・署名専用、Rust apply時は除外)
         "gravity_scale": scale,
         "sewing_shrink_speed": _f(settings, "sewing_shrink_speed", 1.0),

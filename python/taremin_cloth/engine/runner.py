@@ -352,8 +352,13 @@ def step_cloth_object(
         sync_cloth_parameters(sim, obj, scene)
         sync_attachment_pins(sim, obj, scene)
 
-    # substeps未指定(None)時はコア側で適応サブステップまたは既定値を自動判定
-    actual_substeps = substeps
+    # substeps未指定(None)時は、非適応ならsettings.substepsを使用し、適応サブステップ有効時はコア側に判定委譲(None)
+    if substeps is not None:
+        actual_substeps = substeps
+    elif settings is not None:
+        actual_substeps = None if bool(getattr(settings, "enable_adaptive_substep", False)) else getattr(settings, "substeps", None)
+    else:
+        actual_substeps = None
     actual_iters = solver_iterations if solver_iterations is not None else (getattr(settings, "solver_iterations", 1) if settings else 1)
 
     # 縫合優先モード: 直近座標で結合率を測定し、step 前にラッチ状態を更新する。

@@ -147,6 +147,8 @@ class TestConfigParity(unittest.TestCase):
             "set_sewing_lock_distance": ["sewing_lock_distance"],
             "set_areal_density": ["areal_density"],
             "set_adaptive_substep_options": ["enable_adaptive_substep", "min_substeps", "max_substeps"],
+            "set_auto_coupled_on_low_substeps": ["auto_coupled_on_low_substeps"],
+            "set_auto_compensate_iterations": ["auto_compensate_iterations"],
             "set_thickness": [],
             "set_enable_compact_readback": [],  # 転送最適化のみで物理に無関係
             "set_profiling_enabled": [],  # 計測プロファイル用で物理に無関係

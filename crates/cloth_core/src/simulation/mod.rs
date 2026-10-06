@@ -266,6 +266,7 @@ pub struct GpuClothSimulator {
     pub self_collision_max_iterations: u32,
     pub coupled_self_collision_mode: u32,
     pub coupled_collider: bool,
+    pub auto_coupled_on_low_substeps: bool,
     pub post_collision_relaxation_iters: u32,
     pub self_collision_substep_interval: u32,
     pub self_collision_ee_substep_interval: u32,
@@ -323,6 +324,9 @@ pub struct GpuClothSimulator {
     pub base_substeps: u32,
     pub(crate) effective_substeps: u32,
     pub(crate) mesh_char_len: f32,
+    pub(crate) mesh_diameter_hops: u32,
+    pub auto_compensate_iterations: bool,
+    pub(crate) effective_solver_iterations: u32,
     pub(crate) cloth_thickness: f32,
     pub(crate) prev_step_positions: Vec<[f32; 3]>,
     pub(crate) last_step_max_displacement: f32,
@@ -378,6 +382,25 @@ impl GpuClothSimulator {
         };
         let cloth_thickness = 0.005f32;
         let mesh_char_len = (cloth_thickness * 2.0).min(min_edge_len).max(0.001);
+        let mut min_pos = [f32::MAX; 3];
+        let mut max_pos = [f32::MIN; 3];
+        for v in &mesh.vertices {
+            for i in 0..3 {
+                min_pos[i] = min_pos[i].min(v.position[i]);
+                max_pos[i] = max_pos[i].max(v.position[i]);
+            }
+        }
+        let diag_len = ((max_pos[0] - min_pos[0]).powi(2)
+            + (max_pos[1] - min_pos[1]).powi(2)
+            + (max_pos[2] - min_pos[2]).powi(2))
+        .sqrt();
+        let avg_edge_len = if !mesh.distance_constraints.is_empty() {
+            let total_len: f32 = mesh.initial_distance_rest_lengths.iter().sum();
+            (total_len / mesh.initial_distance_rest_lengths.len() as f32).max(1e-4)
+        } else {
+            0.02
+        };
+        let mesh_diameter_hops = ((diag_len / avg_edge_len).ceil() as u32).clamp(10, 60);
         let prev_step_positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
 
         let sim = Self {
@@ -554,6 +577,7 @@ impl GpuClothSimulator {
             self_collision_max_iterations: res.self_collision_max_iterations,
             coupled_self_collision_mode: 0,
             coupled_collider: false,
+            auto_coupled_on_low_substeps: true,
             post_collision_relaxation_iters: 1,
             self_collision_substep_interval: 1,
             self_collision_ee_substep_interval: 1,
@@ -603,6 +627,9 @@ impl GpuClothSimulator {
             base_substeps: 20,
             effective_substeps: 0,
             mesh_char_len,
+            mesh_diameter_hops,
+            auto_compensate_iterations: true,
+            effective_solver_iterations: 0,
             cloth_thickness,
             prev_step_positions,
             last_step_max_displacement: 0.0,
@@ -654,6 +681,20 @@ impl GpuClothSimulator {
     /// 直近の物理ステップで使用された実効サブステップ数を取得する
     pub fn effective_substeps(&self) -> u32 {
         self.effective_substeps
+    }
+
+    /// 直近の物理ステップで使用された実効イテレーション数を取得する
+    pub fn effective_solver_iterations(&self) -> u32 {
+        if self.effective_solver_iterations > 0 {
+            self.effective_solver_iterations
+        } else {
+            self.solver_iterations
+        }
+    }
+
+    /// 低サブステップ時のイテレーション自動補償 (Auto Compensate Iterations) を設定する
+    pub fn set_auto_compensate_iterations(&mut self, enabled: bool) {
+        self.auto_compensate_iterations = enabled;
     }
 
     /// 布の厚みを設定し、CFL特性長を再計算する
@@ -946,6 +987,11 @@ impl GpuClothSimulator {
     /// コライダー衝突拘束を反復ループ内で同調解決するか（Coupled XPBD）、反復外で1回解決するかを設定する
     pub fn set_coupled_collider(&mut self, enabled: bool) {
         self.coupled_collider = enabled;
+    }
+
+    /// 低サブステップ・侵入リスク時にコライダー衝突を自動で Coupled 解決に強制切り替えするかを設定する
+    pub fn set_auto_coupled_on_low_substeps(&mut self, enabled: bool) {
+        self.auto_coupled_on_low_substeps = enabled;
     }
 
     /// 自己衝突判定を実行するサブステップ間隔を設定する (1: 毎サブステップ, 2: 2サブステップ毎)

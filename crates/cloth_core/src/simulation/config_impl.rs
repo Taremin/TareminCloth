@@ -66,6 +66,8 @@ impl GpuClothSimulator {
             enable_adaptive_substep: self.enable_adaptive_substep,
             min_substeps: self.min_substeps,
             max_substeps: self.max_substeps,
+            auto_coupled_on_low_substeps: self.auto_coupled_on_low_substeps,
+            auto_compensate_iterations: self.auto_compensate_iterations,
         }
     }
 
@@ -121,6 +123,7 @@ impl GpuClothSimulator {
         );
         self.set_coupled_self_collision_options(c.coupled_mode, c.post_relaxation_iters);
         self.set_coupled_collider(c.coupled_collider);
+        self.set_auto_coupled_on_low_substeps(c.auto_coupled_on_low_substeps);
         self.set_self_collision_substep_interval(c.substep_interval.max(1));
         self.set_self_collision_ee_substep_interval(c.ee_substep_interval);
         self.set_self_collision_algorithm(c.self_collision_algorithm);
@@ -153,6 +156,8 @@ impl GpuClothSimulator {
             c.min_substeps,
             c.max_substeps,
         );
+        self.set_auto_coupled_on_low_substeps(c.auto_coupled_on_low_substeps);
+        self.set_auto_compensate_iterations(c.auto_compensate_iterations);
     }
 
     /// 現在設定のハッシュ (フレーム途中変更検出用)

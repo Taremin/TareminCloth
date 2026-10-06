@@ -1453,6 +1453,11 @@ impl ClothSimulator {
         self.simulator.effective_substeps()
     }
 
+    /// 直近の物理ステップで使用された実効イテレーション数を取得する
+    fn get_effective_solver_iterations(&self) -> u32 {
+        self.simulator.effective_solver_iterations()
+    }
+
     /// 適応サブステップ設定を更新する
     fn set_adaptive_substep_options(&mut self, enabled: bool, min_substeps: u32, max_substeps: u32) {
         self.simulator.set_adaptive_substep_options(enabled, min_substeps, max_substeps);
@@ -1574,6 +1579,16 @@ impl ClothSimulator {
     /// コライダー衝突拘束を反復ループ内で同調解決するか（Coupled XPBD）、反復外で1回解決するかを設定
     fn set_coupled_collider(&mut self, enabled: bool) {
         self.simulator.set_coupled_collider(enabled);
+    }
+
+    /// 低サブステップ・侵入リスク時にコライダー衝突を自動で Coupled 解決に強制切り替えするかを設定
+    fn set_auto_coupled_on_low_substeps(&mut self, enabled: bool) {
+        self.simulator.set_auto_coupled_on_low_substeps(enabled);
+    }
+
+    /// 低サブステップ時にトポロジー伝播深度を維持するためイテレーション数を自動補償するかを設定
+    fn set_auto_compensate_iterations(&mut self, enabled: bool) {
+        self.simulator.set_auto_compensate_iterations(enabled);
     }
 
     /// 自己衝突判定を実行するサブステップ間隔を設定 (1: 毎サブステップ, 2: 2サブステップ毎)

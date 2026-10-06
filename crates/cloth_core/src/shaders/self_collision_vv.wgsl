@@ -51,6 +51,9 @@ struct SelfCollisionAccum {
 @group(0) @binding(4) var<storage, read_write> accum: array<SelfCollisionAccum>;
 @group(0) @binding(5) var<storage, read> virt_defs: array<GpuVirtualVertexDef>;
 @group(0) @binding(6) var<storage, read> rest_positions: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read> two_hop_offsets: array<u32>;
+@group(0) @binding(8) var<storage, read> two_hop_indices: array<u32>;
+@group(0) @binding(9) var<storage, read> two_hop_rest_lengths: array<f32>;
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -136,6 +139,35 @@ fn share_any_parent(info_a: ParticleInfo, info_b: ParticleInfo) -> bool {
         || (a2 == b0) || (a2 == b1) || (a2 == b2);
 }
 
+// トポロジー2ホップ近傍判定および初期レスト長取得（Bridson 2002: 動的折り畳み検出用）
+struct TwoHopResult {
+    is_two_hop: bool,
+    rest_length: f32,
+};
+
+fn query_two_hop(vert_a: u32, vert_b: u32) -> TwoHopResult {
+    if (vert_a == vert_b) {
+        return TwoHopResult(true, 0.0);
+    }
+    let start = two_hop_offsets[vert_a];
+    let end = two_hop_offsets[vert_a + 1u];
+
+    var low = start;
+    var high = end;
+    while (low < high) {
+        let mid = low + (high - low) / 2u;
+        let val = two_hop_indices[mid];
+        if (val == vert_b) {
+            return TwoHopResult(true, two_hop_rest_lengths[mid]);
+        } else if (val < vert_b) {
+            low = mid + 1u;
+        } else {
+            high = mid;
+        }
+    }
+    return TwoHopResult(false, 0.0);
+}
+
 // 変位を親頂点へ分配する
 fn distribute_disp(info: ParticleInfo, disp: vec3<f32>) {
     if (!info.is_virtual) {
@@ -198,47 +230,81 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                     let info_j = get_particle_info(j);
 
-                    // 1. 同一面（Same Face）の除外（同一三角形内の要素は自己交差しない）
-                    // (a) 仮想頂点同士で親面が同一
-                    if (info_i.is_virtual && info_j.is_virtual && info_i.parent_face_id == info_j.parent_face_id) {
+                    let min_dist = thick_i + v_j.thickness;
+
+                    // 幾何学的に min_dist 未満に近づいていないペアは即座に早期枝切り
+                    let delta = p_i - p_j;
+                    let dist_sq = dot(delta, delta);
+                    if (dist_sq >= min_dist * min_dist || dist_sq <= EPSILON) {
                         continue;
                     }
-                    // (b) 元頂点と仮想頂点で、仮想頂点の親三角形にその元頂点が含まれている
-                    if (!info_i.is_virtual && info_j.is_virtual) {
+                    let dist_val = sqrt(dist_sq);
+
+                    var is_topological_neighbor = false;
+
+                    if (!info_i.is_virtual && !info_j.is_virtual) {
+                        // 【ケース1】元頂点同士 (Real - Real)
+                        if (index == j) {
+                            continue;
+                        }
+                        let q = query_two_hop(index, j);
+                        is_topological_neighbor = q.is_two_hop;
+                    } else if (!info_i.is_virtual && info_j.is_virtual) {
+                        // 【ケース2】元頂点と仮想頂点 (Real - Virt)
                         let v_idx = info_i.parents.x;
-                        if (v_idx == info_j.parents.x || v_idx == info_j.parents.y || v_idx == info_j.parents.z) {
+                        let p0 = info_j.parents.x;
+                        let p1 = info_j.parents.y;
+                        let p2 = info_j.parents.z;
+                        if (v_idx == p0 || v_idx == p1 || v_idx == p2) {
                             continue;
                         }
-                    }
-                    if (info_i.is_virtual && !info_j.is_virtual) {
+                        let q0 = query_two_hop(v_idx, p0);
+                        let q1 = query_two_hop(v_idx, p1);
+                        let q2 = query_two_hop(v_idx, p2);
+                        is_topological_neighbor = q0.is_two_hop || q1.is_two_hop || q2.is_two_hop;
+                    } else if (info_i.is_virtual && !info_j.is_virtual) {
+                        // 【ケース3】仮想頂点と元頂点 (Virt - Real)
                         let v_idx = info_j.parents.x;
-                        if (v_idx == info_i.parents.x || v_idx == info_i.parents.y || v_idx == info_i.parents.z) {
+                        let p0 = info_i.parents.x;
+                        let p1 = info_i.parents.y;
+                        let p2 = info_i.parents.z;
+                        if (v_idx == p0 || v_idx == p1 || v_idx == p2) {
                             continue;
+                        }
+                        let q0 = query_two_hop(v_idx, p0);
+                        let q1 = query_two_hop(v_idx, p1);
+                        let q2 = query_two_hop(v_idx, p2);
+                        is_topological_neighbor = q0.is_two_hop || q1.is_two_hop || q2.is_two_hop;
+                    } else {
+                        // 【ケース4】仮想頂点同士 (Virt - Virt)
+                        if (info_i.parent_face_id == info_j.parent_face_id) {
+                            continue;
+                        }
+                        if (share_any_parent(info_i, info_j)) {
+                            is_topological_neighbor = true;
+                        } else {
+                            let q = query_two_hop(info_i.parents.x, info_j.parents.x);
+                            is_topological_neighbor = q.is_two_hop;
                         }
                     }
 
-                    let min_dist = thick_i + v_j.thickness;
+                    // 2. トポロジー近傍要素に対するレスト距離動的折り畳み検出 (Bridson 2002)
                     var threshold = min_dist;
-
-                    // 2. 親頂点を共有するトポロジー近傍要素に対するレスト距離スケーリング (Rest-Distance Folded Thresholding)
-                    if (share_any_parent(info_i, info_j)) {
+                    if (is_topological_neighbor) {
                         let delta_rest = info_i.rest_pos - info_j.rest_pos;
-                        let rest_dist_sq = dot(delta_rest, delta_rest);
-                        let l0 = sqrt(rest_dist_sq);
+                        let l0 = length(delta_rest);
+                        // 平坦時 (dist_val >= l0 * 0.5) は自爆防止のため完全除外
+                        if (dist_val >= l0 * 0.5) {
+                            continue;
+                        }
                         // レスト長の 50% 未満に圧縮された場合のみシワ・折り畳みとして反発を許可
                         threshold = min(min_dist, l0 * 0.5);
                     }
 
-                    // 3. 現在の距離による衝突判定
-                    let delta = p_i - p_j;
-                    let dist_sq = dot(delta, delta);
-
-                    if (dist_sq < threshold * threshold && dist_sq > EPSILON) {
-                        let dist_val = sqrt(dist_sq);
+                    // 3. 衝突反発変位の計算・分配（作用・反作用）
+                    if (dist_val < threshold) {
                         let pen = threshold - dist_val;
                         let normal = delta / dist_val;
-
-                        // 衝突反発変位（作用・反作用）
                         let disp = normal * (pen * 0.5);
 
                         distribute_disp(info_i, disp);
