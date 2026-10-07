@@ -439,11 +439,11 @@ def run_full_audit(root: str) -> AuditReport:
         if ok_b_prop: c_b_prop += 1
         if ok_b_panel: c_b_panel += 1
         if ok_g_init: c_g_init += 1
-        else: missing_in_g_init.append(name)
+        elif name not in METADATA_FIELDS: missing_in_g_init.append(name)
         if ok_g_update: c_g_update += 1
-        else: missing_in_g_update.append(name)
+        elif name not in METADATA_FIELDS: missing_in_g_update.append(name)
         if ok_g_ui: c_g_ui += 1
-        else: missing_in_g_ui.append(name)
+        elif name not in METADATA_FIELDS: missing_in_g_ui.append(name)
 
         report.params.append({
             "name": name,
@@ -554,9 +554,9 @@ def format_console(report: AuditReport) -> str:
     lines.append(f"    - Blender Engine (simconfig.py)     {phys_be:3d} / {phys_total:3d}        {pct(phys_be, phys_total):5.1f}%       {'✅ 完全同期 (100%)' if phys_be == phys_total else '⚠️ 欠落あり'}")
     lines.append(f"    - Blender Properties (設定定義)      {p_bp:3d} / {phys_total:3d}        {pct(p_bp, phys_total):5.1f}%       {'✅ 良好' if pct(p_bp, phys_total) > 85 else '⚠️'}")
     lines.append(f"    - Blender Panels (UIウィジェット)     {p_bpan:3d} / {phys_total:3d}        {pct(p_bpan, phys_total):5.1f}%       {'✅ 良好' if pct(p_bpan, phys_total) > 80 else '⚠️'}")
-    lines.append(f"    - GUI IPC Init (SceneInitData)       {phys_gi:3d} / {phys_total:3d}        {pct(phys_gi, phys_total):5.1f}%       {'⚠️ 同期遅れ' if pct(phys_gi, phys_total) < 90 else '✅'}")
-    lines.append(f"    - GUI IPC Update (GuiParamsUpdate)   {phys_gu:3d} / {phys_total:3d}        {pct(phys_gu, phys_total):5.1f}%       {'❌ 大幅欠落' if pct(phys_gu, phys_total) < 50 else '⚠️'}")
-    lines.append(f"    - 独立GUI 単体UI (app.rs)            {phys_gui:3d} / {phys_total:3d}        {pct(phys_gui, phys_total):5.1f}%       {'❌ 未実装多数' if pct(phys_gui, phys_total) < 60 else '⚠️'}")
+    lines.append(f"    - GUI IPC Init (SceneInitData)       {phys_gi:3d} / {phys_total:3d}        {pct(phys_gi, phys_total):5.1f}%       {'✅ 完全同期 (100%)' if phys_gi == phys_total else ('⚠️ 同期遅れ' if pct(phys_gi, phys_total) < 90 else '✅')}")
+    lines.append(f"    - GUI IPC Update (GuiParamsUpdate)   {phys_gu:3d} / {phys_total:3d}        {pct(phys_gu, phys_total):5.1f}%       {'✅ 完全同期 (100%)' if phys_gu == phys_total else ('❌ 大幅欠落' if pct(phys_gu, phys_total) < 50 else '⚠️')}")
+    lines.append(f"    - 独立GUI 単体UI (app.rs)            {phys_gui:3d} / {phys_total:3d}        {pct(phys_gui, phys_total):5.1f}%       {'✅ 完全同期 (100%)' if phys_gui == phys_total else ('❌ 未実装多数' if pct(phys_gui, phys_total) < 60 else '⚠️')}")
 
     # 軸 B
     a_b, t_a = report.api_counts["blender_api"]
@@ -577,8 +577,11 @@ def format_console(report: AuditReport) -> str:
     lines.append("")
     lines.append("-" * 80)
     lines.append("【主なアクション・未実装項目】")
-    for act in report.actionable_items:
-        lines.append(f"  • {act}")
+    if not report.actionable_items:
+        lines.append("  • 全物理パラメータおよびプロトコルが完全同期されています（未実装項目なし）")
+    else:
+        for act in report.actionable_items:
+            lines.append(f"  • {act}")
 
     lines.append("=" * 80)
     return "\n".join(lines)
@@ -594,19 +597,20 @@ def format_markdown(report: AuditReport) -> str:
     lines.append("| レイヤー / 軸 | 実装数 / 全数 | カバレッジ (%) | 状態 |")
     lines.append("|---|:---:|:---:|:---:|")
 
-    p_be, t_p = report.param_counts["blender_engine"]
+    p_be, _ = report.param_counts["blender_engine"]
     p_bp, _ = report.param_counts["blender_prop"]
     p_bpan, _ = report.param_counts["blender_panel"]
     p_gi, _ = report.param_counts["gui_init"]
     p_gu, _ = report.param_counts["gui_update"]
     p_gui, _ = report.param_counts["gui_ui"]
+    phys_total = len([p for p in report.params if p["name"] not in METADATA_FIELDS])
 
-    lines.append(f"| **軸 A: Blender Engine** (`simconfig.py`) | {p_be} / {t_p} | **{pct(p_be, t_p):.1f}%** | {'✅ 完全網羅' if p_be == t_p else '⚠️'} |")
-    lines.append(f"| **軸 A: Blender Properties** (`properties.py`) | {p_bp} / {t_p} | **{pct(p_bp, t_p):.1f}%** | {'✅' if pct(p_bp, t_p) > 90 else '⚠️'} |")
-    lines.append(f"| **軸 A: Blender Panels** (`panels.py`) | {p_bpan} / {t_p} | **{pct(p_bpan, t_p):.1f}%** | {'✅' if pct(p_bpan, t_p) > 80 else '⚠️'} |")
-    lines.append(f"| **軸 A: GUI IPC Init** (`SceneInitData`) | {p_gi} / {t_p} | **{pct(p_gi, t_p):.1f}%** | {'⚠️ 同期遅れ' if pct(p_gi, t_p) < 85 else '✅'} |")
-    lines.append(f"| **軸 A: GUI IPC Update** (`GuiParamsUpdate`) | {p_gu} / {t_p} | **{pct(p_gu, t_p):.1f}%** | {'❌ 大幅欠落' if pct(p_gu, t_p) < 50 else '⚠️'} |")
-    lines.append(f"| **軸 A: 独立GUI 単体UI** (`app.rs`) | {p_gui} / {t_p} | **{pct(p_gui, t_p):.1f}%** | {'❌ 未実装多数' if pct(p_gui, t_p) < 60 else '⚠️'} |")
+    lines.append(f"| **軸 A: Blender Engine** (`simconfig.py`) | {p_be} / {phys_total} | **{pct(p_be, phys_total):.1f}%** | {'✅ 完全網羅' if p_be == phys_total else '⚠️'} |")
+    lines.append(f"| **軸 A: Blender Properties** (`properties.py`) | {p_bp} / {phys_total} | **{pct(p_bp, phys_total):.1f}%** | {'✅' if pct(p_bp, phys_total) > 90 else '⚠️'} |")
+    lines.append(f"| **軸 A: Blender Panels** (`panels.py`) | {p_bpan} / {phys_total} | **{pct(p_bpan, phys_total):.1f}%** | {'✅' if pct(p_bpan, phys_total) > 80 else '⚠️'} |")
+    lines.append(f"| **軸 A: GUI IPC Init** (`SceneInitData`) | {p_gi} / {phys_total} | **{pct(p_gi, phys_total):.1f}%** | {'✅ 完全網羅' if p_gi == phys_total else ('⚠️ 同期遅れ' if pct(p_gi, phys_total) < 85 else '✅')} |")
+    lines.append(f"| **軸 A: GUI IPC Update** (`GuiParamsUpdate`) | {p_gu} / {phys_total} | **{pct(p_gu, phys_total):.1f}%** | {'✅ 完全網羅' if p_gu == phys_total else ('❌ 大幅欠落' if pct(p_gu, phys_total) < 50 else '⚠️')} |")
+    lines.append(f"| **軸 A: 独立GUI 単体UI** (`app.rs`) | {p_gui} / {phys_total} | **{pct(p_gui, phys_total):.1f}%** | {'✅ 完全網羅' if p_gui == phys_total else ('❌ 未実装多数' if pct(p_gui, phys_total) < 60 else '⚠️')} |")
 
     a_b, t_a = report.api_counts["blender_api"]
     a_g, _ = report.api_counts["gui_api"]

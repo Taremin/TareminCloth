@@ -311,9 +311,15 @@ fn apply_simulation_parameters(sim: &mut GpuClothSimulator, data: &protocol::Sce
     cfg.enable_adaptive_substep = data.enable_adaptive_substep;
     cfg.min_substeps = data.min_substeps;
     cfg.max_substeps = data.max_substeps;
+    cfg.auto_coupled_on_low_substeps = data.auto_coupled_on_low_substeps;
+    cfg.auto_compensate_iterations = data.auto_compensate_iterations;
+    cfg.enable_strain_adaptive = data.enable_strain_adaptive;
+    cfg.strain_tolerance = data.strain_tolerance;
     if let Some(ref sc) = data.self_collision {
         cfg.enable_self_collision = sc.enabled;
         cfg.self_collision_algorithm = sc.self_collision_algorithm;
+        cfg.coupled_collider = sc.coupled_collider;
+        cfg.ee_substep_interval = sc.ee_substep_interval;
         cfg.relief_factor = sc.relief_factor;
         cfg.max_displacement_ratio = sc.max_displacement_ratio;
         cfg.exclude_neighbors = sc.exclude_neighbors;

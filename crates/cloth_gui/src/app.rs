@@ -7,6 +7,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use cloth_core::config::SimConfig;
 use cloth_core::mesh::ClothMesh;
 use cloth_core::simulation::GpuClothSimulator;
 use cloth_core::GpuContext;
@@ -81,8 +82,43 @@ pub struct GuiApp {
     self_collision_algorithm: u32,
     edge_collision_enabled: bool,
     coupled_mode: u32,
+    coupled_collider: bool,
+    post_relaxation_iters: u32,
+    substep_interval: u32,
+    ee_substep_interval: u32,
     enable_normal_untangling: bool,
     relief_factor: f32,
+    max_displacement_ratio: f32,
+    exclude_neighbors: bool,
+    self_collision_max_iterations: u32,
+    enable_pair_cache: bool,
+    pair_margin_mode: u32,
+    pair_safety_margin: f32,
+    pair_horizon_scale: f32,
+    pair_max_horizon: f32,
+    pair_max_pairs: u32,
+    enable_pair_final_fallback: bool,
+    edge_margin_scale: f32,
+    edge_margin_offset: f32,
+
+    // 縫合設定
+    sewing_stiffness: f32,
+    enable_sewing_lock: bool,
+    sewing_lock_distance: f32,
+    sewing_priority_enabled: bool,
+    sewing_priority_threshold: f32,
+    sewing_priority_merge_dist: f32,
+    sewing_priority_ramp_frames: u32,
+    sewing_priority_max_frames: u32,
+
+    // ソルバー & ひずみ適応 & 密度
+    solver_mode: u32,
+    workgroup_size: u32,
+    auto_coupled_on_low_substeps: bool,
+    auto_compensate_iterations: bool,
+    enable_strain_adaptive: bool,
+    strain_tolerance: f32,
+    areal_density: f32,
 
     // マウス入力 & インタラクティブ操作 (Grab / Pin)
     is_orbiting: bool,
@@ -162,8 +198,44 @@ impl GuiApp {
             self_collision_algorithm: 0,
             edge_collision_enabled: true,
             coupled_mode: 1, // RELAXATION
+            coupled_collider: false,
+            post_relaxation_iters: 1,
+            substep_interval: 1,
+            ee_substep_interval: 1,
             enable_normal_untangling: true,
             relief_factor: 0.2,
+            max_displacement_ratio: 0.2,
+            exclude_neighbors: true,
+            self_collision_max_iterations: 128,
+            enable_pair_cache: false,
+            pair_margin_mode: 1,
+            pair_safety_margin: 0.005,
+            pair_horizon_scale: 1.3,
+            pair_max_horizon: 0.02,
+            pair_max_pairs: 65536,
+            enable_pair_final_fallback: true,
+            edge_margin_scale: 1.0,
+            edge_margin_offset: 0.0,
+
+            // 縫合設定
+            sewing_stiffness: 10000.0,
+            enable_sewing_lock: true,
+            sewing_lock_distance: 0.02,
+            sewing_priority_enabled: false,
+            sewing_priority_threshold: 0.9,
+            sewing_priority_merge_dist: 0.005,
+            sewing_priority_ramp_frames: 3,
+            sewing_priority_max_frames: 600,
+
+            // ソルバー & ひずみ適応 & 密度
+            solver_mode: 0,
+            workgroup_size: 32,
+            auto_coupled_on_low_substeps: true,
+            auto_compensate_iterations: true,
+            enable_strain_adaptive: true,
+            strain_tolerance: 0.008,
+            areal_density: 0.15,
+
             is_orbiting: false,
             is_panning: false,
             last_mouse_pos: (0.0, 0.0),
@@ -177,6 +249,72 @@ impl GuiApp {
             pinned_verts: HashMap::new(),
             cached_positions: Vec::new(),
             initial_positions: Vec::new(),
+        }
+    }
+
+    /// 現在のGUI設定からSimConfigを生成する (全51パラメータ網羅)
+    pub fn export_sim_config(&self) -> SimConfig {
+        SimConfig {
+            version: 1,
+            gravity: self.gravity,
+            damping: self.air_damping,
+            tension_damping: self.tension_damping,
+            compression_damping: self.compression_damping,
+            shear_damping: self.shear_damping,
+            bending_damping: self.bending_damping,
+            tension_stiffness: self.tension_stiffness,
+            compression_stiffness: self.compression_stiffness,
+            shear_stiffness: self.shear_stiffness,
+            bending_stiffness: self.bending_stiffness,
+            solver_iterations: self.solver_iterations,
+            solver_mode: self.solver_mode,
+            workgroup_size: self.workgroup_size,
+            enable_self_collision: self.self_collision_enabled,
+            relief_factor: self.relief_factor,
+            max_displacement_ratio: self.max_displacement_ratio,
+            exclude_neighbors: self.exclude_neighbors,
+            enable_normal_untangling: self.enable_normal_untangling,
+            self_collision_max_iterations: self.self_collision_max_iterations,
+            coupled_mode: self.coupled_mode,
+            coupled_collider: self.coupled_collider,
+            post_relaxation_iters: self.post_relaxation_iters,
+            substep_interval: self.substep_interval,
+            ee_substep_interval: self.ee_substep_interval,
+            self_collision_algorithm: self.self_collision_algorithm,
+            enable_pair_cache: self.enable_pair_cache,
+            pair_margin_mode: self.pair_margin_mode,
+            pair_safety_margin: self.pair_safety_margin,
+            pair_horizon_scale: self.pair_horizon_scale,
+            pair_max_horizon: self.pair_max_horizon,
+            pair_max_pairs: self.pair_max_pairs,
+            enable_pair_final_fallback: self.enable_pair_final_fallback,
+            enable_edge_collision: self.edge_collision_enabled,
+            edge_margin_scale: self.edge_margin_scale,
+            edge_margin_offset: self.edge_margin_offset,
+            sewing_stiffness: self.sewing_stiffness,
+            enable_sewing_lock: self.enable_sewing_lock,
+            sewing_lock_distance: self.sewing_lock_distance,
+            sewing_priority_enabled: self.sewing_priority_enabled,
+            sewing_priority_threshold: self.sewing_priority_threshold,
+            sewing_priority_merge_dist: self.sewing_priority_merge_dist,
+            sewing_priority_ramp_frames: self.sewing_priority_ramp_frames,
+            sewing_priority_max_frames: self.sewing_priority_max_frames,
+            areal_density: self.areal_density,
+            enable_adaptive_substep: self.enable_adaptive_substep,
+            min_substeps: self.min_substeps,
+            max_substeps: self.max_substeps,
+            auto_coupled_on_low_substeps: self.auto_coupled_on_low_substeps,
+            auto_compensate_iterations: self.auto_compensate_iterations,
+            enable_strain_adaptive: self.enable_strain_adaptive,
+            strain_tolerance: self.strain_tolerance,
+        }
+    }
+
+    /// 現在の設定を物理シミュレータに一括反映する
+    pub fn apply_current_config(&mut self) {
+        let config = self.export_sim_config();
+        if let Some(ref mut sim) = self.simulator {
+            sim.apply_config(&config);
         }
     }
 
@@ -692,8 +830,8 @@ impl GuiApp {
         let Some(ref config) = self.surface_config else { return None; };
         let Some(ref depth_view) = self.depth_texture else { return None; };
         let Some(ref renderer) = self.renderer else { return None; };
-        let Some(ref mut egui_renderer) = self.egui_renderer else { return None; };
-        let Some(ref mut egui_state) = self.egui_state else { return None; };
+        if self.egui_renderer.is_none() { return None; }
+        if self.egui_state.is_none() { return None; }
 
         let output = match surface.get_current_texture() {
             Ok(output) => output,
@@ -729,9 +867,14 @@ impl GuiApp {
         let mut sc_edge_changed = false;
         let mut sc_opts_changed = false;
         let mut sc_coupled_changed = false;
+        let mut any_param_changed = false;
         let mut demo_to_load: Option<DemoSceneType> = None;
 
-        let raw_input = egui_state.take_egui_input(window);
+        let raw_input = if let Some(ref mut state) = self.egui_state {
+            state.take_egui_input(window)
+        } else {
+            return None;
+        };
         self.egui_ctx.begin_pass(raw_input);
 
         egui::Window::new("Taremin Cloth GUI")
@@ -943,12 +1086,15 @@ impl GuiApp {
                         let prev_algo = self.self_collision_algorithm;
                         if ui.selectable_label(self.self_collision_algorithm == 0, "Direct").clicked() {
                             self.self_collision_algorithm = 0;
+                            self.enable_pair_cache = false;
                         }
                         if ui.selectable_label(self.self_collision_algorithm == 1, "Pair Cache").clicked() {
                             self.self_collision_algorithm = 1;
+                            self.enable_pair_cache = true;
                         }
                         if ui.selectable_label(self.self_collision_algorithm == 2, "V-V (Virtual)").clicked() {
                             self.self_collision_algorithm = 2;
+                            self.enable_pair_cache = false;
                         }
                         if self.self_collision_algorithm != prev_algo {
                             sc_algo_changed = true;
@@ -966,6 +1112,14 @@ impl GuiApp {
                         if ui.checkbox(&mut self.edge_collision_enabled, "Edge Collision (E-E)").changed() {
                             sc_edge_changed = true;
                         }
+                        if self.edge_collision_enabled {
+                            if ui.add(egui::Slider::new(&mut self.edge_margin_scale, 0.1..=3.0).text("Edge Margin Scale")).changed() {
+                                any_param_changed = true;
+                            }
+                            if ui.add(egui::Slider::new(&mut self.edge_margin_offset, -0.01..=0.01).text("Edge Margin Offset")).changed() {
+                                any_param_changed = true;
+                            }
+                        }
                         if ui.checkbox(&mut self.enable_normal_untangling, "Normal Untangling").changed() {
                             sc_opts_changed = true;
                         }
@@ -974,6 +1128,16 @@ impl GuiApp {
                     if ui.add(egui::Slider::new(&mut self.relief_factor, 0.0..=1.0).text("Relief Factor")).changed() {
                         sc_opts_changed = true;
                     }
+                    if ui.add(egui::Slider::new(&mut self.max_displacement_ratio, 0.01..=1.0).text("Max Disp Ratio")).changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.checkbox(&mut self.exclude_neighbors, "Exclude Neighbors").changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.self_collision_max_iterations, 1..=256).text("Max SC Iterations")).changed() {
+                        any_param_changed = true;
+                    }
+
                     ui.horizontal(|ui| {
                         ui.label("Coupled Mode:");
                         let prev = self.coupled_mode;
@@ -990,6 +1154,84 @@ impl GuiApp {
                             sc_coupled_changed = true;
                         }
                     });
+                    if ui.checkbox(&mut self.coupled_collider, "Coupled Collider").changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.post_relaxation_iters, 0..=10).text("Post Relaxation Iters")).changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.substep_interval, 1..=10).text("VT Substep Interval")).changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.ee_substep_interval, 1..=10).text("EE Substep Interval")).changed() {
+                        any_param_changed = true;
+                    }
+
+                    if self.self_collision_algorithm == 1 {
+                        ui.separator();
+                        ui.label(egui::RichText::new("Pair Cache Settings").strong());
+                        if ui.checkbox(&mut self.enable_pair_cache, "Enable Pair Cache").changed() {
+                            any_param_changed = true;
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Margin Mode:");
+                            if ui.selectable_label(self.pair_margin_mode == 0, "Const").clicked() {
+                                self.pair_margin_mode = 0;
+                                any_param_changed = true;
+                            }
+                            if ui.selectable_label(self.pair_margin_mode == 1, "Dynamic").clicked() {
+                                self.pair_margin_mode = 1;
+                                any_param_changed = true;
+                            }
+                        });
+                        if ui.add(egui::Slider::new(&mut self.pair_safety_margin, 0.0001..=0.05).text("Safety Margin")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.pair_horizon_scale, 1.0..=5.0).text("Horizon Scale")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.pair_max_horizon, 0.001..=0.1).text("Max Horizon")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.pair_max_pairs, 1024..=262144).text("Max Pairs")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.checkbox(&mut self.enable_pair_final_fallback, "Final Fallback").changed() {
+                            any_param_changed = true;
+                        }
+                    }
+                });
+
+                ui.separator();
+                egui::CollapsingHeader::new("Sewing").default_open(false).show(ui, |ui| {
+                    if ui.add(egui::Slider::new(&mut self.sewing_stiffness, 1.0..=100000.0).logarithmic(true).text("Stiffness")).changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.checkbox(&mut self.enable_sewing_lock, "Sewing Lock").changed() {
+                        any_param_changed = true;
+                    }
+                    if self.enable_sewing_lock {
+                        if ui.add(egui::Slider::new(&mut self.sewing_lock_distance, 0.001..=0.1).text("Lock Distance")).changed() {
+                            any_param_changed = true;
+                        }
+                    }
+                    if ui.checkbox(&mut self.sewing_priority_enabled, "Priority Sewing").changed() {
+                        any_param_changed = true;
+                    }
+                    if self.sewing_priority_enabled {
+                        if ui.add(egui::Slider::new(&mut self.sewing_priority_threshold, 0.1..=1.0).text("Threshold")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.sewing_priority_merge_dist, 0.0005..=0.05).text("Merge Dist")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.sewing_priority_ramp_frames, 1..=30).text("Ramp Frames")).changed() {
+                            any_param_changed = true;
+                        }
+                        if ui.add(egui::Slider::new(&mut self.sewing_priority_max_frames, 10..=1200).text("Max Frames")).changed() {
+                            any_param_changed = true;
+                        }
+                    }
                 });
 
                 ui.separator();
@@ -1024,10 +1266,52 @@ impl GuiApp {
                             );
                         }
                     } else {
-                        ui.add(egui::Slider::new(&mut self.substeps, 1..=60).text("Substeps"));
+                        if ui.add(egui::Slider::new(&mut self.substeps, 1..=60).text("Substeps")).changed() {
+                            any_param_changed = true;
+                        }
                     }
                     if ui.add(egui::Slider::new(&mut self.solver_iterations, 1..=10).text("Iterations")).changed() {
                         iterations_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.areal_density, 0.01..=2.0).text("Areal Density (kg/m²)")).changed() {
+                        any_param_changed = true;
+                    }
+
+                    ui.separator();
+                    ui.label(egui::RichText::new("Solver & Adaptive").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Solver Mode:");
+                        if ui.selectable_label(self.solver_mode == 0, "Gauss-Seidel").clicked() {
+                            self.solver_mode = 0;
+                            any_param_changed = true;
+                        }
+                        if ui.selectable_label(self.solver_mode == 1, "Jacobi").clicked() {
+                            self.solver_mode = 1;
+                            any_param_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Workgroup:");
+                        for &sz in &[16, 32, 64] {
+                            if ui.selectable_label(self.workgroup_size == sz, format!("{}", sz)).clicked() {
+                                self.workgroup_size = sz;
+                                any_param_changed = true;
+                            }
+                        }
+                    });
+                    if ui.checkbox(&mut self.auto_coupled_on_low_substeps, "Auto Coupled on Low Substeps").changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.checkbox(&mut self.auto_compensate_iterations, "Auto Compensate Iterations").changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.checkbox(&mut self.enable_strain_adaptive, "Strain Adaptive").changed() {
+                        any_param_changed = true;
+                    }
+                    if self.enable_strain_adaptive {
+                        if ui.add(egui::Slider::new(&mut self.strain_tolerance, 0.0005..=0.05).text("Strain Tolerance")).changed() {
+                            any_param_changed = true;
+                        }
                     }
 
                     ui.add_space(4.0);
@@ -1057,60 +1341,14 @@ impl GuiApp {
                 });
             });
 
-        // UI操作による物理パラメータ変更の即時反映
-        if let Some(ref mut sim) = self.simulator {
-            if gravity_changed {
-                sim.set_gravity(self.gravity[0], self.gravity[1], self.gravity[2]);
-            }
-            if stiffness_changed {
-                sim.set_stiffness_all(
-                    self.tension_stiffness,
-                    self.compression_stiffness,
-                    self.shear_stiffness,
-                    self.bending_stiffness,
-                );
-            }
-            if air_damping_changed {
-                sim.set_damping(self.air_damping);
-            }
-            if damping_changed {
-                sim.set_damping_all(
-                    self.tension_damping,
-                    self.compression_damping,
-                    self.shear_damping,
-                    self.bending_damping,
-                );
-            }
-            if iterations_changed {
-                sim.solver_iterations = self.solver_iterations;
-            }
-            if adaptive_changed {
-                sim.set_adaptive_substep_options(
-                    self.enable_adaptive_substep,
-                    self.min_substeps,
-                    self.max_substeps,
-                );
-            }
-            if sc_enabled_changed {
-                sim.set_enable_self_collision(self.self_collision_enabled);
-            }
-            if sc_algo_changed {
-                sim.set_self_collision_algorithm(self.self_collision_algorithm);
-            }
-            if sc_edge_changed {
-                sim.set_enable_edge_collision(self.edge_collision_enabled);
-            }
-            if sc_opts_changed {
-                sim.set_self_collision_options(
-                    self.relief_factor,
-                    0.2, // max_displacement_ratio
-                    true, // exclude_neighbors
-                    self.enable_normal_untangling,
-                    256,
-                );
-            }
-            if sc_coupled_changed {
-                sim.set_coupled_self_collision_options(self.coupled_mode, 2);
+        // UI操作による物理パラメータ変更の即時一括反映
+        if stiffness_changed || air_damping_changed || damping_changed || gravity_changed
+            || iterations_changed || adaptive_changed || sc_enabled_changed || sc_algo_changed
+            || sc_edge_changed || sc_opts_changed || sc_coupled_changed || any_param_changed
+        {
+            let config = self.export_sim_config();
+            if let Some(ref mut sim) = self.simulator {
+                sim.apply_config(&config);
             }
         }
 
@@ -1147,8 +1385,11 @@ impl GuiApp {
         }
 
         let full_output = self.egui_ctx.end_pass();
-        egui_state.handle_platform_output(window, full_output.platform_output);
+        if let Some(ref mut state) = self.egui_state {
+            state.handle_platform_output(window, full_output.platform_output);
+        }
 
+        let Some(ref mut egui_renderer) = self.egui_renderer else { return None; };
         let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         for (id, delta) in &full_output.textures_delta.set {
             egui_renderer.update_texture(&gpu_context.device, &gpu_context.queue, *id, delta);
@@ -1293,100 +1534,72 @@ impl GuiApp {
                                 self.base_gravity[1] * scale,
                                 self.base_gravity[2] * scale,
                             ];
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.set_gravity(self.gravity[0], self.gravity[1], self.gravity[2]);
-                            }
                         } else if let Some(g) = p.gravity {
                             self.gravity = g;
                             if self.gravity_scale > 1e-4 {
                                 self.base_gravity = [g[0] / self.gravity_scale, g[1] / self.gravity_scale, g[2] / self.gravity_scale];
                             }
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.set_gravity(g[0], g[1], g[2]);
-                            }
                         }
-                        if let Some(air) = p.air_damping {
-                            self.air_damping = air;
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.set_damping(air);
-                            }
-                        }
-                        if p.tension_damping.is_some() || p.compression_damping.is_some() || p.shear_damping.is_some() || p.bending_damping.is_some() {
-                            if let Some(v) = p.tension_damping { self.tension_damping = v; }
-                            if let Some(v) = p.compression_damping { self.compression_damping = v; }
-                            if let Some(v) = p.shear_damping { self.shear_damping = v; }
-                            if let Some(v) = p.bending_damping { self.bending_damping = v; }
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.set_damping_all(
-                                    self.tension_damping,
-                                    self.compression_damping,
-                                    self.shear_damping,
-                                    self.bending_damping,
-                                );
-                            }
-                        }
-                        if p.stiffness.is_some() || p.tension_stiffness.is_some() || p.compression_stiffness.is_some() || p.shear_stiffness.is_some() || p.bending_stiffness.is_some() {
-                            if let Some(v) = p.tension_stiffness.or(p.stiffness) { self.tension_stiffness = v; self.stiffness = v; }
-                            if let Some(v) = p.compression_stiffness { self.compression_stiffness = v; }
-                            if let Some(v) = p.shear_stiffness { self.shear_stiffness = v; }
-                            if let Some(v) = p.bending_stiffness { self.bending_stiffness = v; }
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.set_stiffness_all(
-                                    self.tension_stiffness,
-                                    self.compression_stiffness,
-                                    self.shear_stiffness,
-                                    self.bending_stiffness,
-                                );
-                            }
-                        }
-                        if let Some(sub) = p.substeps {
-                            self.substeps = sub;
-                        }
-                        if p.enable_adaptive_substep.is_some() || p.min_substeps.is_some() || p.max_substeps.is_some() {
-                            if let Some(v) = p.enable_adaptive_substep { self.enable_adaptive_substep = v; }
-                            if let Some(v) = p.min_substeps { self.min_substeps = v; }
-                            if let Some(v) = p.max_substeps { self.max_substeps = v; }
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.set_adaptive_substep_options(
-                                    self.enable_adaptive_substep,
-                                    self.min_substeps,
-                                    self.max_substeps,
-                                );
-                            }
-                        }
-                        if let Some(iters) = p.solver_iterations {
-                            self.solver_iterations = iters;
-                            if let Some(ref mut sim) = self.simulator {
-                                sim.solver_iterations = iters;
-                            }
-                        }
-                        if let Some(fps) = p.target_fps {
-                            self.target_fps = fps;
-                        }
-                        if p.sewing_priority_enabled.is_some()
-                            || p.sewing_priority_threshold.is_some()
-                            || p.sewing_priority_merge_dist.is_some()
-                            || p.sewing_priority_ramp_frames.is_some()
-                            || p.sewing_priority_max_frames.is_some()
-                        {
-                            if let Some(ref mut sim) = self.simulator {
-                                // 現在値を読んで未指定項目を維持する
-                                let (enabled, threshold, merge_dist, ramp_frames, max_frames) = (
-                                    p.sewing_priority_enabled.unwrap_or(sim.sewing_priority_enabled),
-                                    p.sewing_priority_threshold.unwrap_or(sim.sewing_priority_threshold),
-                                    p.sewing_priority_merge_dist.unwrap_or(sim.sewing_priority_merge_dist),
-                                    p.sewing_priority_ramp_frames.unwrap_or(sim.sewing_priority_ramp_frames),
-                                    p.sewing_priority_max_frames.unwrap_or(sim.sewing_priority_max_frames),
-                                );
-                                sim.set_sewing_priority_options(
-                                    enabled,
-                                    threshold,
-                                    merge_dist,
-                                    ramp_frames,
-                                    max_frames,
-                                );
-                            }
-                        }
+                        if let Some(air) = p.air_damping { self.air_damping = air; }
+                        if let Some(v) = p.tension_damping { self.tension_damping = v; }
+                        if let Some(v) = p.compression_damping { self.compression_damping = v; }
+                        if let Some(v) = p.shear_damping { self.shear_damping = v; }
+                        if let Some(v) = p.bending_damping { self.bending_damping = v; }
+                        if let Some(v) = p.tension_stiffness.or(p.stiffness) { self.tension_stiffness = v; self.stiffness = v; }
+                        if let Some(v) = p.compression_stiffness { self.compression_stiffness = v; }
+                        if let Some(v) = p.shear_stiffness { self.shear_stiffness = v; }
+                        if let Some(v) = p.bending_stiffness { self.bending_stiffness = v; }
+                        if let Some(sub) = p.substeps { self.substeps = sub; }
+                        if let Some(v) = p.enable_adaptive_substep { self.enable_adaptive_substep = v; }
+                        if let Some(v) = p.min_substeps { self.min_substeps = v; }
+                        if let Some(v) = p.max_substeps { self.max_substeps = v; }
+                        if let Some(iters) = p.solver_iterations { self.solver_iterations = iters; }
+                        if let Some(fps) = p.target_fps { self.target_fps = fps; }
+
+                        // 自己衝突
+                        if let Some(v) = p.enable_self_collision { self.self_collision_enabled = v; }
+                        if let Some(v) = p.self_collision_algorithm { self.self_collision_algorithm = v; }
+                        if let Some(v) = p.enable_edge_collision { self.edge_collision_enabled = v; }
+                        if let Some(v) = p.coupled_mode { self.coupled_mode = v; }
+                        if let Some(v) = p.coupled_collider { self.coupled_collider = v; }
+                        if let Some(v) = p.post_relaxation_iters { self.post_relaxation_iters = v; }
+                        if let Some(v) = p.substep_interval { self.substep_interval = v; }
+                        if let Some(v) = p.ee_substep_interval { self.ee_substep_interval = v; }
+                        if let Some(v) = p.enable_normal_untangling { self.enable_normal_untangling = v; }
+                        if let Some(v) = p.relief_factor { self.relief_factor = v; }
+                        if let Some(v) = p.max_displacement_ratio { self.max_displacement_ratio = v; }
+                        if let Some(v) = p.exclude_neighbors { self.exclude_neighbors = v; }
+                        if let Some(v) = p.self_collision_max_iterations { self.self_collision_max_iterations = v; }
+                        if let Some(v) = p.enable_pair_cache { self.enable_pair_cache = v; }
+                        if let Some(v) = p.pair_margin_mode { self.pair_margin_mode = v; }
+                        if let Some(v) = p.pair_safety_margin { self.pair_safety_margin = v; }
+                        if let Some(v) = p.pair_horizon_scale { self.pair_horizon_scale = v; }
+                        if let Some(v) = p.pair_max_horizon { self.pair_max_horizon = v; }
+                        if let Some(v) = p.pair_max_pairs { self.pair_max_pairs = v; }
+                        if let Some(v) = p.enable_pair_final_fallback { self.enable_pair_final_fallback = v; }
+                        if let Some(v) = p.edge_margin_scale { self.edge_margin_scale = v; }
+                        if let Some(v) = p.edge_margin_offset { self.edge_margin_offset = v; }
+
+                        // 縫合
+                        if let Some(v) = p.sewing_stiffness { self.sewing_stiffness = v; }
+                        if let Some(v) = p.enable_sewing_lock { self.enable_sewing_lock = v; }
+                        if let Some(v) = p.sewing_lock_distance { self.sewing_lock_distance = v; }
+                        if let Some(v) = p.sewing_priority_enabled { self.sewing_priority_enabled = v; }
+                        if let Some(v) = p.sewing_priority_threshold { self.sewing_priority_threshold = v; }
+                        if let Some(v) = p.sewing_priority_merge_dist { self.sewing_priority_merge_dist = v; }
+                        if let Some(v) = p.sewing_priority_ramp_frames { self.sewing_priority_ramp_frames = v; }
+                        if let Some(v) = p.sewing_priority_max_frames { self.sewing_priority_max_frames = v; }
+
+                        // ソルバー & ひずみ適応 & 密度
+                        if let Some(v) = p.solver_mode { self.solver_mode = v; }
+                        if let Some(v) = p.workgroup_size { self.workgroup_size = v; }
+                        if let Some(v) = p.auto_coupled_on_low_substeps { self.auto_coupled_on_low_substeps = v; }
+                        if let Some(v) = p.auto_compensate_iterations { self.auto_compensate_iterations = v; }
+                        if let Some(v) = p.enable_strain_adaptive { self.enable_strain_adaptive = v; }
+                        if let Some(v) = p.strain_tolerance { self.strain_tolerance = v; }
+                        if let Some(v) = p.areal_density { self.areal_density = v; }
+
+                        self.apply_current_config();
                     }
                     GuiCommand::UpdateColliders { colliders, mesh_triangles } => {
                         if let Some(ref mut sim) = self.simulator {

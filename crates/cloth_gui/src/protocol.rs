@@ -115,6 +115,10 @@ pub struct GuiSelfCollisionData {
     pub enable_pair_cache_final_fallback: bool,
     #[serde(default)]
     pub self_collision_algorithm: u32,
+    #[serde(default)]
+    pub coupled_collider: bool,
+    #[serde(default = "default_substep_interval")]
+    pub ee_substep_interval: u32,
 }
 
 fn default_pair_margin_mode() -> u32 { 1 }
@@ -216,6 +220,14 @@ pub struct SceneInitData {
     pub min_substeps: u32,
     #[serde(default = "default_max_substeps")]
     pub max_substeps: u32,
+    #[serde(default = "default_true")]
+    pub auto_coupled_on_low_substeps: bool,
+    #[serde(default = "default_true")]
+    pub auto_compensate_iterations: bool,
+    #[serde(default)]
+    pub enable_strain_adaptive: bool,
+    #[serde(default = "default_strain_tolerance")]
+    pub strain_tolerance: f32,
     pub self_collision: Option<GuiSelfCollisionData>,
     pub bone_sdf: Option<GuiBoneSdfData>,
     #[serde(default)]
@@ -243,6 +255,7 @@ fn default_sewing_priority_threshold() -> f32 { 0.9 }
 fn default_sewing_priority_merge_dist() -> f32 { 0.005 }
 fn default_sewing_priority_ramp_frames() -> u32 { 3 }
 fn default_sewing_priority_max_frames() -> u32 { 600 }
+fn default_strain_tolerance() -> f32 { 0.008 }
 
 /// 物理パラメータの更新
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -283,6 +296,72 @@ pub struct GuiParamsUpdate {
     pub sewing_priority_max_frames: Option<u32>,
     #[serde(default)]
     pub sewing_lock_distance: Option<f32>,
+
+    // 自己衝突系オプション
+    #[serde(default)]
+    pub enable_self_collision: Option<bool>,
+    #[serde(default)]
+    pub self_collision_algorithm: Option<u32>,
+    #[serde(default)]
+    pub coupled_mode: Option<u32>,
+    #[serde(default)]
+    pub coupled_collider: Option<bool>,
+    #[serde(default)]
+    pub post_relaxation_iters: Option<u32>,
+    #[serde(default)]
+    pub relief_factor: Option<f32>,
+    #[serde(default)]
+    pub max_displacement_ratio: Option<f32>,
+    #[serde(default)]
+    pub exclude_neighbors: Option<bool>,
+    #[serde(default)]
+    pub enable_normal_untangling: Option<bool>,
+    #[serde(default)]
+    pub self_collision_max_iterations: Option<u32>,
+    #[serde(default)]
+    pub substep_interval: Option<u32>,
+    #[serde(default)]
+    pub ee_substep_interval: Option<u32>,
+    #[serde(default)]
+    pub enable_edge_collision: Option<bool>,
+    #[serde(default)]
+    pub edge_margin_scale: Option<f32>,
+    #[serde(default)]
+    pub edge_margin_offset: Option<f32>,
+    #[serde(default)]
+    pub enable_pair_cache: Option<bool>,
+    #[serde(default)]
+    pub pair_margin_mode: Option<u32>,
+    #[serde(default)]
+    pub pair_safety_margin: Option<f32>,
+    #[serde(default)]
+    pub pair_horizon_scale: Option<f32>,
+    #[serde(default)]
+    pub pair_max_horizon: Option<f32>,
+    #[serde(default)]
+    pub pair_max_pairs: Option<u32>,
+    #[serde(default)]
+    pub enable_pair_final_fallback: Option<bool>,
+
+    // ソルバー & ひずみ適応 & その他
+    #[serde(default)]
+    pub solver_mode: Option<u32>,
+    #[serde(default)]
+    pub workgroup_size: Option<u32>,
+    #[serde(default)]
+    pub auto_coupled_on_low_substeps: Option<bool>,
+    #[serde(default)]
+    pub auto_compensate_iterations: Option<bool>,
+    #[serde(default)]
+    pub enable_strain_adaptive: Option<bool>,
+    #[serde(default)]
+    pub strain_tolerance: Option<f32>,
+    #[serde(default)]
+    pub sewing_stiffness: Option<f32>,
+    #[serde(default)]
+    pub enable_sewing_lock: Option<bool>,
+    #[serde(default)]
+    pub areal_density: Option<f32>,
 }
 
 /// GUIからBlenderへ返送するレスポンスメッセージ (JSON)
@@ -375,12 +454,16 @@ mod tests {
             pair_cache_max_pairs: 32768,
             enable_pair_cache_final_fallback: true,
             self_collision_algorithm: 2,
+            coupled_collider: false,
+            ee_substep_interval: 1,
         };
         let s = serde_json::to_string(&sc).unwrap();
         let d: GuiSelfCollisionData = serde_json::from_str(&s).unwrap();
         assert_eq!(d.max_iterations, 512);
         assert_eq!(d.substep_interval, 2);
         assert_eq!(d.self_collision_algorithm, 2);
+        assert!(!d.coupled_collider);
+        assert_eq!(d.ee_substep_interval, 1);
     }
 }
 

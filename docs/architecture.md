@@ -1011,9 +1011,9 @@ Taremin Cloth は、物理シミュレーション核（`crates/cloth_core`）�
 | **軸 A: Blender Engine** (`simconfig.py`) | 51 / 51 | **100.0%** | ✅ 完全同期 (Single Source of Truth) |
 | **軸 A: Blender Properties** (`properties.py`) | 42 / 51 | **82.4%** | ✅ 主要項目網羅 |
 | **軸 A: Blender Panels** (`panels.py`) | 40 / 51 | **78.4%** | ✅ 主要項目露出 |
-| **軸 A: GUI IPC Init** (`SceneInitData`) | 45 / 51 | **88.2%** | ⚠️ 最新機能（ひずみ適応等）の一部未定義 |
-| **軸 A: GUI IPC Update** (`GuiParamsUpdate`) | 20 / 51 | **39.2%** | ❌ 実行中の自己衝突動的変更が未対応 |
-| **軸 A: 独立GUI 単体UI** (`app.rs`) | 20 / 51 | **39.2%** | ❌ 縫合・詳細設定スライダーが未実装 |
+| **軸 A: GUI IPC Init** (`SceneInitData`) | 51 / 51 | **100.0%** | ✅ 完全網羅 (100% パリティ達成) |
+| **軸 A: GUI IPC Update** (`GuiParamsUpdate`) | 51 / 51 | **100.0%** | ✅ 完全同期 (100% パリティ達成) |
+| **軸 A: 独立GUI 単体UI** (`app.rs`) | 51 / 51 | **100.0%** | ✅ 完全網羅 (100% パリティ達成) |
 | **軸 B: Blender API 利用率** | 71 / 115 | **61.7%** | ✅ 活用中 |
 | **軸 B: 独立GUI API 利用率** | 29 / 115 | **25.2%** | ⚠️ 最小限利用 |
 | **軸 C: Blender 機能・コライダー網羅** | 19 / 20 | **95.0%** | ✅ 網羅 |

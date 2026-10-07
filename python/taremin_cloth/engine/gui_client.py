@@ -189,7 +189,9 @@ def extract_self_collision_data(settings) -> Optional[Dict[str, Any]]:
     cfg = collect_sim_config(settings)
     return {
         "enabled": bool(cfg["enable_self_collision"]),
+        "self_collision_algorithm": int(cfg.get("self_collision_algorithm", 0)),
         "coupled_mode": int(cfg["coupled_mode"]),
+        "coupled_collider": bool(cfg.get("coupled_collider", False)),
         "post_relaxation_iters": int(cfg["post_relaxation_iters"]),
         "relief_factor": float(cfg["relief_factor"]),
         "max_displacement_ratio": float(cfg["max_displacement_ratio"]),
@@ -197,6 +199,7 @@ def extract_self_collision_data(settings) -> Optional[Dict[str, Any]]:
         "exclude_neighbors": bool(cfg["exclude_neighbors"]),
         "enable_normal_untangling": bool(cfg["enable_normal_untangling"]),
         "substep_interval": int(cfg["substep_interval"]),
+        "ee_substep_interval": int(cfg.get("ee_substep_interval", 1)),
         "enable_edge_collision": bool(cfg["enable_edge_collision"]),
         "edge_margin_scale": float(cfg["edge_margin_scale"]),
         "edge_margin_offset": float(cfg["edge_margin_offset"]),
@@ -450,6 +453,10 @@ class ClothGuiClient:
                 "enable_adaptive_substep": bool(cfg.get("enable_adaptive_substep", False)),
                 "min_substeps": int(cfg.get("min_substeps", 1)),
                 "max_substeps": int(cfg.get("max_substeps", 40)),
+                "auto_coupled_on_low_substeps": bool(cfg.get("auto_coupled_on_low_substeps", True)),
+                "auto_compensate_iterations": bool(cfg.get("auto_compensate_iterations", True)),
+                "enable_strain_adaptive": bool(cfg.get("enable_strain_adaptive", True)),
+                "strain_tolerance": float(cfg.get("strain_tolerance", 0.008)),
                 "fps": float(scene.render.fps) if scene and hasattr(scene, "render") else 60.0,
                 "self_collision": self_col,
                 "bone_sdf": bone_sdf_dict,
@@ -586,74 +593,21 @@ class ClothGuiClient:
             "weights": weight_list,
         })
 
-    def send_params(
-        self,
-        gravity=None,
-        gravity_scale=None,
-        air_damping=None,
-        tension_damping=None,
-        compression_damping=None,
-        shear_damping=None,
-        bending_damping=None,
-        stiffness=None,
-        compression_stiffness=None,
-        shear_stiffness=None,
-        bending_stiffness=None,
-        solver_iterations=None,
-        sewing_priority_enabled=None,
-        sewing_priority_threshold=None,
-        sewing_priority_merge_dist=None,
-        sewing_priority_ramp_frames=None,
-        sewing_priority_max_frames=None,
-        sewing_lock_distance=None,
-        enable_adaptive_substep=None,
-        min_substeps=None,
-        max_substeps=None,
-    ) -> bool:
+    def send_params(self, **kwargs) -> bool:
         """物理パラメータの動的更新コマンドを送信する"""
         params = {}
-        if gravity is not None:
-            params["gravity"] = list(gravity)
-        if gravity_scale is not None:
-            params["gravity_scale"] = float(gravity_scale)
-        if air_damping is not None:
-            params["air_damping"] = float(air_damping)
-        if tension_damping is not None:
-            params["tension_damping"] = float(tension_damping)
-        if compression_damping is not None:
-            params["compression_damping"] = float(compression_damping)
-        if shear_damping is not None:
-            params["shear_damping"] = float(shear_damping)
-        if bending_damping is not None:
-            params["bending_damping"] = float(bending_damping)
-        if stiffness is not None:
-            params["stiffness"] = float(stiffness)
-        if compression_stiffness is not None:
-            params["compression_stiffness"] = float(compression_stiffness)
-        if shear_stiffness is not None:
-            params["shear_stiffness"] = float(shear_stiffness)
-        if bending_stiffness is not None:
-            params["bending_stiffness"] = float(bending_stiffness)
-        if solver_iterations is not None:
-            params["solver_iterations"] = int(solver_iterations)
-        if sewing_priority_enabled is not None:
-            params["sewing_priority_enabled"] = bool(sewing_priority_enabled)
-        if sewing_priority_threshold is not None:
-            params["sewing_priority_threshold"] = float(sewing_priority_threshold)
-        if sewing_priority_merge_dist is not None:
-            params["sewing_priority_merge_dist"] = float(sewing_priority_merge_dist)
-        if sewing_priority_ramp_frames is not None:
-            params["sewing_priority_ramp_frames"] = int(sewing_priority_ramp_frames)
-        if sewing_priority_max_frames is not None:
-            params["sewing_priority_max_frames"] = int(sewing_priority_max_frames)
-        if sewing_lock_distance is not None:
-            params["sewing_lock_distance"] = float(sewing_lock_distance)
-        if enable_adaptive_substep is not None:
-            params["enable_adaptive_substep"] = bool(enable_adaptive_substep)
-        if min_substeps is not None:
-            params["min_substeps"] = int(min_substeps)
-        if max_substeps is not None:
-            params["max_substeps"] = int(max_substeps)
+        for k, v in kwargs.items():
+            if v is not None:
+                if isinstance(v, (list, tuple)):
+                    params[k] = list(v)
+                elif isinstance(v, bool):
+                    params[k] = bool(v)
+                elif isinstance(v, int):
+                    params[k] = int(v)
+                elif isinstance(v, float):
+                    params[k] = float(v)
+                else:
+                    params[k] = v
 
         return self.send_command("SetParams", params)
 
@@ -688,6 +642,39 @@ class ClothGuiClient:
             "enable_adaptive_substep": bool(cfg.get("enable_adaptive_substep", False)),
             "min_substeps": int(cfg.get("min_substeps", 1)),
             "max_substeps": int(cfg.get("max_substeps", 40)),
+            # 自己衝突
+            "enable_self_collision": bool(cfg.get("enable_self_collision", True)),
+            "self_collision_algorithm": int(cfg.get("self_collision_algorithm", 0)),
+            "coupled_mode": int(cfg.get("coupled_mode", 0)),
+            "coupled_collider": bool(cfg.get("coupled_collider", False)),
+            "post_relaxation_iters": int(cfg.get("post_relaxation_iters", 1)),
+            "relief_factor": float(cfg.get("relief_factor", 0.2)),
+            "max_displacement_ratio": float(cfg.get("max_displacement_ratio", 0.2)),
+            "exclude_neighbors": bool(cfg.get("exclude_neighbors", True)),
+            "enable_normal_untangling": bool(cfg.get("enable_normal_untangling", True)),
+            "self_collision_max_iterations": int(cfg.get("self_collision_max_iterations", 128)),
+            "substep_interval": int(cfg.get("substep_interval", 1)),
+            "ee_substep_interval": int(cfg.get("ee_substep_interval", 1)),
+            "enable_edge_collision": bool(cfg.get("enable_edge_collision", False)),
+            "edge_margin_scale": float(cfg.get("edge_margin_scale", 1.0)),
+            "edge_margin_offset": float(cfg.get("edge_margin_offset", 0.0)),
+            "enable_pair_cache": bool(cfg.get("enable_pair_cache", False)),
+            "pair_margin_mode": int(cfg.get("pair_margin_mode", 1)),
+            "pair_safety_margin": float(cfg.get("pair_safety_margin", 0.005)),
+            "pair_horizon_scale": float(cfg.get("pair_horizon_scale", 1.3)),
+            "pair_max_horizon": float(cfg.get("pair_max_horizon", 0.02)),
+            "pair_max_pairs": int(cfg.get("pair_max_pairs", 65536)),
+            "enable_pair_final_fallback": bool(cfg.get("enable_pair_final_fallback", True)),
+            # ソルバー & ひずみ適応 & その他
+            "solver_mode": int(cfg.get("solver_mode", 0)),
+            "workgroup_size": int(cfg.get("workgroup_size", 32)),
+            "auto_coupled_on_low_substeps": bool(cfg.get("auto_coupled_on_low_substeps", True)),
+            "auto_compensate_iterations": bool(cfg.get("auto_compensate_iterations", True)),
+            "enable_strain_adaptive": bool(cfg.get("enable_strain_adaptive", True)),
+            "strain_tolerance": float(cfg.get("strain_tolerance", 0.008)),
+            "sewing_stiffness": float(cfg.get("sewing_stiffness", 10000.0)),
+            "enable_sewing_lock": bool(cfg.get("enable_sewing_lock", True)),
+            "areal_density": float(cfg.get("areal_density", 0.15)),
         }
 
         # 差分検知: 前回送信したパラメータと完全一致している場合はスキップ
