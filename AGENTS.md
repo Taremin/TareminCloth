@@ -281,7 +281,7 @@ python tools/release.py 0.0.1
 
 ### リリース自動化の仕組み
 1. `tools/release.py` により `__init__.py`、`pyproject.toml`、`Cargo.toml`（3クレート）、`Cargo.lock` が同期更新され、テスト通過後に `chore(release): vX.Y.Z` コミットと `vX.Y.Z` アノテーションタグが作成されます。
-2. リモートへタグがプッシュされると、GitHub Actions の `release.yml` が自動起動し、Windows (x64)、Linux (x64)、macOS (Universal) のバイナリが並列ビルドされ、GitHub Releases に各プラットフォーム向けアドオンzipが自動添付・公開されます（`beta` や `rc` が含まれるタグは自動的に Pre-release として公開されます）。
+2. リモートへタグがプッシュされると、GitHub Actions の `release.yml` が自動起動し、Windows (x64)、Linux (x64)、macOS (Universal) のバイナリが並列ビルドされ、GitHub Releases に各プラットフォーム向けアドオンzipが添付された下書き（Draft）が作成されます（`beta` や `rc` が含まれるタグは Pre-release 属性が付きます。最終確認後にGitHub上で手動公開してください）。
 
 ---
 

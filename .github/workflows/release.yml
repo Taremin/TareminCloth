@@ -165,5 +165,5 @@ jobs:
           name: Release ${{ steps.tag.outputs.tag_name }}
           body_path: changelog.md
           files: release_assets/*.zip
-          draft: false
+          draft: true
           prerelease: ${{ steps.tag.outputs.is_prerelease == 'true' }}
