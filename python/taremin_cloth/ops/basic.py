@@ -14,7 +14,7 @@ from ..engine.cache import (
 )
 from ..utils import topology
 from ..utils.logger import logger
-from ..utils.view3d import tag_redraw_view3d, stop_animation
+from ..properties import BoolProperty, StringProperty, EnumProperty
 from .. import i18n
 
 
@@ -133,7 +133,7 @@ class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
-    all_objects: bpy.props.BoolProperty(
+    all_objects: BoolProperty(
         name="All Objects",
         description="Apply to all cloth objects in scene",
         default=False,
@@ -188,7 +188,7 @@ class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
-    all_objects: bpy.props.BoolProperty(
+    all_objects: BoolProperty(
         name="All Objects",
         description="Apply to all cloth objects in scene",
         default=False,
@@ -282,7 +282,7 @@ class TAREMIN_CLOTH_OT_select_object(bpy.types.Operator):
     bl_translation_context = i18n.CONTEXT
     bl_options = {'UNDO'}
 
-    object_name: bpy.props.StringProperty(
+    object_name: StringProperty(
         name="Object Name",
         description="Name of the object to select",
         default="",
@@ -444,12 +444,16 @@ class TAREMIN_CLOTH_OT_save_as_shape_key(bpy.types.Operator):
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
-    shape_key_name: bpy.props.StringProperty(
+    @classmethod
+    def description(cls, context, properties):
+        return i18n.trans(cls.bl_description)
+
+    shape_key_name: StringProperty(
         name="Shape Key Name",
         description="Name of the new shape key (default: Cloth_Shape)",
         default="",
     )
-    target_mode: bpy.props.EnumProperty(
+    target_mode: EnumProperty(
         name="Target Mode",
         description="Target object destination mode",
         items=[

@@ -43,6 +43,10 @@ Copy-Item "target/release/taremin_cloth_core.dll" "python/taremin_cloth/taremin_
 python run_tests.py --ci
 # 特定のテストモジュールだけをピンポイントで試行錯誤
 python run_tests.py --ci -t test_quick_pinning.py
+python run_tests.py --ci -t test_i18n.py
+
+# i18n 翻訳完全性監査（未登録 description / name / label / dead keys 検知・Blender不要）
+python tools/audit_i18n.py
 
 # または現在の環境上で直接実行
 python -m unittest tests/core/test_mesh_analysis.py
@@ -127,6 +131,7 @@ sim.save_profile_trace("scratch/trace.json")  # chrome://tracing で開ける
 | `audit-cache` | 同一ログのON/OFF再現で貫通起因を判定 (再記録不要) | `python -m taremin_cloth.log_tools audit-cache input.jsonl.gz -f 71 --lookback 3` |
 | `profile` | 指定区間をGPU計測付きでリプレイし壁時計と内訳表示・trace保存 | `python -m taremin_cloth.log_tools profile input.jsonl.gz -f 71 -o trace.json` |
 | `coverage` | エンジンコア機能・API・パラメータのBlender/独立GUI実装率を測定・比較（3軸カバレッジ監査） | `python -m taremin_cloth.log_tools coverage`<br>`python tools/audit_feature_coverage.py --format markdown` |
+| `audit_i18n` | UI/プロパティの description・name・選択肢の未翻訳およびデッドキーをAST解析で完全監査 | `python tools/audit_i18n.py`<br>`python tools/audit_i18n.py --check` |
 
 > [!TIP]
 > **スパース記録 (2階層ロギング)**: `sim.set_debug_recording_options(full_stride=5, ring_size=3, lookahead=2, enable_triggers=True)` で間引きフル保存+トリガー時文脈復元。スタブ区間は座標なし (`inspect` はstats表示、`render/check/export-obj` は近傍フルを案内、`replay_range/replay_until` は入力連続性を保ちフル区間のみ比較)。スパース形式のファイルは `version: 3` で識別される。

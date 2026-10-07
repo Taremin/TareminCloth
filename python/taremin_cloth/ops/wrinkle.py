@@ -10,29 +10,16 @@ import functools
 import math
 from typing import Any, List, Optional, Tuple
 import bpy
-from bpy.props import (
-    BoolProperty as _BoolProperty,
-    EnumProperty as _EnumProperty,
-    FloatProperty as _FloatProperty,
-    StringProperty as _StringProperty,
-)
 from bpy.types import Operator
 import numpy as np
 
 from .. import i18n
-
-def _wrap_prop(prop_func):
-    @functools.wraps(prop_func)
-    def wrapper(*args, **kwargs):
-        if "translation_context" not in kwargs:
-            kwargs["translation_context"] = i18n.CONTEXT
-        return prop_func(*args, **kwargs)
-    return wrapper
-
-FloatProperty = _wrap_prop(_FloatProperty)
-BoolProperty = _wrap_prop(_BoolProperty)
-EnumProperty = _wrap_prop(_EnumProperty)
-StringProperty = _wrap_prop(_StringProperty)
+from ..properties import (
+    BoolProperty,
+    EnumProperty,
+    FloatProperty,
+    StringProperty,
+)
 from ..engine.wrinkle_field import WrinkleCurveItem
 from ..engine.wrinkle_preset import (
     WrinklePreset,

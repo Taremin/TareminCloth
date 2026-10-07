@@ -669,12 +669,12 @@ class TareminClothObjectSettings(PropertyGroup):
         type=bpy.types.Object,
         description="Target object to follow for pinned vertices",
     )
-    pin_target_bone: bpy.props.StringProperty(
+    pin_target_bone: StringProperty(
         name="Pin Target Bone",
         description="Bone name to follow when target is an armature",
         default="",
     )
-    pin_vertex_group: bpy.props.StringProperty(
+    pin_vertex_group: StringProperty(
         name="Pin Vertex Group",
         description="Vertex group name used for pinning and tracking",
         default="Pin",

@@ -13,13 +13,17 @@ import sys
 import types
 import unittest
 
-# プロジェクトルートおよび python/ ディレクトリをモジュール検索パスに追加
+# プロジェクトルート、python/、tools/ ディレクトリをモジュール検索パスに追加
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 python_dir = os.path.join(project_root, "python")
+tools_dir = os.path.join(project_root, "tools")
 if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
+if tools_dir not in sys.path:
+    sys.path.insert(0, tools_dir)
 
 from taremin_cloth import i18n, panels, properties, preferences, ops, presets
+from audit_i18n import extract_terms_from_ast
 
 try:
     import bpy
@@ -172,8 +176,13 @@ class TestI18nDictionary(unittest.TestCase):
             result = i18n.trans("Physical Properties")
             self.assertEqual(result, "Physical Properties")
 
-    def test_registered_dict_purity(self):
-        """Blender登録辞書がアドオン固有コンテキスト'TareminCloth'単一に純化され、'*'や'Operator'を一切汚染しないことを検証"""
+    def test_registered_dict_context_isolation(self):
+        """Blender登録辞書において、'*' に登録されるのが説明文（description）に限定され、名前空間汚染が防止されていることを検証
+
+        Blender C++ UIエンジンの仕様によりツールチップ描画時にRNAコンテキストが脱落して '*' で検索されるため、
+        説明文（descriptions.json に定義された長文）のみを '*' に登録し、短いプロパティ名やUIラベルは
+        'TareminCloth' 専用コンテキストに隔離して名前空間汚染を防止します。
+        """
         reg_dict = i18n._build_registered_dict()
         self.assertIn("ja_JP", reg_dict)
         ja_entries = reg_dict["ja_JP"]
@@ -182,18 +191,27 @@ class TestI18nDictionary(unittest.TestCase):
         operator_entries = [k for k in ja_entries.keys() if k[0] == "Operator"]
         taremin_entries = [k for k in ja_entries.keys() if k[0] == i18n.CONTEXT]
 
+        expected_descs = i18n.get_descriptions()
+        star_msgids = set(k[1] for k in star_entries)
+
+        # 1. '*' に登録されているエントリはすべて descriptions.json の説明文であること
         self.assertEqual(
-            len(star_entries), 0,
-            f"一般コンテキスト '*' に登録されているエントリが存在します ({len(star_entries)}件): {star_entries[:5]}"
+            star_msgids, expected_descs,
+            f"'*' に登録されているエントリが descriptions.json と一致しません: 差分 = {star_msgids ^ expected_descs}"
         )
+
+        # 2. Operator コンテキストは一切汚染されていないこと
         self.assertEqual(
             len(operator_entries), 0,
             f"Blender標準コンテキスト 'Operator' に登録されているエントリが存在します ({len(operator_entries)}件): {operator_entries[:5]}"
         )
+
+        # 3. アドオン専用コンテキスト TareminCloth には全エントリが登録されていること
         self.assertGreater(
             len(taremin_entries), 100,
             f"TareminCloth コンテキストに十分なエントリが登録されていること ({len(taremin_entries)}件)"
         )
+        self.assertEqual(len(taremin_entries), len(ja_entries) - len(star_entries))
 
     def test_json_files_syntax(self):
         """translations/*.json ファイルが有効なJSONであることを検証"""
@@ -226,108 +244,84 @@ class TestI18nDictionary(unittest.TestCase):
 
 
 class TestI18nRNACoverage(unittest.TestCase):
-    """静的RNAプロパティ・Enum選択肢・オペレーター・パネルの辞書網羅テスト"""
+    """静的RNAプロパティ・Enum選択肢・オペレーター・パネルの辞書網羅テスト（AST解析ベース）"""
 
-    def _collect_all_static_terms(self):
-        """アドオン定義の全静的用語を収集"""
-        terms = set()
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        addon_dir = Path(python_dir) / "taremin_cloth"
+        cls.terms = extract_terms_from_ast(addon_dir)
+        raw_dict = i18n.get_raw_translations()
+        cls.ja_dict = raw_dict.get("ja_JP", {})
 
-        # 1. パネル bl_label
-        panel_classes = [
-            cls for _, cls in inspect.getmembers(panels, inspect.isclass)
-            if hasattr(cls, "bl_label")
-        ]
-        for p_cls in panel_classes:
-            ctx = getattr(p_cls, "bl_translation_context", None) or "*"
-            lbl = getattr(p_cls, "bl_label", None)
-            if lbl and isinstance(lbl, str):
-                terms.add((ctx, lbl.strip()))
-
-        # 2. RNA プロパティ & Enum選択肢
-        rna_classes = [
-            properties.TareminClothElasticGroup,
-            properties.TareminClothObjectSettings,
-            properties.TareminClothColliderAnimSettings,
-            properties.TareminClothColliderSettings,
-            preferences.TareminClothPreferences,
-        ]
-        for rna_cls in rna_classes:
-            if hasattr(rna_cls, "__annotations__"):
-                for prop_name, prop_def in rna_cls.__annotations__.items():
-                    kw = getattr(prop_def, "keywords", {})
-                    name = kw.get("name")
-                    desc = kw.get("description")
-                    if name and isinstance(name, str):
-                        terms.add(("*", name.strip()))
-                    if desc and isinstance(desc, str):
-                        terms.add(("*", desc.strip()))
-                    items = kw.get("items")
-                    if items and isinstance(items, (list, tuple)):
-                        for itm in items:
-                            if isinstance(itm, (list, tuple)) and len(itm) >= 3:
-                                if itm[1] and isinstance(itm[1], str):
-                                    terms.add(("*", itm[1].strip()))
-                                if itm[2] and isinstance(itm[2], str):
-                                    terms.add(("*", itm[2].strip()))
-
-        # 3. オペレーター & メニュー (ops, presets)
-        op_modules = [ops.basic, ops.gui, ops.interactive, ops.pose, ops.tools, presets]
-        for mod in op_modules:
-            for _, cls in inspect.getmembers(mod, inspect.isclass):
-                is_op = (
-                    (issubclass(cls, (bpy.types.Operator, bpy.types.Menu)) if HAS_BPY else getattr(cls, "bl_idname", None))
-                    if isinstance(cls, type) else False
-                )
-                if is_op:
-                    lbl = getattr(cls, "bl_label", None)
-                    desc = getattr(cls, "bl_description", None)
-                    if lbl and isinstance(lbl, str):
-                        terms.add(("*", lbl.strip()))
-                    if desc and isinstance(desc, str):
-                        terms.add(("*", desc.strip()))
-                    if hasattr(cls, "__annotations__"):
-                        for prop_name, prop_def in cls.__annotations__.items():
-                            kw = getattr(prop_def, "keywords", {})
-                            p_name = kw.get("name")
-                            p_desc = kw.get("description")
-                            if p_name and isinstance(p_name, str):
-                                terms.add(("*", p_name.strip()))
-                            if p_desc and isinstance(p_desc, str):
-                                terms.add(("*", p_desc.strip()))
-                            items = kw.get("items")
-                            if items and isinstance(items, (list, tuple)):
-                                for itm in items:
-                                    if isinstance(itm, (list, tuple)) and len(itm) >= 3:
-                                        if itm[1] and isinstance(itm[1], str):
-                                            terms.add(("*", itm[1].strip()))
-                                        if itm[2] and isinstance(itm[2], str):
-                                            terms.add(("*", itm[2].strip()))
-
-        return terms
-
-    def test_all_rna_terms_are_translated(self):
-        """全RNAプロパティ・オペレーターが辞書に漏れなく登録されていることを検証"""
-        static_terms = self._collect_all_static_terms()
-        ja_dict = i18n.TRANSLATIONS_DICT["ja_JP"]
-
+    def test_all_property_descriptions_are_translated(self):
+        """全プロパティの description (ツールチップ) が辞書に漏れなく登録されていることを検証"""
         missing = []
-        for ctxt, text in sorted(static_terms):
-            if not text:
-                continue
-            # 専用コンテキストまたは一般コンテキストで辞書に存在するか
-            if (ctxt, text) not in ja_dict and ("*", text) not in ja_dict:
-                missing.append((ctxt, text))
-
+        for itm in self.terms["descriptions"]:
+            text = itm["text"]
+            if text not in self.ja_dict:
+                missing.append(f"{itm['file']}:{itm['line']} -> {text!r}")
         self.assertEqual(
             len(missing), 0,
-            f"辞書に未登録の用語が {len(missing)} 件あります:\n" +
-            "\n".join(f"  ({c!r}, {t!r})" for c, t in missing[:20])
+            f"辞書に未登録のプロパティ description が {len(missing)} 件あります:\n" +
+            "\n".join(f"  {m}" for m in missing[:20])
+        )
+
+    def test_all_property_names_are_translated(self):
+        """全プロパティの name が辞書に漏れなく登録されていることを検証"""
+        missing = []
+        for itm in self.terms["names"]:
+            text = itm["text"]
+            if text not in self.ja_dict:
+                missing.append(f"{itm['file']}:{itm['line']} -> {text!r}")
+        self.assertEqual(
+            len(missing), 0,
+            f"辞書に未登録のプロパティ name が {len(missing)} 件あります:\n" +
+            "\n".join(f"  {m}" for m in missing[:20])
+        )
+
+    def test_all_enum_items_are_translated(self):
+        """全Enum選択肢の name および description が辞書に漏れなく登録されていることを検証"""
+        missing = []
+        for itm in self.terms["enum_items"]:
+            text = itm["text"]
+            if text not in self.ja_dict:
+                missing.append(f"{itm['file']}:{itm['line']} ({itm['type']}) -> {text!r}")
+        self.assertEqual(
+            len(missing), 0,
+            f"辞書に未登録の Enum 項目が {len(missing)} 件あります:\n" +
+            "\n".join(f"  {m}" for m in missing[:20])
+        )
+
+    def test_all_operator_and_panel_labels_are_translated(self):
+        """全パネル・オペレーターの bl_label および bl_description が辞書に漏れなく登録されていることを検証"""
+        missing = []
+        for itm in self.terms["bl_labels"] + self.terms["bl_descriptions"]:
+            text = itm["text"]
+            if text not in self.ja_dict:
+                missing.append(f"{itm['file']}:{itm['line']} ({itm.get('class', '')}) -> {text!r}")
+        self.assertEqual(
+            len(missing), 0,
+            f"辞書に未登録の bl_label / bl_description が {len(missing)} 件あります:\n" +
+            "\n".join(f"  {m}" for m in missing[:20])
+        )
+
+    def test_all_ui_trans_texts_are_translated(self):
+        """i18n.trans() 等で明示的にラップされた全UI文言が辞書に漏れなく登録されていることを検証"""
+        missing = []
+        for itm in self.terms["ui_texts"]:
+            text = itm["text"]
+            if text not in self.ja_dict:
+                missing.append(f"{itm['file']}:{itm['line']} ({itm['source']}) -> {text!r}")
+        self.assertEqual(
+            len(missing), 0,
+            f"辞書に未登録の UI テキストが {len(missing)} 件あります:\n" +
+            "\n".join(f"  {m}" for m in missing[:20])
         )
 
     def test_all_operator_classes_have_translation_context(self):
         """全オペレータークラス・メニュークラスがアドオン固有コンテキスト bl_translation_context を保持していることを検証"""
         all_classes = list(ops.OPERATOR_CLASSES)
-        # presets モジュール内のオペレーター・メニュー
         for _, cls in inspect.getmembers(presets, inspect.isclass):
             if cls.__name__.startswith("TAREMIN_CLOTH_") and (issubclass(cls, (bpy.types.Operator, bpy.types.Menu)) if HAS_BPY else getattr(cls, "bl_idname", None)):
                 if cls not in all_classes:
@@ -344,6 +338,52 @@ class TestI18nRNACoverage(unittest.TestCase):
             f"bl_translation_context が正しく設定されていないクラスが {len(missing_context)} 件あります:\n" +
             "\n".join(f"  {name}: {ctx!r} (期待値: {i18n.CONTEXT!r})" for name, ctx in missing_context)
         )
+
+    def test_no_raw_bpy_props_in_addon_modules(self):
+        """properties.py / preferences.py 以外で生の bpy.props が直接利用されていないこと（コンテキスト欠落防止）を検証"""
+        raw_props = self.terms.get("raw_props", [])
+        self.assertEqual(
+            len(raw_props), 0,
+            f"コンテキスト未注入の恐れがある生の bpy.props 直接利用が {len(raw_props)} 件検出されました:\n" +
+            "\n".join(f"  {itm['file']}:{itm['line']} -> {itm['detail']}" for itm in raw_props)
+        )
+
+    def test_descriptions_json_consistency_with_ast(self):
+        """descriptions.json がAST走査結果の全説明文（プロパティ・Enum・クラス）と完全一致していることを検証"""
+        ast_descs = set(
+            [x["text"] for x in self.terms["descriptions"]]
+            + [x["text"] for x in self.terms["bl_descriptions"]]
+            + [x["text"] for x in self.terms["enum_items"] if x["type"] == "enum_description"]
+        )
+        file_descs = i18n.get_descriptions()
+        self.assertEqual(
+            ast_descs, file_descs,
+            f"descriptions.json とコード内の説明文に不整合があります: 差分 = {ast_descs ^ file_descs}"
+        )
+
+    def test_all_property_descriptions_registered_under_star(self):
+        """全プロパティの description が Blender 登録辞書で一般コンテキスト '*' にも漏れなく登録されていることを検証"""
+        reg_dict = i18n._build_registered_dict()
+        ja_entries = reg_dict.get("ja_JP", {})
+        for itm in self.terms["descriptions"]:
+            text = itm["text"]
+            self.assertIn(
+                ("*", text), ja_entries,
+                f"プロパティ description が '*' コンテキストに未登録です: {text!r} ({itm['file']}:{itm['line']})"
+            )
+
+    def test_property_names_not_in_star_context(self):
+        """プロパティの name が名前空間汚染防止のため一般コンテキスト '*' に登録されていないことを検証"""
+        reg_dict = i18n._build_registered_dict()
+        ja_entries = reg_dict.get("ja_JP", {})
+        desc_set = i18n.get_descriptions()
+        for itm in self.terms["names"]:
+            text = itm["text"]
+            if text not in desc_set:
+                self.assertNotIn(
+                    ("*", text), ja_entries,
+                    f"プロパティ name が誤って '*' コンテキストに登録されています: {text!r} ({itm['file']}:{itm['line']})"
+                )
 
 
 class TestI18nDeadKeys(unittest.TestCase):
@@ -400,7 +440,7 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
                     all_terms.add(t)
 
         # 1. 全登録クラス (Panel, Operator, Menu) の bl_label, bl_description
-        for mod in [panels, presets, preferences, ops.basic, ops.bake, ops.gui, ops.interactive, ops.pose, ops.tools]:
+        for mod in [panels, presets, preferences, ops.basic, ops.bake, ops.gui, ops.interactive, ops.pose, ops.tools, ops.wrinkle]:
             for name, cls in inspect.getmembers(mod, inspect.isclass):
                 if issubclass(cls, (bpy.types.Panel, bpy.types.Operator, bpy.types.Menu)):
                     lbl = getattr(cls, "bl_label", None)
@@ -434,6 +474,8 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
             properties.TareminClothColliderSettings,
             properties.TareminClothColliderAnimSettings,
             properties.TareminClothElasticGroup,
+            properties.TareminClothBrushSettings,
+            properties.TareminWrinkleCurveSettings,
             preferences.TareminClothPreferences,
         ]:
             if hasattr(p_cls, "bl_rna"):
@@ -506,7 +548,7 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
         record("Mesh (Simple)")
         record("Taremin Cloth")
 
-        # 8. インタラクティブモード実行時メッセージ (ステータスバー、ピン操作、開始/停止/ベンチマーク)
+        # 8. インタラクティブモード実行時メッセージ (ステータスバー、ピン操作、開始/停止/ベンチマーク、初期化ステージ)
         record("Taremin Cloth: [Left Drag] Move Vertex | [P] Toggle Pin | [Right Click / ESC] Exit")
         record("Unpinned vertex #%d")
         record("Pinned vertex #%d")
@@ -514,6 +556,29 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
         record("Interactive Simulation Stopped (Paused)")
         record("Benchmarking FPS... (will complete in ~2 seconds)")
         record("Debug recording saved: %s (%d frames)")
+        for st_msg in [
+            "Extracting mesh...", "Initializing GPU...", "Loading pins...",
+            "Preparing cloth...", "Syncing colliders...", "Setting up viewport...",
+        ]:
+            record(st_msg)
+
+        # 9. brush パッケージのEnumアイテムおよびプロパティ
+        from taremin_cloth import brush
+        for brush_mod in [brush.base, brush.single_grab, brush.range_grab, brush.smooth]:
+            for _, b_cls in inspect.getmembers(brush_mod, inspect.isclass):
+                if hasattr(b_cls, "bl_rna"):
+                    for p in b_cls.bl_rna.properties:
+                        record(p.name)
+                        record(p.description)
+                        if p.type == 'ENUM':
+                            for itm in p.enum_items:
+                                record(itm.name)
+                                record(itm.description)
+            if hasattr(brush_mod, "FALLOFF_ITEMS"):
+                for itm in brush_mod.FALLOFF_ITEMS:
+                    if len(itm) >= 3:
+                        record(itm[1])
+                        record(itm[2])
 
         # 辞書との突合
         ja_dict = i18n.TRANSLATIONS_DICT["ja_JP"]
@@ -524,6 +589,49 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
             len(unused_keys), 0,
             f"辞書に登録されていますが、BlenderのUI/RNAで実際に使われていないエントリが {len(unused_keys)} 件あります:\n" +
             "\n".join(f"  {k!r} -> {ja_dict.get(('*', k))!r}" for k in sorted(unused_keys))
+        )
+
+    def test_all_rna_properties_have_taremin_cloth_context(self):
+        """全オペレータープロパティおよびPropertyGroupプロパティが専用コンテキスト 'TareminCloth' を保持していることを厳格検証"""
+        missing_context = []
+
+        # 1. オペレータープロパティ
+        if hasattr(bpy.ops, "taremin_cloth"):
+            for op_name in dir(bpy.ops.taremin_cloth):
+                if op_name.startswith("_"):
+                    continue
+                op_func = getattr(bpy.ops.taremin_cloth, op_name)
+                if hasattr(op_func, "get_rna_type"):
+                    op_rna = op_func.get_rna_type()
+                    for prop in op_rna.properties:
+                        if prop.identifier in ("rna_type", "name") or prop.type in ('POINTER', 'COLLECTION'):
+                            continue
+                        ctx = getattr(prop, "translation_context", None)
+                        if ctx != i18n.CONTEXT:
+                            missing_context.append((f"bpy.ops.taremin_cloth.{op_name}.{prop.identifier}", ctx))
+
+        # 2. PropertyGroup プロパティ
+        for p_cls in [
+            properties.TareminClothObjectSettings,
+            properties.TareminClothColliderSettings,
+            properties.TareminClothColliderAnimSettings,
+            properties.TareminClothElasticGroup,
+            properties.TareminClothBrushSettings,
+            properties.TareminWrinkleCurveSettings,
+            preferences.TareminClothPreferences,
+        ]:
+            if hasattr(p_cls, "bl_rna"):
+                for prop in p_cls.bl_rna.properties:
+                    if prop.identifier in ("rna_type", "name", "bl_idname") or prop.type in ('POINTER', 'COLLECTION'):
+                        continue
+                    ctx = getattr(prop, "translation_context", None)
+                    if ctx != i18n.CONTEXT:
+                        missing_context.append((f"{p_cls.__name__}.{prop.identifier}", ctx))
+
+        self.assertEqual(
+            len(missing_context), 0,
+            f"translation_context が '{i18n.CONTEXT}' に設定されていないプロパティが {len(missing_context)} 件あります:\n" +
+            "\n".join(f"  {target}: {ctx!r}" for target, ctx in missing_context)
         )
 
 

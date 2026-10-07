@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 import bpy
 import mathutils
-from bpy.props import IntProperty, StringProperty
+from ..properties import IntProperty, StringProperty
 from bpy_extras import view3d_utils
 from ..engine.cache import (
     _simulators,

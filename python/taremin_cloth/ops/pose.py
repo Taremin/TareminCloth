@@ -4,6 +4,7 @@ taremin_cloth ポーズ管理オペレーター
 """
 
 import bpy
+from ..properties import EnumProperty
 from ..utils import anim_driver
 from .. import i18n
 
@@ -15,7 +16,7 @@ class TAREMIN_CLOTH_OT_record_pose(bpy.types.Operator):
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
-    slot: bpy.props.EnumProperty(
+    slot: EnumProperty(
         name="Slot",
         items=[
             ('START', "Start (0.0)", "Record current pose as start pose snapshot"),
@@ -74,7 +75,7 @@ class TAREMIN_CLOTH_OT_apply_pose_preview(bpy.types.Operator):
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
-    slot: bpy.props.EnumProperty(
+    slot: EnumProperty(
         name="Slot",
         items=[
             ('START', "Start (0.0)", "Apply recorded start pose to armature"),

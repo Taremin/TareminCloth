@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 import bpy
-from bpy.props import StringProperty, EnumProperty
+from .properties import StringProperty, EnumProperty
 from bpy.types import Operator, Menu
 from . import i18n
 
