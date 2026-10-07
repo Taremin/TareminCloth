@@ -1231,9 +1231,50 @@ def main() -> None:
     p_profile.add_argument("--output", "-o", default=None, help="chrometrace保存先 (.json)")
     p_profile.set_defaults(func=cmd_profile)
 
+    # 14. coverage (エンジンコア機能・クライアントカバレッジ監査)
+    p_coverage = subparsers.add_parser("coverage", help="エンジンコア機能とBlender/独立GUIの実装カバレッジを測定・比較")
+    p_coverage.add_argument("--format", choices=["console", "markdown", "json"], default="console", help="出力形式")
+    p_coverage.add_argument("--check", action="store_true", help="Blender Engineパリティ欠落があれば非ゼロ終了")
+    p_coverage.add_argument("--output", "-o", default=None, help="レポート保存先")
+    p_coverage.set_defaults(func=cmd_coverage)
+
 
     args = parser.parse_args()
     args.func(args)
+
+
+def cmd_coverage(args):
+    """エンジンコア機能・クライアント統合カバレッジ監査"""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    tools_dir = os.path.join(project_root, "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    from audit_feature_coverage import run_full_audit, format_console, format_markdown, METADATA_FIELDS
+    report = run_full_audit(project_root)
+    if args.format == "markdown":
+        out = format_markdown(report)
+    elif args.format == "json":
+        import json
+        out = json.dumps({
+            "param_counts": report.param_counts,
+            "api_counts": report.api_counts,
+            "feature_counts": report.feature_counts,
+            "actionable_items": report.actionable_items,
+        }, indent=2, ensure_ascii=False)
+    else:
+        out = format_console(report)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(out)
+        print(f"Report saved to {args.output}")
+    else:
+        print(out)
+    if args.check:
+        phys_total = len([p for p in report.params if p["name"] not in METADATA_FIELDS])
+        phys_be = len([p for p in report.params if p["name"] not in METADATA_FIELDS and p["blender_engine"]])
+        if phys_be < phys_total:
+            print(f"[ERROR] Blender Engine 物理パラメータ欠落: {phys_be}/{phys_total}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

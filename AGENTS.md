@@ -126,6 +126,7 @@ sim.save_profile_trace("scratch/trace.json")  # chrome://tracing で開ける
 | `audit-pairs` | GPU収集ペアとCPU真値のカバレッジ分類 (hit/stale/horizon/other/飽和) | `python -m taremin_cloth.log_tools audit-pairs input.jsonl.gz -f 71` |
 | `audit-cache` | 同一ログのON/OFF再現で貫通起因を判定 (再記録不要) | `python -m taremin_cloth.log_tools audit-cache input.jsonl.gz -f 71 --lookback 3` |
 | `profile` | 指定区間をGPU計測付きでリプレイし壁時計と内訳表示・trace保存 | `python -m taremin_cloth.log_tools profile input.jsonl.gz -f 71 -o trace.json` |
+| `coverage` | エンジンコア機能・API・パラメータのBlender/独立GUI実装率を測定・比較（3軸カバレッジ監査） | `python -m taremin_cloth.log_tools coverage`<br>`python tools/audit_feature_coverage.py --format markdown` |
 
 > [!TIP]
 > **スパース記録 (2階層ロギング)**: `sim.set_debug_recording_options(full_stride=5, ring_size=3, lookahead=2, enable_triggers=True)` で間引きフル保存+トリガー時文脈復元。スタブ区間は座標なし (`inspect` はstats表示、`render/check/export-obj` は近傍フルを案内、`replay_range/replay_until` は入力連続性を保ちフル区間のみ比較)。スパース形式のファイルは `version: 3` で識別される。

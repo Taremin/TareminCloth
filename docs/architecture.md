@@ -988,6 +988,52 @@ cargo run -p cloth_gui -- --demo sewing    # 衣服縫合
 python run_tests.py --ci -t tests/physics/test_demo_scenes.py
 ```
 
+---
+
+## 10. エンジンコア機能・クライアント統合カバレッジ監査アーキテクチャ (Feature & Client Coverage Audit)
+
+Taremin Cloth は、物理シミュレーション核（`crates/cloth_core`）に対して「Blender アドオン (`python/taremin_cloth`)」と「独立GUI (`crates/cloth_gui`)」の2つの異なるクライアントを持ちます。
+新機能やパラメータの追加時に片方のクライアントへの反映漏れ（機能非対称性・同期漏れ）を防ぐため、3つの測定軸に基づく統合カバレッジ監査システムを配備しています。
+
+### 10.1 3つの測定軸 (3 Audit Axes)
+
+1. **軸 A: SimConfig 物理パラメータ・カバレッジ (全51項目)**
+   - コアの正本である `SimConfig`（`crates/cloth_core/src/config.rs`）の全設定項目が、Blender側（`simconfig.py`, `properties.py`, `panels.py`）および独立GUI側（`SceneInitData`, `GuiParamsUpdate`, `app.rs`）にどこまで到達しているかを照合。
+2. **軸 B: シミュレータ API / メソッド・カバレッジ (全115メソッド)**
+   - `ClothSimulator`（PyO3 / Rustコア）が公開する全APIのうち、Blender Pythonアドオンおよび独立GUIから実際に呼び出されている割合を解析。
+3. **軸 C: コライダー & 機能種別カバレッジ (全20機能)**
+   - 形状コライダー（球/カプセル/平面/メッシュ/ボーンSDF）および対話機能（Grab/Pin/Cold Resume/GPUプロファイル/デバッグ録画等）のサポート状況を網羅。
+
+### 10.2 カバレッジ測定サマリー (基準値)
+
+| レイヤー / 軸 | 実装数 / 全数 | カバレッジ (%) | 状態 |
+|---|:---:|:---:|:---:|
+| **軸 A: Blender Engine** (`simconfig.py`) | 51 / 51 | **100.0%** | ✅ 完全同期 (Single Source of Truth) |
+| **軸 A: Blender Properties** (`properties.py`) | 42 / 51 | **82.4%** | ✅ 主要項目網羅 |
+| **軸 A: Blender Panels** (`panels.py`) | 40 / 51 | **78.4%** | ✅ 主要項目露出 |
+| **軸 A: GUI IPC Init** (`SceneInitData`) | 45 / 51 | **88.2%** | ⚠️ 最新機能（ひずみ適応等）の一部未定義 |
+| **軸 A: GUI IPC Update** (`GuiParamsUpdate`) | 20 / 51 | **39.2%** | ❌ 実行中の自己衝突動的変更が未対応 |
+| **軸 A: 独立GUI 単体UI** (`app.rs`) | 20 / 51 | **39.2%** | ❌ 縫合・詳細設定スライダーが未実装 |
+| **軸 B: Blender API 利用率** | 71 / 115 | **61.7%** | ✅ 活用中 |
+| **軸 B: 独立GUI API 利用率** | 29 / 115 | **25.2%** | ⚠️ 最小限利用 |
+| **軸 C: Blender 機能・コライダー網羅** | 19 / 20 | **95.0%** | ✅ 網羅 |
+| **軸 C: 独立GUI 機能・コライダー網羅** | 16 / 20 | **80.0%** | ✅ 良好 |
+
+### 10.3 監査ツールの実行とCI回帰テスト
+
+```bash
+# 1. コンソールにカバレッジサマリーと未実装差分を表示
+python tools/audit_feature_coverage.py
+# または log_tools 経由で実行
+python -m taremin_cloth.log_tools coverage
+
+# 2. Markdown形式でマトリクス表を出力 (ドキュメント貼り付け用)
+python tools/audit_feature_coverage.py --format markdown
+
+# 3. CI自動テスト (Blender Engine 100%パリティおよびGUIベースライン退行防止)
+python run_tests.py --ci -t test_feature_coverage.py
+```
+
 
 
 
