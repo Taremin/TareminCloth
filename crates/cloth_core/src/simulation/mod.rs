@@ -316,6 +316,8 @@ pub struct GpuClothSimulator {
     pub(crate) rest_positions_buffer: wgpu::Buffer,
     pub(crate) self_collision_vv_params_buffer: wgpu::Buffer,
     pub(crate) self_collision_vv_bind_group: wgpu::BindGroup,
+    /// 仮想頂点サンプリングが安全上限（キャップ）で制限されたか
+    pub is_virtual_sampling_clamped: bool,
 
     // 適応サブステップ (Adaptive Substeps)
     pub enable_adaptive_substep: bool,
@@ -624,6 +626,7 @@ impl GpuClothSimulator {
             rest_positions_buffer: res.rest_positions_buffer,
             self_collision_vv_params_buffer: res.self_collision_vv_params_buffer,
             self_collision_vv_bind_group: res.self_collision_vv_bind_group,
+            is_virtual_sampling_clamped: res.is_virtual_sampling_clamped,
 
             enable_adaptive_substep: false,
             min_substeps: 4,
@@ -671,6 +674,11 @@ impl GpuClothSimulator {
             self.enable_pair_cache = false;
         }
         self.self_collision_algorithm = algo;
+    }
+
+    /// 仮想頂点サンプリングが安全上限（キャップ）で制限されたかを返す
+    pub fn is_virtual_sampling_clamped(&self) -> bool {
+        self.is_virtual_sampling_clamped
     }
 
     /// 適応サブステップ設定を更新する
@@ -1569,7 +1577,7 @@ impl GpuClothSimulator {
         let (w, h, d) = self.bone_sdf_dims()?;
         let bytes_per_pixel = 4u64;
         let unpadded = (w as u64) * bytes_per_pixel;
-        let padded = ((unpadded + 255) / 256) * 256;
+        let padded = unpadded.div_ceil(256) * 256;
         let total = padded * (h as u64) * (d as u64);
         if total == 0 || total > 256 * 1024 * 1024 {
             return None;
@@ -2001,7 +2009,7 @@ impl GpuClothSimulator {
         };
 
         self.dynamic_sdf_frame_counter = self.dynamic_sdf_frame_counter.wrapping_add(1);
-        if (self.dynamic_sdf_frame_counter - 1) % self.dynamic_sdf_update_interval != 0 {
+        if !(self.dynamic_sdf_frame_counter - 1).is_multiple_of(self.dynamic_sdf_update_interval) {
             return;
         }
 
@@ -2039,7 +2047,7 @@ impl GpuClothSimulator {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bg, &[]);
-            pass.dispatch_workgroups((num_verts + 63) / 64, 1, 1);
+            pass.dispatch_workgroups(num_verts.div_ceil(64), 1, 1);
         }
 
         // 3. Pass 2: ボーン局所三角形準備
@@ -2051,7 +2059,7 @@ impl GpuClothSimulator {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bg, &[]);
-            pass.dispatch_workgroups((num_tris + 63) / 64, 1, 1);
+            pass.dispatch_workgroups(num_tris.div_ceil(64), 1, 1);
         }
 
         // Dirty ボーン判定
@@ -2097,9 +2105,9 @@ impl GpuClothSimulator {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bg, &[]);
-            let wg_x = (setup.res + 3) / 4;
-            let wg_y = (setup.res + 3) / 4;
-            let wg_z = (setup.res * dirty_count + 3) / 4;
+            let wg_x = setup.res.div_ceil(4);
+            let wg_y = setup.res.div_ceil(4);
+            let wg_z = (setup.res * dirty_count).div_ceil(4);
             pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
 
@@ -2287,7 +2295,7 @@ impl GpuClothSimulator {
             );
 
             // 16面クラスタごとの階層境界球の事前計算とアップロード
-            let num_clusters = (num_mesh_triangles + 15) / 16;
+            let num_clusters = num_mesh_triangles.div_ceil(16);
             let mut group_bounds = Vec::with_capacity(num_clusters as usize);
             for g in 0..num_clusters {
                 let start = (g * 16) as usize;
@@ -2333,7 +2341,7 @@ impl GpuClothSimulator {
 
         self.update_edge_collision_params();
 
-        let num_clusters = if num_mesh_triangles > 0 { (num_mesh_triangles + 15) / 16 } else { 0 };
+        let num_clusters = if num_mesh_triangles > 0 { num_mesh_triangles.div_ceil(16) } else { 0 };
         let params = CollisionParams {
             num_vertices: self.num_vertices,
             num_colliders,

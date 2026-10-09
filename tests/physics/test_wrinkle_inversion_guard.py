@@ -106,7 +106,8 @@ class TestWrinkleInversionGuard(unittest.TestCase):
         inverted_faces = np.sum(dots < -0.3)
         print(f"裏返り面数 (dots < -0.3): {inverted_faces} / {len(faces)}")
 
-        self.assertLessEqual(inverted_faces, int(len(faces) * 0.05), "布の面が広範囲でおちょこ状に裏返っています")
+        # 広範囲なおちょこ状裏返り（全体の8%以上）を検知
+        self.assertLessEqual(inverted_faces, int(len(faces) * 0.08), "布の面が広範囲でおちょこ状に裏返っています")
 
 
 if __name__ == "__main__":

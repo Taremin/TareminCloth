@@ -128,7 +128,7 @@ fn default_max_horizon() -> f32 { 0.02 }
 fn default_pair_max() -> u32 { 65536 }
 
 fn default_coupled_mode() -> u32 { 1 }
-fn default_post_relax() -> u32 { 2 }
+fn default_post_relax() -> u32 { 1 }
 fn default_max_search_iters() -> u32 { 256 }
 fn default_substep_interval() -> u32 { 1 }
 fn default_relief_factor() -> f32 { 0.2 }
@@ -224,7 +224,7 @@ pub struct SceneInitData {
     pub auto_coupled_on_low_substeps: bool,
     #[serde(default = "default_true")]
     pub auto_compensate_iterations: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enable_strain_adaptive: bool,
     #[serde(default = "default_strain_tolerance")]
     pub strain_tolerance: f32,
@@ -248,8 +248,8 @@ fn default_sewing_stiffness() -> f32 { 10000.0 }
 fn default_sewing_lock_distance() -> f32 { 0.02 }
 fn default_areal_density() -> f32 { 0.15 }
 fn default_substeps() -> u32 { 20 }
-fn default_min_substeps() -> u32 { 1 }
-fn default_max_substeps() -> u32 { 40 }
+fn default_min_substeps() -> u32 { 4 }
+fn default_max_substeps() -> u32 { 64 }
 fn default_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
 fn default_sewing_priority_threshold() -> f32 { 0.9 }
 fn default_sewing_priority_merge_dist() -> f32 { 0.005 }
@@ -427,8 +427,9 @@ mod tests {
         assert!(init.enable_sewing_lock);
         assert_eq!(init.sewing_lock_distance, 0.02);
         assert!(!init.enable_adaptive_substep);
-        assert_eq!(init.min_substeps, 1);
-        assert_eq!(init.max_substeps, 40);
+        assert_eq!(init.min_substeps, 4);
+        assert_eq!(init.max_substeps, 64);
+        assert!(init.enable_strain_adaptive);
     }
 
     #[test]

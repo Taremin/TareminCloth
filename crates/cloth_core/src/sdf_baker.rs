@@ -144,9 +144,9 @@ pub fn compute_3d_atlas_layout(
     }
     let n_cols = (n_bones as f64).powf(1.0 / 3.0).ceil() as usize;
     let n_cols = n_cols.max(1);
-    let n_rows = (((n_bones + n_cols - 1) / n_cols) as f64).sqrt().ceil() as usize;
+    let n_rows = (n_bones.div_ceil(n_cols) as f64).sqrt().ceil() as usize;
     let n_rows = n_rows.max(1);
-    let n_layers = ((n_bones + n_cols * n_rows - 1) / (n_cols * n_rows)).max(1);
+    let n_layers = n_bones.div_ceil(n_cols * n_rows).max(1);
 
     let max_tile = n_cols.max(n_rows).max(n_layers);
     let safe_res = if max_tile * resolution > max_dim {
@@ -540,9 +540,9 @@ pub fn bake_bone_sdf_gpu(
         pass.set_pipeline(&compute_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
 
-        let wg_x = ((safe_res as u32) + 3) / 4;
-        let wg_y = ((safe_res as u32) + 3) / 4;
-        let wg_z = ((safe_res as u32 * n_active as u32) + 3) / 4;
+        let wg_x = (safe_res as u32).div_ceil(4);
+        let wg_y = (safe_res as u32).div_ceil(4);
+        let wg_z = (safe_res as u32 * n_active as u32).div_ceil(4);
         pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
 
@@ -913,9 +913,9 @@ pub fn bake_mesh_sdf_gpu(
         });
         pass.set_pipeline(&compute_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let dispatch_x = (width + 3) / 4;
-        let dispatch_y = (height + 3) / 4;
-        let dispatch_z = (depth + 3) / 4;
+        let dispatch_x = width.div_ceil(4);
+        let dispatch_y = height.div_ceil(4);
+        let dispatch_z = depth.div_ceil(4);
         pass.dispatch_workgroups(dispatch_x, dispatch_y, dispatch_z);
     }
 
@@ -1138,7 +1138,7 @@ pub fn bake_mesh_sdf_coarse(
         });
         pass.set_pipeline(&compute_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((width + 3) / 4, (height + 3) / 4, (depth + 3) / 4);
+        pass.dispatch_workgroups(width.div_ceil(4), height.div_ceil(4), depth.div_ceil(4));
     }
 
     encoder.copy_buffer_to_buffer(&dist_buffer, 0, &dist_staging, 0, output_bytes);
@@ -1149,11 +1149,11 @@ pub fn bake_mesh_sdf_coarse(
     let tri_bytes = read_staging_to_vec(device, &tri_staging)?;
 
     let dist_packed: Vec<u32> = dist_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let nearest_tri: Vec<u32> = tri_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
@@ -1390,7 +1390,7 @@ pub fn bake_mesh_sdf_hierarchical(
             });
             pass.set_pipeline(&compute_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((width + 3) / 4, (height + 3) / 4, (slab + 3) / 4);
+            pass.dispatch_workgroups(width.div_ceil(4), height.div_ceil(4), slab.div_ceil(4));
         }
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);

@@ -12,12 +12,14 @@ if str(python_dir) not in sys.path:
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+import tests
 import taremin_cloth
 from taremin_cloth.utils import topology
 from taremin_cloth.panels import TAREMIN_CLOTH_PT_main_panel, TAREMIN_CLOTH_PT_topology
 from tests.fixtures.panel_test_utils import render_panel
 
 
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
 class TestCrossSubdivision(unittest.TestCase):
     def setUp(self):
         taremin_cloth.register()

@@ -1631,22 +1631,32 @@ def draw_callback_2d():
 def register_draw_handler():
     """描画ハンドラーを登録する (3D POST_VIEW および 2D POST_PIXEL)"""
     global _draw_handler, _draw_handler_2d
-    if _draw_handler is None and hasattr(bpy.types, "SpaceView3D"):
-        _draw_handler = bpy.types.SpaceView3D.draw_handler_add(
-            draw_callback_3d, (), 'WINDOW', 'POST_VIEW'
-        )
-    if _draw_handler_2d is None and hasattr(bpy.types, "SpaceView3D"):
-        _draw_handler_2d = bpy.types.SpaceView3D.draw_handler_add(
-            draw_callback_2d, (), 'WINDOW', 'POST_PIXEL'
-        )
+    space_view_3d = getattr(bpy.types, "SpaceView3D", None)
+    if space_view_3d and hasattr(space_view_3d, "draw_handler_add"):
+        if _draw_handler is None:
+            _draw_handler = space_view_3d.draw_handler_add(
+                draw_callback_3d, (), 'WINDOW', 'POST_VIEW'
+            )
+        if _draw_handler_2d is None:
+            _draw_handler_2d = space_view_3d.draw_handler_add(
+                draw_callback_2d, (), 'WINDOW', 'POST_PIXEL'
+            )
 
 
 def unregister_draw_handler():
     """描画ハンドラーを解除する"""
     global _draw_handler, _draw_handler_2d
-    if _draw_handler is not None and hasattr(bpy.types, "SpaceView3D"):
-        bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, 'WINDOW')
-        _draw_handler = None
-    if _draw_handler_2d is not None and hasattr(bpy.types, "SpaceView3D"):
-        bpy.types.SpaceView3D.draw_handler_remove(_draw_handler_2d, 'WINDOW')
-        _draw_handler_2d = None
+    space_view_3d = getattr(bpy.types, "SpaceView3D", None)
+    if space_view_3d and hasattr(space_view_3d, "draw_handler_remove"):
+        if _draw_handler is not None:
+            try:
+                space_view_3d.draw_handler_remove(_draw_handler, 'WINDOW')
+            except Exception:
+                pass
+            _draw_handler = None
+        if _draw_handler_2d is not None:
+            try:
+                space_view_3d.draw_handler_remove(_draw_handler_2d, 'WINDOW')
+            except Exception:
+                pass
+            _draw_handler_2d = None

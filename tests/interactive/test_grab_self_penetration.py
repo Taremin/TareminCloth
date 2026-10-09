@@ -75,6 +75,7 @@ class TestGrabSelfPenetration(unittest.TestCase):
             thickness=0.005, # 5mm
             stiffness=2000.0,
         )
+        sim.set_damping(30.0)  # 脱出後の単振動を減衰させ表側で安定静止させる
         sim.set_gravity(0.0, 0.0, 0.0) # 重力なしで純粋な衝突・Untangling復元力を観察
         sim.set_enable_self_collision(True)
         sim.set_self_collision_options(

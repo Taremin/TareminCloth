@@ -107,6 +107,8 @@ pub struct SimulationResources {
     pub rest_positions_buffer: wgpu::Buffer,
     pub self_collision_vv_params_buffer: wgpu::Buffer,
     pub self_collision_vv_bind_group: wgpu::BindGroup,
+    /// 仮想頂点サンプリングが安全上限（キャップ）で制限されたか
+    pub is_virtual_sampling_clamped: bool,
 }
 
 pub fn build_simulation_resources(
@@ -179,6 +181,7 @@ pub fn build_simulation_resources(
         default_thick,
         target_spacing,
     );
+    let mut is_virtual_sampling_clamped = virtual_sampling.is_clamped;
     let num_virtual_vertices = virtual_sampling.virtual_defs.len() as u32;
     let num_total_particles = num_vertices + num_virtual_vertices;
 
@@ -207,6 +210,18 @@ pub fn build_simulation_resources(
     }
 
     // 1. GPU バッファの作成
+    let vertex_buffer_bytes = (all_initial_vertices.len() * std::mem::size_of::<GpuVertex>()) as u64;
+    let max_buf_size = device.limits().max_buffer_size;
+    if vertex_buffer_bytes > max_buf_size {
+        eprintln!(
+            "[TareminCloth][WARN] 頂点バッファサイズ ({} bytes) が GPU上限 ({} bytes) を超過したためクランプします",
+            vertex_buffer_bytes, max_buf_size
+        );
+        is_virtual_sampling_clamped = true;
+        let max_verts = (max_buf_size / std::mem::size_of::<GpuVertex>() as u64) as usize;
+        all_initial_vertices.truncate(max_verts.max(mesh.vertices.len()));
+    }
+
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth Vertex Buffer"),
         contents: bytemuck::cast_slice(&all_initial_vertices),
@@ -335,7 +350,7 @@ pub fn build_simulation_resources(
     });
 
     // 16面グループごとの階層境界球バッファ (vec4<f32>: xyz=中心, w=半径)
-    let max_groups = ((max_mesh_triangles + 15) / 16).max(1);
+    let max_groups = max_mesh_triangles.div_ceil(16).max(1);
     let collider_group_bounds_size = (max_groups * std::mem::size_of::<[f32; 4]>()) as u64;
     let collider_group_bounds_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Collider Group Bounds Buffer"),
@@ -1648,5 +1663,6 @@ pub fn build_simulation_resources(
         rest_positions_buffer,
         self_collision_vv_params_buffer,
         self_collision_vv_bind_group,
+        is_virtual_sampling_clamped,
     }
 }

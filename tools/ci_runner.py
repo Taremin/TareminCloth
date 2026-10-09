@@ -119,13 +119,29 @@ def run_ci_tests(
 
         print(f"\n[CI Runner] 単体テスト実行: {target}")
         cmd = [str(py_exe), "-m", "unittest", target]
+        result = subprocess.run(cmd, cwd=repo_root, env=env)
+        return result.returncode
     else:
-        # CI（ci.yml）と同一の全件ディスカバリテスト実行
-        print("\n[CI Runner] CI全件テスト実行: python -m unittest discover -s tests/core -t .")
-        cmd = [str(py_exe), "-m", "unittest", "discover", "-s", "tests/core", "-t", "."]
-
-    result = subprocess.run(cmd, cwd=repo_root, env=env)
-    return result.returncode
+        # CI（ci.yml）と同一のスタンドアロン全件ディスカバリテスト実行
+        # (e2e は Blender プロセス起動が必要なため別枠)
+        test_dirs = [
+            "tests/core",
+            "tests/physics",
+            "tests/collider",
+            "tests/interactive",
+            "tests/regression",
+        ]
+        total_ret = 0
+        for td in test_dirs:
+            target_path = repo_root / td
+            if not target_path.exists():
+                continue
+            print(f"\n[CI Runner] スタンドアロンテスト実行: python -m unittest discover -s {td} -t .")
+            cmd = [str(py_exe), "-m", "unittest", "discover", "-s", td, "-t", "."]
+            res = subprocess.run(cmd, cwd=repo_root, env=env)
+            if res.returncode != 0:
+                total_ret = res.returncode
+        return total_ret
 
 
 if __name__ == "__main__":

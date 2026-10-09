@@ -61,20 +61,34 @@ _BLENDER_MODULES = [
 ]
 from unittest.mock import MagicMock
 
-if "bpy.types" not in sys.modules:
-    types_mod = _DummyTypesModule()
-    sys.modules["bpy.types"] = types_mod
+# 本物の Blender 実行環境か判定 (bpy.app.version が正常に存在するか)
+_IS_REAL_BLENDER = False
+if "bpy" in sys.modules and hasattr(sys.modules["bpy"], "app") and hasattr(sys.modules["bpy"].app, "version"):
+    _IS_REAL_BLENDER = True
 
-for mod_name in _BLENDER_MODULES:
-    if mod_name not in sys.modules:
-        try:
-            __import__(mod_name)
-        except ImportError:
+if not _IS_REAL_BLENDER:
+    if "bpy.types" not in sys.modules:
+        sys.modules["bpy.types"] = _DummyTypesModule()
+    for mod_name in _BLENDER_MODULES:
+        # すでに本物のモジュールとしてロードされていない限り、モックで統一
+        if mod_name not in sys.modules or not hasattr(sys.modules[mod_name], "__file__"):
             m = MagicMock()
             m.__name__ = mod_name
             if mod_name == "bpy":
                 m.types = sys.modules.get("bpy.types", _DummyTypesModule())
             sys.modules[mod_name] = m
+        else:
+            # site-packages等に壊れたスタブが存在する場合は安全なモックで上書き
+            try:
+                # 動作テスト
+                if mod_name == "bpy" and not hasattr(sys.modules["bpy"], "data"):
+                    raise RuntimeError("Invalid bpy stub")
+            except Exception:
+                m = MagicMock()
+                m.__name__ = mod_name
+                if mod_name == "bpy":
+                    m.types = sys.modules.get("bpy.types", _DummyTypesModule())
+                sys.modules[mod_name] = m
 
 try:
     from .fixtures import panel_test_utils

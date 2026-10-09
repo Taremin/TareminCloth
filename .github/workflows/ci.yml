@@ -68,6 +68,10 @@ jobs:
         shell: bash
         run: |
           python -m unittest discover -s tests/core -t .
+          python -m unittest discover -s tests/physics -t .
+          python -m unittest discover -s tests/collider -t .
+          python -m unittest discover -s tests/interactive -t .
+          python -m unittest discover -s tests/regression -t .
 
       - name: Check Documentation Integrity (Links, Mermaid, KaTeX)
         shell: bash

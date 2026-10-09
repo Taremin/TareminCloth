@@ -14,11 +14,13 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 import bpy
+import tests
 import taremin_cloth
 from taremin_cloth.ops.interactive import enter_isolated_view, exit_isolated_view
 from taremin_cloth.utils import drawing
 
 
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
 class TestInteractiveOptimization(unittest.TestCase):
 
     @classmethod

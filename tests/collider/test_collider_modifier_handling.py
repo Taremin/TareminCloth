@@ -18,6 +18,7 @@ if str(root_dir) not in sys.path:
 
 import bpy
 import mathutils
+import tests
 import taremin_cloth
 from taremin_cloth.engine.collider import (
     get_collider_eval_mesh,
@@ -28,6 +29,7 @@ from taremin_cloth.engine.collider import (
 from taremin_cloth.engine.runner import apply_fast_playback, restore_fast_playback
 
 
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
 class TestColliderModifierHandling(unittest.TestCase):
 
     @classmethod

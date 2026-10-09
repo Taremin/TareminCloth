@@ -204,7 +204,7 @@ impl GpuClothSimulator {
         // Pair統計は間引き可能 (既定毎フレーム)。飽和トリガーの粒度に影響する。
         let pair_stride = self.debug_recorder.record_options().pair_stats_stride.max(1);
         let seq = self.debug_recorder.next_frame_seq();
-        let pair = if self.enable_pair_cache && seq % pair_stride == 0 {
+        let pair = if self.enable_pair_cache && seq.is_multiple_of(pair_stride) {
             let (vt, ee, max_vt, max_ee) = self.get_pair_cache_stats();
             Some((vt, ee, vt >= max_vt || ee >= max_ee))
         } else {

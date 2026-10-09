@@ -12,11 +12,13 @@ if str(python_dir) not in sys.path:
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+import tests
 import taremin_cloth_core
 import taremin_cloth
 from tests.fixtures.panel_test_utils import render_panel
 
 
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
 class TestElasticGroups(unittest.TestCase):
     def setUp(self):
         taremin_cloth.register()

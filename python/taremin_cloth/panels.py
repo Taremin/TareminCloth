@@ -787,6 +787,12 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
                 self_sub.prop(settings, "enable_pair_cache_final_fallback", text=i18n.trans("Final Fallback"))
             elif settings.self_collision_algorithm == 'VERTEX_VERTEX':
                 self_sub.label(text=i18n.trans("Virtual Collider Vertices & Pure Sphere-Sphere SC"), icon='INFO')
+                from .engine.runner import is_virtual_sampling_clamped
+                if obj and is_virtual_sampling_clamped(obj.name):
+                    box_warn = self_sub.box()
+                    box_warn.alert = True
+                    box_warn.label(text=i18n.trans("Sampling Density Limited"), icon='ERROR')
+                    box_warn.label(text=i18n.trans("Thickness is too small for mesh size. Penetrations may occur."))
         l_col.separator()
         box_layer = l_col.box()
         box_layer.label(text=i18n.trans("Layer & Collision Hierarchy"), icon='OVERLAY')

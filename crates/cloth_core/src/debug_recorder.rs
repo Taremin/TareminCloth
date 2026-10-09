@@ -608,7 +608,7 @@ impl SimulationDebugRecorder {
         if use_lookahead {
             self.lookahead_left -= 1;
         }
-        let keep_full = (frame_index % stride == 0) || trigger || use_lookahead || force_full;
+        let keep_full = frame_index.is_multiple_of(stride) || trigger || use_lookahead || force_full;
         if trigger && self.options.lookahead > 0 {
             self.lookahead_left = self.options.lookahead;
         }

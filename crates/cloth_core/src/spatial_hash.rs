@@ -41,7 +41,7 @@ impl GpuSpatialHash {
         table_size: u32,
     ) -> Self {
         let device = &context.device;
-        let num_blocks = (table_size + 255) / 256;
+        let num_blocks = table_size.div_ceil(256);
 
         let cell_counts_init = vec![0u32; table_size as usize];
         let cell_counts_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -149,8 +149,8 @@ impl GpuSpatialHash {
         prof: &crate::simulation::profile::GpuProfiler,
         parent: Option<&wgpu_profiler::GpuProfilerQuery>,
     ) {
-        let num_blocks = (self.table_size + 255) / 256;
-        let vert_workgroups = (num_vertices + 255) / 256;
+        let num_blocks = self.table_size.div_ceil(256);
+        let vert_workgroups = num_vertices.div_ceil(256);
 
         // 1. カウンタクリア
         {
@@ -262,7 +262,7 @@ impl GpuEdgeSpatialHash {
         table_size: u32,
     ) -> Self {
         let device = &context.device;
-        let num_blocks = (table_size + 255) / 256;
+        let num_blocks = table_size.div_ceil(256);
 
         let cell_counts_init = vec![0u32; table_size as usize];
         let cell_counts_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -371,8 +371,8 @@ impl GpuEdgeSpatialHash {
         prof: &crate::simulation::profile::GpuProfiler,
         parent: Option<&wgpu_profiler::GpuProfilerQuery>,
     ) {
-        let num_blocks = (self.table_size + 255) / 256;
-        let edge_workgroups = (num_edges + 255) / 256;
+        let num_blocks = self.table_size.div_ceil(256);
+        let edge_workgroups = num_edges.div_ceil(256);
 
         // 1. カウンタクリア
         {
@@ -588,7 +588,7 @@ impl GpuColliderEdgeSpatialHash {
         }
 
         // 1. エッジバッファの再確保・書き込み
-        let req_edge_size = (edges.len() * std::mem::size_of::<GpuColliderEdge>()) as u64;
+        let req_edge_size = std::mem::size_of_val(edges) as u64;
         if self.collider_edges_buffer.size() < req_edge_size {
             self.collider_edges_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Collider Edge Buffer"),
@@ -622,7 +622,7 @@ impl GpuColliderEdgeSpatialHash {
             cell_size: self.cell_size,
             table_size: self.table_size,
             num_vertices: self.num_edges,
-            num_blocks: (self.table_size + 255) / 256,
+            num_blocks: self.table_size.div_ceil(256),
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
     }

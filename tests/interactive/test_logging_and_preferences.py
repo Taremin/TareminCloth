@@ -20,10 +20,12 @@ from taremin_cloth.preferences import (
     load_preferences_from_disk,
     apply_saved_preferences,
 )
+import tests
 from taremin_cloth.utils.logger import logger, set_log_level
 from taremin_cloth.operators import cache_rest_positions, restore_rest_positions
 
 
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
 class TestLoggingAndPreferences(unittest.TestCase):
 
     def setUp(self):

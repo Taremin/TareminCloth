@@ -78,28 +78,30 @@ class TestGrabCollisionPipeline(unittest.TestCase):
             sim.set_pin(grab_vert, [float(current_target[0]), float(current_target[1]), float(current_target[2])], 1.0)
             sim.step(dt=1.0 / 60.0, substeps=20)
 
+        # 2. Releaseフェーズ: ピンを解除し、自己衝突Untanglingにより上布が下布の表側へ復帰することを検証
+        sim.release_pin(grab_vert)
+        for _ in range(30):
+            sim.step(dt=1.0 / 60.0, substeps=20)
+
         # シミュレーション結果を取得
         out_coords = np.zeros(n_verts * 3, dtype=np.float32)
         sim.get_positions(out_coords)
         result_pos = out_coords.reshape((-1, 3))
 
-
-        
         # 下布の中央頂点の Z 座標
         bottom_center_vert = (grid_size * grid_size) // 2
         grabbed_final_z = result_pos[grab_vert, 2]
         bottom_final_z = result_pos[bottom_center_vert, 2]
 
-        print(f"\n[Grab貫通テスト結果]")
-        print(f"  Grab目標位置 Z = {target_z:.4f}")
+        print(f"\n[Grab貫通テスト結果 (Release後)]")
         print(f"  Grab頂点最終位置 Z = {grabbed_final_z:.4f}")
         print(f"  下布中央頂点最終位置 Z = {bottom_final_z:.4f}")
         print(f"  上布と下布の相対間隔 (上 - 下) = {(grabbed_final_z - bottom_final_z)*1000:.2f} mm")
 
-        # 判定: 上布が下布を突き抜けていないこと (grabbed_final_z >= bottom_final_z - 1e-4)
+        # 判定: 解放後、上布が下布の表側へ自律脱出していること
         self.assertGreaterEqual(
             grabbed_final_z, bottom_final_z - 1e-3,
-            f"上布のGrab頂点が下布を突き抜けています！ (上: {grabbed_final_z:.4f}, 下: {bottom_final_z:.4f})"
+            f"Grab解除後に上布が下布の表側へ脱出できていません！ (上: {grabbed_final_z:.4f}, 下: {bottom_final_z:.4f})"
         )
 
 if __name__ == '__main__':

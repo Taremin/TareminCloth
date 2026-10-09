@@ -44,6 +44,11 @@ pub struct SelfCollisionVvParams {
     pub _pad1: u32,
 }
 
+/// 仮想頂点サンプリングの安全上限キャップ
+pub const MAX_EDGE_SUBDIVISION_KE: u32 = 16;
+pub const MAX_FACE_SUBDIVISION_K: u32 = 16;
+pub const MAX_TOTAL_VIRTUAL_VERTICES: usize = 150_000;
+
 /// 仮想頂点サンプリング結果
 #[derive(Clone, Debug, Default)]
 pub struct VirtualMeshSampling {
@@ -53,6 +58,8 @@ pub struct VirtualMeshSampling {
     pub edge_particle_count: usize,
     /// 面内部に生成された仮想頂点数
     pub interior_particle_count: usize,
+    /// サンプリング密度が安全上限（キャップ）に達して制限されたか
+    pub is_clamped: bool,
 }
 
 /// メッシュの各エッジ・面に対して規則的なサンプリングを行い、仮想頂点群を生成する
@@ -75,6 +82,7 @@ pub fn generate_virtual_vertices(
     }
 
     let mut virtual_defs = Vec::new();
+    let mut is_clamped = false;
 
     // 1. 各エッジを含む代表三角形を検索するためのマップを構築
     // キー: 正規化エッジ (min(u, v), max(u, v)) -> (親face_idx, [a, b, c], 局所インデックス)
@@ -105,13 +113,21 @@ pub fn generate_virtual_vertices(
         let dz = pv[2] - pu[2];
         let length = (dx * dx + dy * dy + dz * dz).sqrt();
 
-        let ke = (length / target_spacing).ceil() as u32;
+        let mut ke = (length / target_spacing).ceil() as u32;
+        if ke > MAX_EDGE_SUBDIVISION_KE {
+            ke = MAX_EDGE_SUBDIVISION_KE;
+            is_clamped = true;
+        }
         if ke > 1 {
             // 親三角形内での u と v の位置を特定
             let u_slot = parent_tri.iter().position(|&x| x == u).unwrap();
             let v_slot = parent_tri.iter().position(|&x| x == v).unwrap();
 
             for m in 1..ke {
+                if virtual_defs.len() >= MAX_TOTAL_VIRTUAL_VERTICES {
+                    is_clamped = true;
+                    break;
+                }
                 let t = m as f32 / ke as f32; // u -> v への内分比
                 let mut bary = [0.0f32; 3];
                 bary[u_slot] = 1.0 - t;
@@ -131,6 +147,10 @@ pub fn generate_virtual_vertices(
     // 3. 面内部サンプリング（規則的重心グリッド）
     let mut interior_count = 0;
     for (f_idx, &tri) in faces.iter().enumerate() {
+        if virtual_defs.len() >= MAX_TOTAL_VIRTUAL_VERTICES {
+            is_clamped = true;
+            break;
+        }
         let [a, b, c] = tri;
         let pa = positions[a as usize];
         let pb = positions[b as usize];
@@ -141,11 +161,19 @@ pub fn generate_virtual_vertices(
         let l_ca = dist(pc, pa);
         let l_max = l_ab.max(l_bc).max(l_ca);
 
-        let k = (l_max / target_spacing).ceil() as u32;
+        let mut k = (l_max / target_spacing).ceil() as u32;
+        if k > MAX_FACE_SUBDIVISION_K {
+            k = MAX_FACE_SUBDIVISION_K;
+            is_clamped = true;
+        }
         if k >= 3 {
             // 面内部の点: i >= 1, j >= 1, i + j < k
             for i in 1..k {
                 for j in 1..(k - i) {
+                    if virtual_defs.len() >= MAX_TOTAL_VIRTUAL_VERTICES {
+                        is_clamped = true;
+                        break;
+                    }
                     let u = i as f32 / k as f32;
                     let v = j as f32 / k as f32;
                     let w = 1.0 - u - v;
@@ -166,6 +194,7 @@ pub fn generate_virtual_vertices(
         virtual_defs,
         edge_particle_count: edge_count,
         interior_particle_count: interior_count,
+        is_clamped,
     }
 }
 

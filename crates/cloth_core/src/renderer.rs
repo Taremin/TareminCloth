@@ -525,7 +525,7 @@ fn rasterize_voxels(
         let cy = v[1];
         let cz = v[2];
         let size = v[3];
-        let base_clr = [v[4] as f32, v[5] as f32, v[6] as f32];
+        let base_clr = [v[4], v[5], v[6]];
 
         let (c_s, c_z, valid) = project_point([cx, cy, cz], vp, w_f, h_f);
         if !valid || c_z <= 0.0 {
@@ -922,7 +922,7 @@ pub fn render_scene_to_png_file(
     }
 
     let file = File::create(path).map_err(|e| e.to_string())?;
-    let ref mut w = BufWriter::new(file);
+    let w = &mut BufWriter::new(file);
 
     let mut encoder = png::Encoder::new(w, result.width, result.height);
     encoder.set_color(png::ColorType::Rgb);

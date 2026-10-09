@@ -633,6 +633,8 @@ class ClothGuiClient:
             "shear_stiffness": float(cfg["shear_stiffness"]),
             "bending_stiffness": float(cfg["bending_stiffness"]),
             "solver_iterations": int(cfg["solver_iterations"]),
+            "substeps": int(getattr(settings, "substeps", 20)) if settings else 20,
+            "target_fps": float(scene.render.fps) if scene and hasattr(scene, "render") else 60.0,
             "sewing_priority_enabled": bool(cfg["sewing_priority_enabled"]),
             "sewing_priority_threshold": float(cfg["sewing_priority_threshold"]),
             "sewing_priority_merge_dist": float(cfg["sewing_priority_merge_dist"]),

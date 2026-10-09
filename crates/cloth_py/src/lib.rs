@@ -1381,9 +1381,24 @@ impl ClothSimulator {
             Some(sew_vec.as_slice())
         };
 
-        let inv_m_vec: Option<Vec<f32>> = inv_masses.map(|arr| arr.to_vec().unwrap());
-        let layer_id_vec: Option<Vec<u32>> = layer_ids.map(|arr| arr.to_vec().unwrap());
-        let thick_vec: Option<Vec<f32>> = thicknesses.map(|arr| arr.to_vec().unwrap());
+        let inv_m_vec: Option<Vec<f32>> = match inv_masses {
+            Some(arr) => Some(arr.to_vec().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("inv_massesの変換失敗: {e}"))
+            })?),
+            None => None,
+        };
+        let layer_id_vec: Option<Vec<u32>> = match layer_ids {
+            Some(arr) => Some(arr.to_vec().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("layer_idsの変換失敗: {e}"))
+            })?),
+            None => None,
+        };
+        let thick_vec: Option<Vec<f32>> = match thicknesses {
+            Some(arr) => Some(arr.to_vec().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("thicknessesの変換失敗: {e}"))
+            })?),
+            None => None,
+        };
 
         let ctx = GpuContext::get_or_init().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("GPU初期化失敗: {e}"))
@@ -1485,8 +1500,8 @@ impl ClothSimulator {
 
     /// 非同期実行された前フレームの頂点位置を回収する（成功時 True, 未実行/失敗時 False）
     fn fetch_positions<'py>(&mut self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<bool> {
-        let mut out_slice = unsafe { out_array.as_slice_mut()? };
-        let ok = self.simulator.fetch_positions_flat(&mut out_slice);
+        let out_slice = unsafe { out_array.as_slice_mut()? };
+        let ok = self.simulator.fetch_positions_flat(out_slice);
         Ok(ok)
     }
 
@@ -1504,8 +1519,8 @@ impl ClothSimulator {
     /// out_array の長さは (buffered_frame_count * num_vertices * 3) 以上である必要があります
     /// 戻り値: 取得したフレーム数
     fn fetch_buffered_positions<'py>(&mut self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<u32> {
-        let mut out_slice = unsafe { out_array.as_slice_mut()? };
-        let count = self.simulator.fetch_buffered_positions(&mut out_slice);
+        let out_slice = unsafe { out_array.as_slice_mut()? };
+        let count = self.simulator.fetch_buffered_positions(out_slice);
         Ok(count)
     }
 
@@ -1691,6 +1706,11 @@ impl ClothSimulator {
         self.simulator.num_virtual_vertices
     }
 
+    /// 仮想頂点サンプリングが安全上限（キャップ）で制限されたかを返す
+    fn is_virtual_sampling_clamped(&self) -> bool {
+        self.simulator.is_virtual_sampling_clamped()
+    }
+
     /// ペアキャッシュ詳細オプションを設定
     /// margin_mode: 0=Fixed(従来), 1=AutoVelocity(速度スイープ自動拡張)
     #[pyo3(signature = (max_vt_pairs=65536, max_ee_pairs=65536, margin_mode=1, safety_margin=0.005, horizon_scale=1.3, max_horizon=0.02))]
@@ -1743,8 +1763,8 @@ impl ClothSimulator {
 
     /// 頂点位置を NumPy フラット配列 (len = num_vertices * 3) に同期的に書き戻す
     fn get_positions<'py>(&self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<()> {
-        let mut out_slice = unsafe { out_array.as_slice_mut()? };
-        self.simulator.get_positions_flat(&mut out_slice);
+        let out_slice = unsafe { out_array.as_slice_mut()? };
+        self.simulator.get_positions_flat(out_slice);
         Ok(())
     }
 

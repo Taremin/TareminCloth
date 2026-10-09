@@ -18,6 +18,8 @@ def set_log_level(level_name: str):
     """
     ロガーの出力レベルを変更する ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
     """
+    if not isinstance(level_name, str):
+        return
     level = getattr(logging, level_name.upper(), logging.INFO)
     logger.setLevel(level)
     for h in logger.handlers:

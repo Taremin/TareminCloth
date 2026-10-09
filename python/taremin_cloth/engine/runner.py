@@ -231,6 +231,15 @@ def get_or_create_simulator(obj):
     return finalize_simulator_init(obj, sim, state)
 
 
+def is_virtual_sampling_clamped(obj_name: str) -> bool:
+    """指定オブジェクトの仮想頂点サンプリングが安全上限で制限されたかを返す"""
+    if obj_name in _simulators:
+        sim, _ = _simulators[obj_name]
+        if hasattr(sim, "is_virtual_sampling_clamped"):
+            return bool(sim.is_virtual_sampling_clamped())
+    return False
+
+
 def get_seam_partners(obj_name: str, vert_idx: int) -> list[int]:
     """オブジェクトの縫合クラスタマップから指定頂点のパートナー頂点一覧を取得する"""
     cluster_map = get_seam_cluster_map(obj_name)

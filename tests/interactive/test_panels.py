@@ -8,6 +8,7 @@ addon_dir = Path(__file__).parent.parent / "python"
 if str(addon_dir) not in sys.path:
     sys.path.insert(0, str(addon_dir))
 
+import tests
 import taremin_cloth
 from taremin_cloth.panels import (
     TAREMIN_CLOTH_PT_objects_panel,
@@ -17,6 +18,7 @@ from taremin_cloth.panels import (
 from tests.fixtures.panel_test_utils import render_panel, MockLayout
 
 
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
 class TestPanels(unittest.TestCase):
     """UIパネル描画およびテストユーティリティの動作検証テスト"""
 

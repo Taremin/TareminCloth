@@ -57,14 +57,14 @@ impl GpuClothSimulator {
         }
 
         let wg_size = self.workgroup_size;
-        let vert_workgroups = (self.num_vertices + wg_size - 1) / wg_size;
+        let vert_workgroups = self.num_vertices.div_ceil(wg_size);
         let num_pins = self.dynamic_pins.len() as u32;
-        let pin_workgroups = (num_pins + wg_size - 1) / wg_size;
+        let pin_workgroups = num_pins.div_ceil(wg_size);
         let has_colliders = !self.colliders.is_empty() || !self.mesh_triangles.is_empty() || self.enable_bone_sdf;
 
         if has_colliders {
             let num_mesh_triangles = self.mesh_triangles.len() as u32;
-            let num_clusters = if num_mesh_triangles > 0 { (num_mesh_triangles + 15) / 16 } else { 0 };
+            let num_clusters = if num_mesh_triangles > 0 { num_mesh_triangles.div_ceil(16) } else { 0 };
             let col_params = CollisionParams {
                 num_vertices: self.num_vertices,
                 num_colliders: self.colliders.len() as u32,
@@ -116,7 +116,7 @@ impl GpuClothSimulator {
             // 0. 縫合自然長の時間進行 (サブステップ毎に1回。反復数・衝突モード非依存)
             if self.num_sewing_constraints > 0 {
                 let sew_workgroups =
-                    (self.num_sewing_constraints + wg_size - 1) / wg_size;
+                    self.num_sewing_constraints.div_ceil(wg_size);
                 let query = self.profiler.begin_pass("sew_shrink", encoder);
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Sew Shrink Pass"),
@@ -183,7 +183,7 @@ impl GpuClothSimulator {
                 for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
                     if count > 0 {
                         cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
-                        cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                        cpass.dispatch_workgroups(count.div_ceil(wg_size), 1, 1);
                     }
                 }
 
@@ -193,7 +193,7 @@ impl GpuClothSimulator {
                     for (color_idx, &count) in self.bend_color_counts.iter().enumerate() {
                         if count > 0 {
                             cpass.set_bind_group(0, &self.bending_bind_groups[color_idx], &[]);
-                            cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                            cpass.dispatch_workgroups(count.div_ceil(wg_size), 1, 1);
                         }
                     }
                 }
@@ -257,7 +257,7 @@ impl GpuClothSimulator {
             });
             cpass.set_pipeline(self.shared.ensure_edge());
             cpass.set_bind_group(0, &self.edge_collision_bind_group, &[]);
-            let edge_workgroups = (self.num_edges + wg_size - 1) / wg_size;
+            let edge_workgroups = self.num_edges.div_ceil(wg_size);
             cpass.dispatch_workgroups(edge_workgroups, 1, 1);
             drop(cpass);
             self.profiler.end_pass(encoder, query);
@@ -301,7 +301,7 @@ impl GpuClothSimulator {
                     for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
                         if count > 0 {
                             cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
-                            cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                            cpass.dispatch_workgroups(count.div_ceil(wg_size), 1, 1);
                         }
                     }
                 }
@@ -325,7 +325,7 @@ impl GpuClothSimulator {
             for (color_idx, &count) in self.sew_color_counts.iter().enumerate() {
                 if count > 0 {
                     cpass.set_bind_group(0, &self.sewing_bind_groups[color_idx], &[]);
-                    cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                    cpass.dispatch_workgroups(count.div_ceil(wg_size), 1, 1);
                 }
             }
             drop(cpass);
@@ -374,7 +374,7 @@ impl GpuClothSimulator {
 
                     let mut max_d = 0.0f32;
                     if self.prev_step_positions.len() == n_verts {
-                        for (chunk, prev) in floats.chunks_exact(3).zip(&self.prev_step_positions) {
+                        for (chunk, prev) in floats.as_chunks::<3>().0.iter().zip(&self.prev_step_positions) {
                             let dx = (chunk[0] - prev[0]).abs();
                             let dy = (chunk[1] - prev[1]).abs();
                             let dz = (chunk[2] - prev[2]).abs();
@@ -425,7 +425,7 @@ impl GpuClothSimulator {
                     if self.cached_cpu_positions.len() != n_verts {
                         self.cached_cpu_positions.resize(n_verts, [0.0; 3]);
                     }
-                    for (i, chunk) in floats.chunks_exact(3).enumerate() {
+                    for (i, chunk) in floats.as_chunks::<3>().0.iter().enumerate() {
                         let p = [chunk[0], chunk[1], chunk[2]];
                         self.prev_step_positions[i] = p;
                         self.cached_cpu_positions[i] = p;
@@ -664,7 +664,7 @@ impl GpuClothSimulator {
     /// 頂点座標抽出パスをエンコード (GpuVertex から連続 f32 座標配列へ抽出)
     pub(crate) fn encode_extract_positions(&self, encoder: &mut wgpu::CommandEncoder) {
         let wg_size = self.workgroup_size as u64;
-        let vert_workgroups = ((self.num_vertices as u64) + wg_size - 1) / wg_size;
+        let vert_workgroups = (self.num_vertices as u64).div_ceil(wg_size);
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Extract Positions Pass"),
             timestamp_writes: None,
@@ -1221,7 +1221,7 @@ impl GpuClothSimulator {
         if self.solver_mode == 1 {
             // Atomic Jacobi モード (全エッジを単一ディスパッチで一斉評価 + 頂点変位平均適用)
             if self.num_distance_constraints > 0 {
-                let edge_workgroups = (self.num_distance_constraints + wg_size - 1) / wg_size;
+                let edge_workgroups = self.num_distance_constraints.div_ceil(wg_size);
                 cpass.set_pipeline(&self.shared.ensure_atomic().solve);
                 cpass.set_bind_group(0, &self.distance_atomic_bind_group, &[]);
                 cpass.dispatch_workgroups(edge_workgroups, 1, 1);
@@ -1235,7 +1235,7 @@ impl GpuClothSimulator {
             for (color_idx, &count) in self.dist_color_counts.iter().enumerate() {
                 if count > 0 {
                     cpass.set_bind_group(0, &self.distance_bind_groups[color_idx], &[]);
-                    cpass.dispatch_workgroups((count + wg_size - 1) / wg_size, 1, 1);
+                    cpass.dispatch_workgroups(count.div_ceil(wg_size), 1, 1);
                 }
             }
         }
@@ -1261,7 +1261,7 @@ impl GpuClothSimulator {
             // 仮想頂点サンプリング + 純粋球対球 (VERTEX_VERTEX) 方式
             // =========================================================================
             let total_particles = self.num_vertices + self.num_virtual_vertices;
-            let total_workgroups = (total_particles + wg_size - 1) / wg_size;
+            let total_workgroups = total_particles.div_ceil(wg_size);
 
             // 1. 仮想頂点の順方向補間パス (親頂点の現在座標から仮想頂点座標を更新)
             if self.num_virtual_vertices > 0 {
@@ -1270,9 +1270,9 @@ impl GpuClothSimulator {
                     label: Some(&format!("{prefix} Virtual Forward Pass")),
                     timestamp_writes: self.profiler.pass_writes(&query),
                 });
-                cpass.set_pipeline(&self.shared.ensure_virtual_forward());
+                cpass.set_pipeline(self.shared.ensure_virtual_forward());
                 cpass.set_bind_group(0, &self.virt_forward_bind_group, &[]);
-                let virt_workgroups = (self.num_virtual_vertices + wg_size - 1) / wg_size;
+                let virt_workgroups = self.num_virtual_vertices.div_ceil(wg_size);
                 cpass.dispatch_workgroups(virt_workgroups, 1, 1);
                 drop(cpass);
                 self.profiler.end_pass(encoder, query);
@@ -1294,7 +1294,7 @@ impl GpuClothSimulator {
                     label: Some(&format!("{prefix} Self Collision VV Pass")),
                     timestamp_writes: self.profiler.pass_writes(&query),
                 });
-                cpass.set_pipeline(&self.shared.ensure_self_collision_vv());
+                cpass.set_pipeline(self.shared.ensure_self_collision_vv());
                 cpass.set_bind_group(0, &self.self_collision_vv_bind_group, &[]);
                 cpass.dispatch_workgroups(total_workgroups, 1, 1);
                 drop(cpass);
@@ -1380,8 +1380,8 @@ impl GpuClothSimulator {
             // (DispatchIndirect) を避けた直接ディスパッチで足りる。
             let vt_slots = self.num_vertices * self.pair_cache_quota_vt.clamp(1, super::PAIR_QUOTA_MAX);
             let ee_slots = self.num_vertices * self.pair_cache_quota_ee.clamp(1, super::PAIR_QUOTA_MAX);
-            let vt_workgroups = ((vt_slots + 63) / 64).max(1);
-            let ee_workgroups = ((ee_slots + 63) / 64).max(1);
+            let vt_workgroups = vt_slots.div_ceil(64).max(1);
+            let ee_workgroups = ee_slots.div_ceil(64).max(1);
 
             {
                 // V-T ペア解決 (計測のため E-E とパスを分ける。処理内容は同一)
@@ -1449,7 +1449,7 @@ impl GpuClothSimulator {
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().solve_ee);
                 cpass.set_bind_group(0, &self.self_collision_ee_bind_group, &[]);
-                let edge_workgroups = (self.num_edges + wg_size - 1) / wg_size;
+                let edge_workgroups = self.num_edges.div_ceil(wg_size);
                 cpass.dispatch_workgroups(edge_workgroups, 1, 1);
                 drop(cpass);
                 self.profiler.end_pass(encoder, query);
