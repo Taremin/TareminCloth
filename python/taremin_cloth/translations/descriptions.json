@@ -267,6 +267,7 @@
   "Smooth falloff",
   "Smoothstep easing (Recommended: suppresses shocks)",
   "Solve collider collision inside solver iterations (Coupled XPBD). Turning off solves outside loop once per substep for higher performance",
+  "Solve self-collision inside every solver iteration without finishing relaxation",
   "Sphere collider",
   "Spherical falloff",
   "Split into 2 triangles along wrinkle ridge lines",

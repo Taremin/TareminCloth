@@ -232,7 +232,9 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
         - **協調収束設計 (Coupled Modes)**:
           - `OFF` モード（推奨標準デフォルト）: 物理質量化に伴い標準推奨。Post-Relaxationを行わず、厚み反発の押し広げ変位を維持してシワの自縛ロック（自己交差トラップ）を完全に防止。Grab解放後の自然解消を実現。
           - `RELAXATION` モード: 自己衝突直後に距離拘束および縫合拘束を2反復再適用（Post-Relaxation）。対向布の強い押し付け時にエッジ過剰伸長を約5割抑制。
-          - `FULL_COUPLED` モード（高精度設定）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和（距離拘束＋縫合拘束）を適用してエッジ伸びを約7割抑制（多重プリーツスカート等向け）。
+          - `PER_ITERATION` モード（コア `coupled_mode = 2`）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げ緩和は行わない。`FULL_COUPLED` から仕上げ緩和を除いた構成で、独立GUI（`Per-Iteration`）とBlender（`PER_ITERATION`）から選択できる。
+          - `FULL_COUPLED` モード（高精度設定。コア `coupled_mode = 3`）: 反復ループの各回で自己衝突を同調ディスパッチし、仕上げに1回緩和（距離拘束＋縫合拘束）を適用してエッジ伸びを約7割抑制（多重プリーツスカート等向け）。
+          - コアの `coupled_mode` 値と動作: `0`=外側のみ、`1`=外側+仕上げ緩和、`2`=反復内のみ、`3`=反復内+仕上げ緩和。Blenderの列挙の保存値（`OFF=0 / RELAXATION=1 / FULL_COUPLED=2 / PER_ITERATION=3`）とは体系が異なり、`coupled_mode_from_settings` が変換する。
          - **レイヤー衝突階層と Face Attribute (Layer Hierarchy & Untangling)**:
            - **階層番号 (`layer_id: u32`)**: 頂点ごとに保持され、重ね着やレイヤードスカートの内外関係（0=最内層、1, 2...=外層）を決定。
            - **自律的脱出 (Untangling)**: 自己衝突シェーダー内で $`v_i.\text{layer-id} > v_j.\text{layer-id}`$ を検知した場合、内側層の表側法線ベクトル方向へ外側層を優先的に押し戻し、複雑な挟み込みや交差からの自律的脱出を実現。
@@ -964,10 +966,11 @@ XPBD物理シミュレーションにおいて、頂点質量とコンプライ�
 - **Edge Collision (E-E) (チェックボックス)**: エッジ同士の交差防止（Edge-Centric E-E Directパス）の有効化/無効化（Direct / Pair Cache時のみ）。
 - **Untangling (チェックボックス)**: レイヤー階層（`layer_id`）に基づく外層への自動押し出し機能の切り替え（Direct / Pair Cache時のみ）。
 - **Relief Factor (スライダー: 0.05 〜 1.00)**: 自己衝突変位の反復あたり適用緩和係数。
-- **Coupled Mode (ComboBox)**:
-  - `OFF`: 緩和なし（標準推奨・自縛ロック防止）
-  - `Relaxation`: 自己衝突後に距離拘束を再適用（対向押し付け時の過剰伸長抑制）
-  - `Full Coupled`: 各反復で自己衝突と距離拘束を同調解決（多重プリーツ等向け高精度設定）
+- **Coupled Mode (ボタン4択: OFF / Relaxation / Per-Iteration / Full)**: 値と表示名の対応は `crates/cloth_gui/src/coupled_mode.rs` の `COUPLED_MODES` に集約（`0..=3` はコアの `coupled_mode` と同値）。
+  - `OFF` (0): 緩和なし（標準推奨・自縛ロック防止）
+  - `Relaxation` (1): 自己衝突後に距離拘束を再適用（対向押し付け時の過剰伸長抑制）
+  - `Per-Iteration` (2): 各反復で自己衝突を同調解決し、仕上げ緩和は行わない
+  - `Full` (3): 各反復で自己衝突を同調解決し、仕上げ緩和も行う（Blenderの `FULL_COUPLED` と同じ。多重プリーツ等向け高精度設定）
 
 変更は `sim.set_enable_self_collision()`、`sim.set_self_collision_algorithm()`、`sim.set_enable_edge_collision()`、`sim.set_self_collision_options()`、`sim.set_coupled_self_collision_options()` を介して即座にGPU物理コアへ送信され、シミュレーションをリセットすることなく挙動差分を確認できます。
 

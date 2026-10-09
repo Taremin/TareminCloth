@@ -1,8 +1,9 @@
 """
 Coupled自己衝突 アプローチ別 性能・品質比較ベンチマークスクリプト
-1. 現行方式 (反復外自己衝突)
-2. Post-Self-Collision Relaxation (自己衝突後に距離拘束を協調再解決: 1, 2, 4 iters)
-3. 反復内実行 (Coupled 参考上限: 各反復で自己衝突を実行)
+1. OFF (反復外自己衝突)
+2. RELAXATION / Post-Relaxation (自己衝突後に距離拘束を協調再解決: 1, 2, 4 iters)
+3. PER_ITERATION / Per-Iteration (イテレーションごと実行 / 仕上げ緩和なし)
+4. FULL_COUPLED / Full (イテレーションごと実行 + 仕上げ緩和: 1, 2 iters)
 におけるエッジ伸長率（品質）とフレーム時間・FPS（パフォーマンス）を定量比較する。
 """
 
@@ -107,13 +108,13 @@ def run_benchmarks():
     print("=" * 88)
 
     modes = [
-        ("① 現行方式 (反復外自己衝突)", 0, 0),
-        ("② Post-Relaxation (1 iter)", 1, 1),
-        ("③ Post-Relaxation (2 iters)", 1, 2),
-        ("④ Post-Relaxation (4 iters)", 1, 4),
-        ("⑤ 反復内実行 (Coupled 単体)", 2, 0),
-        ("⑥ ハイブリッド (反復内 + Relax 1)", 3, 1),
-        ("⑦ ハイブリッド (反復内 + Relax 2)", 3, 2),
+        ("① OFF (反復外自己衝突)", 0, 0),
+        ("② RELAXATION (Post-Relax 1 iter)", 1, 1),
+        ("③ RELAXATION (Post-Relax 2 iters)", 1, 2),
+        ("④ RELAXATION (Post-Relax 4 iters)", 1, 4),
+        ("⑤ PER_ITERATION (反復内単体)", 2, 0),
+        ("⑥ FULL_COUPLED (反復内 + Relax 1)", 3, 1),
+        ("⑦ FULL_COUPLED (反復内 + Relax 2)", 3, 2),
     ]
 
     # -------------------------------------------------------------

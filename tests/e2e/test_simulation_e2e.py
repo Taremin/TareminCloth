@@ -1208,6 +1208,36 @@ class TestSimulationE2E(unittest.TestCase):
             if cloth_obj.name in bpy.data.objects:
                 bpy.data.objects.remove(cloth_obj, do_unlink=True)
 
+    def test_coupled_mode_enum_numbers_and_core_mapping(self):
+        """Coupled Mode列挙の保存値(番号)が既存.blendと互換であり、コアのmode値へ正しく変換されること"""
+        from taremin_cloth.engine.simconfig import coupled_mode_from_settings
+
+        bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1.0, location=(0, 0, 0))
+        cloth_obj = bpy.context.active_object
+        cloth_obj.taremin_cloth.is_cloth = True
+        settings = cloth_obj.taremin_cloth
+
+        try:
+            # 既存 .blend で保存済みの番号 (OFF=0 / RELAXATION=1 / FULL_COUPLED=2) が不変であること。
+            # PER_ITERATION を後から追加した新規項目として 3 を割り当てている。
+            items = settings.bl_rna.properties["coupled_self_collision_mode"].enum_items
+            numbers = {item.identifier: item.value for item in items}
+            self.assertEqual(
+                numbers,
+                {"OFF": 0, "RELAXATION": 1, "FULL_COUPLED": 2, "PER_ITERATION": 3},
+            )
+
+            # 各列挙値がコアのmode値 (dispatch.rs の分岐) へ変換されること
+            expected_core_mode = {"OFF": 0, "RELAXATION": 1, "PER_ITERATION": 2, "FULL_COUPLED": 3}
+            for identifier, core_mode in expected_core_mode.items():
+                settings.coupled_self_collision_mode = identifier
+                self.assertEqual(settings.coupled_self_collision_mode, identifier)
+                mode, _relax = coupled_mode_from_settings(settings)
+                self.assertEqual(mode, core_mode, msg=identifier)
+        finally:
+            if cloth_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(cloth_obj, do_unlink=True)
+
     def test_save_as_shape_key_e2e(self):
         """シミュレーション変形形状を別オブジェクトのシェイプキーとして保存・蓄積するE2Eテスト"""
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=2, y_subdivisions=2, size=1.0)

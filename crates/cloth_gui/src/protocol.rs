@@ -78,7 +78,7 @@ pub struct GuiMeshTriangleData {
 pub struct GuiSelfCollisionData {
     pub enabled: bool,
     #[serde(default = "default_coupled_mode")]
-    pub coupled_mode: u32, // 0: OFF, 1: RELAXATION, 3: FULL_COUPLED
+    pub coupled_mode: u32, // 0: OFF, 1: RELAXATION, 2: PER_ITERATION, 3: FULL_COUPLED
     #[serde(default = "default_post_relax")]
     pub post_relaxation_iters: u32,
     #[serde(default = "default_relief_factor")]
@@ -464,6 +464,14 @@ mod tests {
         assert_eq!(d.self_collision_algorithm, 2);
         assert!(!d.coupled_collider);
         assert_eq!(d.ee_substep_interval, 1);
+        assert_eq!(d.coupled_mode, 3);
+
+        // mode 2 (PER_ITERATION) が往復で欠落・変換されないこと
+        let mut sc2 = d.clone();
+        sc2.coupled_mode = 2;
+        let s2 = serde_json::to_string(&sc2).unwrap();
+        let d2: GuiSelfCollisionData = serde_json::from_str(&s2).unwrap();
+        assert_eq!(d2.coupled_mode, 2);
     }
 }
 

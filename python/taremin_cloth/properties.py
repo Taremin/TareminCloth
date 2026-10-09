@@ -530,9 +530,12 @@ class TareminClothObjectSettings(PropertyGroup):
         name="Coupled Mode",
         description="Coupled convergence mode for self-collision and distance constraints",
         items=[
-            ('OFF', "Off (Wrinkle-Safe)", "Traditional self-collision without post-relaxation; prevents wrinkle locking during grab and deep folding"),
-            ('RELAXATION', "Relaxation (Anti-Stretch)", "Re-apply distance constraints after collision; suppresses stretching under heavy surface pressing"),
-            ('FULL_COUPLED', "Full Coupled (High Quality)", "Coupled solve inside loop with finishing relaxation"),
+            # 第5要素は保存値。既存 .blend との互換のため OFF=0 / RELAXATION=1 / FULL_COUPLED=2 を維持し、
+            # 新規の PER_ITERATION は 3 とする (コアの mode 値とは別の番号体系。変換は coupled_mode_from_settings)
+            ('OFF', "Off (Wrinkle-Safe)", "Traditional self-collision without post-relaxation; prevents wrinkle locking during grab and deep folding", '', 0),
+            ('RELAXATION', "Relaxation (Anti-Stretch)", "Re-apply distance constraints after collision; suppresses stretching under heavy surface pressing", '', 1),
+            ('PER_ITERATION', "Per-Iteration (No Relaxation)", "Solve self-collision inside every solver iteration without finishing relaxation", '', 3),
+            ('FULL_COUPLED', "Full Coupled (High Quality)", "Coupled solve inside loop with finishing relaxation", '', 2),
         ],
         default='OFF',
     )

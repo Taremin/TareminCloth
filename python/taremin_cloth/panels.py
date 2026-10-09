@@ -751,7 +751,8 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
             self_sub.prop(settings, "self_collision_max_displacement_ratio", text=i18n.trans("Max Step Ratio"))
             self_sub.prop(settings, "self_collision_max_iterations", text=i18n.trans("Search Limit"))
             self_sub.prop(settings, "coupled_self_collision_mode", text=i18n.trans("Coupled Mode"))
-            if settings.coupled_self_collision_mode != 'OFF':
+            # 仕上げ緩和を行うのは RELAXATION / FULL_COUPLED のみ (OFF / PER_ITERATION では未使用)
+            if settings.coupled_self_collision_mode in ('RELAXATION', 'FULL_COUPLED'):
                 self_sub.prop(settings, "post_collision_relaxation_iters", text=i18n.trans("Relax Steps"))
             self_sub.prop(settings, "self_collision_substep_interval", text=i18n.trans("Substep Interval"))
 

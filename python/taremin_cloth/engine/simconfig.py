@@ -101,10 +101,16 @@ def coupled_mode_from_settings(settings: Any) -> Tuple[int, int]:
     """coupled_self_collision_mode設定を (mode_int, relax_iters) に変換する。
 
     params.py / gui_client.py に重複していた同一分岐の一本化。
+
+    対応表 (コアの mode 値。dispatch.rs の分岐と一致):
+        OFF -> 0 / RELAXATION -> 1 / PER_ITERATION -> 2 / FULL_COUPLED -> 3
+    PER_ITERATION は仕上げ緩和を行わないため、緩和反復数は 0 を返す。
     """
     mode_str = _get(settings, "coupled_self_collision_mode", "RELAXATION")
     if mode_str == "OFF":
         return 0, 0
+    if mode_str == "PER_ITERATION":
+        return 2, 0
     try:
         relax_iters = int(_get(settings, "post_collision_relaxation_iters", 2))
     except (TypeError, ValueError):

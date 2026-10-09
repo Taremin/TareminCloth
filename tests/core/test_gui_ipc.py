@@ -286,7 +286,7 @@ class TestGuiIpc(unittest.TestCase):
                 "substeps": 20,
                 "self_collision": {
                     "enabled": True,
-                    "coupled_mode": 2, # FULL_COUPLED
+                    "coupled_mode": 3, # FULL_COUPLED
                     "post_relaxation_iters": 3,
                     "relief_factor": 0.3,
                     "max_displacement_ratio": 0.2,

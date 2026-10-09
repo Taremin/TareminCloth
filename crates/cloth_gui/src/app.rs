@@ -13,6 +13,7 @@ use cloth_core::simulation::GpuClothSimulator;
 use cloth_core::GpuContext;
 
 use crate::camera::OrbitCamera;
+use crate::coupled_mode::COUPLED_MODES;
 use crate::demo_scenes::DemoSceneType;
 use crate::mesh_render::MeshRenderer;
 use crate::protocol::{GuiCommand, GuiResponse, SceneInitData};
@@ -1138,17 +1139,16 @@ impl GuiApp {
                         any_param_changed = true;
                     }
 
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Coupled Mode:");
                         let prev = self.coupled_mode;
-                        if ui.selectable_label(self.coupled_mode == 0, "OFF").clicked() {
-                            self.coupled_mode = 0;
-                        }
-                        if ui.selectable_label(self.coupled_mode == 1, "Relaxation").clicked() {
-                            self.coupled_mode = 1;
-                        }
-                        if ui.selectable_label(self.coupled_mode == 2, "Full").clicked() {
-                            self.coupled_mode = 2;
+                        for (value, label, hint) in COUPLED_MODES {
+                            if ui.selectable_label(self.coupled_mode == value, label)
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                self.coupled_mode = value;
+                            }
                         }
                         if self.coupled_mode != prev {
                             sc_coupled_changed = true;

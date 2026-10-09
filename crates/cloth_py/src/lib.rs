@@ -1569,7 +1569,7 @@ impl ClothSimulator {
     }
 
     /// Coupled自己衝突モードと緩和イテレーション数を設定
-    /// mode: 0: 通常(反復外), 1: Post-Relaxation, 2: 反復内実行
+    /// mode: 0: 外側のみ, 1: 外側+Post-Relaxation, 2: 反復内のみ, 3: 反復内+Post-Relaxation
     /// relaxation_iters: Post-Relaxation時の距離拘束反復回数
     #[pyo3(signature = (mode=0, relaxation_iters=1))]
     fn set_coupled_self_collision_options(&mut self, mode: u32, relaxation_iters: u32) {

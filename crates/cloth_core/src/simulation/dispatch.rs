@@ -212,7 +212,7 @@ impl GpuClothSimulator {
                 // mode 2 または 3: 反復ループの各回で自己衝突を実行 (Coupled 同調解決)
                 if should_solve_self_collision && (self.coupled_self_collision_mode == 2 || self.coupled_self_collision_mode == 3) {
                     let need_rebuild = sub_idx == 0;
-                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "In-Loop", need_rebuild, is_last_substep, should_run_ee);
+                    self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Per-Iteration", need_rebuild, is_last_substep, should_run_ee);
                 }
             }
 

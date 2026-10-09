@@ -10,6 +10,7 @@ mod camera;
 mod mesh_render;
 mod demo_scenes;
 mod app;
+mod coupled_mode;
 
 use cloth_core::mesh::ClothMesh;
 use cloth_core::simulation::GpuClothSimulator;

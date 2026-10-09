@@ -166,6 +166,11 @@ class TestSimconfigSync(unittest.TestCase):
         self.assertEqual(self.sc.coupled_mode_from_settings(s), (1, 2))
         s = make_settings(coupled_self_collision_mode="RELAXATION", post_collision_relaxation_iters=4)
         self.assertEqual(self.sc.coupled_mode_from_settings(s), (1, 4))
+        # PER_ITERATION は仕上げ緩和なし: relax_iters の指定に関わらず (2, 0)
+        s = make_settings(coupled_self_collision_mode="PER_ITERATION", post_collision_relaxation_iters=5)
+        self.assertEqual(self.sc.coupled_mode_from_settings(s), (2, 0))
+        s = make_settings(coupled_self_collision_mode="PER_ITERATION", post_collision_relaxation_iters=0)
+        self.assertEqual(self.sc.coupled_mode_from_settings(s), (2, 0))
 
     def test_signature_sensitivity(self):
         """全Liveキーの変更が署名に反映されること"""

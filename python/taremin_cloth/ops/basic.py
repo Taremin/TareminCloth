@@ -14,6 +14,7 @@ from ..engine.cache import (
 )
 from ..utils import topology
 from ..utils.logger import logger
+from ..utils.view3d import tag_redraw_view3d, stop_animation
 from ..properties import BoolProperty, StringProperty, EnumProperty
 from .. import i18n
 
