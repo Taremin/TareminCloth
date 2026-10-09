@@ -434,10 +434,6 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             box_selected.label(text=f"{i18n.trans('Selected:')} {obj.name}", icon='OBJECT_DATA')
             col_sel = box_selected.column(align=True)
             col_sel.prop(settings, "enabled", text=i18n.trans("Simulation Active"), icon='PHYSICS')
-            if is_interactive_running():
-                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Stop Interactive Mode"), icon='CANCEL', depress=True)
-            else:
-                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
             row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
             col_sel.operator("taremin_cloth.save_as_shape_key", text=i18n.trans("Save as Shape Key"), icon='SHAPEKEY_DATA')
@@ -547,10 +543,6 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             box_selected.label(text=f"{i18n.trans('Selected:')} {obj.name}", icon='OBJECT_DATA')
             col_sel = box_selected.column(align=True)
             col_sel.prop(settings, "enabled", text=i18n.trans("Simulation Active"), icon='PHYSICS')
-            if is_interactive_running():
-                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Stop Interactive Mode"), icon='CANCEL', depress=True)
-            else:
-                col_sel.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
             row_sel = col_sel.row(align=True)
             row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
             op_clr = row_sel.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply Rest"), icon='CHECKMARK')

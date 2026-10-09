@@ -94,6 +94,8 @@ class TestPanels(unittest.TestCase):
         # 主要オペレーターの存在確認
         self.assertIn("taremin_cloth.toggle_cloth", operators)
         self.assertIn("taremin_cloth.interactive", operators)
+        # interactive ボタンが1つだけ描画され、二重描画（重複）されていないことを検証
+        self.assertEqual(operators.count("taremin_cloth.interactive"), 1)
         self.assertIn("taremin_cloth.reset_selected", operators)
         self.assertIn("taremin_cloth.apply_rest_shape", operators)
         self.assertIn("taremin_cloth.save_as_shape_key", operators)
@@ -150,6 +152,21 @@ class TestPanels(unittest.TestCase):
         self.assertIn("enable_edge_collision", props_col)
         self.assertIn("edge_margin_scale", props_col)
         self.assertIn("edge_margin_offset", props_col)
+
+    def test_main_panel_cloth_enabled_simple_mode(self):
+        """Cloth が有効な状態での簡単モード (Simple Mode) のメインパネル描画テスト"""
+        bpy.context.scene.taremin_cloth_ui_mode = 'SIMPLE'
+        self.obj.taremin_cloth.is_cloth = True
+
+        layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
+        operators = layout.get_operators()
+
+        # 主要オペレーターの存在確認および重複防止の検証
+        self.assertIn("taremin_cloth.toggle_cloth", operators)
+        self.assertIn("taremin_cloth.interactive", operators)
+        self.assertEqual(operators.count("taremin_cloth.interactive"), 1)
+        self.assertIn("taremin_cloth.reset_selected", operators)
+        self.assertIn("taremin_cloth.save_as_shape_key", operators)
 
     # -------------------------------------------------------------------------
     # GPU Collider パネル (TAREMIN_CLOTH_PT_collider_panel) のテスト
