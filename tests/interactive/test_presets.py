@@ -49,6 +49,8 @@ class TestPresets(unittest.TestCase):
         self.assertIn("Silk (絹)", BUILTIN_FABRIC_PRESETS)
         self.assertIn("Cotton (木綿)", BUILTIN_FABRIC_PRESETS)
         self.assertIn("Leather (革)", BUILTIN_FABRIC_PRESETS)
+        self.assertIn("Wool (ウール)", BUILTIN_FABRIC_PRESETS)
+        self.assertIn("Polyester (ポリエステル)", BUILTIN_FABRIC_PRESETS)
         for name, params in BUILTIN_FABRIC_PRESETS.items():
             self.assertIn("tension_stiffness", params)
             self.assertIn("bending_stiffness", params)
@@ -97,6 +99,22 @@ class TestPresets(unittest.TestCase):
         self.assertAlmostEqual(self.obj.taremin_cloth.bending_stiffness, 200.0)
         self.assertAlmostEqual(self.obj.taremin_cloth.tension_stiffness, 8000.0)
         self.assertAlmostEqual(self.obj.taremin_cloth.thickness, 0.015)
+
+        # Wool を適用
+        res = bpy.ops.taremin_cloth.apply_preset(category='fabric', preset_name="Wool (ウール)")
+        self.assertEqual(res, {'FINISHED'})
+        self.assertEqual(self.obj.taremin_cloth.last_fabric_preset, "Wool (ウール)")
+        self.assertAlmostEqual(self.obj.taremin_cloth.bending_stiffness, 50.0)
+        self.assertAlmostEqual(self.obj.taremin_cloth.tension_stiffness, 2500.0)
+        self.assertAlmostEqual(self.obj.taremin_cloth.thickness, 0.008)
+
+        # Polyester を適用
+        res = bpy.ops.taremin_cloth.apply_preset(category='fabric', preset_name="Polyester (ポリエステル)")
+        self.assertEqual(res, {'FINISHED'})
+        self.assertEqual(self.obj.taremin_cloth.last_fabric_preset, "Polyester (ポリエステル)")
+        self.assertAlmostEqual(self.obj.taremin_cloth.bending_stiffness, 8.0)
+        self.assertAlmostEqual(self.obj.taremin_cloth.tension_stiffness, 3000.0)
+        self.assertAlmostEqual(self.obj.taremin_cloth.thickness, 0.003)
 
     def test_apply_simulation_preset(self):
         """シミュレーション品質プリセットの適用オペレーターの動作確認"""
@@ -256,6 +274,68 @@ class TestPresets(unittest.TestCase):
         finally:
             if cube.name in bpy.data.objects:
                 bpy.data.objects.remove(cube, do_unlink=True)
+
+    def test_reset_cloth_settings(self):
+        """布設定の一括初期化オペレーターの動作およびユーザー定義データの保護検証"""
+        props = self.obj.taremin_cloth
+        props.is_cloth = True
+
+        # デフォルトから値を変更
+        props.tension_stiffness = 9999.0
+        props.substeps = 55
+        props.enable_self_collision = True
+        props.self_collision_relief_factor = 0.5
+        props.pin_vertex_group = "PinGroup"
+        item = props.elastic_groups.add()
+        item.name = "ElasticGroup"
+        item.scale = 0.8
+
+        # 1. FABRIC スコープ初期化
+        res = bpy.ops.taremin_cloth.reset_cloth_settings(scope='FABRIC')
+        self.assertEqual(res, {'FINISHED'})
+        self.assertAlmostEqual(props.tension_stiffness, 1500.0)  # 木綿基準デフォルト
+        self.assertEqual(props.substeps, 55)  # シミュレーションは未変更
+        self.assertTrue(props.enable_self_collision)  # 衝突設定は未変更
+        self.assertEqual(props.pin_vertex_group, "PinGroup")  # ピン保護
+
+        # 2. SIMULATION スコープ初期化
+        res = bpy.ops.taremin_cloth.reset_cloth_settings(scope='SIMULATION')
+        self.assertEqual(res, {'FINISHED'})
+        self.assertEqual(props.substeps, 20)  # デフォルトに復元
+        self.assertTrue(props.enable_self_collision)  # 衝突は未変更
+
+        # 3. COLLISION スコープ初期化
+        res = bpy.ops.taremin_cloth.reset_cloth_settings(scope='COLLISION')
+        self.assertEqual(res, {'FINISHED'})
+        self.assertFalse(props.enable_self_collision)  # デフォルト(False)に復元
+        self.assertAlmostEqual(props.self_collision_relief_factor, 1.0)  # デフォルト(1.0)に復元
+
+        # 4. ALL スコープ初期化（保護対象の確認）
+        props.tension_stiffness = 8888.0
+        props.substeps = 42
+        res = bpy.ops.taremin_cloth.reset_cloth_settings(scope='ALL')
+        self.assertEqual(res, {'FINISHED'})
+        self.assertAlmostEqual(props.tension_stiffness, 1500.0)
+        self.assertEqual(props.substeps, 20)
+        self.assertEqual(props.pin_vertex_group, "PinGroup")  # ピン保護確認
+        self.assertEqual(len(props.elastic_groups), 1)  # ゴム紐保護確認
+        self.assertEqual(props.elastic_groups[0].name, "ElasticGroup")
+
+    def test_reset_collider_settings(self):
+        """コライダー設定の初期化オペレーターの動作および形状タイプの保護検証"""
+        c_props = self.obj.taremin_cloth_collider
+        c_props.is_collider = True
+        c_props.collider_type = 'CAPSULE'
+        c_props.friction = 0.95
+        c_props.restitution = 0.8
+        c_props.thickness = 0.05
+
+        res = bpy.ops.taremin_cloth.reset_collider_settings()
+        self.assertEqual(res, {'FINISHED'})
+        self.assertEqual(c_props.collider_type, 'CAPSULE')  # コライダー形状は保護
+        self.assertAlmostEqual(c_props.friction, 0.5)  # デフォルト復帰
+        self.assertAlmostEqual(c_props.restitution, 0.0)  # デフォルト復帰
+        self.assertAlmostEqual(c_props.thickness, 0.005)  # デフォルト復帰
 
 
 if __name__ == "__main__":

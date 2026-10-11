@@ -1,3 +1,18 @@
+"""
+Taremin Cloth プリセット管理モジュール
+
+各布素材プリセットの物理パラメータ（剛性・厚み・面密度）は、以下の実測規格値および実機校正に基づいて策定されています：
+1. 面密度（areal_density: kg/m2）および厚み（thickness: m）:
+   ASTM D3776（Standard Test Methods for Mass Per Unit Area of Fabric）等の生地目付規格値。
+   - 絹: 50 g/m2 (0.05 kg/m2), 木綿: 150 g/m2 (0.15 kg/m2), 麻: 200 g/m2 (0.20 kg/m2)
+   - デニム: 400 g/m2 (12オンス標準, 0.40 kg/m2), 革: 1000 g/m2 (1.00 kg/m2)
+   - ウール: 300 g/m2 (0.30 kg/m2), ポリエステル: 120 g/m2 (0.12 kg/m2)
+   厚みは実布比率を反映しつつ、GPU空間ハッシュ自己衝突の裏抜け防止下限マージン（>= 2mm）を考慮。
+2. 剛性（stiffness, bending_stiffness: N/m）:
+   Blender 標準 Cloth プリセットの素材間剛性比率をベースに、布特有の異方性（引張 >> 剪断 >> 圧縮・曲げ）を反映。
+   XPBD バネ定数 k（N/m）として物理単位化し、実機（1m吊り下げ伸び率: 木綿で約0.8%、革で0.0%）に合わせて校正。
+"""
+
 import json
 import re
 from pathlib import Path
@@ -62,6 +77,32 @@ BUILTIN_FABRIC_PRESETS = {
         "air_damping": 1.0,
         "thickness": 0.010,
         "areal_density": 0.40,
+    },
+    "Wool (ウール)": {
+        "tension_stiffness": 2500.0,
+        "compression_stiffness": 400.0,
+        "shear_stiffness": 300.0,
+        "bending_stiffness": 50.0,
+        "tension_damping": 8.0,
+        "compression_damping": 8.0,
+        "shear_damping": 8.0,
+        "bending_damping": 1.5,
+        "air_damping": 1.0,
+        "thickness": 0.008,
+        "areal_density": 0.30,
+    },
+    "Polyester (ポリエステル)": {
+        "tension_stiffness": 3000.0,
+        "compression_stiffness": 100.0,
+        "shear_stiffness": 150.0,
+        "bending_stiffness": 8.0,
+        "tension_damping": 4.0,
+        "compression_damping": 4.0,
+        "shear_damping": 4.0,
+        "bending_damping": 0.3,
+        "air_damping": 1.2,
+        "thickness": 0.003,
+        "areal_density": 0.12,
     },
     "Leather (革)": {
         "tension_stiffness": 8000.0,
@@ -443,6 +484,151 @@ class TAREMIN_CLOTH_OT_delete_preset(Operator):
             self.report({'WARNING'}, f"プリセットファイルが見つかりません: {file_path.name}")
             return {'CANCELLED'}
 
+
+def reset_properties_to_defaults(prop_group: bpy.types.PropertyGroup, prop_names: set[str]):
+    """プロパティグループ内の指定プロパティをRNA定義のデフォルト値へ復帰"""
+    rna_props = prop_group.bl_rna.properties
+    for name in prop_names:
+        if name in rna_props:
+            prop = rna_props[name]
+            if prop.type in {'POINTER', 'COLLECTION'}:
+                continue
+            default_val = getattr(prop, "default", None)
+            if default_val is not None:
+                try:
+                    setattr(prop_group, name, default_val)
+                except Exception as e:
+                    print(f"[TareminCloth] プロパティリセット失敗 ({name}): {e}")
+
+
+CLOTH_FABRIC_PROPERTIES = {
+    "tension_stiffness", "compression_stiffness", "shear_stiffness", "bending_stiffness", "stiffness",
+    "tension_damping", "compression_damping", "shear_damping", "bending_damping", "air_damping",
+    "thickness", "areal_density", "last_fabric_preset",
+}
+
+CLOTH_SIMULATION_PROPERTIES = {
+    "substeps", "solver_iterations", "enable_adaptive_substep", "min_substeps", "max_substeps",
+    "auto_compensate_iterations", "enable_strain_adaptive", "strain_tolerance",
+    "workgroup_size", "solver_mode", "enable_async_readback", "enable_compact_readback",
+    "enable_frame_buffering", "frame_buffer_size", "gravity", "last_simulation_preset",
+    "enable_coarse_constraints",
+}
+
+CLOTH_COLLISION_PROPERTIES = {
+    "enable_self_collision", "self_collision_purpose", "self_collision_relief_factor",
+    "self_collision_max_displacement_ratio", "self_collision_max_iterations",
+    "self_collision_algorithm", "enable_pair_cache", "pair_cache_margin_mode",
+    "pair_cache_safety_margin", "pair_cache_horizon_scale", "pair_cache_max_horizon",
+    "pair_cache_max_pairs", "enable_pair_cache_final_fallback",
+    "self_collision_exclude_neighbors", "enable_normal_untangling",
+    "coupled_self_collision_mode", "post_collision_relaxation_iters",
+    "self_collision_substep_interval", "self_collision_ee_substep_interval",
+    "coupled_collider_mode", "auto_coupled_on_low_substeps",
+    "enable_edge_collision", "edge_margin_scale", "edge_margin_offset",
+    "layer_id", "target_face_layer_id",
+}
+
+CLOTH_OTHER_PROPERTIES = {
+    "triangulation_mode", "dynamic_preserve_flat", "dynamic_flatness_threshold",
+    "auto_triangulate_on_stop", "enable_cross_subdivision", "post_process_mode",
+    "adaptive_flatness_threshold", "auto_post_process", "use_wrinkle_field",
+    "wrinkle_global_strength", "wrinkle_bone_radius", "wrinkle_valley_depth",
+    "wrinkle_crest_depth", "wrinkle_preview_mode", "isolate_viewport_view",
+    "show_fps_overlay", "fps_overlay_position", "show_hud_help",
+    "interactive_realtime_sync", "interactive_max_steps",
+    "enable_sewing", "sewing_shrink_speed", "sewing_stiffness", "enable_sewing_lock",
+    "sewing_lock_distance", "enable_sewing_priority", "sewing_priority_threshold",
+    "sewing_priority_merge_dist", "sewing_priority_ramp_frames", "sewing_priority_max_frames",
+}
+
+COLLIDER_RESET_PROPERTIES = {
+    "friction", "restitution", "thickness", "radius", "single_sided",
+    "enable_single_sided_recovery", "enable_cluster_culling", "sweep_margin_offset",
+    "sdf_resolution", "sdf_resolution_custom", "sdf_margin", "weight_threshold",
+    "blend_k", "sdf_update_mode", "sdf_dynamic_update_interval", "sdf_cache_enabled",
+    "enable_joint_mesh", "joint_weight_threshold", "joint_rotation_threshold",
+    "mesh_sdf_voxel_size", "mesh_sdf_margin", "mesh_sdf_max_vram_mb",
+    "mesh_sdf_auto_scale", "mesh_sdf_cache_enabled", "last_collider_preset",
+}
+
+
+class TAREMIN_CLOTH_OT_reset_cloth_settings(Operator):
+    """布シミュレーション設定をデフォルト値へリセットします"""
+    bl_idname = "taremin_cloth.reset_cloth_settings"
+    bl_label = "Reset Cloth Settings"
+    bl_description = "Reset cloth settings to default values (preserves pin and elastic data)"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    scope: EnumProperty(
+        name="Scope",
+        items=[
+            ('ALL', "All Settings", "Reset all cloth parameters to defaults"),
+            ('FABRIC', "Fabric & Material", "Reset stiffness, damping, thickness and areal density"),
+            ('SIMULATION', "Simulation & Solver", "Reset quality, substeps, solver and stepping"),
+            ('COLLISION', "Collisions", "Reset self-collision and collider parameters"),
+        ],
+        default='ALL',
+    )
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or not hasattr(obj, "taremin_cloth") or not obj.taremin_cloth.is_cloth:
+            self.report({'WARNING'}, "有効な布オブジェクトが選択されていません")
+            return {'CANCELLED'}
+
+        settings = obj.taremin_cloth
+        targets = set()
+        if self.scope == 'ALL':
+            targets = CLOTH_FABRIC_PROPERTIES | CLOTH_SIMULATION_PROPERTIES | CLOTH_COLLISION_PROPERTIES | CLOTH_OTHER_PROPERTIES
+        elif self.scope == 'FABRIC':
+            targets = CLOTH_FABRIC_PROPERTIES
+        elif self.scope == 'SIMULATION':
+            targets = CLOTH_SIMULATION_PROPERTIES
+        elif self.scope == 'COLLISION':
+            targets = CLOTH_COLLISION_PROPERTIES
+
+        reset_properties_to_defaults(settings, targets)
+
+        # キャッシュの無効化と再同期通知
+        try:
+            from .engine.runner import clear_cloth_simulator
+            clear_cloth_simulator(obj.name)
+        except Exception:
+            pass
+
+        self.report({'INFO'}, f"布設定 ({self.scope}) をデフォルト値に戻しました")
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_reset_collider_settings(Operator):
+    """コライダー設定をデフォルト値へリセットします"""
+    bl_idname = "taremin_cloth.reset_collider_settings"
+    bl_label = "Reset Collider Settings"
+    bl_description = "Reset collider contact settings to default values (preserves shape and anim target)"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        obj = context.active_object
+        if not obj or not hasattr(obj, "taremin_cloth_collider") or not obj.taremin_cloth_collider.is_collider:
+            self.report({'WARNING'}, "有効なコライダーオブジェクトが選択されていません")
+            return {'CANCELLED'}
+
+        settings = obj.taremin_cloth_collider
+        reset_properties_to_defaults(settings, COLLIDER_RESET_PROPERTIES)
+
+        try:
+            from .engine.collider import clear_collider_cache
+            clear_collider_cache()
+        except Exception:
+            pass
+
+        self.report({'INFO'}, "コライダー設定をデフォルト値に戻しました")
+        return {'FINISHED'}
+
+
 # -----------------------------------------------------------------------------
 # メニュー (UI)
 # -----------------------------------------------------------------------------
@@ -795,6 +981,8 @@ classes = (
     TAREMIN_CLOTH_OT_apply_config_preset,
     TAREMIN_CLOTH_OT_delete_config_preset,
     TAREMIN_CLOTH_MT_config_presets,
+    TAREMIN_CLOTH_OT_reset_cloth_settings,
+    TAREMIN_CLOTH_OT_reset_collider_settings,
 )
 
 

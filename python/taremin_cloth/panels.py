@@ -537,6 +537,11 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             col_grav = box_grav.column(align=True)
             col_grav.prop(settings, "gravity", slider=True)
 
+            # 設定一括リセット
+            row_rst = layout_params.row(align=True)
+            op_rst = row_rst.operator("taremin_cloth.reset_cloth_settings", text=i18n.trans("Reset Settings to Defaults"), icon='LOOP_BACK')
+            op_rst.scope = 'ALL'
+
         else:
             # --- 詳細モード (Advanced Mode) ---
             box_selected = layout.box()
@@ -544,11 +549,14 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             col_sel = box_selected.column(align=True)
             col_sel.prop(settings, "enabled", text=i18n.trans("Simulation Active"), icon='PHYSICS')
             row_sel = col_sel.row(align=True)
-            row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset"), icon='FILE_REFRESH')
-            op_clr = row_sel.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply Rest"), icon='CHECKMARK')
+            row_sel.operator("taremin_cloth.reset_selected", text=i18n.trans("Reset Simulation"), icon='FILE_REFRESH')
+            op_rst_adv = row_sel.operator("taremin_cloth.reset_cloth_settings", text=i18n.trans("Reset Settings"), icon='LOOP_BACK')
+            op_rst_adv.scope = 'ALL'
+            row_sel2 = col_sel.row(align=True)
+            op_clr = row_sel2.operator("taremin_cloth.apply_rest_shape", text=i18n.trans("Apply Rest"), icon='CHECKMARK')
             if op_clr:
                 op_clr.all_objects = False
-            col_sel.operator("taremin_cloth.save_as_shape_key", text=i18n.trans("Save as Shape Key"), icon='SHAPEKEY_DATA')
+            row_sel2.operator("taremin_cloth.save_as_shape_key", text=i18n.trans("Save as Shape Key"), icon='SHAPEKEY_DATA')
 
 
 class TAREMIN_CLOTH_PT_pinning(bpy.types.Panel):
@@ -624,6 +632,9 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
         op_del = row_preset.operator("taremin_cloth.delete_preset", text="", icon='REMOVE')
         if op_del:
             op_del.category = 'fabric'
+        op_rst = row_preset.operator("taremin_cloth.reset_cloth_settings", text="", icon='LOOP_BACK')
+        if op_rst:
+            op_rst.scope = 'FABRIC'
 
         # 剛性 (Stiffness)
         box_stiff = layout.box()
@@ -735,7 +746,10 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
         if settings.enable_self_collision:
             row_p = l_col.row(align=True)
             row_p.prop(settings, "self_collision_purpose", text=i18n.trans("Purpose"))
-            row_p.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+            row_p.operator("taremin_cloth.auto_fit_self_collision", text="", icon='FIXED_SIZE')
+            op_rst_sc = row_p.operator("taremin_cloth.reset_cloth_settings", text="", icon='LOOP_BACK')
+            if op_rst_sc:
+                op_rst_sc.scope = 'COLLISION'
 
             self_sub = l_col.column(align=True)
             self_sub.prop(settings, "self_collision_algorithm", text=i18n.trans("Algorithm"))
@@ -1136,6 +1150,9 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
         op_del = row.operator("taremin_cloth.delete_preset", text="", icon='REMOVE')
         if op_del:
             op_del.category = 'simulation'
+        op_rst = row.operator("taremin_cloth.reset_cloth_settings", text="", icon='LOOP_BACK')
+        if op_rst:
+            op_rst.scope = 'SIMULATION'
 
         sim_col = box_sim.column(align=True)
         sim_col.prop(settings, "substeps")
@@ -1418,6 +1435,9 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             if col_settings.collider_type in {'BONE_SDF', 'MESH_SDF'}:
                 b_col.separator()
                 b_col.operator("taremin_cloth.rebake_bone_sdf", text=i18n.trans("Bake / Update SDF"), icon='FILE_REFRESH')
+
+            b_col.separator()
+            b_col.operator("taremin_cloth.reset_collider_settings", text=i18n.trans("Reset Settings to Defaults"), icon='LOOP_BACK')
         else:
             # --- 詳細モード (Advanced Mode) ---
             box = layout.box()
@@ -1430,6 +1450,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
             op_del = row.operator("taremin_cloth.delete_preset", text="", icon='REMOVE')
             if op_del:
                 op_del.category = 'collider'
+            row.operator("taremin_cloth.reset_collider_settings", text="", icon='LOOP_BACK')
 
             b_col = box.column(align=True)
 

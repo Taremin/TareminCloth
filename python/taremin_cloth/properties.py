@@ -175,11 +175,11 @@ class TareminClothObjectSettings(PropertyGroup):
         description="Last applied simulation quality preset",
         default="",
     )
-    # 剛性 (Stiffness)
+    # 剛性 (Stiffness: Cotton/木綿 基準)
     tension_stiffness: FloatProperty(
         name="Tension",
         description="Resistance against stretching",
-        default=1000.0,
+        default=1500.0,
         min=0.1,
         max=100000.0,
         soft_min=10.0,
@@ -188,7 +188,7 @@ class TareminClothObjectSettings(PropertyGroup):
     compression_stiffness: FloatProperty(
         name="Compression",
         description="Resistance against compression and wrinkles",
-        default=100.0,
+        default=150.0,
         min=0.1,
         max=100000.0,
         soft_min=10.0,
@@ -206,7 +206,7 @@ class TareminClothObjectSettings(PropertyGroup):
     bending_stiffness: FloatProperty(
         name="Bending",
         description="Resistance against face bending",
-        default=10.0,
+        default=15.0,
         min=0.0,
         max=1000.0,
         soft_min=0.0,
@@ -216,7 +216,7 @@ class TareminClothObjectSettings(PropertyGroup):
     stiffness: FloatProperty(
         name="Tension",
         description="Tensile stiffness linked with tension_stiffness",
-        default=1000.0,
+        default=1500.0,
         min=0.1,
         max=100000.0,
         soft_min=10.0,

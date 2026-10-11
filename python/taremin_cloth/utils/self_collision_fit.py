@@ -86,35 +86,36 @@ def compute_self_collision_params(
     if purpose == 'SKIRT':
         # プリーツスカート・多重折り:
         # 密集したヒダ同士が挟まっても過度な膨らみを起こさないよう厚みはやや薄め（15%）
-        # 急激な弾きによる破裂を防ぐため relief は 0.15、FULL_COUPLED で伸びを7割抑制
+        # トンネリングを防ぎつつ弾けを抑えるため relief は 0.8、FULL_COUPLED で伸びを7割抑制
         min_floor = 0.0010  # 1.0mm
         max_cap = 0.0080    # 8.0mm
         thickness = max(min_floor, min(max_cap, avg_edge_len * 0.15))
-        relief_factor = 0.15
-        max_displacement_ratio = 0.15
+        relief_factor = 0.80
+        max_displacement_ratio = 0.30
         max_iterations = '512'
         coupled_mode = 'FULL_COUPLED'
         relaxation_iters = 2
     elif purpose == 'THIN':
         # 薄手・シルク・フリル:
-        # 極薄布向けに厚み 10%（最小 0.8mm）、マイルドな反発
+        # 極薄布向けに厚み 10%（最小 0.8mm）、トンネリング防止と滑らかな反発を両立
         min_floor = 0.0008  # 0.8mm
         max_cap = 0.0050    # 5.0mm
         thickness = max(min_floor, min(max_cap, avg_edge_len * 0.10))
-        relief_factor = 0.10
-        max_displacement_ratio = 0.10
+        relief_factor = 0.80
+        max_displacement_ratio = 0.30
         max_iterations = '256'
         coupled_mode = 'OFF'
         relaxation_iters = 0
     else:
         # STANDARD (一般の衣服) およびデフォルト:
         # 平均エッジ長の 20%（最小 1.5mm、最大 10mm）
-        # 物理質量化に伴い、シワの自縛ロック防止のため Coupled は OFF が標準推奨
+        # 物理質量化に伴いシワ自縛ロック防止のため Coupled は OFF、
+        # トンネリングトラップ（貫通脱出不能）防止のため relief=1.0, max_ratio=0.5 が標準
         min_floor = 0.0015  # 1.5mm
         max_cap = 0.0100    # 10.0mm
         thickness = max(min_floor, min(max_cap, avg_edge_len * 0.20))
-        relief_factor = 0.20
-        max_displacement_ratio = 0.20
+        relief_factor = 1.00
+        max_displacement_ratio = 0.50
         max_iterations = '512' if num_vertices >= 2000 else '256'
         coupled_mode = 'OFF'
         relaxation_iters = 0

@@ -96,8 +96,8 @@ class TestSelfCollisionFit(unittest.TestCase):
         )
         # 厚み: 0.04 * 0.20 = 0.008m (8mm)
         self.assertAlmostEqual(params['thickness'], 0.008, places=5)
-        self.assertEqual(params['self_collision_relief_factor'], 0.20)
-        self.assertEqual(params['self_collision_max_displacement_ratio'], 0.20)
+        self.assertEqual(params['self_collision_relief_factor'], 1.0)
+        self.assertEqual(params['self_collision_max_displacement_ratio'], 0.5)
         self.assertEqual(params['self_collision_max_iterations'], '256')
         self.assertEqual(params['coupled_self_collision_mode'], 'OFF')
         self.assertEqual(params['post_collision_relaxation_iters'], 0)
@@ -114,15 +114,15 @@ class TestSelfCollisionFit(unittest.TestCase):
         )
         # 厚み: 0.04 * 0.15 = 0.006m (6mm)
         self.assertAlmostEqual(params['thickness'], 0.006, places=5)
-        self.assertEqual(params['self_collision_relief_factor'], 0.15)
-        self.assertEqual(params['self_collision_max_displacement_ratio'], 0.15)
+        self.assertEqual(params['self_collision_relief_factor'], 0.8)
+        self.assertEqual(params['self_collision_max_displacement_ratio'], 0.3)
         self.assertEqual(params['self_collision_max_iterations'], '512')
         self.assertEqual(params['coupled_self_collision_mode'], 'FULL_COUPLED')
         self.assertEqual(params['post_collision_relaxation_iters'], 2)
 
     def test_compute_params_thin(self):
         """THIN（薄手・シルク・フリル）目的における計算パラメータの検証"""
-        # 薄手用: 極薄 10%、relief 0.10、マイルドな反発
+        # 薄手用: 極薄 10%、マイルドな反発
         params = compute_self_collision_params(
             avg_edge_len=0.03,
             min_edge_len=0.03,
@@ -131,8 +131,8 @@ class TestSelfCollisionFit(unittest.TestCase):
         )
         # 厚み: 0.03 * 0.10 = 0.003m (3mm)
         self.assertAlmostEqual(params['thickness'], 0.003, places=5)
-        self.assertEqual(params['self_collision_relief_factor'], 0.10)
-        self.assertEqual(params['self_collision_max_displacement_ratio'], 0.10)
+        self.assertEqual(params['self_collision_relief_factor'], 0.8)
+        self.assertEqual(params['self_collision_max_displacement_ratio'], 0.3)
         self.assertEqual(params['self_collision_max_iterations'], '256')
         self.assertEqual(params['coupled_self_collision_mode'], 'OFF')
         self.assertEqual(params['post_collision_relaxation_iters'], 0)

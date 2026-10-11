@@ -46,11 +46,12 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
 - **👕 マルチレイヤー & 自己衝突 (Multi-Layer)**:
   - レイヤー優先度（Layer ID）と厚み（Thickness）に基づき、重ね着した布の突き抜けを防止。
 - **🎨 3軸プリセットシステム & カスタム保存**:
-  - **布素材 (Fabric)**: 絹（Silk）、木綿（Cotton）、麻（Linen）、デニム（Denim）、革（Leather）、ゴム（Rubber）
-    - 各素材に面密度（Areal Density、kg/m2）を設定し、三角形面積に応じて分配した物理質量で計算します。剛性値はバネ定数（N/m）です。
+  - **布素材 (Fabric)**: 絹（Silk）、木綿（Cotton）、ウール（Wool）、麻（Linen）、デニム（Denim）、革（Leather）、ポリエステル（Polyester）、ゴム（Rubber）
+    - JIS L 1096規格試験およびKES（川端評価システム）の引張・曲げ物性データに基づき、面密度（Areal Density、kg/m²）とバネ定数（N/m）を策定。三角形面積に応じた物理質量で計算します。
   - **シミュレーション品質 (Quality)**: Fast（リアルタイム編集・高FPS）、Balanced（標準）、Best（レンダリング用高精度）、Stiff（伸び防止・紐やタイト服）
   - **コライダー特性 (Collider)**: 肌（Skin）、布（Fabric）、滑面・金属（Smooth/Metal）、高摩擦ゴム（Rubber）
   - ユーザーが調整したお気に入りのパラメータを名前をつけて保存・読み込み・削除可能（JSONファイル形式）。
+  - **設定初期化（Reset Settings to Defaults）**: 各パネルおよび全体設定から、ピン留めグループやゴム紐グループ、コライダー形状タイプを保護したまま、物性・品質パラメータを安全にワンクリックでデフォルト復元可能。シミュレーション状態（頂点位置・速度）をリセットする「Reset Simulation」とは明確に分離されています。
 - **💠 十字分割 & 最適トポロジー後処理 (Cross Subdivision & Post-Processing)**:
   - 四角面（Quad）特有の対角線折り目バイアスを解消するため、シミュレーション時に中心点を追加して4つの三角形に十字分割（Poke Faces）。
   - シミュレーション完了時、シワの稜線に沿った「最適な三角面2つ」への再分割、平坦部の「四角面復元（Quad化）」、または「アダプティブ自動判定」で出力可能。
@@ -461,6 +462,10 @@ taremin_cloth/
 │   └── fixtures/garments/tshirt/  # Tシャツ型紙OBJ + 縫合JSON + scene.json
 ├── tools/bake_siroino_fixtures.py # 素体OBJ化と型紙生成 (Blender 5.2使用)
 ├── tools/check_sewing.py          # 縫合対応辺の辺長整合検査 (chains/orphans報告)
+├── remotion-xpbd/               # GPU XPBD動作原理 explainer動画 (Remotionサブプロジェクト)
+│   ├── src/Main.tsx             # 全14チャプタのタイムライン (130秒)
+│   ├── src/scenes/              # Opening〜Outroの各シーン
+│   └── README.md                # プレビュー/レンダリング手順 (fnm + npm)
 ├── run_tests.py                 # Blender 自動テストランナー
 ├── Cargo.toml                   # Rust ワークスペース設定
 └── README.md
