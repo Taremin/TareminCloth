@@ -977,6 +977,9 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         cloth_obj.taremin_cloth.is_cloth = True
         cloth_obj.taremin_cloth.thickness = 0.01
+        cloth_obj.taremin_cloth.tension_stiffness = 1000.0
+        cloth_obj.taremin_cloth.compression_stiffness = 100.0
+        cloth_obj.taremin_cloth.bending_stiffness = 10.0
         cloth_obj.taremin_cloth.enable_edge_collision = True
         cloth_obj.taremin_cloth.edge_margin_scale = 1.2
         cloth_obj.taremin_cloth.edge_margin_offset = 0.002
@@ -1184,12 +1187,12 @@ class TestSimulationE2E(unittest.TestCase):
             settings.self_collision_purpose = 'SKIRT'
             self.assertEqual(settings.coupled_self_collision_mode, 'FULL_COUPLED')
             self.assertEqual(settings.self_collision_max_iterations, '512')
-            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.15, places=2)
+            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.80, places=2)
 
-            # 用途を THIN（薄手・シルク）に変更 -> マイルドな 0.10 に連動
+            # 用途を THIN（薄手・シルク）に変更 -> マイルドな 0.80 に連動
             settings.self_collision_purpose = 'THIN'
             self.assertEqual(settings.coupled_self_collision_mode, 'OFF')
-            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.10, places=2)
+            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.80, places=2)
 
             # 手動で Auto Fit オペレーターを実行
             settings.self_collision_purpose = 'STANDARD'
@@ -1198,7 +1201,7 @@ class TestSimulationE2E(unittest.TestCase):
             res = bpy.ops.taremin_cloth.auto_fit_self_collision()
             self.assertEqual(res, {'FINISHED'})
             self.assertEqual(settings.coupled_self_collision_mode, 'OFF')
-            self.assertAlmostEqual(settings.self_collision_relief_factor, 0.20, places=2)
+            self.assertAlmostEqual(settings.self_collision_relief_factor, 1.00, places=2)
 
             # 用途を CUSTOM に変更した時、Auto Fit ボタンは disable (poll = False) になること
             settings.self_collision_purpose = 'CUSTOM'
