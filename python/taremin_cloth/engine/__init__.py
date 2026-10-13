@@ -71,6 +71,8 @@ from .runner import (
     bake_step_frame,
     bake_finalize_simulation,
     bake_cloth_simulation,
+    flush_async_simulation,
+    flush_all_async_simulations,
 )
 
 __all__ = [
@@ -130,5 +132,7 @@ __all__ = [
     "step_cloth_scene",
     "cloth_frame_handler",
     "bake_cloth_simulation",
+    "flush_async_simulation",
+    "flush_all_async_simulations",
 ]
 

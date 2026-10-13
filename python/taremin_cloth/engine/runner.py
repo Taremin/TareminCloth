@@ -320,6 +320,25 @@ def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None)
     return base_steps
 
 
+def _apply_coords_to_mesh(obj, coords):
+    """計算済み座標配列をBlenderメッシュ頂点に適用する。"""
+    pos_world = coords.reshape(-1, 3)
+    pos_local = None
+    if hasattr(obj, "matrix_world"):
+        try:
+            inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
+            if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
+        except (ValueError, TypeError, AttributeError):
+            pos_local = None
+    if pos_local is not None:
+        obj.data.vertices.foreach_set("co", pos_local.flatten())
+    else:
+        obj.data.vertices.foreach_set("co", coords)
+    obj.data.update()
+    obj["_taremin_cloth_is_deformed"] = True
+
+
 def step_cloth_object(
     obj,
     scene,
@@ -349,6 +368,25 @@ def step_cloth_object(
     """
     sim, coords = get_or_create_simulator(obj)
     settings = getattr(obj, "taremin_cloth", None)
+
+    from ..preferences import is_async_readback_experimental_enabled
+    use_async = (
+        not _is_baking
+        and is_async_readback_experimental_enabled(scene)
+        and settings is not None
+        and bool(getattr(settings, "enable_async_readback", False))
+        and hasattr(sim, "step_async")
+        and hasattr(sim, "fetch_positions")
+    )
+
+    # 非同期モード: 前フレームのGPU計算結果を回収してメッシュに反映
+    if use_async:
+        if sim.fetch_positions(coords):
+            if update_mesh:
+                _apply_coords_to_mesh(obj, coords)
+            wp_mgr = _waypoint_managers.get(obj.name)
+            if wp_mgr and wp_mgr.has_active_seams:
+                wp_mgr.update(coords, sim=sim)
 
     if not skip_sync:
         if depsgraph is None:
@@ -381,32 +419,20 @@ def step_cloth_object(
             except Exception:
                 pass
 
-    sim.step(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
-
-    if update_mesh:
-        sim.get_positions(coords)
-        pos_world = coords.reshape(-1, 3)
-        pos_local = None
-        if hasattr(obj, "matrix_world"):
-            try:
-                inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
-                if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
-                    pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
-            except (ValueError, TypeError, AttributeError):
-                pos_local = None
-        if pos_local is not None:
-            obj.data.vertices.foreach_set("co", pos_local.flatten())
-        else:
-            obj.data.vertices.foreach_set("co", coords)
-        obj.data.update()
-        obj["_taremin_cloth_is_deformed"] = True
-
-    # 中継点縫合の動的通過＆結合完了時ピン解放判定
-    wp_mgr = _waypoint_managers.get(obj.name)
-    if wp_mgr and wp_mgr.has_active_seams:
-        if not update_mesh:
+    if use_async:
+        sim.step_async(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
+    else:
+        sim.step(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
+        if update_mesh:
             sim.get_positions(coords)
-        wp_mgr.update(coords, sim=sim)
+            _apply_coords_to_mesh(obj, coords)
+
+        # 中継点縫合の動的通過＆結合完了時ピン解放判定
+        wp_mgr = _waypoint_managers.get(obj.name)
+        if wp_mgr and wp_mgr.has_active_seams:
+            if not update_mesh:
+                sim.get_positions(coords)
+            wp_mgr.update(coords, sim=sim)
 
     return sim, coords
 
@@ -531,6 +557,33 @@ def save_profile_traces(directory: str = "scratch") -> dict:
         except Exception:
             continue
     return out
+
+
+def flush_async_simulation(obj, update_mesh: bool = True) -> bool:
+    """指定オブジェクトの未回収非同期シミュレーション結果を待機・回収してメッシュに反映する。"""
+    if obj.name not in _simulators:
+        return False
+    sim, coords = _simulators[obj.name]
+    if hasattr(sim, "fetch_positions"):
+        ok = sim.fetch_positions(coords)
+        if ok and update_mesh:
+            _apply_coords_to_mesh(obj, coords)
+        return ok
+    return False
+
+
+def flush_all_async_simulations(update_mesh: bool = True) -> int:
+    """全登録シミュレータの未回収非同期シミュレーション結果をフラッシュする。回収数を返す。"""
+    count = 0
+    for name, (sim, coords) in list(_simulators.items()):
+        obj = bpy.data.objects.get(name) if hasattr(bpy, "data") else None
+        if hasattr(sim, "fetch_positions"):
+            ok = sim.fetch_positions(coords)
+            if ok:
+                count += 1
+                if update_mesh and obj is not None:
+                    _apply_coords_to_mesh(obj, coords)
+    return count
 
 
 def _persistent(func):
@@ -693,6 +746,7 @@ def bake_step_frame(bake_ctx, frame):
 
 def bake_finalize_simulation(bake_ctx):
     """ベイクの完了・終了処理を行い、タイムラインを開始フレームに戻す"""
+    flush_all_async_simulations(update_mesh=False)
     if not bake_ctx:
         return
     scene = bake_ctx["scene"]

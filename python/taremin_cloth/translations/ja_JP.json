@@ -322,6 +322,8 @@
   "Enable Wrinkle Field": "ドレープガイドを有効化",
   "Enable all cloths and colliders": "すべての布とコライダーを有効化",
   "Enable cloth simulation for this object": "このオブジェクトでClothシミュレーションを有効にする",
+  "Enable 1-frame delayed asynchronous readback pipeline to hide GPU wait time (Experimental)": "1フレーム遅延による非同期リードバックパイプラインを有効化し、GPU待機時間を隠蔽します（実験的機能）",
+  "Enable Async Readback": "非同期リードバックを有効化",
   "Enable cloths only, pause colliders": "布のみ有効化し、コライダーを一時停止",
   "Enable collider animation driving": "コライダーアニメーション駆動を有効化",
   "Enable colliders only, pause cloths": "コライダーのみ有効化し、布を一時停止",

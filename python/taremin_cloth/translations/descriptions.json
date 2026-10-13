@@ -107,6 +107,7 @@
   "Dynamic SDF recalculation interval in frames (1=every frame)",
   "Dynamically adjust substeps based on cloth velocity to improve FPS",
   "Dynamically boost substeps and iterations when cloth stretching (strain) exceeds tolerance to prevent gravity sagging",
+  "Enable 1-frame delayed asynchronous readback pipeline to hide GPU wait time (Experimental)",
   "Enable GPU collider on this object",
   "Enable all cloths and colliders",
   "Enable cloth simulation for this object",

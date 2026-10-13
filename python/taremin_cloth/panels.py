@@ -1178,6 +1178,9 @@ class TAREMIN_CLOTH_PT_quality(bpy.types.Panel):
         row_buf.prop(settings, "enable_frame_buffering")
         if settings.enable_frame_buffering:
             row_buf.prop(settings, "frame_buffer_size")
+        from .preferences import is_async_readback_experimental_enabled
+        if is_async_readback_experimental_enabled(context):
+            p_col.prop(settings, "enable_async_readback")
         if hasattr(context.scene, "taremin_cloth_fast_playback"):
             p_col.prop(context.scene, "taremin_cloth_fast_playback")
 

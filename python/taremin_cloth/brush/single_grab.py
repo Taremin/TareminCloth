@@ -11,6 +11,17 @@ from .base import BaseBrushTool
 from .math import ray_plane_hit
 
 
+def _copy_vec(v):
+    if v is None:
+        return None
+    if hasattr(v, "copy"):
+        return v.copy()
+    try:
+        return mathutils.Vector((float(v.x), float(v.y), float(v.z)))
+    except Exception:
+        return v
+
+
 class SingleGrabTool(BaseBrushTool):
     """1頂点を掴んでビュー平面上でドラッグする"""
 
@@ -29,6 +40,7 @@ class SingleGrabTool(BaseBrushTool):
         self.grab_plane_normal = None
         self.grab_initial_plane_hit = None
         self.grab_current_target_world = None
+        self._prev_target_world = None
 
     @property
     def dragging(self):
@@ -94,6 +106,7 @@ class SingleGrabTool(BaseBrushTool):
         self.grab_plane_normal = camera_forward
         self.grab_initial_pos_world = v_initial_world
         self.grab_current_target_world = v_initial_world
+        self._prev_target_world = _copy_vec(v_initial_world)
 
         # クリック時のレイとビュー平面との初期交点を計算・記録
         denom = direction.dot(camera_forward)
@@ -156,6 +169,16 @@ class SingleGrabTool(BaseBrushTool):
         # 目標のワールド頂点位置にオフセットを加算
         target_world = self.grab_initial_pos_world + delta_world
         self.grab_current_target_world = target_world
+
+        # 前フレーム（または直前move）からの移動量を算出し、物理コアへ外部変位として通知
+        prev_target = getattr(self, "_prev_target_world", None)
+        if prev_target is None:
+            prev_target = self.grab_initial_pos_world
+        frame_disp = (target_world - prev_target).length
+        self._prev_target_world = _copy_vec(target_world)
+
+        if hasattr(sim, "note_external_displacement") and frame_disp > 1e-5:
+            sim.note_external_displacement(float(frame_disp))
 
         # クラスタ内の全頂点に同一オフセットを適用してピン位置更新
         for v in getattr(self, "grabbed_cluster", [self.grabbed_vert]):

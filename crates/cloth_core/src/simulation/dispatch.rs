@@ -89,7 +89,8 @@ impl GpuClothSimulator {
         // 1サブステップあたりの重力・運動変位スケールを評価し、コライダー安全マージンに対する侵入リスクを判定
         let g_accel = (self.gravity[0].powi(2) + self.gravity[1].powi(2) + self.gravity[2].powi(2)).sqrt();
         let freefall_disp = 0.5 * g_accel * substep_dt * substep_dt;
-        let step_disp = freefall_disp.max(self.last_step_max_displacement / (substeps as f32).max(1.0));
+        let effective_motion_disp = self.last_step_effective_displacement.max(self.last_step_max_displacement);
+        let step_disp = freefall_disp.max(effective_motion_disp / (substeps as f32).max(1.0));
         let safe_margin = (self.cloth_thickness * 0.8).max(0.002);
         let is_penetration_risk = step_disp > safe_margin * 0.25;
 
@@ -348,6 +349,74 @@ impl GpuClothSimulator {
         }
     }
 
+    /// 読み戻された頂点座標スライスから、最大変位・歪み率・前回座標キャッシュを更新する
+    fn update_feedback_from_floats(&mut self, floats: &[f32]) {
+        let n_verts = self.num_vertices as usize;
+        let mut max_d = 0.0f32;
+        if self.prev_step_positions.len() == n_verts {
+            for (chunk, prev) in floats.as_chunks::<3>().0.iter().zip(&self.prev_step_positions) {
+                let dx = (chunk[0] - prev[0]).abs();
+                let dy = (chunk[1] - prev[1]).abs();
+                let dz = (chunk[2] - prev[2]).abs();
+                let d = dx.max(dy).max(dz);
+                if d > max_d {
+                    max_d = d;
+                }
+            }
+        } else {
+            self.prev_step_positions.resize(n_verts, [0.0; 3]);
+        }
+
+        // 引張歪み率 (Strain) の集計:
+        // 極小エッジによる特異点発散を防ぐため、特性長 (0.5 * mesh_avg_edge_len) を分母下限として保護。
+        // また、外れ値1本（コライダー押し出し等）に引きずられないよう、P95 (95パーセンタイル) を代表値とする。
+        let mut rep_strain = 0.0f32;
+        if !self.distance_constraints.is_empty() {
+            let min_ref = (0.5 * self.mesh_avg_edge_len).max(0.002);
+            let mut positive_strains = Vec::with_capacity(self.distance_constraints.len());
+            for (dc, &l0) in self.distance_constraints.iter().zip(&self.initial_distance_rest_lengths) {
+                if l0 <= 1e-6 {
+                    continue;
+                }
+                let v0 = (dc.v0 as usize) * 3;
+                let v1 = (dc.v1 as usize) * 3;
+                if v0 + 2 >= floats.len() || v1 + 2 >= floats.len() {
+                    continue;
+                }
+                let dx = floats[v0] - floats[v1];
+                let dy = floats[v0 + 1] - floats[v1 + 1];
+                let dz = floats[v0 + 2] - floats[v1 + 2];
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                let strain = (dist - l0) / l0.max(min_ref);
+                if strain > 0.0 {
+                    positive_strains.push(strain);
+                }
+            }
+            if !positive_strains.is_empty() {
+                let p95_idx = ((positive_strains.len() as f32) * 0.95) as usize;
+                let p95_idx = p95_idx.min(positive_strains.len() - 1);
+                rep_strain = *positive_strains.select_nth_unstable_by(p95_idx, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                }).1;
+            }
+        }
+        self.last_step_max_strain = rep_strain;
+
+        if self.cached_cpu_positions.len() != n_verts {
+            self.cached_cpu_positions.resize(n_verts, [0.0; 3]);
+        }
+        if self.prev_step_positions.len() != n_verts {
+            self.prev_step_positions.resize(n_verts, [0.0; 3]);
+        }
+        for (i, chunk) in floats.as_chunks::<3>().0.iter().enumerate() {
+            let p = [chunk[0], chunk[1], chunk[2]];
+            self.prev_step_positions[i] = p;
+            self.cached_cpu_positions[i] = p;
+        }
+        self.cached_positions_frame_seq = self.current_frame_seq;
+        self.last_step_max_displacement = max_d;
+    }
+
     /// 非同期に提出された適応サブステップ用の頂点座標を回収し、最大変位を更新する（ノンブロッキング）
     pub(crate) fn poll_adaptive_displacement(&mut self) {
         if !self.enable_adaptive_substep {
@@ -372,69 +441,14 @@ impl GpuClothSimulator {
                     let data = slice.get_mapped_range();
                     let floats: &[f32] = bytemuck::cast_slice(&data);
 
-                    let mut max_d = 0.0f32;
-                    if self.prev_step_positions.len() == n_verts {
-                        for (chunk, prev) in floats.as_chunks::<3>().0.iter().zip(&self.prev_step_positions) {
-                            let dx = (chunk[0] - prev[0]).abs();
-                            let dy = (chunk[1] - prev[1]).abs();
-                            let dz = (chunk[2] - prev[2]).abs();
-                            let d = dx.max(dy).max(dz);
-                            if d > max_d {
-                                max_d = d;
-                            }
-                        }
-                    } else {
-                        self.prev_step_positions.resize(n_verts, [0.0; 3]);
-                    }
-
-                    // 引張歪み率 (Strain) の集計:
-                    // 極小エッジによる特異点発散を防ぐため、特性長 (0.5 * mesh_avg_edge_len) を分母下限として保護。
-                    // また、外れ値1本（コライダー押し出し等）に引きずられないよう、P95 (95パーセンタイル) を代表値とする。
-                    let mut rep_strain = 0.0f32;
-                    if !self.distance_constraints.is_empty() {
-                        let min_ref = (0.5 * self.mesh_avg_edge_len).max(0.002);
-                        let mut positive_strains = Vec::with_capacity(self.distance_constraints.len());
-                        for (dc, &l0) in self.distance_constraints.iter().zip(&self.initial_distance_rest_lengths) {
-                            if l0 <= 1e-6 {
-                                continue;
-                            }
-                            let v0 = (dc.v0 as usize) * 3;
-                            let v1 = (dc.v1 as usize) * 3;
-                            if v0 + 2 >= floats.len() || v1 + 2 >= floats.len() {
-                                continue;
-                            }
-                            let dx = floats[v0] - floats[v1];
-                            let dy = floats[v0 + 1] - floats[v1 + 1];
-                            let dz = floats[v0 + 2] - floats[v1 + 2];
-                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                            let strain = (dist - l0) / l0.max(min_ref);
-                            if strain > 0.0 {
-                                positive_strains.push(strain);
-                            }
-                        }
-                        if !positive_strains.is_empty() {
-                            let p95_idx = ((positive_strains.len() as f32) * 0.95) as usize;
-                            let p95_idx = p95_idx.min(positive_strains.len() - 1);
-                            rep_strain = *positive_strains.select_nth_unstable_by(p95_idx, |a, b| {
-                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                            }).1;
-                        }
-                    }
-                    self.last_step_max_strain = rep_strain;
-
-                    if self.cached_cpu_positions.len() != n_verts {
-                        self.cached_cpu_positions.resize(n_verts, [0.0; 3]);
-                    }
-                    for (i, chunk) in floats.as_chunks::<3>().0.iter().enumerate() {
-                        let p = [chunk[0], chunk[1], chunk[2]];
-                        self.prev_step_positions[i] = p;
-                        self.cached_cpu_positions[i] = p;
-                    }
-                    self.cached_positions_frame_seq = self.current_frame_seq;
-                    self.last_step_max_displacement = max_d;
+                    let copy_len = (compact_size as usize / 4).min(floats.len());
+                    let mut temp_coords = vec![0.0f32; copy_len];
+                    temp_coords.copy_from_slice(&floats[..copy_len]);
 
                     drop(data);
                     self.adaptive_staging_buffers[read_idx].unmap();
+
+                    self.update_feedback_from_floats(&temp_coords);
                 }
                 0 => {
                     // まだGPU実行中の場合は戻す（Waitしない！）
@@ -474,6 +488,7 @@ impl GpuClothSimulator {
         let external_disp = self.pending_external_displacement;
         let max_disp = self.last_step_max_displacement.max(external_disp);
         self.pending_external_displacement = 0.0;
+        self.last_step_effective_displacement = max_disp;
 
         // CFL安全許容変位 (衝突マージンとしての布厚みと特性長)
         // 極小エッジ（1mm以下）に引きずられてマージンが過剰縮小（0.5mm以下）し過敏発振するのを防止しつつ、
@@ -680,6 +695,9 @@ impl GpuClothSimulator {
             return;
         }
 
+        let actual_substeps = self.compute_effective_substeps(dt, substeps);
+        let _actual_iters = self.compute_effective_iterations(actual_substeps);
+
         // 前の非同期マッピングが未回収の場合、自動的に待機・回収してクリーンアップ
         if self.async_pending {
             let mut dummy = vec![0.0f32; (self.num_vertices as usize) * 3];
@@ -692,7 +710,10 @@ impl GpuClothSimulator {
             },
         );
 
-        self.encode_simulation_steps(&mut encoder, dt, substeps);
+        self.dispatch_dynamic_bone_sdf_update(&mut encoder);
+        self.profiler.frame_begin();
+        self.encode_simulation_steps(&mut encoder, dt, actual_substeps);
+        self.profiler.frame_end(&mut encoder);
 
         if self.enable_compact_readback {
             self.encode_extract_positions(&mut encoder);
@@ -758,6 +779,9 @@ impl GpuClothSimulator {
 
                     drop(data);
                     self.compact_staging_buffers[read_idx].unmap();
+
+                    // 非同期回収時にも最大変位・歪み率・前回座標キャッシュを更新（同期実行と完全に同一の適応フィードバック）
+                    self.update_feedback_from_floats(&out[..copy_len]);
                 } else {
                     let buffer_size = (self.num_vertices as u64) * std::mem::size_of::<GpuVertex>() as u64;
                     let slice = self.staging_buffers[read_idx].slice(..buffer_size);
@@ -775,6 +799,11 @@ impl GpuClothSimulator {
 
                     drop(data);
                     self.staging_buffers[read_idx].unmap();
+
+                    let n_verts = self.num_vertices as usize;
+                    if out.len() >= n_verts * 3 {
+                        self.update_feedback_from_floats(&out[..n_verts * 3]);
+                    }
                 }
 
                 self.async_pending = false;

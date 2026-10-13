@@ -322,6 +322,8 @@
   "Enable Wrinkle Field": "Enable Wrinkle Field",
   "Enable all cloths and colliders": "Enable all cloths and colliders",
   "Enable cloth simulation for this object": "Enable cloth simulation for this object",
+  "Enable 1-frame delayed asynchronous readback pipeline to hide GPU wait time (Experimental)": "Enable 1-frame delayed asynchronous readback pipeline to hide GPU wait time (Experimental)",
+  "Enable Async Readback": "Enable Async Readback",
   "Enable cloths only, pause colliders": "Enable cloths only, pause colliders",
   "Enable collider animation driving": "Enable collider animation driving",
   "Enable colliders only, pause cloths": "Enable colliders only, pause cloths",

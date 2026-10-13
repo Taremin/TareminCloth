@@ -1490,12 +1490,13 @@ impl ClothSimulator {
     }
 
     /// シミュレーションを非同期に 1 フレーム進める（GPU計算を発行しCPUブロックなしで即座に復帰）
-    #[pyo3(signature = (dt=0.016666667, substeps=20, solver_iterations=None))]
-    fn step_async(&mut self, dt: f32, substeps: u32, solver_iterations: Option<u32>) {
+    #[pyo3(signature = (dt=0.016666667, substeps=None, solver_iterations=None))]
+    fn step_async(&mut self, dt: f32, substeps: Option<u32>, solver_iterations: Option<u32>) {
         if let Some(iters) = solver_iterations {
             self.simulator.set_solver_iterations(iters);
         }
-        self.simulator.step_async(dt, substeps);
+        let requested = substeps.unwrap_or(0);
+        self.simulator.step_async(dt, requested);
     }
 
     /// 非同期実行された前フレームの頂点位置を回収する（成功時 True, 未実行/失敗時 False）

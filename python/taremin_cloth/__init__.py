@@ -67,7 +67,12 @@ for mod in modules:
         drawing = mod
         break
 
-from .engine.runner import step_cloth_object, step_cloth_scene
+from .engine.runner import (
+    step_cloth_object,
+    step_cloth_scene,
+    flush_async_simulation,
+    flush_all_async_simulations,
+)
 
 
 _is_registered = False

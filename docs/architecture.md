@@ -80,7 +80,22 @@ sequenceDiagram
 - **UIステータス表示とメモリ可視化**:
   3D ViewportのNパネル（Quick Controls / Quality & Solver）に、キャッシュ済みフレーム範囲（例: `1 - 30 (30f)`）および概算メモリ使用量をリアルタイム表示。手動キャッシュクリアおよび現在の変形状態のシェイプキー保存（`Save as Shape Key`）を提供。
 
-### 1.4 3Dビューポート・オーバーレイ描画パイプライン (Drawing & Overlay Pipeline)
+### 1.4 GPU非同期リードバックパイプラインと外部変位連動 (Async Readback & Displacement Feedback)
+
+GPUシミュレーション実行中におけるCPU同期待ち（リードバックブロック）を解消し、高フレームレートを維持するための非同期実行機構です。Blender設定の実験的機能（`enable_async_readback`）で解禁されます。
+
+- **先頭回収・末尾発行パイプライン (`step_cloth_object`)**:
+  - 各フレームのステップ開始時に、前フレームでGPUディスパッチされた頂点バッファを `fetch_positions(coords)` で回収し、即座にメッシュへ反映。
+  - パラメータ同期およびピン更新後、末尾で `step_async(...)` を発行し、GPU計算の完了を待たずにCPU処理を復帰。
+- **内部変位自動回収と外力変位通知 (`note_external_displacement`)**:
+  - `fetch_positions` による頂点回収時、Rustコア内部で前回座標との差分から最大変位（`last_step_max_displacement`）および歪み率をネイティブ更新。同期実行と完全に同一の適応サブステップ計算と内部運動追従が、1フレーム遅延の非同期のまま自然に動作。
+  - さらに、ブラシ操作時（`SingleGrabTool` / `RangeGrabTool`）のマウスドラッグ量（純粋な外力移動）を `sim.note_external_displacement(frame_disp)` で物理コアへ即時通知。
+  - 物理コア内部で `last_step_effective_displacement` にこれらを保持し、CFL条件によるサブステップ数の動的引き上げと、コライダー侵入リスク判定（`is_penetration_risk`）による Coupled XPBD（反復内衝突解決）への自動昇格を即座に連動。これにより、布自体の自由反発（ピン解放時のリバウンド）による過剰な激重化を防ぎつつ、ドラッグ操作時のコライダーすり抜け・貫通を強力に防止。
+- **同期保護とフラッシュ (`flush_async_simulation`)**:
+  - タイムラインのベイク処理（`bake_cloth_scene`）では物理精度の決定性を保護するため同期モードで実行。
+  - モーダル操作終了時やアニメーション停止時には、未回収の非同期フレームを `flush_async_simulation` / `flush_all_async_simulations` で待機・フラッシュし、メッシュ状態の最新性を保証。
+
+### 1.5 3Dビューポート・オーバーレイ描画パイプライン (Drawing & Overlay Pipeline)
 
 3Dビューポート上の視覚的フィードバック（ピン留め頂点、掴み操作ハイライト、縫合ライン、ゴム紐テンション色、操作HUD等）は、`SpaceView3D.draw_handler_add` を利用してGPU直描画されます。
 
@@ -97,7 +112,7 @@ sequenceDiagram
 - **HUD表示指針**:
   表示内容の分類・Theme値・共通ヘルパーの使用義務・ブラシ状態の供給I/Fは [docs/hud.md](hud.md) に集約。本節との乖離を防ぐため、詳細はhud.mdを正本とする。
 
-### 1.5 GPUリソース初期化と共有パイプラインキャッシュ (Shared Pipeline Cache)
+### 1.6 GPUリソース初期化と共有パイプラインキャッシュ (Shared Pipeline Cache)
 
 `ClothSimulator` 生成時 (インタラクティブモード起動の「GPUを初期化中...」段階) の待ち時間の大半は、WGSL 16 本・コンピュートパイプライン 23 本のコンパイル (実測約 5.5 秒) でした。メッシュ非依存部分をプロセス全体で共有し、未使用機能を遅延生成することで、初回約 1 秒・2 個目以降 1 ミリ秒台に短縮しています。
 

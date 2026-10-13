@@ -10,6 +10,17 @@ from .base import BaseBrushTool, resolve_brush_center, update_brush_circle, brus
 from .math import verts_in_brush, depth_keep_mask, select_grab_pins, grab_drag_targets
 
 
+def _copy_vec(v):
+    if v is None:
+        return None
+    if hasattr(v, "copy"):
+        return v.copy()
+    try:
+        return mathutils.Vector((float(v.x), float(v.y), float(v.z)))
+    except Exception:
+        return v
+
+
 class RangeGrabTool(BaseBrushTool):
     """ブラシ半径内の頂点群を減衰重みでドラッグする"""
 
@@ -45,6 +56,7 @@ class RangeGrabTool(BaseBrushTool):
         self.plane_point = None
         self.plane_normal = None
         self.initial_plane_hit = None
+        self._prev_hit = None
 
     def on_press(self, ctx):
         # 中心解決に失敗 (パネル上など region_data なし) した場合は
@@ -129,6 +141,7 @@ class RangeGrabTool(BaseBrushTool):
         self.plane_point = None
         self.plane_normal = None
         self.initial_plane_hit = None
+        self._prev_hit = None
 
     def _start(self, ctx):
         obj, sim = ctx.obj, ctx.sim
@@ -198,6 +211,7 @@ class RangeGrabTool(BaseBrushTool):
             self.plane_point = None
             self.plane_normal = None
             self.initial_plane_hit = None
+        self._prev_hit = _copy_vec(self.initial_plane_hit)
         update_brush_circle(ctx.context, obj, res["center"], radius, ctx.mouse_pos)
         return True
 
@@ -226,6 +240,17 @@ class RangeGrabTool(BaseBrushTool):
         t = (self.plane_point - origin).dot(self.plane_normal) / denom
         current_hit = origin + direction * t
         delta_world = current_hit - self.initial_plane_hit
+
+        # 前フレーム（または直前move）からの移動量を算出し、物理コアへ外部変位として通知
+        prev_hit = getattr(self, "_prev_hit", None)
+        if prev_hit is None:
+            prev_hit = self.initial_plane_hit
+        frame_disp = (current_hit - prev_hit).length * strength
+        self._prev_hit = _copy_vec(current_hit)
+
+        if hasattr(sim, "note_external_displacement") and frame_disp > 1e-5:
+            sim.note_external_displacement(float(frame_disp))
+
         v_ids = list(self.grab.keys())
         try:
             init_mat = np.array(
@@ -267,3 +292,4 @@ class RangeGrabTool(BaseBrushTool):
         self.plane_point = None
         self.plane_normal = None
         self.initial_plane_hit = None
+        self._prev_hit = None

@@ -71,6 +71,7 @@ def save_preferences_to_disk(prefs=None) -> bool:
         "debug_sparse_triggers": getattr(prefs, "debug_sparse_triggers", False),
         "enable_standalone_gui": getattr(prefs, "enable_standalone_gui", False),
         "enable_wrinkle_field": getattr(prefs, "enable_wrinkle_field", False),
+        "enable_async_readback": getattr(prefs, "enable_async_readback", False),
     }
     filepath = get_preferences_filepath()
     try:
@@ -141,6 +142,8 @@ def apply_saved_preferences(prefs=None) -> bool:
             prefs.enable_standalone_gui = bool(data["enable_standalone_gui"])
         if "enable_wrinkle_field" in data and hasattr(prefs, "enable_wrinkle_field"):
             prefs.enable_wrinkle_field = bool(data["enable_wrinkle_field"])
+        if "enable_async_readback" in data and hasattr(prefs, "enable_async_readback"):
+            prefs.enable_async_readback = bool(data["enable_async_readback"])
     finally:
         _is_restoring = False
 
@@ -368,6 +371,13 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         update=_on_experimental_update,
     )
 
+    enable_async_readback: BoolProperty(
+        name="Enable Async Readback",
+        description="Enable 1-frame delayed asynchronous readback pipeline to hide GPU wait time (Experimental)",
+        default=False,
+        update=_on_experimental_update,
+    )
+
     def draw(self, context):
         global _has_restored_preferences
         if not _has_restored_preferences:
@@ -420,6 +430,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         box_exp.label(text=i18n.trans("Experimental Features"), icon='EXPERIMENTAL')
         box_exp.prop(self, "enable_standalone_gui", text=i18n.trans("Enable Standalone GUI Client"))
         box_exp.prop(self, "enable_wrinkle_field", text=i18n.trans("Enable Wrinkle Field"))
+        box_exp.prop(self, "enable_async_readback", text=i18n.trans("Enable Async Readback"))
 
 
 
@@ -450,6 +461,27 @@ def is_wrinkle_field_enabled(context=None) -> bool:
         if type(prefs).__module__.startswith("unittest.mock"):
             return True
         v = getattr(prefs, "enable_wrinkle_field", False)
+        if not isinstance(v, bool):
+            return True
+        return bool(v)
+    except Exception:
+        return True
+
+
+def is_async_readback_experimental_enabled(context=None) -> bool:
+    """非同期リードバック実験フラグの有効判定（共通ヘルパー）。
+
+    実Blenderで実Bool値Falseの場合のみFalseを返す。
+    プリファレンス未取得・モック環境（Blender非依存テスト）では
+    従来互換のためTrueを返す。
+    """
+    try:
+        prefs = get_preferences(context)
+        if prefs is None:
+            return True
+        if type(prefs).__module__.startswith("unittest.mock"):
+            return True
+        v = getattr(prefs, "enable_async_readback", False)
         if not isinstance(v, bool):
             return True
         return bool(v)
