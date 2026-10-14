@@ -1,4 +1,7 @@
-use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use numpy::{
+    PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray3, PyUntypedArrayMethods,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
@@ -24,6 +27,8 @@ use cloth_core::{
     radial_adjust as core_radial_adjust,
     grab_drag_targets as core_grab_drag_targets,
     ray_plane_hit as core_ray_plane_hit,
+    remesh_pattern_2d_core as core_remesh_pattern_2d,
+    remesh_cloth_to_quad_3d_core as core_remesh_cloth_to_quad_3d,
 };
 
 /// GPUが利用可能かどうかを判定する
@@ -2667,6 +2672,188 @@ impl ClothSimulator {
     }
 }
 
+/// 2D型紙境界ループと内部拘束線から等方性三角形メッシュを生成する
+#[pyfunction]
+#[pyo3(signature = (
+    boundary_loop,
+    internal_constraints=None,
+    target_edge_length=0.015,
+    iterations=6,
+    min_edge_ratio=0.8,
+    max_edge_ratio=1.333,
+    smoothing_strength=0.5
+))]
+fn remesh_pattern_2d<'py>(
+    py: Python<'py>,
+    boundary_loop: PyReadonlyArray2<f32>,
+    internal_constraints: Option<Vec<PyReadonlyArray2<f32>>>,
+    target_edge_length: f32,
+    iterations: u32,
+    min_edge_ratio: f32,
+    max_edge_ratio: f32,
+    smoothing_strength: f32,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<u32>>)> {
+    let b_shape = boundary_loop.shape();
+    if b_shape.len() != 2 || b_shape[1] != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "boundary_loop must have shape [B, 2]",
+        ));
+    }
+    let b_slice = boundary_loop.as_slice().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("boundary_loop is not contiguous: {e}"))
+    })?;
+    let boundary_points: Vec<[f32; 2]> = b_slice.chunks_exact(2).map(|c| [c[0], c[1]]).collect();
+
+    let constraints_vec: Option<Vec<Vec<[f32; 2]>>> = match internal_constraints {
+        Some(list) => {
+            let mut all = Vec::with_capacity(list.len());
+            for arr in list {
+                let s = arr.shape();
+                if s.len() != 2 || s[1] != 2 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "internal constraint must have shape [M, 2]",
+                    ));
+                }
+                let sl = arr.as_slice().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "internal constraint is not contiguous: {e}"
+                    ))
+                })?;
+                all.push(sl.chunks_exact(2).map(|c| [c[0], c[1]]).collect());
+            }
+            Some(all)
+        }
+        None => None,
+    };
+
+    let constraints_ref: Option<&[Vec<[f32; 2]>]> = constraints_vec.as_deref();
+
+    let (verts, tris) = core_remesh_pattern_2d(
+        &boundary_points,
+        constraints_ref,
+        target_edge_length,
+        iterations,
+        min_edge_ratio,
+        max_edge_ratio,
+        smoothing_strength,
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let mut flat_verts = Vec::with_capacity(verts.len() * 2);
+    for v in &verts {
+        flat_verts.push(v[0]);
+        flat_verts.push(v[1]);
+    }
+
+    let mut flat_tris = Vec::with_capacity(tris.len() * 3);
+    for t in &tris {
+        flat_tris.push(t[0]);
+        flat_tris.push(t[1]);
+        flat_tris.push(t[2]);
+    }
+
+    let py_verts_1d = PyArray1::from_vec(py, flat_verts);
+    let py_verts = py_verts_1d.reshape([verts.len(), 2])?;
+
+    let py_tris_1d = PyArray1::from_vec(py, flat_tris);
+    let py_tris = py_tris_1d.reshape([tris.len(), 3])?;
+
+    Ok((py_verts, py_tris))
+}
+
+/// シミュレーション済み布メッシュをプロダクションQuadトポロジーに変換し、3D重心逆写像を行う
+#[pyfunction]
+#[pyo3(signature = (
+    sim_positions_3d,
+    sim_uvs_2d,
+    sim_triangles,
+    boundary_loop_2d,
+    target_quad_size=0.010,
+    boundary_belt_loops=1,
+    smoothing_iterations=10
+))]
+fn remesh_cloth_to_quad_3d<'py>(
+    py: Python<'py>,
+    sim_positions_3d: PyReadonlyArray2<f32>,
+    sim_uvs_2d: PyReadonlyArray2<f32>,
+    sim_triangles: PyReadonlyArray2<u32>,
+    boundary_loop_2d: PyReadonlyArray2<f32>,
+    target_quad_size: f32,
+    boundary_belt_loops: u32,
+    smoothing_iterations: u32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let pos_view = sim_positions_3d.as_slice()?;
+    let uv_view = sim_uvs_2d.as_slice()?;
+    let tri_view = sim_triangles.as_slice()?;
+    let bnd_view = boundary_loop_2d.as_slice()?;
+
+    let pos_3d: Vec<[f32; 3]> = pos_view.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let uvs_2d: Vec<[f32; 2]> = uv_view.chunks_exact(2).map(|c| [c[0], c[1]]).collect();
+    let tris: Vec<[u32; 3]> = tri_view.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let boundary: Vec<[f32; 2]> = bnd_view.chunks_exact(2).map(|c| [c[0], c[1]]).collect();
+
+    let output = core_remesh_cloth_to_quad_3d(
+        &pos_3d,
+        &uvs_2d,
+        &tris,
+        &boundary,
+        target_quad_size,
+        boundary_belt_loops,
+        smoothing_iterations,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    let out_dict = PyDict::new(py);
+
+    // positions_3d: [M, 3]
+    let m = output.positions_3d.len();
+    let mut flat_pos = Vec::with_capacity(m * 3);
+    for p in &output.positions_3d {
+        flat_pos.push(p[0]);
+        flat_pos.push(p[1]);
+        flat_pos.push(p[2]);
+    }
+    let py_pos = PyArray1::from_vec(py, flat_pos).reshape([m, 3])?;
+    out_dict.set_item("positions_3d", py_pos)?;
+
+    // uvs_2d: [M, 2]
+    let mut flat_uv = Vec::with_capacity(m * 2);
+    for uv in &output.uvs_2d {
+        flat_uv.push(uv[0]);
+        flat_uv.push(uv[1]);
+    }
+    let py_uv = PyArray1::from_vec(py, flat_uv).reshape([m, 2])?;
+    out_dict.set_item("uvs_2d", py_uv)?;
+
+    // quads: [Q, 4]
+    let q = output.quads.len();
+    let mut flat_quads = Vec::with_capacity(q * 4);
+    for quad in &output.quads {
+        flat_quads.push(quad[0]);
+        flat_quads.push(quad[1]);
+        flat_quads.push(quad[2]);
+        flat_quads.push(quad[3]);
+    }
+    let py_quads = PyArray1::from_vec(py, flat_quads).reshape([q, 4])?;
+    out_dict.set_item("quads", py_quads)?;
+
+    // triangles: [K, 3]
+    let t = output.triangles.len();
+    let mut flat_tris = Vec::with_capacity(t * 3);
+    for tri in &output.triangles {
+        flat_tris.push(tri[0]);
+        flat_tris.push(tri[1]);
+        flat_tris.push(tri[2]);
+    }
+    let py_tris = PyArray1::from_vec(py, flat_tris).reshape([t, 3])?;
+    out_dict.set_item("triangles", py_tris)?;
+
+    // boundary_vertex_indices: [B]
+    let py_bnd = PyArray1::from_vec(py, output.boundary_vertex_indices);
+    out_dict.set_item("boundary_vertex_indices", py_bnd)?;
+
+    Ok(out_dict)
+}
+
 /// taremin_cloth_core Python モジュール
 #[pymodule]
 fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2700,6 +2887,8 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_triangle_intersections, m)?)?;
     m.add_function(wrap_pyfunction!(find_proximity_violations, m)?)?;
     m.add_function(wrap_pyfunction!(audit_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(remesh_pattern_2d, m)?)?;
+    m.add_function(wrap_pyfunction!(remesh_cloth_to_quad_3d, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

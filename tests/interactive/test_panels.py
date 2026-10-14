@@ -14,6 +14,7 @@ from taremin_cloth.panels import (
     TAREMIN_CLOTH_PT_objects_panel,
     TAREMIN_CLOTH_PT_main_panel,
     TAREMIN_CLOTH_PT_collider_panel,
+    TAREMIN_CLOTH_PT_pattern_piece,
 )
 from tests.fixtures.panel_test_utils import render_panel, MockLayout
 
@@ -483,7 +484,25 @@ class TestPanels(unittest.TestCase):
         self.assertEqual(TAREMIN_CLOTH_PT_collisions.bl_order, 3)
         self.assertEqual(TAREMIN_CLOTH_PT_forces.bl_order, 4)
 
+    def test_pattern_piece_panel_draw(self):
+        """型紙パネル（TAREMIN_CLOTH_PT_pattern_piece）の描画テスト"""
+        # 型紙パーツを有効化
+        self.obj.taremin_pattern.is_pattern_piece = True
+
+        # パネル描画の検証（オペレーターの未登録やプロパティ不整合がないこと）
+        layout = render_panel(TAREMIN_CLOTH_PT_pattern_piece)
+        labels = layout.get_labels()
+        self.assertTrue(any("Pattern:" in lbl or "型紙:" in lbl for lbl in labels))
+        self.assertTrue(any("3D Placement & Arrangement" in lbl or "3D配置・アセンブリ" in lbl for lbl in labels))
+
+        # オペレーターの存在確認
+        operators = layout.get_operators()
+        self.assertIn("taremin_cloth.apply_quick_arrangement", operators)
+        self.assertIn("taremin_cloth.edit_arrangement_3d", operators)
+        self.assertIn("taremin_cloth.build_garment", operators)
+
 
 if __name__ == "__main__":
+
     unittest.main()
 

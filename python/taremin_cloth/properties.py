@@ -1378,8 +1378,54 @@ class TareminWrinkleCurveSettings(bpy.types.PropertyGroup):
     )
 
 
+class TareminPatternPieceSettings(PropertyGroup):
+    """2D型紙パーツ設定（Curve / 平面Mesh共通）"""
+    is_pattern_piece: BoolProperty(
+        name="Is Pattern Piece",
+        description="Treat this object as a 2D pattern piece for garment assembly",
+        default=False,
+    )
+    target_edge_length: FloatProperty(
+        name="Target Edge Length",
+        description="Target mesh edge length for remeshing",
+        default=0.015,
+        min=0.002,
+        max=0.1,
+        unit='LENGTH',
+    )
+    arrangement_offset: FloatVectorProperty(
+        name="Arrangement Offset",
+        description="3D space placement offset for garment assembly",
+        size=3,
+        default=(0.0, 0.0, 0.0),
+        subtype='TRANSLATION',
+    )
+    arrangement_euler: FloatVectorProperty(
+        name="Arrangement Rotation",
+        description="3D space placement rotation (Euler) for garment assembly",
+        size=3,
+        default=(0.0, 0.0, 0.0),
+        subtype='EULER',
+    )
+    layer_id: IntProperty(
+        name="Cloth Layer",
+        description="Collision layer priority ID (higher layers stay outside lower layers)",
+        default=0,
+        min=0,
+        max=31,
+    )
+
+
 def register():
-    for cls in (TareminClothElasticGroup, TareminClothBrushSettings, TareminClothObjectSettings, TareminClothColliderAnimSettings, TareminClothColliderSettings, TareminWrinkleCurveSettings):
+    for cls in (
+        TareminClothElasticGroup,
+        TareminClothBrushSettings,
+        TareminClothObjectSettings,
+        TareminClothColliderAnimSettings,
+        TareminClothColliderSettings,
+        TareminWrinkleCurveSettings,
+        TareminPatternPieceSettings,
+    ):
         try:
             bpy.utils.register_class(cls)
         except ValueError:
@@ -1387,6 +1433,7 @@ def register():
     bpy.types.Object.taremin_cloth = PointerProperty(type=TareminClothObjectSettings)
     bpy.types.Object.taremin_cloth_collider = PointerProperty(type=TareminClothColliderSettings)
     bpy.types.Object.taremin_wrinkle = PointerProperty(type=TareminWrinkleCurveSettings)
+    bpy.types.Object.taremin_pattern = PointerProperty(type=TareminPatternPieceSettings)
     bpy.types.Scene.taremin_cloth_fast_playback = BoolProperty(
         name="Fast Playback",
         description="Bypass modifiers of non-simulated objects during playback to reduce Depsgraph overhead",
@@ -1422,13 +1469,23 @@ def unregister():
         del bpy.types.Scene.taremin_cloth_config_presets_json
     if hasattr(bpy.types.Scene, "taremin_cloth_fast_playback"):
         del bpy.types.Scene.taremin_cloth_fast_playback
+    if hasattr(bpy.types.Object, "taremin_pattern"):
+        del bpy.types.Object.taremin_pattern
     if hasattr(bpy.types.Object, "taremin_wrinkle"):
         del bpy.types.Object.taremin_wrinkle
     if hasattr(bpy.types.Object, "taremin_cloth"):
         del bpy.types.Object.taremin_cloth
     if hasattr(bpy.types.Object, "taremin_cloth_collider"):
         del bpy.types.Object.taremin_cloth_collider
-    for cls in (TareminWrinkleCurveSettings, TareminClothColliderSettings, TareminClothColliderAnimSettings, TareminClothObjectSettings, TareminClothBrushSettings, TareminClothElasticGroup):
+    for cls in (
+        TareminPatternPieceSettings,
+        TareminWrinkleCurveSettings,
+        TareminClothColliderSettings,
+        TareminClothColliderAnimSettings,
+        TareminClothObjectSettings,
+        TareminClothBrushSettings,
+        TareminClothElasticGroup,
+    ):
         try:
             bpy.utils.unregister_class(cls)
         except RuntimeError:

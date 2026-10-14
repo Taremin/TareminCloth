@@ -1052,6 +1052,42 @@ python tools/audit_feature_coverage.py --format markdown
 python run_tests.py --ci -t test_feature_coverage.py
 ```
 
+---
+
+## 11. 2D型紙CAD製図 & プロダクションQuadリメッシュアーキテクチャ (2D Pattern CAD & Production Quad Remesh)
+
+Taremin Cloth は、Marvelous Designer や CLO3D のような 2D CAD 型紙製図と 3D 衣服シミュレーションのシームレスな統合パイプラインを提供します。
+
+```mermaid
+graph LR
+    CAD[2D CAD型紙<br>Curve / Mesh] -->|サンプリング & 縫合同期| IR[中間表現<br>PatternContour2D]
+    IR -->|CDT & Botsch-Kobbelt等方性| TriMesh[2D等方性三角メッシュ<br>remesh_pattern_2d]
+    TriMesh -->|3Dオイラー配置 & 縫合LooseEdge| SimGarment[3D布シミュレーション<br>Taremin Cloth GPU XPBD]
+    SimGarment -->|重心逆写像 & 境界ベルト| QuadMesh[本番用Quadトポロジー<br>remesh_cloth_to_quad_3d]
+```
+
+### 11.1 主要コンポーネント
+
+1. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
+   - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。
+   - 境界頂点 `0..B` の完全不変保護（外周長・面積厳密保存）。
+   - エッジ分割・縮約・Delaunay flip・ラプラシアン平滑化によるスリバー三角形の完全解消（最小角 $\ge 18^\circ$）。
+2. **中間表現 & 縫合・中継ガイド同期 (`python/taremin_cloth/utils/pattern_ir.py`)**:
+   - `PatternContour2D`: ベジェ曲線・ポリラインから境界セグメントとノッチ（合印）を抽出。
+   - `synchronize_seam_subdivisions`: 縫合ペア間の不等長弧長・ノッチ位置を分割同期。
+   - 中継ガイド付き単一パス Loose Edge 自動生成。
+3. **Blender データ構造 & 3D統合ビルダー (`python/taremin_cloth/utils/pattern_builder.py`)**:
+   - `Object.taremin_pattern`: 型紙プロパティ（配置オフセット・オイラー角・レイヤーID）。
+   - 各パーツを `UVMap_Pattern` に格納し、3D配置・頂点グループ・`cloth_layer` 属性を統合付与。
+4. **2D特化ビューポート (`python/taremin_cloth/utils/pattern_view.py`)**:
+   - Top直交ビュー、回転ロック（`lock_rotation = True`）、グリッド最適化によるCAD感覚の製図環境。
+5. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`)**:
+   - 外周 Boundary Quad Belt の構築による境界エッジ整列。
+   - 構造化グリッド充填 / QuadDominant リメッシュ（Quad比率 $\ge 85\%$）。
+   - 2D空間ハッシュによる高速 Point-In-Triangle 重心逆写像（ドレープ曲面へのZ誤差 $< 1.5\,\text{mm}$）。
+   - UVアイランド独立維持 ＋ 縫合ペア3D中点スナップによる縫い目隙間 $0.0\,\text{m}$ 補正。
+
+
 
 
 

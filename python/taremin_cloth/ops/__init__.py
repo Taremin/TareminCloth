@@ -75,6 +75,15 @@ from .wrinkle import (
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
 )
+from .pattern import (
+    TAREMIN_OT_create_pattern_piece,
+    TAREMIN_OT_toggle_pattern_2d_view,
+    TAREMIN_OT_apply_quick_arrangement,
+    TAREMIN_OT_edit_arrangement_3d,
+    TAREMIN_OT_sync_arrangement_proxy,
+    TAREMIN_OT_build_garment,
+    TAREMIN_OT_remesh_to_quad,
+)
 
 OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_toggle_cloth,
@@ -121,6 +130,13 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_add_wrinkle_preset,
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
+    TAREMIN_OT_create_pattern_piece,
+    TAREMIN_OT_toggle_pattern_2d_view,
+    TAREMIN_OT_apply_quick_arrangement,
+    TAREMIN_OT_edit_arrangement_3d,
+    TAREMIN_OT_sync_arrangement_proxy,
+    TAREMIN_OT_build_garment,
+    TAREMIN_OT_remesh_to_quad,
 )
 
 __all__ = [
@@ -163,6 +179,13 @@ __all__ = [
     "TAREMIN_CLOTH_OT_add_wrinkle_preset",
     "TAREMIN_CLOTH_OT_slide_wrinkle_curves",
     "TAREMIN_CLOTH_OT_save_wrinkle_preset",
+    "TAREMIN_OT_create_pattern_piece",
+    "TAREMIN_OT_toggle_pattern_2d_view",
+    "TAREMIN_OT_apply_quick_arrangement",
+    "TAREMIN_OT_edit_arrangement_3d",
+    "TAREMIN_OT_sync_arrangement_proxy",
+    "TAREMIN_OT_build_garment",
+    "TAREMIN_OT_remesh_to_quad",
     "FPSCounter",
     "is_interactive_running",
     "stop_interactive_if_running",

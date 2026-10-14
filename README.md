@@ -14,10 +14,16 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
   - 3D ビューポート上でシミュレーションを実行しながら、マウスで布の頂点を掴んでリアルタイムに引っ張る操作が可能。
 - **📌 ピン留め (Pinning)**:
   - 頂点グループ（`Pin` または `Cloth_Pin`）による固定ピン対応。
-- **🧵 型紙縫合 & 中継点誘導 (Pattern Seaming & Waypoint Seams)**:
-  - 面に属さない孤立エッジ（Loose Edges）を「縫合線」として自動認識し、自然長を徐々に短縮して服の形状に縫い合わせ。
-  - **中継点（Waypoint）誘導**: 縫合エッジを細分化して腕や障害物の下などに中間頂点を配置（$`A - W - B`$）するだけで、中継点アンカーを経由する誘導スプリングを自動展開。コライダーを挟み込む破綻を起こさず、平面や二つ折りの袖パターンから安全に筒状縫合が可能。
-  - **ワールド座標系同期**: 布オブジェクトの位置・回転・均等スケールをワールド空間で自動整合。事前に「全トランスフォームの適用（Ctrl+A）」を行わなくても、配置した通りの位置で正確にコライダーと衝突・縫合。
+- **📐 2D型紙CAD製図 & 3D衣装アセンブリ (2D Pattern CAD & 3D Garment Assembly)**:
+  - **2D製図特化ビュー**: 3Dビューポートを2D Top直交ビューに瞬時に切り替え、視点回転をネイティブロック（`lock_rotation = True`）したCAD感覚の作図環境。
+  - **ベジェ曲線 / 平面メッシュの自動リメッシュ**: ベジェ曲線や平面ポリゴンから境界ループ・ノッチ（合印）を抽出し、Rust 2D CDT（拘束Delaunay分割）とBotsch-Kobbelt等方性リメッシュにより高品質な2D三角メッシュを生成。
+  - **縫合・中継ガイド自動同期**: 縫合ペア間の不等長弧長分割およびノッチ位置を自動整合し、中継ガイド付き Loose Edge を一発生成。
+  - **ワンクリック3D衣装ビルド**: 各パーツの3Dオイラー配置・UVレイヤー（`UVMap_Pattern`）・頂点グループ・`cloth_layer`属性を単一のシミュレーション用メッシュへ自動統合。
+- **⏹️ プロダクションQuadリメッシュ & 3D逆写像 (Production Quad Remeshing)**:
+  - シミュレーション後の布メッシュから、外周 Boundary Quad Belt を保持した本番用Quadトポロジー（Quad比率 85%以上）を生成。
+  - 2D空間ハッシュによる高速 Point-In-Triangle 重心座標逆写像により、シワやドレープの曲面形状を高精度（誤差1.5mm未満）に再現。
+  - 縫合ペア境界の3D中点スナップにより、UVアイランドを独立維持したまま縫い目ギャップを完全ゼロ化。
+
 
 - **🛡️ 剛体 & メッシュコライダー (SDF & Triangle Mesh Collision)**:
   - 球（Sphere）、カプセル（Capsule）、無限平面（Plane）の SDF プリミティブ衝突判定。
@@ -441,11 +447,14 @@ taremin_cloth/
 │   ├── __init__.py              # アドオンエントリポイント
 │   ├── properties.py            # Blender プロパティ定義
 │   ├── operators.py             # オペレーター & タイムラインハンドラー
-│   ├── panels.py                # 3Dビューポート NパネルUI
-│   ├── ops/                     # オペレーター実装 (interactive / basic / tools / bake / pose / gui)
+│   ├── panels.py                # 3Dビューポート NパネルUI (型紙パーツ・衣服ビルド含む)
+│   ├── ops/                     # オペレーター実装 (interactive / basic / tools / bake / pose / gui / pattern)
 │   ├── brush/                   # ブラシツール (base・math 基盤 + single_grab・range_grab・smooth 個別実装)
 │   ├── engine/                  # 同期・実行・キャッシュ管理
-│   ├── utils/                   # 描画・メッシュ抽出等の共通処理
+│   ├── utils/                   # 描画・メッシュ抽出・型紙中間表現(IR)・ビュー制御等の共通処理
+│   │   ├── pattern_ir.py        # 2D型紙中間表現 & 縫合・中継ガイド同期
+│   │   ├── pattern_builder.py   # Curve/Mesh 型紙から単一3D衣服メッシュの統合ビルダー
+│   │   └── pattern_view.py      # 2D製図特化ビューポート制御 (Top直交 & 回転ロック)
 │   └── taremin_cloth_core.pyd   # PyO3 GPU コアバイナリ
 ├── crates/
 │   ├── cloth_core/              # wgpu XPBD 物理計算コア & WGSL シェーダー
@@ -453,10 +462,12 @@ taremin_cloth/
 │   │   │   ├── context.rs       # GPU Device / Queue 管理
 │   │   │   ├── mesh.rs          # 頂点・拘束・コライダー構造体
 │   │   │   ├── coloring.rs      # グラフ彩色 (Welsh-Powell)
+│   │   │   ├── pattern_remesh.rs# 2D CDT & Botsch-Kobbelt 等方性リメッシュ
+│   │   │   ├── quad_remesh.rs   # 本番用Quadリメッシュ & 3D Barycentric 逆写像
 │   │   │   ├── simulation/      # シミュレーションループ & ディスパッチ
 │   │   │   └── shaders/         # WGSL コンピュートシェーダー群
 │   ├── cloth_gui/               # 独立プロセス型 IPC リアルタイムGUIビューア
-│   └── cloth_py/                # PyO3 Python バインディング
+│   └── cloth_py/                # PyO3 Python バインディング (remesh_pattern_2d, remesh_cloth_to_quad_3d等)
 ├── tests/                       # 単体テスト & E2E テスト
 │   └── fixtures/bodies/siroino/   # E2E素体コライダーOBJ + 出所記録 (CC0派生)
 │   └── fixtures/garments/tshirt/  # Tシャツ型紙OBJ + 縫合JSON + scene.json

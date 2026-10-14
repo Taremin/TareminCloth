@@ -957,6 +957,130 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
         if settings.show_elastic_overlay:
             row_elastic_disp.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
+        # 2D型紙エディタ & 衣装ビルド
+        box_pattern = layout.box()
+        box_pattern.label(text=i18n.trans("2D Pattern & Garment Assembly"), icon='FILE_IMAGE')
+        row_view = box_pattern.row(align=True)
+        row_view.operator("taremin_cloth.toggle_pattern_2d_view", text=i18n.trans("Toggle 2D View"), icon='VIEW_ORTHO')
+        row_view.operator("taremin_cloth.create_pattern_piece", text=i18n.trans("New Pattern"), icon='ADD')
+
+        row_build = box_pattern.row(align=True)
+        row_build.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
+        row_build.operator("taremin_cloth.remesh_to_quad", text=i18n.trans("Remesh to Quad"), icon='MOD_REMESH')
+
+        if hasattr(obj, "taremin_pattern"):
+            pat = obj.taremin_pattern
+            box_piece = box_pattern.box()
+            box_piece.label(text=i18n.trans("Pattern Piece Settings"), icon='PROPERTIES')
+            box_piece.prop(pat, "is_pattern_piece")
+            if pat.is_pattern_piece:
+                box_piece.prop(pat, "target_edge_length")
+                box_piece.prop(pat, "layer_id")
+
+                box_arr = box_piece.box()
+                box_arr.label(text=i18n.trans("3D Placement & Arrangement"), icon='ORIENTATION_GIMBAL')
+
+                row_p1 = box_arr.row(align=True)
+                op = row_p1.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Front (Chest)"))
+                if op:
+                    op.preset = 'CHEST_FRONT'
+                op = row_p1.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Back"))
+                if op:
+                    op.preset = 'BACK'
+
+                row_p2 = box_arr.row(align=True)
+                op = row_p2.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Left Arm"))
+                if op:
+                    op.preset = 'ARM_LEFT'
+                op = row_p2.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Right Arm"))
+                if op:
+                    op.preset = 'ARM_RIGHT'
+
+                row_p3 = box_arr.row(align=True)
+                op = row_p3.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Collar"))
+                if op:
+                    op.preset = 'COLLAR'
+                op = row_p3.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Waist"))
+                if op:
+                    op.preset = 'WAIST_SKIRT'
+
+                box_arr.operator("taremin_cloth.edit_arrangement_3d", text=i18n.trans("Edit in 3D (Proxy)"), icon='EMPTY_ARROWS')
+                box_arr.prop(pat, "arrangement_offset")
+                box_arr.prop(pat, "arrangement_euler")
+
+
+class TAREMIN_CLOTH_PT_pattern_piece(bpy.types.Panel):
+    """型紙オブジェクト選択時の専用プロパティパネル"""
+    bl_label = "2D Pattern Piece"
+    bl_idname = "TAREMIN_CLOTH_PT_pattern_piece"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Taremin Cloth"
+    bl_order = 1
+    bl_translation_context = i18n.CONTEXT
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if not obj:
+            return False
+        if hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece:
+            return True
+        return obj.type == 'CURVE'
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+        pat = getattr(obj, "taremin_pattern", None)
+
+        box = layout.box()
+        box.label(text=f"{i18n.trans('Pattern:')} {obj.name}", icon='CURVE_DATA' if obj.type == 'CURVE' else 'MESH_PLANE')
+
+        row_view = box.row(align=True)
+        row_view.operator("taremin_cloth.toggle_pattern_2d_view", text=i18n.trans("Toggle 2D View"), icon='VIEW_ORTHO')
+        row_view.operator("taremin_cloth.create_pattern_piece", text=i18n.trans("New Pattern"), icon='ADD')
+
+        if pat:
+            col = box.column(align=True)
+            col.prop(pat, "is_pattern_piece")
+            if pat.is_pattern_piece:
+                col.prop(pat, "target_edge_length")
+                col.prop(pat, "layer_id")
+
+                box_arr = box.box()
+                box_arr.label(text=i18n.trans("3D Placement & Arrangement"), icon='ORIENTATION_GIMBAL')
+
+                row_p1 = box_arr.row(align=True)
+                op = row_p1.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Front (Chest)"))
+                if op:
+                    op.preset = 'CHEST_FRONT'
+                op = row_p1.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Back"))
+                if op:
+                    op.preset = 'BACK'
+
+                row_p2 = box_arr.row(align=True)
+                op = row_p2.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Left Arm"))
+                if op:
+                    op.preset = 'ARM_LEFT'
+                op = row_p2.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Right Arm"))
+                if op:
+                    op.preset = 'ARM_RIGHT'
+
+                row_p3 = box_arr.row(align=True)
+                op = row_p3.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Collar"))
+                if op:
+                    op.preset = 'COLLAR'
+                op = row_p3.operator("taremin_cloth.apply_quick_arrangement", text=i18n.trans("Waist"))
+                if op:
+                    op.preset = 'WAIST_SKIRT'
+
+                box_arr.operator("taremin_cloth.edit_arrangement_3d", text=i18n.trans("Edit in 3D (Proxy)"), icon='EMPTY_ARROWS')
+                box_arr.prop(pat, "arrangement_offset")
+                box_arr.prop(pat, "arrangement_euler")
+
+        box_build = layout.box()
+        box_build.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
+
 
 class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
     """ドレープガイド（シワ造形）設定サブパネル（実験的機能）"""
@@ -1658,6 +1782,7 @@ classes = (
     TAREMIN_CLOTH_PT_collisions,
     TAREMIN_CLOTH_PT_forces,
     TAREMIN_CLOTH_PT_pattern,
+    TAREMIN_CLOTH_PT_pattern_piece,
     TAREMIN_CLOTH_PT_wrinkle_field,
     TAREMIN_CLOTH_PT_wrinkle_curve_item,
     TAREMIN_CLOTH_PT_topology,

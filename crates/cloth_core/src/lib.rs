@@ -14,6 +14,11 @@ pub mod virtual_mesh;
 pub mod debug_recorder;
 pub mod renderer;
 pub mod sdf_baker;
+pub mod pattern_remesh;
+pub mod quad_remesh;
+
+pub use pattern_remesh::{polygon_signed_area_2d, remesh_pattern_2d_core, triangle_signed_area_2d};
+pub use quad_remesh::{remesh_cloth_to_quad_3d_core, QuadRemeshOutput};
 
 pub use context::{GpuBufferLimits, GpuContext, GpuContextError, GpuDeviceInfo};
 pub use config::SimConfig;

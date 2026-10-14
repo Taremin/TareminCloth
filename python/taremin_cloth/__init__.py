@@ -25,6 +25,10 @@ subpackages = [
             "topology",
             "collider_detect",
             "self_collision_fit",
+            "pattern_ir",
+            "pattern_builder",
+            "pattern_view",
+            "pattern_proxy",
         ],
     ),
     (
