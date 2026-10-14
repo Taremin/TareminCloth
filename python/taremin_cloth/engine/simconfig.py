@@ -14,6 +14,7 @@ Rust側に存在しないPython側付帯キー (`EXTRA_KEYS`) は転送・署名
 
 import json
 from typing import Any, Dict, Optional, Tuple
+from ..utils.logger import logger
 
 #: Rust SimConfigに存在しないPython側付帯キー (転送・署名専用)
 EXTRA_KEYS = ("gravity_scale", "sewing_shrink_speed")
@@ -248,8 +249,8 @@ def apply_sim_config(sim: Any, cfg: Dict[str, Any]) -> str:
         try:
             applier(json.dumps(live))
             return "config"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[SimConfig] apply_config_json failed, falling back to legacy setters: {exc}")
     apply_sim_config_legacy(sim, cfg)
     return "legacy"
 

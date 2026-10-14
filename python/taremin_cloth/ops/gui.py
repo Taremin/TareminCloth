@@ -12,7 +12,9 @@ import numpy as np
 
 from ..engine.gui_client import get_gui_client
 from ..engine.cache import cache_rest_positions
+from ..engine.runner import _apply_coords_to_mesh
 from ..utils.logger import logger
+from ..utils.view3d import tag_redraw_view3d
 from .. import i18n
 
 _gui_process = None
@@ -212,9 +214,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
 
                     # Blenderメッシュ頂点更新 (Blenderの余力がある時だけ反映)
                     try:
-                        obj.data.vertices.foreach_set("co", flat_coords)
-                        obj.data.update()
-                        obj["_taremin_cloth_is_deformed"] = True
+                        _apply_coords_to_mesh(obj, flat_coords)
 
                         now = time.perf_counter()
                         if self._last_frame_time > 0.0:
@@ -225,10 +225,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
                         self._last_frame_time = now
 
                         # ビューポート再描画要求
-                        if context.screen:
-                            for a in context.screen.areas:
-                                if a.type == 'VIEW_3D':
-                                    a.tag_redraw()
+                        tag_redraw_view3d(context)
                     except Exception as e:
                         logger.warning(f"[GuiPreview] Mesh update error: {e}")
 
@@ -238,7 +235,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
                 client.send_update_colliders(context.scene)
                 client.send_update_bone_transforms(context.scene)
                 client.send_update_elastic_scales(obj)
-                client.send_update_pins(obj, context.scene)
+                client.send_update_pins(obj, scene=context.scene)
                 client.send_update_params_from_settings(obj, context.scene)
 
             return {'PASS_THROUGH'}
@@ -322,15 +319,10 @@ class TAREMIN_CLOTH_OT_apply_gui_pose(bpy.types.Operator):
             self.report({'ERROR'}, "ポーズの取得に失敗しました")
             return {'CANCELLED'}
 
-        obj.data.vertices.foreach_set("co", pose)
-        obj.data.update()
-        cache_rest_positions(obj, force=True)
+        _apply_coords_to_mesh(obj, pose)
         obj["_taremin_cloth_is_deformed"] = False
-
-        if context.screen:
-            for a in context.screen.areas:
-                if a.type == 'VIEW_3D':
-                    a.tag_redraw()
+        cache_rest_positions(obj, force=True)
+        tag_redraw_view3d(context)
 
         self.report({'INFO'}, f"GUIの形状を '{obj.name}' に確定適用しました")
         return {'FINISHED'}

@@ -481,14 +481,14 @@ class TestWrinkleOps(unittest.TestCase):
         with patch("taremin_cloth.utils.drawing.get_3d_uniform_color_shader", return_value=mock_shader), \
              patch("taremin_cloth.utils.drawing.get_point_shader", return_value=mock_shader), \
              patch("taremin_cloth.utils.drawing.batch_for_shader", return_value=mock_batch), \
-             patch("gpu.state.depth_test_set"), \
-             patch("gpu.state.depth_test_get", return_value='LESS_EQUAL'), \
-             patch("gpu.state.line_width_set"), \
-             patch("gpu.state.line_width_get", return_value=1.0), \
-             patch("gpu.state.blend_set"), \
-             patch("gpu.state.blend_get", return_value='NONE'), \
-             patch("gpu.state.point_size_set"), \
-             patch("gpu.state.point_size_get", return_value=1.0):
+             patch("gpu.state.depth_test_set", create=True), \
+             patch("gpu.state.depth_test_get", return_value='LESS_EQUAL', create=True), \
+             patch("gpu.state.line_width_set", create=True), \
+             patch("gpu.state.line_width_get", return_value=1.0, create=True), \
+             patch("gpu.state.blend_set", create=True), \
+             patch("gpu.state.blend_get", return_value='NONE', create=True), \
+             patch("gpu.state.point_size_set", create=True), \
+             patch("gpu.state.point_size_get", return_value=1.0, create=True):
             # 例外なく描画が完了すること
             draw_wrinkle_armature_overlay(bones_data, active_bone_name="Bone1", chain_bone_names=["Bone1", "Bone2"])
             self.assertTrue(mock_shader.bind.called)

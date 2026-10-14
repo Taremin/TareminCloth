@@ -49,6 +49,14 @@ def sync_cloth_parameters(sim, obj, scene=None):
 
 
 _prev_wrinkle_signatures = {}
+
+def clear_wrinkle_signature_cache(obj_name=None):
+    """シミュレータ破棄時にドレープガイドのベイク署名キャッシュを消去する"""
+    if obj_name is None:
+        _prev_wrinkle_signatures.clear()
+    else:
+        _prev_wrinkle_signatures.pop(obj_name, None)
+
 # _prev_wrinkle_signatures[obj_name] は下記のキャッシュ辞書である:
 # {
 #   "desc": [WrinkleCurveDesc, ...] (骨ローカル・照合用),
@@ -378,48 +386,105 @@ def sync_elastic_groups(sim, obj):
         prev_map["_is_synced"] = True
 
 
-def sync_attachment_pins(sim, obj, scene):
+def _extract_vertex_pin_weight(v, vg, vg_idx) -> float:
+    """MeshVertex から指定頂点グループのウェイトを取得する (v.groups / vg.weight 両対応)"""
+    if vg_idx is not None and hasattr(v, "groups") and v.groups is not None:
+        for g in v.groups:
+            if getattr(g, "group", None) == vg_idx and g.weight > 0.0:
+                return float(g.weight)
+        return 0.0
+    if hasattr(vg, "weight"):
+        try:
+            w = float(vg.weight(v.index))
+            return w if w > 0.0 else 0.0
+        except (RuntimeError, TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def compute_attachment_pin_targets(obj):
+    """アタッチメントピンのワールド目標座標配列を算出する共通関数 (In-process / GUI IPC 共通正本)。
+
+    Returns:
+        tuple[list[int], list[list[float]], list[float], tuple] | None:
+            (vertex_indices, world_positions, weights, target_matrix_signature)
+            設定無効または対象頂点なしの場合は None。
+    """
     settings = getattr(obj, "taremin_cloth", None)
-    if not settings or not settings.pin_target_object:
-        return
+    if not settings or not getattr(settings, "pin_target_object", None):
+        return None
 
     target_obj = settings.pin_target_object
-    vg_name = settings.pin_vertex_group or "Pin"
+    vg_name = getattr(settings, "pin_vertex_group", "") or "Pin"
     vg = obj.vertex_groups.get(vg_name)
     if not vg:
-        return
+        return None
 
     target_mat = target_obj.matrix_world
-    if settings.pin_target_bone and target_obj.type == "ARMATURE" and target_obj.pose:
+    if getattr(settings, "pin_target_bone", "") and getattr(target_obj, "type", "") == "ARMATURE" and getattr(target_obj, "pose", None):
         bone = target_obj.pose.bones.get(settings.pin_target_bone)
         if bone:
             target_mat = target_mat @ bone.matrix
 
-    inv_world = obj.matrix_world.inverted()
-    local_target = inv_world @ target_mat.translation
-    loc_tuple = (round(local_target.x, 5), round(local_target.y, 5), round(local_target.z, 5))
-
-    prev_loc = _prev_attachment_pin_targets.get(obj.name)
-    if prev_loc == loc_tuple:
-        return
-    _prev_attachment_pin_targets[obj.name] = loc_tuple
+    try:
+        mat_np = np.array([list(row) for row in target_mat], dtype=np.float32)
+    except (TypeError, ValueError):
+        mat_np = np.asarray(target_mat, dtype=np.float32)
+    mat_sig = tuple(np.round(mat_np.flatten(), 5).tolist())
 
     mesh = obj.data
     cache_key = (obj.name, vg_name, len(mesh.vertices))
     pinned_entries = _attachment_pin_indices_cache.get(cache_key)
     if pinned_entries is None:
         pinned_entries = []
-        vg_idx = vg.index
+        vg_idx = getattr(vg, "index", None)
+        obj_mat = getattr(obj, "matrix_world", None)
+        try:
+            inv_init_target = target_mat.inverted()
+        except Exception:
+            inv_init_target = None
         for v in mesh.vertices:
-            for g in v.groups:
-                if g.group == vg_idx and g.weight > 0.0:
-                    pinned_entries.append((v.index, float(g.weight)))
-                    break
+            w = _extract_vertex_pin_weight(v, vg, vg_idx)
+            if w > 0.0:
+                v_world = (obj_mat @ v.co) if obj_mat is not None else v.co
+                rel_co = (inv_init_target @ v_world) if inv_init_target is not None else v_world
+                pinned_entries.append((int(v.index), float(w), rel_co))
         _attachment_pin_indices_cache[cache_key] = pinned_entries
 
     if not pinned_entries:
-        return
+        return None
 
-    target_xyz = [local_target.x, local_target.y, local_target.z]
-    for v_idx, weight in pinned_entries:
+    v_indices = []
+    positions = []
+    weights = []
+    if len(pinned_entries) == 1:
+        # 単一頂点ピンはターゲットのワールド位置へ直接追従
+        t_world = target_mat.translation
+        v_idx, weight, _ = pinned_entries[0]
+        v_indices.append(v_idx)
+        positions.append([float(t_world.x), float(t_world.y), float(t_world.z)])
+        weights.append(weight)
+    else:
+        # 複数頂点ピンはターゲット初期姿勢に対する各頂点の相対オフセットを維持してワールド座標を算出
+        for v_idx, weight, rel_co in pinned_entries:
+            p_world = target_mat @ rel_co
+            v_indices.append(v_idx)
+            positions.append([float(p_world.x), float(p_world.y), float(p_world.z)])
+            weights.append(weight)
+
+    return v_indices, positions, weights, mat_sig
+
+
+def sync_attachment_pins(sim, obj, scene):
+    """In-process シミュレータへアタッチメントピン座標を同期する（差分スキップ付き）"""
+    res = compute_attachment_pin_targets(obj)
+    if res is None:
+        return
+    v_indices, positions, weights, mat_sig = res
+    if _prev_attachment_pin_targets.get(obj.name) == mat_sig:
+        return
+    _prev_attachment_pin_targets[obj.name] = mat_sig
+
+    for v_idx, target_xyz, weight in zip(v_indices, positions, weights):
         sim.set_pin(v_idx, target_xyz, weight)
+

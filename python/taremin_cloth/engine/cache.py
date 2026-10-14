@@ -199,6 +199,8 @@ def clear_simulator_for_object(obj_name, clear_timeline=True):
     _waypoint_managers.pop(obj_name, None)
     _seam_cluster_maps.pop(obj_name, None)
     purge_applied_signature(obj_name)
+    from .params import clear_wrinkle_signature_cache
+    clear_wrinkle_signature_cache(obj_name)
     for k in list(_attachment_pin_indices_cache.keys()):
         if isinstance(k, tuple) and k[0] == obj_name:
             _attachment_pin_indices_cache.pop(k, None)
@@ -221,6 +223,8 @@ def clear_simulators():
     restore_fast_playback()
     clear_collider_cache()
     purge_applied_signature(None)
+    from .params import clear_wrinkle_signature_cache
+    clear_wrinkle_signature_cache(None)
     count = len(_simulators)
     _simulators.clear()
     _prev_coords_cache.clear()
@@ -252,47 +256,17 @@ def get_cloth_params_signature(obj):
         )
 
     pin_obj_name = settings.pin_target_object.name if getattr(settings, "pin_target_object", None) else ""
-    # 前半: 再構築キー (メッシュ同一性・ピン・縫合・ベイク条件)。後半: Liveキー
-    # (simconfig収集値。 relief/coupled/pair等の途中変更も検知して stale bake を防ぐ)。
+    # 前半: トポロジー・再構築キー（SimConfigに含まれないBlender側構成キー）
+    # 後半: Live物理キー（engine.simconfig の Single Source of Truth に完全委譲）
     return (
-        round(float(getattr(settings, "tension_stiffness", 1000.0)), 2),
-        round(float(getattr(settings, "compression_stiffness", 1000.0)), 2),
-        round(float(getattr(settings, "shear_stiffness", 1000.0)), 2),
-        round(float(getattr(settings, "bending_stiffness", 10.0)), 2),
-        round(float(getattr(settings, "air_damping", 0.05)), 4),
-        round(float(getattr(settings, "tension_damping", 0.1)), 4),
-        round(float(getattr(settings, "compression_damping", 0.1)), 4),
-        round(float(getattr(settings, "shear_damping", 0.1)), 4),
-        round(float(getattr(settings, "bending_damping", 0.1)), 4),
-        round(float(getattr(settings, "gravity", 1.0)), 4),
         str(getattr(settings, "pin_vertex_group", "")),
         pin_obj_name,
         str(getattr(settings, "pin_target_bone", "")),
         bool(getattr(settings, "enable_sewing", False)),
-        round(float(getattr(settings, "sewing_shrink_speed", 1.0)), 4),
-        round(float(getattr(settings, "sewing_stiffness", 10000.0)), 2),
-        bool(getattr(settings, "enable_sewing_lock", True)),
-        bool(getattr(settings, "enable_sewing_priority", False)),
-        round(float(getattr(settings, "sewing_priority_threshold", 0.9)), 4),
-        round(float(getattr(settings, "sewing_priority_merge_dist", 0.005)), 5),
-        int(getattr(settings, "sewing_priority_ramp_frames", 3)),
-        int(getattr(settings, "sewing_priority_max_frames", 600)),
         round(float(getattr(settings, "thickness", 0.005)), 5),
-        round(float(getattr(settings, "areal_density", 0.15)), 5),
         bool(getattr(settings, "enable_coarse_constraints", False)),
-        bool(getattr(settings, "enable_self_collision", False)),
-        str(getattr(settings, "self_collision_algorithm", "DIRECT")),
         str(getattr(settings, "self_collision_purpose", "STANDARD")),
-        bool(getattr(settings, "enable_pair_cache", False)),
-        str(getattr(settings, "pair_cache_margin_mode", "AUTO")),
-        round(float(getattr(settings, "pair_cache_safety_margin", 0.005)), 5),
-        round(float(getattr(settings, "pair_cache_horizon_scale", 1.3)), 3),
-        round(float(getattr(settings, "pair_cache_max_horizon", 0.02)), 5),
-        int(getattr(settings, "pair_cache_max_pairs", 65536)),
-        bool(getattr(settings, "enable_pair_cache_final_fallback", True)),
-        int(getattr(settings, "substeps", 10)),
-        int(getattr(settings, "solver_iterations", 2)),
-        str(getattr(settings, "solver_mode", "COLORING")),
+        int(getattr(settings, "substeps", 20)),
         elastic_tuples,
         sim_config_signature(collect_sim_config(settings)),
     )

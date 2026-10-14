@@ -18,11 +18,11 @@ impl GpuClothSimulator {
         SimConfig {
             version: 1,
             gravity: self.gravity,
-            damping: self.damping,
-            tension_damping: 0.0,
-            compression_damping: 0.0,
-            shear_damping: 0.0,
-            bending_damping: 0.0,
+            damping: self.air_damping,
+            tension_damping: self.tension_damping,
+            compression_damping: self.compression_damping,
+            shear_damping: self.shear_damping,
+            bending_damping: self.bending_damping,
             tension_stiffness: tension,
             compression_stiffness: compression,
             shear_stiffness: shear,
@@ -103,9 +103,13 @@ impl GpuClothSimulator {
     /// workgroup_size は生成後変更してもパイプライン再構築されないため記録のみ.
     pub fn apply_config(&mut self, c: &SimConfig) {
         self.set_gravity(c.gravity[0], c.gravity[1], c.gravity[2]);
-        // damping_all は加算型のため直接代入で再現性を保つ
-        let detail = (c.tension_damping + c.compression_damping + c.shear_damping + c.bending_damping) * 0.05;
-        self.damping = (c.damping + detail).max(0.0);
+        self.set_damping(c.damping);
+        self.set_damping_all(
+            c.tension_damping,
+            c.compression_damping,
+            c.shear_damping,
+            c.bending_damping,
+        );
         self.set_stiffness_all(
             c.tension_stiffness,
             c.compression_stiffness,

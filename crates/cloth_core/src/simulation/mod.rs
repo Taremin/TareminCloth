@@ -249,6 +249,11 @@ pub struct GpuClothSimulator {
     pub solver_iterations: u32,
     pub gravity: [f32; 3],
     pub damping: f32,
+    pub air_damping: f32,
+    pub tension_damping: f32,
+    pub compression_damping: f32,
+    pub shear_damping: f32,
+    pub bending_damping: f32,
     pub enable_self_collision: bool,
     pub self_collision_relief_factor: f32,
     pub self_collision_max_displacement_ratio: f32,
@@ -577,6 +582,11 @@ impl GpuClothSimulator {
             solver_iterations: 2,
             gravity: [0.0, 0.0, -9.81],
             damping: 1.0,
+            air_damping: 1.0,
+            tension_damping: 0.0,
+            compression_damping: 0.0,
+            shear_damping: 0.0,
+            bending_damping: 0.0,
             enable_self_collision: true,
             self_collision_relief_factor: res.self_collision_relief_factor,
             self_collision_max_displacement_ratio: res.self_collision_max_displacement_ratio,
@@ -1317,12 +1327,22 @@ impl GpuClothSimulator {
     }
 
     /// 大域空気減衰率（Air Damping / Velocity Damping）を設定する
-    pub fn set_damping(&mut self, damping: f32) {
-
-        self.damping = damping.max(0.0);
+    /// 空気減衰と4種内部減衰から実効減衰率 (self.damping) を決定論的に再計算する
+    fn recompute_effective_damping(&mut self) {
+        let internal_damp = (self.tension_damping
+            + self.compression_damping
+            + self.shear_damping
+            + self.bending_damping)
+            * 0.05;
+        self.damping = (self.air_damping + internal_damp).max(0.0);
     }
 
-    /// 減衰4種（引張・圧縮・せん断・曲げ）を反映して減衰率を設定する
+    pub fn set_damping(&mut self, damping: f32) {
+        self.air_damping = damping.max(0.0);
+        self.recompute_effective_damping();
+    }
+
+    /// 減衰4種（引張・圧縮・せん断・曲げ）を反映して減衰率を設定する（冪等）
     pub fn set_damping_all(
         &mut self,
         tension_damp: f32,
@@ -1330,8 +1350,11 @@ impl GpuClothSimulator {
         shear_damp: f32,
         bending_damp: f32,
     ) {
-        let internal_damp = (tension_damp + compression_damp + shear_damp + bending_damp) * 0.05;
-        self.damping = (self.damping + internal_damp).max(0.0);
+        self.tension_damping = tension_damp.max(0.0);
+        self.compression_damping = compression_damp.max(0.0);
+        self.shear_damping = shear_damp.max(0.0);
+        self.bending_damping = bending_damp.max(0.0);
+        self.recompute_effective_damping();
     }
 
     /// 指定された元エッジインデックス群に対して自然長スケール（倍率）を設定し、GPUバッファに反映する

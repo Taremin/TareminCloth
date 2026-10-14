@@ -218,34 +218,9 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                     }
                     GuiCommand::SetParams(p) => {
                         if let Some(ref mut sim) = simulator {
-                            if let Some(g) = p.gravity {
-                                sim.set_gravity(g[0], g[1], g[2]);
-                            }
-                            if let Some(air) = p.air_damping {
-                                sim.set_damping(air);
-                            }
-                            if p.tension_damping.is_some() || p.compression_damping.is_some() || p.shear_damping.is_some() || p.bending_damping.is_some() {
-                                sim.set_damping_all(
-                                    p.tension_damping.unwrap_or(0.0),
-                                    p.compression_damping.unwrap_or(0.0),
-                                    p.shear_damping.unwrap_or(0.0),
-                                    p.bending_damping.unwrap_or(0.0),
-                                );
-                            }
-                            if p.stiffness.is_some() || p.compression_stiffness.is_some() || p.shear_stiffness.is_some() || p.bending_stiffness.is_some() {
-                                sim.set_stiffness_all(
-                                    p.stiffness.unwrap_or(100.0),
-                                    p.compression_stiffness.unwrap_or(0.0),
-                                    p.shear_stiffness.unwrap_or(0.0),
-                                    p.bending_stiffness.unwrap_or(0.0),
-                                );
-                            }
-                            if let Some(iters) = p.solver_iterations {
-                                sim.solver_iterations = iters;
-                            }
-                            if let Some(dist) = p.sewing_lock_distance {
-                                sim.set_sewing_lock_distance(dist);
-                            }
+                            let mut cfg = sim.export_config();
+                            p.apply_to_sim_config(&mut cfg);
+                            sim.apply_config(&cfg);
                         }
                     }
                     GuiCommand::Quit => {
@@ -284,62 +259,7 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
 }
 
 fn apply_simulation_parameters(sim: &mut GpuClothSimulator, data: &protocol::SceneInitData) {
-    // SimConfig一本化: InitScene受信値を正本構造体に写像して一括適用する。
-    // 個別setterの手列挙は行わない (新パラメータはここへの1行追加で伝播する)。
-    let mut cfg = cloth_core::config::SimConfig::default();
-    cfg.gravity = data.gravity;
-    cfg.damping = data.air_damping;
-    cfg.tension_damping = data.tension_damping;
-    cfg.compression_damping = data.compression_damping;
-    cfg.shear_damping = data.shear_damping;
-    cfg.bending_damping = data.bending_damping;
-    cfg.tension_stiffness = data.stiffness;
-    cfg.compression_stiffness = data.compression_stiffness;
-    cfg.shear_stiffness = data.shear_stiffness;
-    cfg.bending_stiffness = data.bending_stiffness;
-    cfg.solver_iterations = data.solver_iterations;
-    cfg.solver_mode = data.solver_mode;
-    cfg.workgroup_size = data.workgroup_size;
-    cfg.sewing_stiffness = data.sewing_stiffness;
-    cfg.enable_sewing_lock = data.enable_sewing_lock;
-    cfg.sewing_lock_distance = data.sewing_lock_distance;
-    cfg.areal_density = data.areal_density;
-    cfg.sewing_priority_enabled = data.sewing_priority_enabled;
-    cfg.sewing_priority_threshold = data.sewing_priority_threshold;
-    cfg.sewing_priority_merge_dist = data.sewing_priority_merge_dist;
-    cfg.sewing_priority_ramp_frames = data.sewing_priority_ramp_frames;
-    cfg.sewing_priority_max_frames = data.sewing_priority_max_frames;
-    cfg.enable_adaptive_substep = data.enable_adaptive_substep;
-    cfg.min_substeps = data.min_substeps;
-    cfg.max_substeps = data.max_substeps;
-    cfg.auto_coupled_on_low_substeps = data.auto_coupled_on_low_substeps;
-    cfg.auto_compensate_iterations = data.auto_compensate_iterations;
-    cfg.enable_strain_adaptive = data.enable_strain_adaptive;
-    cfg.strain_tolerance = data.strain_tolerance;
-    if let Some(ref sc) = data.self_collision {
-        cfg.enable_self_collision = sc.enabled;
-        cfg.self_collision_algorithm = sc.self_collision_algorithm;
-        cfg.coupled_collider = sc.coupled_collider;
-        cfg.ee_substep_interval = sc.ee_substep_interval;
-        cfg.relief_factor = sc.relief_factor;
-        cfg.max_displacement_ratio = sc.max_displacement_ratio;
-        cfg.exclude_neighbors = sc.exclude_neighbors;
-        cfg.enable_normal_untangling = sc.enable_normal_untangling;
-        cfg.self_collision_max_iterations = sc.max_iterations;
-        cfg.coupled_mode = sc.coupled_mode;
-        cfg.post_relaxation_iters = sc.post_relaxation_iters;
-        cfg.substep_interval = sc.substep_interval;
-        cfg.enable_pair_cache = sc.enable_pair_cache;
-        cfg.pair_margin_mode = sc.pair_cache_margin_mode;
-        cfg.pair_safety_margin = sc.pair_cache_safety_margin;
-        cfg.pair_horizon_scale = sc.pair_cache_horizon_scale;
-        cfg.pair_max_horizon = sc.pair_cache_max_horizon;
-        cfg.pair_max_pairs = sc.pair_cache_max_pairs;
-        cfg.enable_pair_final_fallback = sc.enable_pair_cache_final_fallback;
-        cfg.enable_edge_collision = sc.enable_edge_collision;
-        cfg.edge_margin_scale = sc.edge_margin_scale;
-        cfg.edge_margin_offset = sc.edge_margin_offset;
-    }
+    let cfg = data.to_sim_config();
     sim.apply_config(&cfg);
 
     // 伸縮グループ

@@ -581,8 +581,15 @@ impl GuiApp {
             self.self_collision_algorithm = sc.self_collision_algorithm;
             self.edge_collision_enabled = sc.enable_edge_collision;
             self.coupled_mode = sc.coupled_mode;
+            self.coupled_collider = sc.coupled_collider;
+            self.post_relaxation_iters = sc.post_relaxation_iters;
+            self.substep_interval = sc.substep_interval;
+            self.ee_substep_interval = sc.ee_substep_interval;
             self.enable_normal_untangling = sc.enable_normal_untangling;
             self.relief_factor = sc.relief_factor;
+            self.max_displacement_ratio = sc.max_displacement_ratio;
+            self.exclude_neighbors = sc.exclude_neighbors;
+            self.self_collision_max_iterations = sc.max_iterations;
 
             sim.set_enable_self_collision(sc.enabled);
             sim.set_self_collision_algorithm(sc.self_collision_algorithm);
@@ -591,7 +598,7 @@ impl GuiApp {
                 sc.max_displacement_ratio,
                 sc.exclude_neighbors,
                 sc.enable_normal_untangling,
-                256,
+                sc.max_iterations,
             );
             sim.set_coupled_self_collision_options(sc.coupled_mode, sc.post_relaxation_iters);
             sim.set_enable_edge_collision(sc.enable_edge_collision);

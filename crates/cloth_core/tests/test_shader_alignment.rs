@@ -10,7 +10,9 @@ use cloth_core::simulation::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
     GpuSkinningVertex, GpuWrinkleProfileSample, NormalParams, PinParams, WrinkleFieldParams,
 };
-use cloth_core::sdf_baker::{GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams};
+use cloth_core::sdf_baker::{
+    GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams, GpuHierFineParams,
+};
 use cloth_core::spatial_hash::SpatialHashParams;
 use cloth_core::virtual_mesh::{GpuVirtualVertexDef, SelfCollisionVvParams, VirtualForwardParams};
 
@@ -77,12 +79,31 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("distance_atomic.wgsl", include_str!("../src/shaders/distance_atomic.wgsl")),
     ("bending.wgsl", include_str!("../src/shaders/bending.wgsl")),
     ("sewing.wgsl", include_str!("../src/shaders/sewing.wgsl")),
+    ("sewing_shrink.wgsl", include_str!("../src/shaders/sewing_shrink.wgsl")),
     ("pin.wgsl", include_str!("../src/shaders/pin.wgsl")),
     ("spatial_hash_build.wgsl", include_str!("../src/shaders/spatial_hash_build.wgsl")),
+    ("spatial_grid_sort.wgsl", include_str!("../src/shaders/spatial_grid_sort.wgsl")),
     ("compute_normals.wgsl", include_str!("../src/shaders/compute_normals.wgsl")),
     ("extract_positions.wgsl", include_str!("../src/shaders/extract_positions.wgsl")),
     ("bake_sdf.wgsl", include_str!("../src/shaders/bake_sdf.wgsl")),
     ("bake_mesh_sdf.wgsl", include_str!("../src/shaders/bake_mesh_sdf.wgsl")),
+    ("bake_mesh_sdf_hier_common.wgsl", include_str!("../src/shaders/bake_mesh_sdf_hier_common.wgsl")),
+    (
+        "bake_mesh_sdf_hier_coarse_main.wgsl",
+        concat!(
+            include_str!("../src/shaders/bake_mesh_sdf_hier_common.wgsl"),
+            "\n",
+            include_str!("../src/shaders/bake_mesh_sdf_hier_coarse_main.wgsl")
+        ),
+    ),
+    (
+        "bake_mesh_sdf_hier_fine_main.wgsl",
+        concat!(
+            include_str!("../src/shaders/bake_mesh_sdf_hier_common.wgsl"),
+            "\n",
+            include_str!("../src/shaders/bake_mesh_sdf_hier_fine_main.wgsl")
+        ),
+    ),
     ("skinning.wgsl", include_str!("../src/shaders/skinning.wgsl")),
     ("prep_bone_triangles.wgsl", include_str!("../src/shaders/prep_bone_triangles.wgsl")),
     ("self_collision_apply.wgsl", include_str!("../src/shaders/self_collision_apply.wgsl")),
@@ -90,6 +111,8 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("self_collision_solve_vt.wgsl", include_str!("../src/shaders/self_collision_solve_vt.wgsl")),
     ("self_collision_solve_ee.wgsl", include_str!("../src/shaders/self_collision_solve_ee.wgsl")),
     ("self_collision_ee_direct.wgsl", include_str!("../src/shaders/self_collision_ee_direct.wgsl")),
+    ("self_collision_vv.wgsl", include_str!("../src/shaders/self_collision_vv.wgsl")),
+    ("virtual_vertices_forward.wgsl", include_str!("../src/shaders/virtual_vertices_forward.wgsl")),
     ("spatial_grid_sort_edges.wgsl", include_str!("../src/shaders/spatial_grid_sort_edges.wgsl")),
     ("wrinkle_field.wgsl", include_str!("../src/shaders/wrinkle_field.wgsl")),
 ];
@@ -128,6 +151,30 @@ macro_rules! check_struct_size {
 }
 
 #[test]
+fn test_all_wgsl_files_in_directory_are_registered() {
+    let shaders_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("shaders");
+    let registered: std::collections::HashSet<&str> =
+        ALL_SHADERS.iter().map(|(name, _)| *name).collect();
+    let mut unregistered = Vec::new();
+    for entry in std::fs::read_dir(&shaders_dir).expect("Failed to read src/shaders directory") {
+        let entry = entry.expect("Invalid dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("wgsl") {
+            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                if !registered.contains(fname) {
+                    unregistered.push(fname.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        unregistered.is_empty(),
+        "src/shaders/ 内の以下のWGSLファイルが ALL_SHADERS に未登録です: {:?}",
+        unregistered
+    );
+}
+
+#[test]
 fn test_all_shaders_parse_successfully() {
     for (name, src) in ALL_SHADERS {
         let structs = parse_wgsl_structs(name, src);
@@ -162,10 +209,13 @@ fn test_cross_shader_struct_consistency() {
 
 #[test]
 fn test_rust_and_wgsl_struct_alignment() {
+    let mut hit_counts: HashMap<&'static str, usize> = HashMap::new();
+
     for &(filename, src) in ALL_SHADERS {
         let structs = parse_wgsl_structs(filename, src);
 
         if let Some(s) = structs.get("GpuVertex") {
+            *hit_counts.entry("GpuVertex").or_insert(0) += 1;
             check_struct_size!(filename, s, GpuVertex);
             check_member!(filename, s, GpuVertex, position);
             check_member!(filename, s, GpuVertex, inv_mass);
@@ -245,6 +295,7 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, SpatialHashParams, cell_size);
             check_member!(filename, s, SpatialHashParams, table_size);
             check_member!(filename, s, SpatialHashParams, num_vertices);
+            check_member!(filename, s, SpatialHashParams, num_blocks);
         }
 
         if let Some(s) = structs.get("PinParams") {
@@ -458,13 +509,28 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, WrinkleFieldParams, crest_window);
         }
 
+        if let Some(s) = structs.get("HierFineParams") {
+            *hit_counts.entry("HierFineParams").or_insert(0) += 1;
+            check_struct_size!(filename, s, GpuHierFineParams);
+            check_member!(filename, s, GpuHierFineParams, coarse_w);
+            check_member!(filename, s, GpuHierFineParams, coarse_h);
+            check_member!(filename, s, GpuHierFineParams, coarse_d);
+            check_member!(filename, s, GpuHierFineParams, band);
+            check_member!(filename, s, GpuHierFineParams, z_offset);
+            check_member!(filename, s, GpuHierFineParams, _pad0);
+            check_member!(filename, s, GpuHierFineParams, _pad1);
+            check_member!(filename, s, GpuHierFineParams, _pad2);
+        }
+
         if let Some(s) = structs.get("GpuVirtualVertexDef") {
+            *hit_counts.entry("GpuVirtualVertexDef").or_insert(0) += 1;
             check_struct_size!(filename, s, GpuVirtualVertexDef);
             check_member!(filename, s, GpuVirtualVertexDef, parent_indices);
             check_member!(filename, s, GpuVirtualVertexDef, bary_weights);
         }
 
         if let Some(s) = structs.get("VirtualForwardParams") {
+            *hit_counts.entry("VirtualForwardParams").or_insert(0) += 1;
             check_struct_size!(filename, s, VirtualForwardParams);
             check_member!(filename, s, VirtualForwardParams, num_real_vertices);
             check_member!(filename, s, VirtualForwardParams, num_virtual_vertices);
@@ -473,6 +539,7 @@ fn test_rust_and_wgsl_struct_alignment() {
         }
 
         if let Some(s) = structs.get("SelfCollisionVvParams") {
+            *hit_counts.entry("SelfCollisionVvParams").or_insert(0) += 1;
             check_struct_size!(filename, s, SelfCollisionVvParams);
             check_member!(filename, s, SelfCollisionVvParams, cell_size);
             check_member!(filename, s, SelfCollisionVvParams, table_size);
@@ -483,6 +550,21 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, SelfCollisionVvParams, _pad0);
             check_member!(filename, s, SelfCollisionVvParams, _pad1);
         }
+    }
+
+    // 空振り (Vacuous Truth) 防止アサーション
+    for required in [
+        "GpuVertex",
+        "HierFineParams",
+        "GpuVirtualVertexDef",
+        "VirtualForwardParams",
+        "SelfCollisionVvParams",
+    ] {
+        assert!(
+            hit_counts.get(required).copied().unwrap_or(0) > 0,
+            "Struct '{}' was never checked against any WGSL shader (vacuous assertion)!",
+            required
+        );
     }
 }
 

@@ -457,18 +457,31 @@ class TestGuiIpc(unittest.TestCase):
         # 3. 動的ピンの更新
         self.assertTrue(client.send_update_pins([0], [[0.0, 0.0, 1.2]], [1.0]))
 
-        # 4. パラメータのリアルタイム更新
+        # 4. パラメータのリアルタイム更新 (重力反転 +Z および自己衝突・適応サブステップ等の全項目送信)
         self.assertTrue(client.send_params(
-            gravity=[0.0, 0.0, -5.0],
+            gravity=[0.0, 0.0, 9.81],
             air_damping=0.1,
+            tension_damping=1.0,
             stiffness=200.0,
             solver_iterations=8,
+            enable_self_collision=True,
+            self_collision_algorithm=2,
+            coupled_mode=2,
+            enable_adaptive_substep=True,
+            min_substeps=6,
+            max_substeps=32,
         ))
 
-        # ステップ進行が正常に動作することを確認
-        self.assertTrue(client.step(dt=1.0 / 60.0, substeps=5, solver_iterations=5))
+        # ステップ進行後、上向き重力 (+Z) が実際にシミュレータへ反映されて自由頂点1が上昇(z > 1.0)していることを検証
+        for _ in range(10):
+            self.assertTrue(client.step(dt=1.0 / 60.0, substeps=10, solver_iterations=8))
         res = client.get_latest_coords(timeout=2.0)
         self.assertIsNotNone(res)
+        _, coords, _, _ = res
+        self.assertGreater(
+            coords[5], 1.0,
+            f"SetParamsで更新した上向き重力がシミュレータに反映されていること (z={coords[5]})"
+        )
 
         client.disconnect()
 

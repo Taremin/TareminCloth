@@ -548,45 +548,11 @@ class ClothGuiClient:
                 "weights": list(weights),
             })
 
-        obj = indices_or_obj
-        settings = getattr(obj, "taremin_cloth", None)
-        if not settings or not getattr(settings, "pin_target_object", None):
+        from .params import compute_attachment_pin_targets
+        res = compute_attachment_pin_targets(indices_or_obj)
+        if res is None:
             return True
-
-        target_obj = settings.pin_target_object
-        vg_name = settings.pin_vertex_group or "Pin"
-        vg = obj.vertex_groups.get(vg_name)
-        if not vg:
-            return True
-
-        target_mat = target_obj.matrix_world
-        if getattr(settings, "pin_target_bone", None) and target_obj.type == 'ARMATURE' and target_obj.pose:
-            bone = target_obj.pose.bones.get(settings.pin_target_bone)
-            if bone:
-                target_mat = target_mat @ bone.matrix
-
-        inv_world = obj.matrix_world.inverted()
-        local_target = inv_world @ target_mat.translation
-        target_pt = [float(local_target.x), float(local_target.y), float(local_target.z)]
-
-        v_indices = []
-        pos_list = []
-        weight_list = []
-
-        mesh = obj.data
-        for v in mesh.vertices:
-            try:
-                w = vg.weight(v.index)
-            except RuntimeError:
-                continue
-            if w > 0.0:
-                v_indices.append(v.index)
-                pos_list.append(target_pt)
-                weight_list.append(float(w))
-
-        if not v_indices:
-            return True
-
+        v_indices, pos_list, weight_list, _ = res
         return self.send_command("UpdatePins", {
             "vertex_indices": v_indices,
             "positions": pos_list,

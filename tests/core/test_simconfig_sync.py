@@ -19,42 +19,7 @@ python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
 
-# bpyモック登録 (test_sparse_recording.py と同一preamble)
-try:
-    import tests  # noqa: F401
-except Exception:
-    from unittest.mock import MagicMock
-
-    class _DummyTypesModule:
-        def __init__(self):
-            self._types = {
-                name: type(name, (object,), {})
-                for name in ("Operator", "Panel", "PropertyGroup", "UIList",
-                             "AddonPreferences", "Menu", "Header", "Gizmo",
-                             "GizmoGroup", "Node", "NodeTree", "NodeSocket", "UILayout")
-            }
-
-        def __getattr__(self, name):
-            if name.startswith("__"):
-                raise AttributeError(name)
-            if name not in self._types:
-                self._types[name] = type(name, (object,), {})
-            return self._types[name]
-
-    if "bpy.types" not in sys.modules:
-        sys.modules["bpy.types"] = _DummyTypesModule()
-    for _mod_name in ("bpy", "bpy.props", "bpy.ops", "bpy.utils", "bpy.context",
-                      "bpy.path", "bpy.app", "bpy_extras", "bpy_extras.view3d_utils",
-                      "gpu", "blf", "bmesh", "mathutils"):
-        if _mod_name not in sys.modules:
-            try:
-                __import__(_mod_name)
-            except Exception:
-                _m = MagicMock()
-                _m.__name__ = _mod_name
-                if _mod_name == "bpy":
-                    _m.types = sys.modules.get("bpy.types")
-                sys.modules[_mod_name] = _m
+import tests  # noqa: F401
 
 import numpy as np
 
@@ -144,18 +109,28 @@ class TestSimconfigSync(unittest.TestCase):
         self.assertEqual(route, "config")
         exported = json.loads(sim.get_config_json())
         for key in self.sc.LIVE_KEYS:
-            if key == "damping":
-                # 実効値 = air + detail合計*0.05
-                expect = (cfg["damping"] + (cfg["tension_damping"] + cfg["compression_damping"]
-                                            + cfg["shear_damping"] + cfg["bending_damping"]) * 0.05)
-                self.assertAlmostEqual(exported[key], expect, places=5, msg=key)
-            elif key in ("tension_damping", "compression_damping", "shear_damping", "bending_damping"):
-                continue  # 実効値に折り畳まれるためexport側は0
-            elif isinstance(cfg[key], float):
+            if isinstance(cfg[key], float):
                 # f32 compliance往復のため相対誤差で判定
                 self.assertAlmostEqual(exported[key], cfg[key], delta=abs(cfg[key]) * 1e-4 + 1e-6, msg=key)
             else:
                 self.assertEqual(exported[key], cfg[key], msg=key)
+
+    def test_damping_idempotency_on_repeated_apply(self):
+        """set_damping_all および apply_config_json を複数回呼んでも減衰率が累積増加しないこと (冪等性)"""
+        import taremin_cloth_core as core
+        pos = np.array([[0.0, 0.0, 0.0], [0.05, 0.0, 0.0]], dtype=np.float32)
+        edges = np.array([[0, 1]], dtype=np.uint32)
+        sim = core.ClothSimulator(pos, edges)
+
+        sim.set_damping(1.0)
+        sim.set_damping_all(5.0, 5.0, 5.0, 0.5)
+        cfg_first = json.loads(sim.get_config_json())
+
+        # set_damping を挟まずに再度 set_damping_all を呼んでも値が変わらないこと
+        sim.set_damping_all(5.0, 5.0, 5.0, 0.5)
+        cfg_second = json.loads(sim.get_config_json())
+        self.assertAlmostEqual(cfg_first["damping"], cfg_second["damping"], places=6)
+        self.assertAlmostEqual(cfg_first["tension_damping"], 5.0, places=6)
 
     def test_coupled_mapping(self):
         s = make_settings(coupled_self_collision_mode="OFF", post_collision_relaxation_iters=5)
