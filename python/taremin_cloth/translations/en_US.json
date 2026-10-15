@@ -813,6 +813,7 @@
   "Substep Interval": "Substep Interval",
   "Substep frequency for edge-to-edge self-collision (0: disabled, 1: every substep, 2: every 2 substeps, etc.)": "Substep frequency for edge-to-edge self-collision (0: disabled, 1: every substep, 2: every 2 substeps, etc.)",
   "Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)": "Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)",
+  "Settling cloth drape...": "Settling cloth drape...",
   "Suppress gravity until the specified share of sewing pairs has closed (garment assembly phase)": "Suppress gravity until the specified share of sewing pairs has closed (garment assembly phase)",
   "Surface friction coefficient": "Surface friction coefficient",
   "Sweep Margin Offset": "Sweep Margin Offset",
@@ -874,6 +875,7 @@
   "Uncompressed: ~%s": "Uncompressed: ~%s",
   "Unpinned vertex #%d": "Unpinned vertex #%d",
   "Update Interval": "Update Interval",
+  "Updating mesh...": "Updating mesh...",
   "Use hybrid partial mesh collider only at joint blend regions to eliminate sharp SDF corners": "Use hybrid partial mesh collider only at joint blend regions to eliminate sharp SDF corners",
   "Use vertex normals to push penetrated vertices outward": "Use vertex normals to push penetrated vertices outward",
   "Valley (Root) radial gradient window in meters: pull fades from edge to zero at target": "Valley (Root) radial gradient window in meters: pull fades from edge to zero at target",
@@ -912,5 +914,14 @@
   "[Esc] Cancel": "[Esc] Cancel",
   "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit",
   "[LMB/Enter] Confirm  [RMB/Esc] Cancel  [Wheel] Radius  [Shift+Wheel] Influence  [B] Change Bone": "[LMB/Enter] Confirm  [RMB/Esc] Cancel  [Wheel] Radius  [Shift+Wheel] Influence  [B] Change Bone",
-  "[LMB] Select Bone  |  [RMB/Esc] Cancel": "[LMB] Select Bone  |  [RMB/Esc] Cancel"
+  "[LMB] Select Bone  |  [RMB/Esc] Cancel": "[LMB] Select Bone  |  [RMB/Esc] Cancel",
+  "Active Region Scale": "Active Region Scale",
+  "Active-Region Sculpt": "Active-Region Sculpt",
+  "Air damping factor during drape settlement (higher values suppress oscillations)": "Air damping factor during drape settlement (higher values suppress oscillations)",
+  "Freeze vertices far outside brush radius to achieve high FPS during sculpting": "Freeze vertices far outside brush radius to achieve high FPS during sculpting",
+  "Instant Drape": "Instant Drape",
+  "Multiplier for brush radius defining active simulation area": "Multiplier for brush radius defining active simulation area",
+  "Number of simulation substeps to execute": "Number of simulation substeps to execute",
+  "Run quasi-static high-damping simulation steps to instantly settle cloth drape without timeline playback": "Run quasi-static high-damping simulation steps to instantly settle cloth drape without timeline playback",
+  "Substeps": "Substeps"
 }

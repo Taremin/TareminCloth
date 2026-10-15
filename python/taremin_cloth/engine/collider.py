@@ -82,6 +82,11 @@ def clear_collider_cache():
     _bone_pose_signatures.clear()
     _bone_sdf_signatures.clear()
     _last_sync_info.clear()
+    try:
+        from .runner import clear_collider_armature_cache
+        clear_collider_armature_cache()
+    except Exception:
+        pass
 
 
 def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_indices=None):
@@ -413,10 +418,11 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
         use_cached_mesh = cached_mesh_data is not None
         if use_cached_mesh:
             all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin = cached_mesh_data
-        all_mesh_triangles = []
-        all_mesh_attributes = []
-        has_cluster_culling = False
-        max_sweep_margin = 0.05
+        else:
+            all_mesh_triangles = []
+            all_mesh_attributes = []
+            has_cluster_culling = False
+            max_sweep_margin = 0.05
         sdf_sources = []
 
         for obj, col_settings in collider_objs:

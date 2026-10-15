@@ -41,12 +41,65 @@ def brush_opt(brush, name, default):
     return getattr(brush, name, default)
 
 
+class ActiveRegionManager:
+    """Active-Region Sculpt Mode: ブラシ影響半径外の遠隔頂点を一時ピン固定して高速化するマネージャー"""
+
+    def __init__(self):
+        self._temp_frozen_indices = []
+
+    @property
+    def is_active(self):
+        return len(self._temp_frozen_indices) > 0
+
+    def freeze_inactive_region(self, sim, coords, center, radius, active_scale=2.5, exclude_pins=None):
+        """centerからの距離が radius * active_scale を超える頂点を現在位置でピン固定する"""
+        if sim is None or coords is None or len(coords) == 0:
+            return
+        if self._temp_frozen_indices:
+            self.release_temp_pins(sim)
+
+        coords_2d = coords.reshape((-1, 3))
+        center_vec = np.asarray(center, dtype=np.float32).reshape((1, 3))
+        diff = coords_2d - center_vec
+        d2 = np.sum(diff * diff, axis=1)
+        thresh2 = (float(radius) * float(active_scale)) ** 2
+
+        # 閾値より外側の頂点
+        outer_indices = np.where(d2 > thresh2)[0]
+        exclude_set = set(exclude_pins) if exclude_pins else set()
+
+        frozen = []
+        for v in outer_indices:
+            idx = int(v)
+            if idx not in exclude_set:
+                pos = coords_2d[idx]
+                sim.set_pin(idx, [float(pos[0]), float(pos[1]), float(pos[2])], 1.0)
+                frozen.append(idx)
+        self._temp_frozen_indices = frozen
+
+    def release_temp_pins(self, sim):
+        """一時固定された全ピンを解放する"""
+        if sim is None or not self._temp_frozen_indices:
+            self._temp_frozen_indices = []
+            return
+        for idx in self._temp_frozen_indices:
+            try:
+                sim.release_pin(idx)
+            except Exception:
+                pass
+        self._temp_frozen_indices = []
+
+
 class BaseBrushTool:
     """個別ブラシのインターフェース。戻り値 True = イベント消費"""
 
     name = 'BASE'
     # HUD表示用ラベルキー（i18n.trans適用は呼出側で行う）
     label_key = 'Grab'
+
+    def __init__(self):
+        self.active_region = ActiveRegionManager()
+        self.reset()
 
     def hud_info(self, brush, radial=None):
         """HUD Guidance用の構造化情報を返す（docs/hud.md:5）。

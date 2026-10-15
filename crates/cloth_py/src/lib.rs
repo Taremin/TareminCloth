@@ -1489,6 +1489,14 @@ impl ClothSimulator {
         self.simulator.step_single_substep(dt_sub);
     }
 
+    /// 準静的一瞬ドレープを実行し、重力・衝突・拘束の釣り合い位置へ即座に収束させる
+    #[pyo3(signature = (substeps=40, damping=0.85))]
+    fn instant_drape(&mut self, substeps: Option<u32>, damping: Option<f32>) -> u32 {
+        let actual_substeps = substeps.unwrap_or(40);
+        let actual_damping = damping.unwrap_or(0.85);
+        self.simulator.instant_drape(actual_substeps, actual_damping)
+    }
+
     /// シミュレーションを非同期に 1 フレーム進める（GPU計算を発行しCPUブロックなしで即座に復帰）
     #[pyo3(signature = (dt=0.016666667, substeps=None, solver_iterations=None))]
     fn step_async(&mut self, dt: f32, substeps: Option<u32>, solver_iterations: Option<u32>) {

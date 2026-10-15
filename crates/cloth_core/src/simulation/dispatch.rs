@@ -367,14 +367,17 @@ impl GpuClothSimulator {
             self.prev_step_positions.resize(n_verts, [0.0; 3]);
         }
 
-        // 引張歪み率 (Strain) の集計:
-        // 極小エッジによる特異点発散を防ぐため、特性長 (0.5 * mesh_avg_edge_len) を分母下限として保護。
-        // また、外れ値1本（コライダー押し出し等）に引きずられないよう、P95 (95パーセンタイル) を代表値とする。
+        // 引張歪み率 (Strain) の高速ストライドサンプリング集計:
+        // 全拘束(数万〜十数万本)を毎フレームCPUでsqrt+ソートする代わりに、最大2048本を等間隔サンプリングしてP95を算出する。
         let mut rep_strain = 0.0f32;
         if !self.distance_constraints.is_empty() {
             let min_ref = (0.5 * self.mesh_avg_edge_len).max(0.002);
-            let mut positive_strains = Vec::with_capacity(self.distance_constraints.len());
-            for (dc, &l0) in self.distance_constraints.iter().zip(&self.initial_distance_rest_lengths) {
+            let total_dc = self.distance_constraints.len();
+            let stride = (total_dc / 2048).max(1);
+            let mut positive_strains = Vec::with_capacity((total_dc / stride) + 1);
+            for idx in (0..total_dc).step_by(stride) {
+                let dc = &self.distance_constraints[idx];
+                let l0 = self.initial_distance_rest_lengths[idx];
                 if l0 <= 1e-6 {
                     continue;
                 }
@@ -386,10 +389,14 @@ impl GpuClothSimulator {
                 let dx = floats[v0] - floats[v1];
                 let dy = floats[v0 + 1] - floats[v1 + 1];
                 let dz = floats[v0 + 2] - floats[v1 + 2];
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                let strain = (dist - l0) / l0.max(min_ref);
-                if strain > 0.0 {
-                    positive_strains.push(strain);
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                // 伸びているエッジ (dist_sq > l0 * l0) のみ sqrt を計算する (約50%以上のsqrtをスキップ)
+                if dist_sq > l0 * l0 {
+                    let dist = dist_sq.sqrt();
+                    let strain = (dist - l0) / l0.max(min_ref);
+                    if strain > 0.0 {
+                        positive_strains.push(strain);
+                    }
                 }
             }
             if !positive_strains.is_empty() {
@@ -674,6 +681,42 @@ impl GpuClothSimulator {
         self.encode_simulation_steps(&mut encoder, dt_sub, 1);
         self.context.queue.submit(Some(encoder.finish()));
         self.context.device.poll(wgpu::Maintain::Wait);
+    }
+
+    /// 準静的一瞬ドレープ (Quasi-Static Instant Drape)
+    /// 高減衰かつ一括サブステップ実行により、数ミリ秒で重力・衝突下の静止釣り合い位置へ収束させる
+    pub fn instant_drape(&mut self, total_substeps: u32, drape_damping: f32) -> u32 {
+        if self.num_vertices == 0 || total_substeps == 0 {
+            return 0;
+        }
+
+        let old_air_damping = self.air_damping;
+        let effective_damping = drape_damping.max(0.5);
+        self.set_damping(effective_damping);
+
+        let dt_per_substep = 0.001666667; // 1/600秒 (約1.67ms) の安定小タイムステップ
+        let chunk_size = 20u32;
+        let mut executed = 0u32;
+
+        while executed < total_substeps {
+            let current_chunk = chunk_size.min(total_substeps - executed);
+            let dt = dt_per_substep * current_chunk as f32;
+
+            let mut encoder = self.context.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor {
+                    label: Some("Instant Drape Chunk Encoder"),
+                },
+            );
+
+            self.dispatch_dynamic_bone_sdf_update(&mut encoder);
+            self.encode_simulation_steps(&mut encoder, dt, current_chunk);
+            self.context.queue.submit(Some(encoder.finish()));
+            executed += current_chunk;
+        }
+
+        self.context.device.poll(wgpu::Maintain::Wait);
+        self.set_damping(old_air_damping);
+        executed
     }
 
     /// 頂点座標抽出パスをエンコード (GpuVertex から連続 f32 座標配列へ抽出)

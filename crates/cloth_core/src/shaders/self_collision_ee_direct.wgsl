@@ -108,18 +108,23 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let denom = a * e - b * b;
 
     var s = 0.0;
-    if (denom > EPSILON) {
+    if (abs(denom) > EPSILON) {
         s = clamp((b * f - c * e) / denom, 0.0, 1.0);
-    } else {
-        s = 0.0;
     }
-    let t = clamp((b * s + f) / e, 0.0, 1.0);
+
+    var t = (b * s + f) / e;
+    if (t < 0.0) {
+        t = 0.0;
+        s = clamp(-c / a, 0.0, 1.0);
+    } else if (t > 1.0) {
+        t = 1.0;
+        s = clamp((b - c) / a, 0.0, 1.0);
+    }
     return vec2<f32>(s, t);
 }
 
-// トポロジー2ホップ近傍判定（Bridson 2002: レスト長比率による動的折り畳み検出）
-// 初期距離 L0 の 50% 未満に圧縮された場合、鋭角なシワ・折り畳みと判定して衝突判定を許可（除外解除）
-fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> bool {
+// トポロジー2ホップ近傍判定（二乗距離版: sqrt不要）
+fn is_topologically_near_folded_sq(vert_a: u32, vert_b: u32, current_dist_sq: f32) -> bool {
     if (vert_a == vert_b) {
         return true;
     }
@@ -133,8 +138,7 @@ fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> 
         let val = two_hop_indices[mid];
         if (val == vert_b) {
             let l0 = two_hop_rest_lengths[mid];
-            // 距離が初期レスト長の 50% 未満に縮んだ場合は折り畳みとみなし、衝突判定を有効化 (false を返す)
-            if (current_dist < l0 * 0.5) {
+            if (current_dist_sq < (l0 * l0) * 0.25) {
                 return false;
             }
             return true;
@@ -242,26 +246,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         continue;
                     }
 
-                    // 2ホップ近傍除外（AABB重なりを通過した候補ペアのみ二分探索を実行）
-                    if (params.exclude_neighbors != 0u) {
-                        let d_u0_j = length(p_u0 - p_j);
-                        let d_u0_vj = length(p_u0 - p_vj);
-                        let d_u1_j = length(p_u1 - p_j);
-                        let d_u1_vj = length(p_u1 - p_vj);
-                        if (is_topologically_near_folded(u0, j, d_u0_j) ||
-                            is_topologically_near_folded(u0, vj, d_u0_vj) ||
-                            is_topologically_near_folded(u1, j, d_u1_j) ||
-                            is_topologically_near_folded(u1, vj, d_u1_vj)) {
-                            continue;
-                        }
-                    }
-
+                    // 【早期枝切り】線分間最短距離の二乗判定（レジスタ演算のみで先に判定）
                     let st = closest_points_segments(p_u0, p_u1, p_j, p_vj);
                     let pt1 = p_u0 + st.x * (p_u1 - p_u0);
                     let pt2 = p_j + st.y * (p_vj - p_j);
-
                     let delta_ee = pt1 - pt2;
-                    let dist_ee = length(delta_ee);
+                    let dist_sq_ee = dot(delta_ee, delta_ee);
 
                     let thick_j = v_j.thickness;
                     let thick_vj = v_vj.thickness;
@@ -269,14 +259,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let thick_b = mix(thick_j, thick_vj, st.y);
                     let effective_thick = thick_a + thick_b;
 
-                    let n_j_raw = normals[j].xyz;
-                    let is_behind_ee = (length(n_j_raw) > 0.5) && (dot(delta_ee, n_j_raw) < 0.0);
+                    if (dist_sq_ee >= effective_thick * effective_thick || dist_sq_ee <= EPSILON * EPSILON) {
+                        continue;
+                    }
 
-                    let is_untangling_ee = (params.enable_normal_untangling != 0u)
-                        && (v_u0.layer_id > v_j.layer_id)
-                        && is_behind_ee;
+                    // 【遅延評価】実際に厚み内に侵入しているペア（0.1%未満）のみ 2ホップ二分探索×4回を実行
+                    if (params.exclude_neighbors != 0u) {
+                        let d0 = p_u0 - p_j;
+                        let d1 = p_u0 - p_vj;
+                        let d2 = p_u1 - p_j;
+                        let d3 = p_u1 - p_vj;
+                        if (is_topologically_near_folded_sq(u0, j, dot(d0, d0)) ||
+                            is_topologically_near_folded_sq(u0, vj, dot(d1, d1)) ||
+                            is_topologically_near_folded_sq(u1, j, dot(d2, d2)) ||
+                            is_topologically_near_folded_sq(u1, vj, dot(d3, d3))) {
+                            continue;
+                        }
+                    }
 
-                    if (!is_untangling_ee && dist_ee < effective_thick && dist_ee > EPSILON) {
+                    // 単一レイヤー時は normals バッファへのグローバルメモリアクセスを完全スキップ
+                    var is_untangling_ee = false;
+                    if (params.enable_normal_untangling != 0u && v_u0.layer_id > v_j.layer_id) {
+                        let n_j_raw = normals[j].xyz;
+                        let is_behind_ee = (dot(n_j_raw, n_j_raw) > 0.25) && (dot(delta_ee, n_j_raw) < 0.0);
+                        is_untangling_ee = is_behind_ee;
+                    }
+
+                    if (!is_untangling_ee) {
+                        let dist_ee = sqrt(dist_sq_ee);
                         let n_ee = delta_ee / dist_ee;
                         let pen_ee = effective_thick - dist_ee;
                         let s = st.x;

@@ -27,6 +27,7 @@ _cached_line_shader = None
 _cached_3d_uniform_shader = None
 _cached_2d_shader = None
 _cached_smooth_line_shader = None
+_cached_3d_smooth_shader = None
 
 
 def clear_pin_cache():
@@ -151,16 +152,18 @@ def is_bake_overlay_active() -> bool:
     return _bake_overlay_info is not None
 
 
-_init_overlay_info = None  # {"message": str, "current": int, "total": int}
+_init_overlay_info = None  # {"message": str, "current": int, "total": int, "can_cancel": bool}
+_toast_overlay_info = None  # {"message": str, "pct": int, "bar_color": tuple, "dismiss_cb": object}
 
 
-def set_init_overlay_info(message: str, current: int, total: int):
-    """インタラクティブ起動準備中のオーバーレイ描画情報を更新する"""
+def set_init_overlay_info(message: str, current: int, total: int, can_cancel: bool = True):
+    """インタラクティブ起動準備中または同期処理中のオーバーレイ描画情報を更新する"""
     global _init_overlay_info
     _init_overlay_info = {
         "message": str(message),
         "current": int(current),
         "total": int(total),
+        "can_cancel": bool(can_cancel),
     }
 
 
@@ -178,6 +181,66 @@ def get_init_overlay_info():
 def is_init_overlay_active() -> bool:
     """起動準備中のオーバーレイ描画が有効かどうかを取得する"""
     return _init_overlay_info is not None
+
+
+def set_toast_overlay_info(
+    message: str,
+    duration: float = 1.8,
+    pct: int = 100,
+    bar_color=(0.3, 0.95, 0.4, 0.95),
+):
+    """
+    画面下部中央に一定時間（duration秒）完了通知バッジ（トースト）を表示する。
+    自動的に bpy.app.timers で消去され、ビューポートが再描画される。
+    """
+    global _toast_overlay_info
+    clear_toast_overlay_info()
+
+    def _dismiss():
+        global _toast_overlay_info
+        _toast_overlay_info = None
+        from .view3d import tag_redraw_view3d
+        tag_redraw_view3d()
+        return None
+
+    timer_handle = None
+    if duration > 0 and hasattr(bpy, "app") and hasattr(bpy.app, "timers"):
+        try:
+            bpy.app.timers.register(_dismiss, first_interval=duration)
+            timer_handle = _dismiss
+        except Exception:
+            pass
+
+    _toast_overlay_info = {
+        "message": str(message),
+        "pct": int(pct),
+        "bar_color": bar_color,
+        "dismiss_cb": timer_handle,
+    }
+
+
+def clear_toast_overlay_info():
+    """トースト通知バッジをクリアする"""
+    global _toast_overlay_info
+    if _toast_overlay_info:
+        cb = _toast_overlay_info.get("dismiss_cb")
+        if cb and hasattr(bpy, "app") and hasattr(bpy.app, "timers"):
+            try:
+                if bpy.app.timers.is_registered(cb):
+                    bpy.app.timers.unregister(cb)
+            except Exception:
+                pass
+        _toast_overlay_info = None
+
+
+def get_toast_overlay_info():
+    """現在のトースト描画情報を取得する（テストまたはUI用）"""
+    return _toast_overlay_info
+
+
+def is_toast_overlay_active() -> bool:
+    """トースト通知描画が有効かどうかを取得する"""
+    return _toast_overlay_info is not None
 
 
 def set_active_grabbed_vertex(obj_name: str, vert_idx: int, target_world_pos=None):
@@ -261,6 +324,22 @@ def get_3d_uniform_color_shader():
         try:
             _cached_3d_uniform_shader = gpu.shader.from_builtin(name)
             return _cached_3d_uniform_shader
+        except Exception:
+            pass
+    return None
+
+get_3d_uniform_shader = get_3d_uniform_color_shader
+
+
+def get_3d_smooth_color_shader():
+    """3Dサーフェス（TRIS）やライン向けの頂点カラー補間シェーダーを取得する"""
+    global _cached_3d_smooth_shader
+    if _cached_3d_smooth_shader is not None:
+        return _cached_3d_smooth_shader
+    for name in ('3D_SMOOTH_COLOR', 'SMOOTH_COLOR'):
+        try:
+            _cached_3d_smooth_shader = gpu.shader.from_builtin(name)
+            return _cached_3d_smooth_shader
         except Exception:
             pass
     return None
@@ -751,9 +830,10 @@ def draw_callback_3d():
             gpu.state.depth_mask_set(orig_depth_mask)
 
 
-def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
-    """画面下部中央に進捗バー付きバッジを描画する（ベイク/起動準備の共通ヘルパー）"""
+def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int, bar_color=None):
+    """画面下部中央に進捗バー付きバッジを描画する（ベイク/起動準備/トーストの共通ヘルパー）"""
     pct = max(0, min(100, int(pct)))
+    effective_bar_color = bar_color if bar_color is not None else (0.2, 0.7, 1.0, 0.9)
     guide_h = 32.0
     pad_x = 18.0
     text_w = 400.0
@@ -816,7 +896,7 @@ def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
                 bar_batch = batch_for_shader(shader_2d, 'TRIS', {"pos": bar_verts})
                 if bar_batch:
                     shader_2d.bind()
-                    shader_2d.uniform_float("color", (0.2, 0.7, 1.0, 0.9))
+                    shader_2d.uniform_float("color", effective_bar_color)
                     bar_batch.draw(shader_2d)
         finally:
             gpu.state.blend_set(orig_blend)
@@ -1433,7 +1513,7 @@ def draw_wrinkle_bone_overlay(chain_bones_coords, active_bone_idx: int = 0):
 
 def draw_callback_2d():
     """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
-    if not _interactive_active and not _bake_overlay_info and not _init_overlay_info:
+    if not _interactive_active and not _bake_overlay_info and not _init_overlay_info and not _toast_overlay_info:
         return
 
     context = bpy.context
@@ -1616,16 +1696,31 @@ def draw_callback_2d():
         message = _init_overlay_info.get("message", "")
         cur = _init_overlay_info.get("current", 0)
         total = _init_overlay_info.get("total", 1)
+        can_cancel = _init_overlay_info.get("can_cancel", True)
         pct = int(min(1.0, max(0.0, cur / max(1, total))) * 100)
 
         stage_text = i18n.trans(message) if message else ""
-        cancel_text = i18n.trans("[Esc] Cancel")
-        try:
-            init_text = f"{stage_text} {cur}/{total} ({pct}%)  |  {cancel_text}"
-        except Exception:
-            init_text = f"{message} {cur}/{total} ({pct}%)"
+        if can_cancel:
+            cancel_text = i18n.trans("[Esc] Cancel")
+            try:
+                init_text = f"{stage_text} {cur}/{total} ({pct}%)  |  {cancel_text}"
+            except Exception:
+                init_text = f"{message} {cur}/{total} ({pct}%)  |  {cancel_text}"
+        else:
+            try:
+                init_text = f"{stage_text} {cur}/{total} ({pct}%)"
+            except Exception:
+                init_text = f"{message} {cur}/{total} ({pct}%)"
 
         _draw_bottom_center_progress(region, shader_2d, init_text, pct)
+
+    # --- 4. 完了通知トーストバッジの描画 (画面下部中央) ---
+    elif _toast_overlay_info:
+        message = _toast_overlay_info.get("message", "")
+        pct = _toast_overlay_info.get("pct", 100)
+        bar_color = _toast_overlay_info.get("bar_color", (0.3, 0.95, 0.4, 0.95))
+        toast_text = i18n.trans(message) if message else ""
+        _draw_bottom_center_progress(region, shader_2d, toast_text, pct, bar_color=bar_color)
 
 
 def register_draw_handler():

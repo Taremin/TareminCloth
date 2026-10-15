@@ -19,6 +19,7 @@
 | 背景（上部バッジ/ガイド） | `(0.12, 0.12, 0.14, 0.75)` | `drawing.py` `_draw_top_badge`/`_draw_bottom_badge_2row` |
 | 背景（下部進捗） | `(0.10, 0.10, 0.13, 0.85)` | `drawing.py` `_draw_bottom_center_progress` |
 | 進捗バー | `(0.2, 0.7, 1.0, 0.9)` 高さ3px | `drawing.py` `_draw_bottom_center_progress` |
+| 進捗バー（トースト/完了） | `(0.3, 0.95, 0.4, 0.95)` 高さ3px | `drawing.py` `_draw_bottom_center_progress` (`bar_color`) |
 | text通常 | `(0.92,0.92,0.95,0.95)` / 進捗 `(0.95,0.95,0.98,1.0)` | `drawing.py` `_draw_bottom_badge_2row`ほか |
 | FPS色 | >=50緑`(0.3,0.95,0.4)`、>=30黄、>0赤、0灰 | `drawing.py` `draw_callback_2d` |
 | 縫合中/通常 | シアン`(0.35,0.85,1.0)` / 緑 | `drawing.py` `draw_callback_2d` |
@@ -27,7 +28,7 @@
 ## 4. 描画基盤（API草案）
 - `_draw_top_badge(region, shader, x, y_top, text, color)` — FPS/縫合フェーズ用。FPSの固定幅も `min_w` で吸収する。
 - `_draw_bottom_badge_2row(region, shader, line1, line2)` — Guidance用。下部中央・最大2行。1行連結の肥大化を防ぐ。
-- `_draw_bottom_center_progress(region, shader, text, pct)` — ベイク/起動準備用。下部中央配置に統一。
+- `_draw_bottom_center_progress(region, shader, text, pct, bar_color)` — ベイク/起動準備/トースト通知用。下部中央配置に統一。
 - `_setup_font(size)` / `_measure_text(text)` — `blf.size/dimensions` のバージョン差分岐を集約。
 - 禁止: `draw_callback_2d` 内での背景頂点列・`blend_set` 直書きの新設。`ops/interactive.py` でのブラシ分岐直書きも禁止（5章の供給I/F経由のみ）。
 
@@ -36,7 +37,8 @@
 |---|---|---|---|
 | Status | FPS、縫合フェーズ | `ops/interactive.py` + `engine/sewing_priority` | interactive中、`show_fps_overlay` |
 | Guidance | 1段目=コンテキストキー、2段目=ツール状態 | 各ブラシの `hud_info()`（下記） | interactive中、`show_hud_help` |
-| Progress | ベイク/起動準備+Esc | `ops/bake.py` / `ops/interactive._update_init_progress` | 対応処理中のみ |
+| Progress | ベイク/起動準備/ドレープ進捗 | `ops/bake.py` / `ops/interactive` / `ops/basic` | 対応処理中のみ |
+| Toast | 一瞬ドレープ収束完了などの完了通知 | `ops/basic.py` / `drawing.set_toast_overlay_info` | 完了後 1.8〜2.0秒間 |
 | Spatial | ピン/グラブ/縫合辺/Elastic/ブラシ円 | `brush/*`、`drawing.draw_callback_3d` | interactive中、個別トグルに従う |
 
 ### Guidance ブラシ表示仕様（UX起点・現状追従しない）

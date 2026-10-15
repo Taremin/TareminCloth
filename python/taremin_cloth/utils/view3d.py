@@ -50,3 +50,18 @@ def stop_animation(context=None):
             bpy.ops.screen.animation_cancel(restore_frame=False)
         except Exception:
             pass
+
+
+def force_redraw_view3d(context=None):
+    """
+    現在の3Dビューポートの即時再描画を強制する。
+    同期的に実行されるオペレーター（一瞬ドレープ等）の実行途中でHUDプログレスを即座に画面へ反映させる。
+    """
+    tag_redraw_view3d(context)
+    try:
+        if not getattr(bpy.app, "background", False):
+            wm = getattr(bpy.ops, "wm", None)
+            if wm and hasattr(wm, "redraw_timer"):
+                wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+    except Exception:
+        pass

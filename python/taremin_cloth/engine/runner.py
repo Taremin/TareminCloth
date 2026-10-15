@@ -320,15 +320,82 @@ def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None)
     return base_steps
 
 
+_collider_armature_pose_cache = {}
+
+
+def clear_collider_armature_cache(obj_name=None):
+    """アーマチュアポーズ比較キャッシュを破棄する"""
+    global _collider_armature_pose_cache
+    if obj_name:
+        _collider_armature_pose_cache.pop(obj_name, None)
+    else:
+        _collider_armature_pose_cache.clear()
+
+
+def _has_collider_armature_moved(col_o) -> bool:
+    """コライダーに紐づくアーマチュアのポーズ行列またはワールド行列が前フレームから変化したかを判定する"""
+    global _collider_armature_pose_cache
+    arm_o = col_o.find_armature() if hasattr(col_o, "find_armature") else None
+    if arm_o is None:
+        for mod in getattr(col_o, "modifiers", []):
+            if getattr(mod, "type", None) == 'ARMATURE' and getattr(mod, "object", None):
+                arm_o = mod.object
+                break
+
+    # アーマチュアがない場合はオブジェクトレベルのアニメーション有無をチェック
+    if arm_o is None or not getattr(arm_o, "pose", None):
+        return bool(col_o.animation_data and col_o.animation_data.action)
+
+    # オブジェクト行列および全ボーン行列の全16成分をシグネチャ化（回転・移動・スケールを100%検知）
+    sig_parts = []
+    w_mat = getattr(col_o, "matrix_world", None)
+    if w_mat is not None:
+        for r in range(4):
+            for c in range(4):
+                sig_parts.append(round(float(w_mat[r][c]), 4))
+
+    arm_mat = getattr(arm_o, "matrix_world", None)
+    if arm_mat is not None:
+        for r in range(4):
+            for c in range(4):
+                sig_parts.append(round(float(arm_mat[r][c]), 4))
+
+    for pb in arm_o.pose.bones:
+        m = pb.matrix
+        for r in range(4):
+            for c in range(4):
+                sig_parts.append(round(float(m[r][c]), 4))
+
+    sig = tuple(sig_parts)
+    key = getattr(col_o, "name", "")
+    prev_sig = _collider_armature_pose_cache.get(key)
+    if prev_sig != sig:
+        _collider_armature_pose_cache[key] = sig
+        return prev_sig is not None
+    return False
+
+
 def _apply_coords_to_mesh(obj, coords):
-    """計算済み座標配列をBlenderメッシュ頂点に適用する。"""
-    pos_world = coords.reshape(-1, 3)
+    """計算済み座標配列をBlenderメッシュ頂点に適用する（単位行列時はゼロコピー直書き）。"""
     pos_local = None
     if hasattr(obj, "matrix_world"):
         try:
-            inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
-            if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
-                pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
+            mat = obj.matrix_world
+            is_identity = True
+            for r in range(4):
+                for c in range(4):
+                    expected = 1.0 if r == c else 0.0
+                    if abs(mat[r][c] - expected) > 1e-5:
+                        is_identity = False
+                        break
+                if not is_identity:
+                    break
+
+            if not is_identity:
+                inv_mat = np.array([list(row) for row in mat.inverted()], dtype=np.float32)
+                if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                    pos_world = coords.reshape(-1, 3)
+                    pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
         except (ValueError, TypeError, AttributeError):
             pos_local = None
     if pos_local is not None:
@@ -423,15 +490,13 @@ def step_cloth_object(
         sim.step_async(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
     else:
         sim.step(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
+        sim.get_positions(coords)
         if update_mesh:
-            sim.get_positions(coords)
             _apply_coords_to_mesh(obj, coords)
 
         # 中継点縫合の動的通過＆結合完了時ピン解放判定
         wp_mgr = _waypoint_managers.get(obj.name)
         if wp_mgr and wp_mgr.has_active_seams:
-            if not update_mesh:
-                sim.get_positions(coords)
             wp_mgr.update(coords, sim=sim)
 
     return sim, coords
@@ -460,9 +525,13 @@ def step_cloth_scene(
     Returns:
         dict[str, tuple]: {obj.name: (sim, coords)} の辞書
     """
+    # Contextオブジェクトが渡された場合の防御的解決
+    if hasattr(scene, "scene") and scene.scene is not None:
+        scene = scene.scene
+
     # 1. コライダーのアニメーション駆動ステップ
     any_collider_deformed = False
-    current_frame = anim_frame if anim_frame is not None else scene.frame_current
+    current_frame = anim_frame if anim_frame is not None else getattr(scene, "frame_current", 1)
 
     for col_o in scene.objects:
         c_set = getattr(col_o, "taremin_cloth_collider", None)
@@ -472,7 +541,7 @@ def step_cloth_scene(
                 if deformed:
                     any_collider_deformed = True
             elif col_o.type == 'MESH' and (c_set.collider_type == 'MESH' or (c_set.collider_type == 'BONE_SDF' and getattr(c_set, "enable_joint_mesh", True))):
-                if col_o.find_armature() or (col_o.animation_data and col_o.animation_data.action):
+                if _has_collider_armature_moved(col_o):
                     any_collider_deformed = True
 
     # 2. 必要に応じてDepsgraphを再評価

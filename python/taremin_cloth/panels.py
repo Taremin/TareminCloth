@@ -366,7 +366,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 row_start.scale_y = 1.3
                 row_start.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
 
-                box_sim.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
+                row_ops = box_sim.row(align=True)
+                row_ops.operator("taremin_cloth.instant_drape", text=i18n.trans("Instant Drape"), icon='FORCE_DRAG')
+                row_ops.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
             else:
                 box_sim.label(text=i18n.trans("No cloth objects in scene"), icon='INFO')
 
@@ -1286,6 +1288,9 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
                 col.prop(brush, "radius", text=i18n.trans("Radius"))
                 col.prop(brush, "strength", text=i18n.trans("Strength"))
                 col.prop(brush, "falloff_shape", text=i18n.trans("Falloff"))
+                col.prop(brush, "use_active_region", text=i18n.trans("Active-Region Sculpt"))
+                if getattr(brush, "use_active_region", True):
+                    col.prop(brush, "active_region_scale", text=i18n.trans("Active Region Scale"))
         col.separator()
         col.operator("taremin_cloth.benchmark_fps", text=i18n.trans("Benchmark FPS (2 sec)"), icon='TIME')
 

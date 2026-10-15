@@ -132,6 +132,18 @@ fn solve_bone_sdf_collision(
 
     for (var b = 0u; b < params.num_bones; b = b + 1u) {
         let info = bone_infos[b];
+
+        // 0. ワールド外接球による先行プリフィルタ（遠隔ボーンの4x4逆行列積をバイパス）
+        let bone_world_radius = info.uvw_offset.w;
+        if (bone_world_radius > 0.0) {
+            let bone_world_center = vec3<f32>(info.aabb_min.w, info.aabb_max.w, info.uvw_scale.w);
+            let diff_w = *p - bone_world_center;
+            let r_total = bone_world_radius + vertex_thickness;
+            if (dot(diff_w, diff_w) > r_total * r_total) {
+                continue;
+            }
+        }
+
         let transform = bone_transforms[b];
 
         // 1. 布の現在位置 p をボーンローカル座標に射影

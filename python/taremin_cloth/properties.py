@@ -147,6 +147,18 @@ class TareminClothBrushSettings(PropertyGroup):
         ],
         default='SPHERE',
     )
+    use_active_region: BoolProperty(
+        name="Active-Region Sculpt",
+        description="Freeze vertices far outside brush radius to achieve high FPS during sculpting",
+        default=True,
+    )
+    active_region_scale: FloatProperty(
+        name="Active Region Scale",
+        description="Multiplier for brush radius defining active simulation area",
+        default=2.5,
+        min=1.2,
+        max=10.0,
+    )
 
 
 def _on_self_collision_algorithm_update(self, context):

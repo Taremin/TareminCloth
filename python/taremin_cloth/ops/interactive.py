@@ -26,6 +26,7 @@ from ..engine.runner import (
     step_cloth_scene,
     step_cloth_object,
     restore_fast_playback,
+    _apply_coords_to_mesh,
 )
 from ..preferences import get_preferences
 from ..utils import drawing, topology, anim_driver
@@ -1058,12 +1059,12 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         realtime_sync = getattr(settings, "interactive_realtime_sync", True) if settings else True
         max_steps = getattr(settings, "interactive_max_steps", 4) if settings else 4
 
-        # インタラクティブモードでは描画レスポンスと実時間同期の両立を図る。
-        # 最大2ステップ/フレームに制限し、最大蓄積を3ステップ分 (約50ms) に抑えて遅延スパイラルを防止。
-        step_limit = min(max_steps, 2) if realtime_sync else 1
+        # インタラクティブモードでは1描画フレームにつき最大1ステップに制限し、
+        # 重いシーンで2ステップ連続実行されてFPSが半減し続けるスパイラル（Spiral of Death）を防止する。
+        step_limit = 1
         if realtime_sync:
             self._accumulator += delta_time
-            self._accumulator = min(self._accumulator, FIXED_DT * 3.0)
+            self._accumulator = min(self._accumulator, FIXED_DT * 1.5)
         else:
             self._accumulator = FIXED_DT
 
@@ -1079,7 +1080,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         # アキュムレータが 1/60 秒以上蓄積されていた場合、共通の step_cloth_scene を呼び出して実行
         if step_count > 0:
             t0 = time.perf_counter()
-            step_cloth_scene(
+            results = step_cloth_scene(
                 context.scene,
                 dt=FIXED_DT,
                 anim_frame=self._anim_frame_counter,
@@ -1763,9 +1764,10 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     if tool is not None:
                         tool.on_release(ctx, self._pinned_verts)
                     self._brush_dragging = None
-                    if context.area:
-                        context.area.tag_redraw()
-                    return {'RUNNING_MODAL'}
+
+                if context.area:
+                    context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
 
         elif event.type == 'MOUSEMOVE':
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)

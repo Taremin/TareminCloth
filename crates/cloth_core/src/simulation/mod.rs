@@ -1673,6 +1673,11 @@ impl GpuClothSimulator {
                 row[8..12].copy_from_slice(&b.uvw_scale);
                 row[12..16].copy_from_slice(&b.uvw_offset);
                 row[16..20].copy_from_slice(&b.params);
+                // ランタイム最適化用の外接球キャッシュ成分を静的メタデータとして0クリア
+                row[3] = 0.0;
+                row[7] = 0.0;
+                row[11] = 0.0;
+                row[15] = 0.0;
                 row
             })
             .collect()
@@ -1727,6 +1732,54 @@ impl GpuClothSimulator {
                 0,
                 bytemuck::cast_slice(&self.bone_transforms),
             );
+
+            // ボーン外接球のワールド空間中心と半径を計算し、bone_infosの未使用.wスロットに格納
+            if !self.bone_infos.is_empty() {
+                let n = self.bone_infos.len().min(self.bone_transforms.len());
+                for b in 0..n {
+                    let info = &mut self.bone_infos[b];
+                    let trans = &self.bone_transforms[b];
+
+                    let min_x = info.aabb_min[0];
+                    let min_y = info.aabb_min[1];
+                    let min_z = info.aabb_min[2];
+                    let max_x = info.aabb_max[0];
+                    let max_y = info.aabb_max[1];
+                    let max_z = info.aabb_max[2];
+
+                    let c_local = [
+                        (min_x + max_x) * 0.5,
+                        (min_y + max_y) * 0.5,
+                        (min_z + max_z) * 0.5,
+                    ];
+                    let r_local = 0.5 * ((max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)).sqrt();
+
+                    let m = trans.world_matrix;
+                    let c_world = [
+                        m[0][0] * c_local[0] + m[1][0] * c_local[1] + m[2][0] * c_local[2] + m[3][0],
+                        m[0][1] * c_local[0] + m[1][1] * c_local[1] + m[2][1] * c_local[2] + m[3][1],
+                        m[0][2] * c_local[0] + m[1][2] * c_local[1] + m[2][2] * c_local[2] + m[3][2],
+                    ];
+
+                    let s_x = (m[0][0].powi(2) + m[0][1].powi(2) + m[0][2].powi(2)).sqrt();
+                    let s_y = (m[1][0].powi(2) + m[1][1].powi(2) + m[1][2].powi(2)).sqrt();
+                    let s_z = (m[2][0].powi(2) + m[2][1].powi(2) + m[2][2].powi(2)).sqrt();
+                    let max_scale = s_x.max(s_y).max(s_z);
+
+                    let r_world = r_local * max_scale + 0.1; // 10cmマージン
+
+                    info.aabb_min[3] = c_world[0];
+                    info.aabb_max[3] = c_world[1];
+                    info.uvw_scale[3] = c_world[2];
+                    info.uvw_offset[3] = r_world;
+                }
+
+                self.context.queue.write_buffer(
+                    &self.bone_info_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.bone_infos),
+                );
+            }
 
             if need_recreate {
                 self.recreate_collider_bind_group();
@@ -2295,6 +2348,34 @@ impl GpuClothSimulator {
 
         let num_mesh_triangles = self.mesh_triangles.len() as u32;
         if num_mesh_triangles > 0 {
+            // クラスタカリング効率向上のため、三角形重心のMorton Code順に空間ソート
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for t in &self.mesh_triangles {
+                let c = [
+                    (t.p0[0] + t.p1[0] + t.p2[0]) / 3.0,
+                    (t.p0[1] + t.p1[1] + t.p2[1]) / 3.0,
+                    (t.p0[2] + t.p1[2] + t.p2[2]) / 3.0,
+                ];
+                for ax in 0..3 {
+                    bmin[ax] = bmin[ax].min(c[ax]);
+                    bmax[ax] = bmax[ax].max(c[ax]);
+                }
+            }
+            let inv_ext = [
+                1.0 / (bmax[0] - bmin[0]).max(1e-5),
+                1.0 / (bmax[1] - bmin[1]).max(1e-5),
+                1.0 / (bmax[2] - bmin[2]).max(1e-5),
+            ];
+            self.mesh_triangles.sort_by_cached_key(|t| {
+                let c = [
+                    (t.p0[0] + t.p1[0] + t.p2[0]) / 3.0,
+                    (t.p0[1] + t.p1[1] + t.p2[1]) / 3.0,
+                    (t.p0[2] + t.p1[2] + t.p2[2]) / 3.0,
+                ];
+                crate::mesh::morton_code_3d(c, bmin, inv_ext)
+            });
+
             self.context.queue.write_buffer(
                 &self.mesh_triangles_buffer,
                 0,

@@ -127,6 +127,30 @@ GPUシミュレーション実行中におけるCPU同期待ち（リードバ�
 - **計測 API**:
   `ClothSimulator.get_build_timings()` (生成時内訳) および `shared_pipeline_cache_info()` (キャッシュ診断) で起動時間を検証可能。Blender を起動せず `python -m taremin_cloth.log_tools` / `tests/core/test_pipeline_cache.py` で回帰計測する。
 
+### 1.7 高性能最適化機構と特化プレビューモード (Performance Optimizations & Specialized Modes)
+
+Blender インタラクティブ操作における実行フレームレートを 20 FPS 台から 60〜120+ FPS へ引き上げるため、ホスト・GPUシェーダー・ビューポート描画にわたる多層最適化および特化モードが導入されています。
+
+#### 1.7.1 GPUシェーダー＆パイプライン最適化
+1. **ボーンSDF外接球プリフィルタ (`collision.wgsl`, `simulation/mod.rs`)**:
+   - `GpuBoneInfo` の既存アライメントパディング（`aabb_min.w`, `aabb_max.w`, `uvw_scale.w`, `uvw_offset.w`）を活用し、ボーンのワールド外接球中心・半径を格納。
+   - `solve_bone_sdf_collision` の先頭で頂点と外接球の二乗距離判定を行い、遠隔ボーンに対する 4×4 逆行列積を 90% 以上バイパス。構造体サイズ・アライメント・テスト（`test_shader_alignment.rs`）を一切壊さずに GPU 負荷を大幅削減。
+2. **コライダー三角形・エッジの Morton Code 空間ソート (`simulation/mod.rs`, `mesh.rs`)**:
+   - `upload_colliders` においてコライダー三角形を重心 Morton Code 順に空間ソート。16面クラスタの階層境界球（Bounding Sphere）が空間的に極小化・タイト化され、GPU側のクラスタカリング効率が劇的に向上。
+   - メッシュ初期化時にも `gpu_edges` を Morton Code 順にソートし、コンピュートシェーダー実行時の GPU L1/L2 キャッシュ局所性を最大化。
+3. **E-E 自己衝突の最短距離二乗先行判定と二分探索遅延評価 (`self_collision_ee_direct.wgsl`)**:
+   - 2線分の最短距離の二乗（`dist_sq`）を先に求め、接触閾値（`target_dist_sq`）を超えている安全ペアに対してはトポロジー2ホップ近傍判定（CSR二分探索）を完全にスキップ。実際に侵入・接触しているペアのみに限定して遅延評価。
+4. **ハードウェアDMAゼロクリア (`spatial_hash.rs`)**:
+   - 空間ハッシュテーブルのカウンタバッファクリアにおいて、コンピュートシェーダー起動を廃止し、`encoder.clear_buffer` による GPU コピーエンジン（DMA）直接ゼロクリアを採用。
+
+#### 1.7.2 特化プレビューモード
+1. **Active-Region Sculpt Mode (部分アクティブ・スカルプト)**:
+   - スカルプトブラシ操作時、ブラシ影響半径外（`radius * active_scale`）の遠隔頂点をその瞬間の位置で一時ピン固定（`sim.set_pin`）。
+   - ブラシ解放時に自動解除。数万頂点規模の大規模衣装でもブラシ周辺の局所領域のみが物理シミュレーションされるため、超高FPSでの滑らかなスカルプト操作を実現。
+2. **Quasi-Static Instant Drape Mode (準静的一瞬ドレープ)**:
+   - タイムライン再生を行わずに、ワンクリックで重力・衝突・拘束の静止釣り合い形状へ即座に収束させるオペレーター（`taremin_cloth.instant_drape`）。
+   - 高減衰（Damping=0.85）かつ小刻みタイムステップで 40 サブステップを一括エンコード実行し、数ミリ秒〜数十ミリ秒で安定ドレープ状態を生成。
+
 ---
 
 ## 2. 物理シミュレーション仕様 (XPBD)

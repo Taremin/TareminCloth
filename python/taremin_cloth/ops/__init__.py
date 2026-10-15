@@ -19,6 +19,7 @@ from .basic import (
     TAREMIN_CLOTH_OT_save_as_shape_key,
     TAREMIN_CLOTH_OT_create_pin_group,
     TAREMIN_CLOTH_OT_toggle_weight_paint,
+    TAREMIN_CLOTH_OT_instant_drape,
 )
 from .interactive import (
     FPSCounter,
@@ -109,6 +110,7 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_save_as_shape_key,
     TAREMIN_CLOTH_OT_create_pin_group,
     TAREMIN_CLOTH_OT_toggle_weight_paint,
+    TAREMIN_CLOTH_OT_instant_drape,
     TAREMIN_CLOTH_OT_launch_gui,
     TAREMIN_CLOTH_OT_connect_gui,
     TAREMIN_CLOTH_OT_gui_preview,

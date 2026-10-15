@@ -278,6 +278,22 @@ pub fn areal_inv_masses(
         .collect()
 }
 
+fn expand_bits_10(mut v: u32) -> u32 {
+    v = (v.wrapping_mul(0x00010001)) & 0xFF0000FF;
+    v = (v.wrapping_mul(0x00000101)) & 0x0F00F00F;
+    v = (v.wrapping_mul(0x00000011)) & 0xC30C30C3;
+    v = (v.wrapping_mul(0x00000005)) & 0x49249249;
+    v
+}
+
+pub fn morton_code_3d(p: [f32; 3], bmin: [f32; 3], inv_extent: [f32; 3]) -> u32 {
+    let x = (((p[0] - bmin[0]) * inv_extent[0]).clamp(0.0, 1.0) * 1023.0) as u32;
+    let y = (((p[1] - bmin[1]) * inv_extent[1]).clamp(0.0, 1.0) * 1023.0) as u32;
+    let z = (((p[2] - bmin[2]) * inv_extent[2]).clamp(0.0, 1.0) * 1023.0) as u32;
+    (expand_bits_10(x) << 2) | (expand_bits_10(y) << 1) | expand_bits_10(z)
+}
+
+
 pub struct ClothMesh {
     pub vertices: Vec<GpuVertex>,
     pub distance_constraints: Vec<GpuDistanceConstraint>,
@@ -921,6 +937,28 @@ impl ClothMesh {
                     gpu_edges.push(GpuEdge { v0: e0, v1: e1 });
                 }
             }
+        }
+
+        if !gpu_edges.is_empty() && !positions.is_empty() {
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for p in positions {
+                for axis in 0..3 {
+                    bmin[axis] = bmin[axis].min(p[axis]);
+                    bmax[axis] = bmax[axis].max(p[axis]);
+                }
+            }
+            let inv_ext = [
+                1.0 / (bmax[0] - bmin[0]).max(1e-5),
+                1.0 / (bmax[1] - bmin[1]).max(1e-5),
+                1.0 / (bmax[2] - bmin[2]).max(1e-5),
+            ];
+            gpu_edges.sort_by_cached_key(|e| {
+                let p0 = positions[e.v0 as usize];
+                let p1 = positions[e.v1 as usize];
+                let mid = [(p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5, (p0[2] + p1[2]) * 0.5];
+                morton_code_3d(mid, bmin, inv_ext)
+            });
         }
 
         Self {

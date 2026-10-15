@@ -813,6 +813,7 @@
   "Substep Interval": "サブステップ間隔",
   "Substep frequency for edge-to-edge self-collision (0: disabled, 1: every substep, 2: every 2 substeps, etc.)": "辺対辺（E-E）自己衝突の実行頻度 (0: 無効、1: 毎サブステップ、2: 2サブステップ毎)",
   "Substep frequency for self-collision detection (1: every substep, 2: every 2 substeps, etc.)": "自己衝突判定を実行するサブステップ間隔（1: 毎サブステップ、2: 2サブステップ毎）",
+  "Settling cloth drape...": "ドレープを収束中...",
   "Suppress gravity until the specified share of sewing pairs has closed (garment assembly phase)": "縫合ペアが指定割合閉じるまで重力を抑制 (衣服組み立てフェーズ)",
   "Surface friction coefficient": "摩擦係数",
   "Sweep Margin Offset": "スイープマージン加算値",
@@ -874,6 +875,7 @@
   "Uncompressed: ~%s": "非圧縮: 約%s",
   "Unpinned vertex #%d": "頂点 #%d のピン留めを解除しました",
   "Update Interval": "更新間隔",
+  "Updating mesh...": "メッシュを更新中...",
   "Use hybrid partial mesh collider only at joint blend regions to eliminate sharp SDF corners": "関節ブレンド領域のみハイブリッド部分メッシュコライダーを使用してSDFの角抜けを解消",
   "Use vertex normals to push penetrated vertices outward": "頂点法線を用いて裏抜けした頂点を表側へ押し戻し、自己交差からの自律的な脱出を可能にします",
   "Valley (Root) radial gradient window in meters: pull fades from edge to zero at target": "谷（根本）の放射状減衰幅 (メートル): 引き込みが境界から目標値へフェード",
@@ -912,5 +914,14 @@
   "[Esc] Cancel": "[Esc] 中止",
   "[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit": "[左ドラッグ] 頂点移動  |  [P] ピン留め/解除  |  [Esc / 右クリック] 終了",
   "[LMB/Enter] Confirm  [RMB/Esc] Cancel  [Wheel] Radius  [Shift+Wheel] Influence  [B] Change Bone": "[左クリック/Enter] 確定  [右クリック/Esc] 取消  [ホイール] 太さ  [Shift+ホイール] 影響幅  [B] ボーン再選択",
-  "[LMB] Select Bone  |  [RMB/Esc] Cancel": "[左クリック] ボーンを決定  |  [右クリック/Esc] 取消"
+  "[LMB] Select Bone  |  [RMB/Esc] Cancel": "[左クリック] ボーンを決定  |  [右クリック/Esc] 取消",
+  "Active Region Scale": "アクティブ領域スケール",
+  "Active-Region Sculpt": "部分アクティブ・スカルプト",
+  "Air damping factor during drape settlement (higher values suppress oscillations)": "ドレープ収束時の空気抵抗減衰係数（高い値ほど振動を抑制）",
+  "Freeze vertices far outside brush radius to achieve high FPS during sculpting": "スカルプト時のFPS向上のため、ブラシ半径から離れた頂点を一時固定します",
+  "Instant Drape": "一瞬ドレープ",
+  "Multiplier for brush radius defining active simulation area": "アクティブなシミュレーション範囲を決定するブラシ半径の倍率",
+  "Number of simulation substeps to execute": "実行するシミュレーションサブステップ数",
+  "Run quasi-static high-damping simulation steps to instantly settle cloth drape without timeline playback": "高減衰ステップを一括実行し、タイムライン再生なしで重力ドレープ形状へ即座に収束させます",
+  "Substeps": "サブステップ数"
 }
