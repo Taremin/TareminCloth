@@ -1,4 +1,4 @@
-use crate::mesh::{GpuVertex, SimParams};
+use crate::mesh::{GpuCollider, GpuPinConstraint, GpuVertex, SelfCollisionParams, SimParams};
 use super::types::CollisionParams;
 use super::GpuClothSimulator;
 
@@ -1124,6 +1124,82 @@ impl GpuClothSimulator {
         drop(data);
         staging.unmap();
         out
+    }
+
+    /// GPUの SimParams バッファ内容を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_sim_params_buffer(&self) -> Option<SimParams> {
+        let size = std::mem::size_of::<SimParams>() as u64;
+        let bytes = self.read_storage_buffer(&self.params_buffer, size);
+        if bytes.len() >= size as usize {
+            Some(*bytemuck::from_bytes::<SimParams>(&bytes[..size as usize]))
+        } else {
+            None
+        }
+    }
+
+    /// GPUの CollisionParams バッファ内容を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_collision_params_buffer(&self) -> Option<CollisionParams> {
+        let size = std::mem::size_of::<CollisionParams>() as u64;
+        let bytes = self.read_storage_buffer(&self.collider_params_buffer, size);
+        if bytes.len() >= size as usize {
+            Some(*bytemuck::from_bytes::<CollisionParams>(&bytes[..size as usize]))
+        } else {
+            None
+        }
+    }
+
+    /// GPUの SelfCollisionParams バッファ内容を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_self_collision_params_buffer(&self) -> Option<SelfCollisionParams> {
+        let size = std::mem::size_of::<SelfCollisionParams>() as u64;
+        let bytes = self.read_storage_buffer(&self.self_collision_params_buffer, size);
+        if bytes.len() >= size as usize {
+            Some(*bytemuck::from_bytes::<SelfCollisionParams>(&bytes[..size as usize]))
+        } else {
+            None
+        }
+    }
+
+    /// GPUの Vertex バッファから先頭 count 件の頂点を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_gpu_vertices_buffer(&self, count: usize) -> Vec<GpuVertex> {
+        let count = count.min(self.num_vertices as usize);
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = (count * std::mem::size_of::<GpuVertex>()) as u64;
+        let bytes = self.read_storage_buffer(&self.vertex_buffer, size);
+        bytemuck::cast_slice::<u8, GpuVertex>(&bytes).to_vec()
+    }
+
+    /// 現在登録されているコライダー数を取得
+    pub fn num_colliders(&self) -> usize {
+        self.colliders.len()
+    }
+
+    /// 現在登録されている動的ピン数を取得
+    pub fn num_dynamic_pins(&self) -> usize {
+        self.dynamic_pins.len()
+    }
+
+    /// GPUの Collider バッファから先頭 count 件 (None時は全件) のコライダーを読戻す (デバッグ・プロトコル検証用)
+    pub fn read_gpu_colliders_buffer(&self, count: Option<usize>) -> Vec<GpuCollider> {
+        let count = count.unwrap_or(self.colliders.len()).min(self.colliders.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = (count * std::mem::size_of::<GpuCollider>()) as u64;
+        let bytes = self.read_storage_buffer(&self.collider_buffer, size);
+        bytemuck::cast_slice::<u8, GpuCollider>(&bytes).to_vec()
+    }
+
+    /// GPUの Pin バッファから先頭 count 件 (None時は全件) の動的ピン拘束を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_gpu_pin_constraints_buffer(&self, count: Option<usize>) -> Vec<GpuPinConstraint> {
+        let count = count.unwrap_or(self.dynamic_pins.len()).min(self.dynamic_pins.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = (count * std::mem::size_of::<GpuPinConstraint>()) as u64;
+        let bytes = self.read_storage_buffer(&self.pin_buffer, size);
+        bytemuck::cast_slice::<u8, GpuPinConstraint>(&bytes).to_vec()
     }
 
     /// 収集中のアクティブペア一覧を読戻す (vt_count, ee_count, vt_pairs, ee_pairs)。

@@ -73,6 +73,12 @@ jobs:
           python -m unittest discover -s tests/interactive -t .
           python -m unittest discover -s tests/regression -t .
 
+      - name: Check Protocol & i18n Integrity
+        shell: bash
+        run: |
+          python tools/audit_protocol.py --check
+          python tools/audit_i18n.py --check
+
       - name: Check Documentation Integrity (Links, Mermaid, KaTeX)
         shell: bash
         run: |

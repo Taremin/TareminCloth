@@ -2673,6 +2673,124 @@ impl ClothSimulator {
         );
         Ok(())
     }
+
+    /// GPU上の SimParams バッファ内容を読戻す (プロトコル検証・デバッグ用)
+    fn inspect_sim_params<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let p = match self.simulator.read_sim_params_buffer() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let d = PyDict::new(py);
+        d.set_item("gravity", vec![p.gravity[0], p.gravity[1], p.gravity[2]])?;
+        d.set_item("substep_dt", p.gravity[3])?;
+        d.set_item("damping", p.damping)?;
+        d.set_item("substeps", p.substeps)?;
+        d.set_item("num_vertices", p.num_vertices)?;
+        d.set_item("num_distance_constraints", p.num_distance_constraints)?;
+        d.set_item("num_bending_constraints", p.num_bending_constraints)?;
+        d.set_item("num_sewing_constraints", p.num_sewing_constraints)?;
+        d.set_item("sewing_compliance", p.sewing_compliance)?;
+        d.set_item("enable_sewing_lock", p.enable_sewing_lock)?;
+        d.set_item("sewing_lock_distance", p.sewing_lock_distance)?;
+        Ok(Some(d))
+    }
+
+    /// GPU上の CollisionParams バッファ内容を読戻す (プロトコル検証・デバッグ用)
+    fn inspect_collision_params<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let p = match self.simulator.read_collision_params_buffer() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let d = PyDict::new(py);
+        d.set_item("num_vertices", p.num_vertices)?;
+        d.set_item("num_colliders", p.num_colliders)?;
+        d.set_item("num_mesh_triangles", p.num_mesh_triangles)?;
+        d.set_item("num_clusters", p.num_clusters)?;
+        d.set_item("dt", p.dt)?;
+        d.set_item("edge_margin_scale", p.edge_margin_scale)?;
+        d.set_item("edge_margin_offset", p.edge_margin_offset)?;
+        d.set_item("enable_cluster_culling", p.enable_cluster_culling)?;
+        d.set_item("enable_single_sided_recovery", p.enable_single_sided_recovery)?;
+        d.set_item("sweep_margin_offset", p.sweep_margin_offset)?;
+        d.set_item("num_bones", p.num_bones)?;
+        d.set_item("enable_bone_sdf", p.enable_bone_sdf)?;
+        Ok(Some(d))
+    }
+
+    /// GPU上の SelfCollisionParams バッファ内容を読戻す (プロトコル検証・デバッグ用)
+    fn inspect_self_collision_params<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let p = match self.simulator.read_self_collision_params_buffer() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let d = PyDict::new(py);
+        d.set_item("cell_size", p.cell_size)?;
+        d.set_item("table_size", p.table_size)?;
+        d.set_item("num_vertices", p.num_vertices)?;
+        d.set_item("num_edges", p.num_edges)?;
+        d.set_item("relief_factor", p.relief_factor)?;
+        d.set_item("max_displacement_ratio", p.max_displacement_ratio)?;
+        d.set_item("enable_relief", p.enable_relief)?;
+        d.set_item("enable_normal_untangling", p.enable_normal_untangling)?;
+        d.set_item("exclude_neighbors", p.exclude_neighbors)?;
+        d.set_item("max_search_iterations", p.max_search_iterations)?;
+        d.set_item("enable_ee", p.enable_ee)?;
+        Ok(Some(d))
+    }
+
+    /// GPU上の Vertex バッファから特定頂点の内容を読戻す (プロトコル検証・デバッグ用)
+    #[pyo3(signature = (vertex_idx))]
+    fn inspect_gpu_vertex<'py>(&self, py: Python<'py>, vertex_idx: usize) -> PyResult<Option<Bound<'py, PyDict>>> {
+        if vertex_idx >= self.simulator.num_vertices as usize {
+            return Ok(None);
+        }
+        let verts = self.simulator.read_gpu_vertices_buffer(vertex_idx + 1);
+        if let Some(v) = verts.get(vertex_idx) {
+            let d = PyDict::new(py);
+            d.set_item("position", vec![v.position[0], v.position[1], v.position[2]])?;
+            d.set_item("inv_mass", v.inv_mass)?;
+            d.set_item("prev_pos", vec![v.prev_pos[0], v.prev_pos[1], v.prev_pos[2]])?;
+            d.set_item("layer_id", v.layer_id)?;
+            d.set_item("velocity", vec![v.velocity[0], v.velocity[1], v.velocity[2]])?;
+            d.set_item("thickness", v.thickness)?;
+            Ok(Some(d))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// GPU上の Collider バッファからコライダー一覧を読戻す (プロトコル検証・デバッグ用)
+    #[pyo3(signature = (count=None))]
+    fn inspect_gpu_colliders<'py>(&self, py: Python<'py>, count: Option<usize>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let cols = self.simulator.read_gpu_colliders_buffer(count);
+        let mut list = Vec::with_capacity(cols.len());
+        for c in cols {
+            let d = PyDict::new(py);
+            d.set_item("collider_type", c.collider_type)?;
+            d.set_item("friction", c.friction)?;
+            d.set_item("restitution", c.restitution)?;
+            d.set_item("point_a", vec![c.point_a[0], c.point_a[1], c.point_a[2]])?;
+            d.set_item("radius", c.radius)?;
+            d.set_item("point_b", vec![c.point_b[0], c.point_b[1], c.point_b[2]])?;
+            list.push(d);
+        }
+        Ok(list)
+    }
+
+    /// GPU上の Pin バッファから動的ピン一覧を読戻す (プロトコル検証・デバッグ用)
+    #[pyo3(signature = (count=None))]
+    fn inspect_gpu_pins<'py>(&self, py: Python<'py>, count: Option<usize>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let pins = self.simulator.read_gpu_pin_constraints_buffer(count);
+        let mut list = Vec::with_capacity(pins.len());
+        for p in pins {
+            let d = PyDict::new(py);
+            d.set_item("vertex_idx", p.vertex_idx)?;
+            d.set_item("weight", p.weight)?;
+            d.set_item("target_pos", vec![p.target_pos[0], p.target_pos[1], p.target_pos[2]])?;
+            list.push(d);
+        }
+        Ok(list)
+    }
 }
 
 /// taremin_cloth_core Python モジュール

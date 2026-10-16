@@ -1238,6 +1238,12 @@ def main() -> None:
     p_coverage.add_argument("--output", "-o", default=None, help="レポート保存先")
     p_coverage.set_defaults(func=cmd_coverage)
 
+    # 15. check-protocol (Python-Rust-wgpu プロトコル整合性監査)
+    p_audit_proto = subparsers.add_parser("check-protocol", aliases=["audit-protocol"], help="Python-Rust-wgpu間のプロトコル・パラメータ完全性を監査")
+    p_audit_proto.add_argument("--format", choices=["text", "markdown", "json"], default="text", help="出力形式")
+    p_audit_proto.add_argument("--check", action="store_true", help="不整合があれば非ゼロ終了 (CI向け)")
+    p_audit_proto.set_defaults(func=cmd_audit_protocol)
+
 
     args = parser.parse_args()
     args.func(args)
@@ -1275,6 +1281,26 @@ def cmd_coverage(args):
         if phys_be < phys_total:
             print(f"[ERROR] Blender Engine 物理パラメータ欠落: {phys_be}/{phys_total}", file=sys.stderr)
             sys.exit(1)
+
+
+def cmd_audit_protocol(args):
+    """Python-Rust-wgpu プロトコル整合性監査"""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    tools_dir = os.path.join(project_root, "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    from audit_protocol import audit_protocol, format_text_report, format_markdown_report
+    report = audit_protocol()
+    if args.format == "markdown":
+        out = format_markdown_report(report)
+    elif args.format == "json":
+        import json
+        out = json.dumps(report, indent=2, ensure_ascii=False)
+    else:
+        out = format_text_report(report)
+    print(out)
+    if args.check and report["status"] != "PASS":
+        sys.exit(1)
 
 
 if __name__ == "__main__":

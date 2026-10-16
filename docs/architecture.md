@@ -1076,6 +1076,71 @@ python tools/audit_feature_coverage.py --format markdown
 python run_tests.py --ci -t test_feature_coverage.py
 ```
 
+---
+
+## 11. アーキテクチャ防護・プロトコル検証体制 (Protocol & Integrity Verification)
+
+Python（Blender UI / スクリプト）、Rust（物理コア / PyO3）、および wgpu / WGSL（GPUバッファ / コンピュートシェーダー）の3層間におけるデータの受け渡し不整合やパラメータ欠落を恒久的に防止するため、**静的4層監査**と**動的E2E GPUリードバック検証**の2重防護体制を配備しています。
+
+```mermaid
+flowchart TD
+    subgraph Layer1["1. Blender UI / Python"]
+        Prop["properties.py (UI定義)"]
+        Collect["simconfig.py (収集辞書)"]
+        FfiCall["ClothSimulator (PyO3呼び出し)"]
+    end
+
+    subgraph Layer2["2. Rust Core (PyO3)"]
+        PyBinding["cloth_py / lib.rs"]
+        RustSim["GpuClothSimulator"]
+        Config["SimConfig / config_impl.rs"]
+    end
+
+    subgraph Layer3["3. wgpu / WGSL"]
+        GpuBuf["params_buffer (Uniform) / Storage Buffer"]
+        Shaders["predict.wgsl, collision.wgsl, etc."]
+    end
+
+    subgraph Defense["防護・検証システム"]
+        Audit["tools/audit_protocol.py<br>(静的4層突合チェッカー)"]
+        InspectApi["sim.inspect_*_params()<br>(GPU実値リードバックAPI)"]
+        IntegrityTest["tests/core/test_protocol_integrity.py<br>(動的E2Eテスト)"]
+    end
+
+    Prop --> Collect --> FfiCall --> PyBinding --> RustSim --> GpuBuf --> Shaders
+    Audit -.->|AST静的検査| Prop
+    Audit -.->|辞書キー照合| Collect
+    Audit -.->|構造体定義照合| Config
+    Audit -.->|WGSL構造体照合| Shaders
+
+    FfiCall -.->|ランタイム投入| IntegrityTest
+    GpuBuf -.->|リードバック| InspectApi -.->|実値アサーション| IntegrityTest
+```
+
+### 11.1 静的プロトコル監査チェッカー (`tools/audit_protocol.py`)
+Blender非依存でPython AST、Rustソースコード、およびWGSLシェーダー定義を静的解析し、以下の4層間の整合性を監査します：
+1. **Blender Property ↔ Python SimConfig**: UIプロパティとして定義されているのに SimConfig にマッピングされていない「孤立プロパティ」の検知。
+2. **Python SimConfig ↔ Rust SimConfig**: `LIVE_KEYS` と `SimConfig` 構造体フィールドの1対1完全一致検証。
+3. **Rust SimConfig ↔ WGSL Struct**: シェーダーUniform構造体（`SimParams`, `CollisionParams`, `SelfCollisionParams` 等）への反映漏れ検知。
+
+```bash
+# プロトコル整合性監査の実行
+python tools/audit_protocol.py
+# CI用（不整合検知時に非ゼロコードで終了）
+python tools/audit_protocol.py --check
+# log_tools 経由
+python -m taremin_cloth.log_tools check-protocol
+```
+
+### 11.2 動的E2Eプロトコル検証テスト (`tests/core/test_protocol_integrity.py`)
+Rustの `GpuClothSimulator` にデバッグ・検証専用のGPUバッファ読戻しAPI（`inspect_sim_params()`, `inspect_collision_params()`, `inspect_self_collision_params()`, `inspect_gpu_vertex()`, `inspect_gpu_colliders()`, `inspect_gpu_pins()`）を配備。Pythonから一意なパラメータや幾何データを投入し、**GPU上のUniform/Storageバッファ内の実際のメモリバイト列と完全一致すること**を実機検証します。
+
+```bash
+# 動的プロトコル検証テストの実行
+python run_tests.py --ci -t test_protocol_integrity.py
+```
+
+
 
 
 

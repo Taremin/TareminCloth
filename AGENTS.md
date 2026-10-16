@@ -48,6 +48,9 @@ python run_tests.py --ci -t test_i18n.py
 # i18n 翻訳完全性監査（未登録 description / name / label / dead keys 検知・Blender不要）
 python tools/audit_i18n.py
 
+# プロトコル整合性監査（Blender/Python/Rust/WGSL間のパラメータ定義・型・孤立チェック・Blender不要）
+python tools/audit_protocol.py --check
+
 # または現在の環境上で直接実行
 python -m unittest tests/core/test_mesh_analysis.py
 python -m unittest tests/core/test_mesh_renderer.py
@@ -131,6 +134,7 @@ sim.save_profile_trace("scratch/trace.json")  # chrome://tracing で開ける
 | `audit-cache` | 同一ログのON/OFF再現で貫通起因を判定 (再記録不要) | `python -m taremin_cloth.log_tools audit-cache input.jsonl.gz -f 71 --lookback 3` |
 | `profile` | 指定区間をGPU計測付きでリプレイし壁時計と内訳表示・trace保存 | `python -m taremin_cloth.log_tools profile input.jsonl.gz -f 71 -o trace.json` |
 | `coverage` | エンジンコア機能・API・パラメータのBlender/独立GUI実装率を測定・比較（3軸カバレッジ監査） | `python -m taremin_cloth.log_tools coverage`<br>`python tools/audit_feature_coverage.py --format markdown` |
+| `check-protocol` | Python-Rust-wgpu間のパラメータ定義・型・孤立を4層突合監査 | `python -m taremin_cloth.log_tools check-protocol`<br>`python tools/audit_protocol.py --check` |
 | `audit_i18n` | UI/プロパティの description・name・選択肢の未翻訳およびデッドキーをAST解析で完全監査 | `python tools/audit_i18n.py`<br>`python tools/audit_i18n.py --check` |
 
 > [!TIP]
