@@ -51,6 +51,9 @@ python tools/audit_i18n.py
 # プロトコル整合性監査（Blender/Python/Rust/WGSL間のパラメータ定義・型・孤立チェック・Blender不要）
 python tools/audit_protocol.py --check
 
+# 関数引数安全規約監査（キーワード専用引数・ブールトラップ検知・Blender不要）
+python tools/audit_function_args.py --check
+
 # または現在の環境上で直接実行
 python -m unittest tests/core/test_mesh_analysis.py
 python -m unittest tests/core/test_mesh_renderer.py
@@ -136,6 +139,7 @@ sim.save_profile_trace("scratch/trace.json")  # chrome://tracing で開ける
 | `coverage` | エンジンコア機能・API・パラメータのBlender/独立GUI実装率を測定・比較（3軸カバレッジ監査） | `python -m taremin_cloth.log_tools coverage`<br>`python tools/audit_feature_coverage.py --format markdown` |
 | `check-protocol` | Python-Rust-wgpu間のパラメータ定義・型・孤立を4層突合監査 | `python -m taremin_cloth.log_tools check-protocol`<br>`python tools/audit_protocol.py --check` |
 | `audit_i18n` | UI/プロパティの description・name・選択肢の未翻訳およびデッドキーをAST解析で完全監査 | `python tools/audit_i18n.py`<br>`python tools/audit_i18n.py --check` |
+| `audit_args` | 関数の引数順序ミス防止・ブールトラップ・キーワード専用引数規約をAST解析で監査 | `python tools/audit_function_args.py`<br>`python tools/audit_function_args.py --check` |
 
 > [!TIP]
 > **スパース記録 (2階層ロギング)**: `sim.set_debug_recording_options(full_stride=5, ring_size=3, lookahead=2, enable_triggers=True)` で間引きフル保存+トリガー時文脈復元。スタブ区間は座標なし (`inspect` はstats表示、`render/check/export-obj` は近傍フルを案内、`replay_range/replay_until` は入力連続性を保ちフル区間のみ比較)。スパース形式のファイルは `version: 3` で識別される。
@@ -238,6 +242,18 @@ Taremin Cloth の詳細な物理計算理論、接触・衝突判定（V-T, E-E,
 コードを追加・修正する前に、すべてのAIエージェントおよび開発者は必ず以下の点検を行ってください：
 1. 「これから書こうとしている処理（メッシュデータ取得・幾何変換・Blender操作など）は、すでに `taremin_cloth.utils` や既存モジュールに存在しないか？」を `grep_search` 等で確認すること。
 2. 複数箇所で同一または類似の処理が必要になった場合、インラインで重複実装せず、必ず `utils/` に共通関数として定義・分離すること。
+
+### 関数引数のキーワード専用化規約 (Keyword-Only Arguments & Boolean Trap Prevention)
+Python側で定義する関数における引数の順序ミスやブールトラップを防止するため、以下の規約を遵守してください：
+1. **主語となる対象（1〜2個）以外は `*,` 以降のキーワード専用引数にする**:
+   - オプショナル引数（デフォルト値付き）やフラグ（`bool`）は、必ず `*,` より後ろに定義してください。
+   - 例: `def step_cloth_scene(scene, *, dt=1/60, update_mesh=True):`
+2. **位置引数の故意な維持（除外指定）**:
+   - `lerp(a, b, t)` や `clamp(val, min_val, max_val)` など、数学的に自明な順序を持つ低レイヤー関数の場合は、`@allow_positional` デコレータ（`taremin_cloth.utils`）を付与するか、行末に `# audit: allow-positional` を記載してください（実行時オーバーヘッドは 0 ナノ秒です）。
+3. **Blender API規約メソッドの例外**:
+   - `execute(self, context)` や `modal`、プロパティ更新コールバックなどのBlender側から位置引数で呼び出される関数はキーワード専用化の対象外です。
+4. **監査ツールによる検証**:
+   - コミット前に `python tools/audit_function_args.py` で引数設計規約に違反していないかを検証してください。
 
 ---
 

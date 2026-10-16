@@ -6,6 +6,7 @@ ClothSimulatorのライフサイクル生成、CFL適応サブステップ計算
 
 import bpy
 import numpy as np
+from typing import Optional
 from .cache import (
     _simulators,
     _prev_coords_cache,
@@ -504,10 +505,11 @@ def step_cloth_object(
 
 def step_cloth_scene(
     scene,
+    *,
     dt: float = 1.0 / 60.0,
-    anim_frame: int = None,
+    anim_frame: Optional[int] = None,
     depsgraph=None,
-    target_objs: list = None,
+    target_objs: Optional[list] = None,
     update_mesh: bool = True,
     steps_per_frame: int = 1,
 ) -> dict:

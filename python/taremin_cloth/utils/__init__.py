@@ -14,6 +14,7 @@ from .view3d import (
     tag_redraw_view3d,
     stop_animation,
 )
+from .args_guard import allow_positional
 from .modal_event import (
     CLICK_DRAG_THRESHOLD_PX,
     CANCEL_TYPES,
@@ -44,5 +45,6 @@ __all__ = [
     "is_confirm",
     "is_left_press",
     "is_left_release",
+    "allow_positional",
 ]
 
