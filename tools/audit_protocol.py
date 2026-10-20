@@ -144,6 +144,8 @@ STATE_PRESET_PROPERTIES: Set[str] = {
     "target_fps",
     "active_elastic_group_index",
     "elastic_groups",
+    "active_string_part_index",
+    "string_parts",
     "last_fabric_preset",
     "last_simulation_preset",
     "interactive_max_steps",

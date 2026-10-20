@@ -17,7 +17,7 @@ pub mod sdf_baker;
 
 pub use context::{GpuBufferLimits, GpuContext, GpuContextError, GpuDeviceInfo};
 pub use config::SimConfig;
-pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams, areal_inv_masses};
+pub use mesh::{ClothMesh, GpuBendingConstraint, GpuCollider, GpuDistanceConstraint, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuVertex, SimParams, areal_inv_masses, compute_combined_inv_masses};
 pub use smooth::{
     TENSION_EXPAND, GRAB_PIN_THRESHOLD,
     FALLOFF_SMOOTH, FALLOFF_SPHERE, FALLOFF_SHARP, FALLOFF_LINEAR, FALLOFF_CONSTANT,

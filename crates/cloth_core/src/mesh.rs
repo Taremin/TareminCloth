@@ -223,19 +223,24 @@ pub struct GpuTriangle {
     pub layer_id: u32,
 }
 
-/// 面密度 (kg/m2) とピンウェイトから物理単位の逆質量配列を計算する。
-/// 各三角形の面積×面密度を3頂点へ等分配し、`inv = (1 - pin_w) / mass` とする。
-/// 面を持たない・面積ゼロの頂点は微小質量で支え、ゼロ除算を防ぐ。
+/// 面密度 (kg/m2) および線密度 (kg/m) とピンウェイトから物理単位の逆質量配列を計算する。
+/// 各三角形の面積×面密度を3頂点へ等分配し、
+/// さらに三角形に属さない1Dエッジ長×線密度を2頂点へ等分配する。
+/// 面も1Dエッジも持たない孤立頂点は微小質量 (MIN_MASS) で支え、ゼロ除算を防ぐ。
 /// ピンウェイト1.0の頂点は 0.0 (完全固定) となる。
-pub fn areal_inv_masses(
+pub fn compute_combined_inv_masses(
     positions: &[[f32; 3]],
     faces: Option<&[[u32; 3]]>,
+    strand_edges: Option<&[[u32; 2]]>,
     pin_weights: Option<&[f32]>,
     areal_density: f32,
+    linear_density: f32,
 ) -> Vec<f32> {
     const MIN_MASS: f32 = 1e-9;
     let n = positions.len();
     let mut masses = vec![0.0f32; n];
+
+    // 1. 面（2D布）の質量分配
     if areal_density > 0.0 {
         if let Some(tris) = faces {
             for &[a, b, c] in tris {
@@ -261,6 +266,28 @@ pub fn areal_inv_masses(
             }
         }
     }
+
+    // 2. 1Dストランド（紐）の質量分配
+    if linear_density > 0.0 {
+        if let Some(edges) = strand_edges {
+            for &[a, b] in edges {
+                let (ia, ib) = (a as usize, b as usize);
+                if ia >= n || ib >= n || a == b {
+                    continue;
+                }
+                let pa = positions[ia];
+                let pb = positions[ib];
+                let dx = pa[0] - pb[0];
+                let dy = pa[1] - pb[1];
+                let dz = pa[2] - pb[2];
+                let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                let share = len * linear_density / 2.0;
+                masses[ia] += share;
+                masses[ib] += share;
+            }
+        }
+    }
+
     masses
         .iter()
         .enumerate()
@@ -276,6 +303,17 @@ pub fn areal_inv_masses(
             }
         })
         .collect()
+}
+
+/// 面密度 (kg/m2) とピンウェイトから物理単位の逆質量配列を計算する。
+/// 後方互換性用ラッパー。
+pub fn areal_inv_masses(
+    positions: &[[f32; 3]],
+    faces: Option<&[[u32; 3]]>,
+    pin_weights: Option<&[f32]>,
+    areal_density: f32,
+) -> Vec<f32> {
+    compute_combined_inv_masses(positions, faces, None, pin_weights, areal_density, 0.0)
 }
 
 fn expand_bits_10(mut v: u32) -> u32 {
@@ -626,6 +664,69 @@ impl ClothMesh {
                         compliance: bend_compliance,
                         _pad: [0.0; 2],
                     });
+                }
+            }
+        }
+
+        // 1Dストランド（紐）の曲げ拘束:
+        // 三角形に属さないエッジ列において、連続する頂点 a - u - b の 2ホップペア (a, b) に曲げ拘束を生成
+        {
+            let mut face_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+            if let Some(triangles) = faces {
+                for &[f0, f1, f2] in triangles {
+                    face_edges.insert((f0.min(f1), f0.max(f1)));
+                    face_edges.insert((f1.min(f2), f1.max(f2)));
+                    face_edges.insert((f2.min(f0), f2.max(f0)));
+                }
+            }
+
+            let mut strand_adj: HashMap<u32, Vec<u32>> = HashMap::new();
+            for &[v0, v1] in edges {
+                if (v0 as usize) < n_verts && (v1 as usize) < n_verts && v0 != v1 {
+                    let key = (v0.min(v1), v0.max(v1));
+                    if !face_edges.contains(&key) {
+                        strand_adj.entry(v0).or_default().push(v1);
+                        strand_adj.entry(v1).or_default().push(v0);
+                    }
+                }
+            }
+
+            let mut existing_bend_pairs: std::collections::HashSet<(u32, u32)> = bending_constraints
+                .iter()
+                .map(|bc| (bc.v2.min(bc.v3), bc.v2.max(bc.v3)))
+                .collect();
+
+            for (&u, neighbors) in &strand_adj {
+                if neighbors.len() >= 2 {
+                    for i in 0..neighbors.len() {
+                        for j in (i + 1)..neighbors.len() {
+                            let a = neighbors[i];
+                            let b = neighbors[j];
+                            if a != b {
+                                let pair = (a.min(b), a.max(b));
+                                if existing_bend_pairs.insert(pair) {
+                                    let pa = positions[a as usize];
+                                    let pb = positions[b as usize];
+                                    let dx = pa[0] - pb[0];
+                                    let dy = pa[1] - pb[1];
+                                    let dz = pa[2] - pb[2];
+                                    let rest_length = (dx * dx + dy * dy + dz * dz).sqrt();
+
+                                    // 1Dストランドは引き絞り（距離拘束の動的短縮）を阻害しないよう適度に柔軟なコンプライアンスを持たせる
+                                    let strand_bend_compliance = (bend_compliance * 10.0).max(0.5);
+                                    bending_constraints.push(GpuBendingConstraint {
+                                        v0: u,
+                                        v1: u,
+                                        v2: a,
+                                        v3: b,
+                                        rest_length,
+                                        compliance: strand_bend_compliance,
+                                        _pad: [0.0; 2],
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1369,6 +1470,85 @@ mod tests {
 
         let nbr_2_from_1 = v1_pairs.iter().find(|(idx, _)| *idx == 2).unwrap();
         assert_eq!(nbr_2_from_1.1, 0.0, "縫合相手ペアはレスト長0.0: {}", nbr_2_from_1.1);
+    }
+
+    #[test]
+    fn test_combined_inv_masses_areal_and_linear() {
+        // 0-1-2 の直角三角形 (面積 0.5 m^2) + 2-3-4 の1Dストランド (各1m, 計2m)
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ];
+        let faces = [[0, 1, 2]];
+        let strand_edges = [[2, 3], [3, 4]];
+        let areal_density = 0.30; // 三角形質量 = 0.5 * 0.30 = 0.15 kg -> 各頂点 0.05 kg
+        let linear_density = 0.02; // 各エッジ質量 = 1.0 * 0.02 = 0.02 kg -> 端点 0.01 kg, 中間 0.02 kg
+
+        let inv = super::compute_combined_inv_masses(
+            &positions,
+            Some(&faces),
+            Some(&strand_edges),
+            None,
+            areal_density,
+            linear_density,
+        );
+        assert_eq!(inv.len(), 5);
+        // 頂点0, 1: 面のみ 0.05 kg -> inv = 20.0
+        assert!((inv[0] - 20.0).abs() < 1e-4);
+        assert!((inv[1] - 20.0).abs() < 1e-4);
+        // 頂点2: 面 0.05 kg + ストランド端 0.01 kg = 0.06 kg -> inv = 1 / 0.06 = 16.6667
+        assert!((inv[2] - (1.0 / 0.06)).abs() < 1e-3);
+        // 頂点3: ストランド中間 0.02 kg -> inv = 50.0
+        assert!((inv[3] - 50.0).abs() < 1e-4);
+        // 頂点4: ストランド端 0.01 kg -> inv = 100.0
+        assert!((inv[4] - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_strand_1d_bending_constraints() {
+        // 1Dストランド: 0 -- 1 -- 2 -- 3
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ];
+        let edges = [[0, 1], [1, 2], [2, 3]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            1000.0,
+            10.0,
+            1.0,
+            None,
+            None,
+        );
+
+        // 2ホップペア (0, 2) と (1, 3) の2件の曲げ拘束が生成されていること
+        assert_eq!(mesh.bending_constraints.len(), 2);
+        let pairs: Vec<(u32, u32)> = mesh
+            .bending_constraints
+            .iter()
+            .map(|bc| (bc.v2.min(bc.v3), bc.v2.max(bc.v3)))
+            .collect();
+        assert!(pairs.contains(&(0, 2)));
+        assert!(pairs.contains(&(1, 3)));
+        for bc in &mesh.bending_constraints {
+            assert!((bc.rest_length - 2.0).abs() < 1e-5);
+        }
     }
 }
 

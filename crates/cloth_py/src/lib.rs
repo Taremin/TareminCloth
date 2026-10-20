@@ -2,7 +2,7 @@ use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyRe
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
-    areal_inv_masses as core_areal_inv_masses,
+    compute_combined_inv_masses as core_combined_inv_masses,
     audit_pairs as core_audit_pairs,
     find_proximity_violations as core_proximity_violations,
     find_triangle_intersections as core_triangle_intersections,
@@ -510,16 +510,18 @@ fn brush_ray_plane_hit(
     core_ray_plane_hit(origin, direction, plane_point, plane_normal)
 }
 
-/// 面密度とピンウェイトから物理単位の逆質量配列 [N] を計算する。
-/// 純CPU・GPU初期化不要。Python `utils/mesh_extract.compute_areal_inv_masses` と同一仕様でRustを正本とする。
+/// 面密度、線密度、ピンウェイトから物理単位の逆質量配列 [N] を計算する。
+/// 純CPU・GPU初期化不要。Python `utils/mesh_extract.compute_combined_inv_masses` と同一仕様でRustを正本とする。
 #[pyfunction]
-#[pyo3(signature = (positions, faces=None, pin_weights=None, areal_density=0.15))]
-fn compute_areal_inv_masses<'py>(
+#[pyo3(signature = (positions, faces=None, strand_edges=None, pin_weights=None, areal_density=0.15, linear_density=0.0))]
+fn compute_combined_inv_masses<'py>(
     py: Python<'py>,
     positions: PyReadonlyArray2<f32>,
     faces: Option<PyReadonlyArray2<u32>>,
+    strand_edges: Option<PyReadonlyArray2<u32>>,
     pin_weights: Option<PyReadonlyArray1<f32>>,
     areal_density: f32,
+    linear_density: f32,
 ) -> PyResult<Bound<'py, PyArray1<f32>>> {
     let p_view = positions.as_array();
     let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
@@ -546,9 +548,50 @@ fn compute_areal_inv_masses<'py>(
     } else {
         Some(face_storage.as_slice())
     };
+
+    let mut strand_storage: Vec<[u32; 2]> = Vec::new();
+    if let Some(s_arr) = strand_edges {
+        let s_view = s_arr.as_array();
+        strand_storage.reserve(s_view.shape()[0]);
+        for row in s_view.outer_iter() {
+            if row.len() >= 2 {
+                strand_storage.push([row[0], row[1]]);
+            }
+        }
+    }
+    let strand_opt = if strand_storage.is_empty() {
+        None
+    } else {
+        Some(strand_storage.as_slice())
+    };
+
     let pin_vec: Option<Vec<f32>> = pin_weights.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
-    let inv = core_areal_inv_masses(&pos_vec, faces_opt, pin_vec.as_deref(), areal_density);
+    let inv = core_combined_inv_masses(&pos_vec, faces_opt, strand_opt, pin_vec.as_deref(), areal_density, linear_density);
     Ok(PyArray1::from_vec(py, inv))
+}
+
+/// 面密度とピンウェイトから物理単位の逆質量配列 [N] を計算する（後方互換ラッパー）。
+/// 純CPU・GPU初期化不要。Python `utils/mesh_extract.compute_areal_inv_masses` と同一仕様でRustを正本とする。
+#[pyfunction]
+#[pyo3(signature = (positions, faces=None, pin_weights=None, areal_density=0.15, strand_edges=None, linear_density=0.0))]
+fn compute_areal_inv_masses<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    faces: Option<PyReadonlyArray2<u32>>,
+    pin_weights: Option<PyReadonlyArray1<f32>>,
+    areal_density: f32,
+    strand_edges: Option<PyReadonlyArray2<u32>>,
+    linear_density: f32,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
+    compute_combined_inv_masses(
+        py,
+        positions,
+        faces,
+        strand_edges,
+        pin_weights,
+        areal_density,
+        linear_density,
+    )
 }
 
 /// 汎用エッジペアのWelsh-Powell彩色で拘束ごとの色番号 [E] を返す。
@@ -2826,6 +2869,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(brush_grab_drag_targets, m)?)?;
     m.add_function(wrap_pyfunction!(brush_ray_plane_hit, m)?)?;
     m.add_function(wrap_pyfunction!(compute_areal_inv_masses, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_combined_inv_masses, m)?)?;
     m.add_function(wrap_pyfunction!(color_edge_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(tri_tri_intersect, m)?)?;
     m.add_function(wrap_pyfunction!(find_triangle_intersections, m)?)?;

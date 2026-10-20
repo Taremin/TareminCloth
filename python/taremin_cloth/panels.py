@@ -48,6 +48,20 @@ class TAREMIN_CLOTH_UL_elastic_groups(bpy.types.UIList):
             layout.label(text="", icon='EDGESEL')
 
 
+class TAREMIN_CLOTH_UL_string_parts(bpy.types.UIList):
+    """紐（Drawstring）パーツ一覧のUIList"""
+    bl_translation_context = i18n.CONTEXT
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            row.prop(item, "enabled", text="")
+            row.prop(item, "name", text="", emboss=False, icon='CURVE_DATA')
+            row.prop(item, "pull_length", text=i18n.trans("Cinch"), slider=True)
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='CURVE_DATA')
+
+
 def _draw_diagnostics_box(layout, context):
     """GPU設定およびログレベル等の診断情報ボックスを描画する"""
     from .preferences import get_preferences
@@ -959,6 +973,45 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
         if settings.show_elastic_overlay:
             row_elastic_disp.prop(settings, "overlay_depth_test", text=i18n.trans("Depth Test (Z)"))
 
+        # 紐パーツ (Drawstrings & Straps)
+        box_string = layout.box()
+        box_string.label(text=i18n.trans("Drawstrings & Straps (Curve)"), icon='CURVE_DATA')
+        row = box_string.row()
+        row.template_list(
+            "TAREMIN_CLOTH_UL_string_parts",
+            "",
+            settings,
+            "string_parts",
+            settings,
+            "active_string_part_index",
+            rows=2,
+        )
+        col_ops = row.column(align=True)
+        col_ops.operator("taremin_cloth.add_string_part", text="", icon='ADD')
+        col_ops.operator("taremin_cloth.remove_string_part", text="", icon='REMOVE')
+        col_ops.separator()
+        col_ops.operator("taremin_cloth.select_string_guide_verts", text="", icon='RESTRICT_SELECT_OFF')
+
+        if 0 <= settings.active_string_part_index < len(settings.string_parts):
+            active_str = settings.string_parts[settings.active_string_part_index]
+            col_str_details = box_string.column(align=True)
+            col_str_details.prop(active_str, "name", text=i18n.trans("Name"))
+            col_str_details.prop(active_str, "curve_object", text=i18n.trans("Curve Object"))
+
+            box_cinch = col_str_details.box()
+            box_cinch.label(text=i18n.trans("Cinch & Tighten Controls"), icon='ARROW_LEFTRIGHT')
+            box_cinch.prop(active_str, "pull_length", text=i18n.trans("Pull Length (Cinch)"), slider=True)
+            row_off = box_cinch.row(align=True)
+            row_off.prop(active_str, "pull_offset_left", text=i18n.trans("Left Offset"))
+            row_off.prop(active_str, "pull_offset_right", text=i18n.trans("Right Offset"))
+
+            col_str_details.prop(active_str, "eyelet_stride", text=i18n.trans("Eyelet Stride"))
+            col_str_details.prop(active_str, "radius", text=i18n.trans("String Radius"))
+            col_str_details.prop(active_str, "linear_density", text=i18n.trans("Linear Density"))
+
+            n_guides = len(active_str.get_guide_vert_indices())
+            col_str_details.label(text=f"{i18n.trans('Guide Border Verts:')} {n_guides}", icon='INFO')
+
 
 class TAREMIN_CLOTH_PT_wrinkle_field(bpy.types.Panel):
     """ドレープガイド（シワ造形）設定サブパネル（実験的機能）"""
@@ -1656,6 +1709,7 @@ def draw_view3d_wrinkle_menu(self, context):
 
 classes = (
     TAREMIN_CLOTH_UL_elastic_groups,
+    TAREMIN_CLOTH_UL_string_parts,
     TAREMIN_CLOTH_PT_main_panel,
     TAREMIN_CLOTH_PT_quality,
     TAREMIN_CLOTH_PT_fabric,

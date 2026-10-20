@@ -749,3 +749,32 @@ Taremin Cloth に配備された布素材プリセット（`BUILTIN_FABRIC_PRESE
   - 壁時計平均: **33.28 ms ± 20.15 ms (30.0 FPS, 約 2.04 倍の高速化)**。自爆反発による無駄な変位蓄積と頂点振動が消失したことで、リアルタイム性能が倍増。
 - **Direct モードとの比較**:
   - Direct モード（V-T / E-E）と同等以上の滑らかなドレープ形状と貫通耐性を維持しながら、30 FPS のリアルタイム処理を実現。
+
+---
+
+## 3.8 紐（1Dストランド）と布の連成・弧長保存引き絞り理論 (Drawstring Arc-Length Transfer)
+
+フードに通した紐（ドローストリング）を引き絞る操作において、布の面積を縮小させずにリアルなギャザー（寄せジワ）を生成し、かつ引き絞った分だけ胸元の垂れ紐が自然に長くなる物理モデルです。
+
+### 1. 間引きアイレット結合によるオイラー座屈ギャザー形成
+布の境界頂点列 $`\{u_0, u_1, \dots, u_K\}`$ のすべてを紐の頂点と 1:1 に剛体結合してしまうと、布の境界エッジと紐のエッジが完全に並列化し、紐を縮めた際に布自身のエッジも平面内で強制圧縮されてギャザー（面外座屈）が阻害されます。
+そこで、ストライド $`S \ge 2`$（標準 $`S = 3`$）の間引きアイレット集合 $`\mathcal{I} = \{0, S, 2S, \dots, K\}`$ のみに対して紐頂点とのゼロ距離縫合拘束を課します。
+紐のトンネル区間自然長を縮小させると、アイレット $`u_{mS}`$ と $`u_{(m+1)S}`$ の間のユークリッド距離が短縮される一方、その間にある布エッジの自然長和 $`\sum_{k=mS}^{(m+1)S-1} L_{k, k+1}^0`$ は不変に保たれるため、余剰弧長が面外方向へオイラー座屈を起こし、物理的に正確なギャザーが形成されます。
+
+### 2. 総弧長保存（Arc-Length Conservation）自然長トランスファー
+紐のトンネル区間、左垂れ（Left Tail）、右垂れ（Right Tail）の初期自然長総和をそれぞれ $`L_{\text{chan}}^0, L_{\text{left}}^0, L_{\text{right}}^0`$ とします。
+引き絞り量 $`P \ge 0`$ および左右オフセット $`\Delta_L, \Delta_R`$ に対し、左右それぞれの引き出し量 $`\Delta L_{\text{left}}, \Delta L_{\text{right}}`$ を以下で決定します（縫合優先モード中は引き絞りを待機するため $`\Delta L_{\text{left}} = \Delta L_{\text{right}} = 0`$）：
+
+$$\Delta L_{\text{left}} = \text{clamp}\left(\frac{P}{2} + \Delta_L,\; 0,\; 0.45 L_{\text{chan}}^0\right), \quad \Delta L_{\text{right}} = \text{clamp}\left(\frac{P}{2} + \Delta_R,\; 0,\; 0.45 L_{\text{chan}}^0\right)$$
+
+$$\Delta L_{\text{cinch}} = \Delta L_{\text{left}} + \Delta L_{\text{right}}$$
+
+これに基づき、各区間のエッジ自然長スケール $`(s_{\text{chan}}, s_{\text{left}}, s_{\text{right}})`$ を更新します：
+
+$$s_{\text{chan}} = \frac{L_{\text{chan}}^0 - \Delta L_{\text{cinch}}}{L_{\text{chan}}^0}, \quad s_{\text{left}} = \frac{L_{\text{left}}^0 + \Delta L_{\text{left}}}{L_{\text{left}}^0}, \quad s_{\text{right}} = \frac{L_{\text{right}}^0 + \Delta L_{\text{right}}}{L_{\text{right}}^0}$$
+
+これにより、任意の引き絞り量および左右非対称オフセットに対して常に
+
+$$L_{\text{chan}} + L_{\text{left}} + L_{\text{right}} = (L_{\text{chan}}^0 - \Delta L_{\text{cinch}}) + (L_{\text{left}}^0 + \Delta L_{\text{left}}) + (L_{\text{right}}^0 + \Delta L_{\text{right}}) = L_{\text{chan}}^0 + L_{\text{left}}^0 + L_{\text{right}}^0$$
+
+が厳密に成立し、紐全体の総弧長が保存されます。

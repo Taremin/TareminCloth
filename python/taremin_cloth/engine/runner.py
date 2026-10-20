@@ -105,18 +105,47 @@ def begin_simulator_init(obj):
 
     is_deformed = obj.get("_taremin_cloth_is_deformed", False)
     rest_pos_2d = None
+    n_mesh_verts = len(obj.data.vertices)
     # レスト頂点座標の取得 (未変形キャッシュがあれば優先して使用)
     if is_deformed and "_taremin_cloth_rest_positions" in obj:
         raw_rest = obj["_taremin_cloth_rest_positions"]
-        if len(raw_rest) == n_verts * 3 * 4:
-            rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3)).copy()
+        if len(raw_rest) == n_mesh_verts * 3 * 4:
+            cloth_rest_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_mesh_verts, 3)).copy()
             if hasattr(obj, "matrix_world"):
                 try:
                     mat = np.array(obj.matrix_world, dtype=np.float32)
                     if mat.ndim == 2 and mat.shape == (4, 4):
-                        rest_pos_2d = (rest_pos_2d @ mat[:3, :3].T) + mat[:3, 3]
+                        cloth_rest_2d = (cloth_rest_2d @ mat[:3, :3].T) + mat[:3, 3]
                 except (ValueError, TypeError, AttributeError):
                     pass
+
+            if cloth_data.curve_parts:
+                rest_blocks = [cloth_rest_2d]
+                string_parts = getattr(settings, "string_parts", None) or []
+                enabled_sp = [sp for sp in string_parts if getattr(sp, "enabled", True) and getattr(sp, "curve_object", None)]
+                for idx, c_part in enumerate(cloth_data.curve_parts):
+                    c_obj = enabled_sp[idx].curve_object if idx < len(enabled_sp) else None
+                    c_rest_world = None
+                    if c_obj is not None and "_taremin_cloth_rest_positions" in c_obj:
+                        raw_c = c_obj["_taremin_cloth_rest_positions"]
+                        if len(raw_c) == c_part.vertex_count * 3 * 4:
+                            c_rest_local = np.frombuffer(raw_c, dtype=np.float32).reshape((c_part.vertex_count, 3)).copy()
+                            if hasattr(c_obj, "matrix_world"):
+                                try:
+                                    c_mat = np.array(c_obj.matrix_world, dtype=np.float32).reshape((4, 4))
+                                    c_rest_world = (c_rest_local @ c_mat[:3, :3].T) + c_mat[:3, 3]
+                                except Exception:
+                                    c_rest_world = c_rest_local
+                            else:
+                                c_rest_world = c_rest_local
+                    if c_rest_world is None:
+                        v_s = c_part.vertex_offset
+                        v_e = v_s + c_part.vertex_count
+                        c_rest_world = pos_2d[v_s:v_e].copy()
+                    rest_blocks.append(c_rest_world.astype(np.float32))
+                rest_pos_2d = np.vstack(rest_blocks)
+            else:
+                rest_pos_2d = cloth_rest_2d
 
     return {
         "cached": False,
@@ -135,6 +164,8 @@ def begin_simulator_init(obj):
         "sim_init_pos": rest_pos_2d if rest_pos_2d is not None else pos_2d,
         "waypoint_seams": cloth_data.waypoint_seams,
         "seam_cluster_map": cloth_data.seam_cluster_map,
+        "thicknesses": cloth_data.thicknesses,
+        "curve_parts": cloth_data.curve_parts,
     }
 
 
@@ -151,6 +182,7 @@ def create_simulator_from_state(obj, state):
         inv_masses=state["inv_masses"],
         sewing_springs=state["sew_2d"],
         layer_ids=state.get("layer_ids"),
+        thicknesses=state.get("thicknesses"),
         layer_id=settings.layer_id,
         thickness=settings.thickness,
         stiffness=settings.tension_stiffness,
@@ -201,6 +233,13 @@ def finalize_simulator_init(obj, sim, state, *, scene=None):
     char_len = max(0.001, min(min_edge_len, thickness * 2.0))
     _mesh_char_len_cache[obj.name] = char_len
 
+    if state.get("seam_cluster_map"):
+        set_seam_cluster_map(obj.name, state["seam_cluster_map"])
+
+    if state.get("curve_parts"):
+        from .cache import set_curve_parts_runtime
+        set_curve_parts_runtime(obj.name, state["curve_parts"])
+
     cache_rest_positions(obj)
     sync_colliders(sim, sc, cloth_obj=obj)
     sync_cloth_parameters(sim, obj, scene=sc)
@@ -213,9 +252,6 @@ def finalize_simulator_init(obj, sim, state, *, scene=None):
             merge_dist=max(0.01, float(thickness) * 2.0),
             pass_dist=max(0.015, float(thickness) * 3.0),
         )
-
-    if state.get("seam_cluster_map"):
-        set_seam_cluster_map(obj.name, state["seam_cluster_map"])
 
     _simulators[obj.name] = (sim, coords)
     n_faces = len(faces_2d) if faces_2d is not None else 0
@@ -380,7 +416,11 @@ def _has_collider_armature_moved(col_o) -> bool:
 
 
 def _apply_coords_to_mesh(obj, coords):
-    """計算済み座標配列をBlenderメッシュ頂点に適用する（単位行列時はゼロコピー直書き）。"""
+    """計算済み座標配列をBlenderメッシュ頂点および紐Curveに適用する（単位行列時はゼロコピー直書き）。"""
+    n_mesh_verts = len(obj.data.vertices)
+    total_verts = len(coords) // 3
+    mesh_coords = coords[:n_mesh_verts * 3]
+
     pos_local = None
     if hasattr(obj, "matrix_world"):
         try:
@@ -398,16 +438,32 @@ def _apply_coords_to_mesh(obj, coords):
             if not is_identity:
                 inv_mat = np.array([list(row) for row in mat.inverted()], dtype=np.float32)
                 if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
-                    pos_world = coords.reshape(-1, 3)
+                    pos_world = mesh_coords.reshape(-1, 3)
                     pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
         except (ValueError, TypeError, AttributeError):
             pos_local = None
     if pos_local is not None:
         obj.data.vertices.foreach_set("co", pos_local.flatten())
     else:
-        obj.data.vertices.foreach_set("co", coords)
+        obj.data.vertices.foreach_set("co", mesh_coords)
     obj.data.update()
     obj["_taremin_cloth_is_deformed"] = True
+
+    # 紐（Curve）オブジェクトへの書き戻し
+    if total_verts > n_mesh_verts:
+        from .cache import get_curve_parts_runtime
+        from ..utils.curve_extract import apply_coords_to_curve
+
+        curve_parts = get_curve_parts_runtime(obj.name)
+        coords_2d = coords.reshape(-1, 3)
+        for c_part in curve_parts:
+            v_start = c_part.vertex_offset
+            v_end = v_start + c_part.vertex_count
+            if v_end <= total_verts:
+                c_world_coords = coords_2d[v_start:v_end]
+                curve_obj = bpy.data.objects.get(c_part.curve_obj_name)
+                if curve_obj:
+                    apply_coords_to_curve(curve_obj, c_world_coords)
 
 
 def step_cloth_object(

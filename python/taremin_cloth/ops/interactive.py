@@ -1922,9 +1922,12 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     vg = obj.vertex_groups.new(name="Pin")
                     settings.pin_vertex_group = "Pin"
 
+                n_mesh_verts = len(obj.data.vertices)
+                is_mesh_vert = (0 <= target_v_idx < n_mesh_verts)
+
                 # すでにピン留めされているか判定
                 is_pinned = (target_v_idx in self._pinned_verts)
-                if not is_pinned:
+                if not is_pinned and is_mesh_vert:
                     try:
                         w = vg.weight(target_v_idx)
                         if w > 0.0:
@@ -1934,21 +1937,23 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
                 if is_pinned:
                     # ピン解除 (Unpin)
-                    try:
-                        vg.remove([target_v_idx])
-                    except RuntimeError:
-                        pass
+                    if is_mesh_vert:
+                        try:
+                            vg.remove([target_v_idx])
+                        except RuntimeError:
+                            pass
                     self._pinned_verts.discard(target_v_idx)
                     # ドラッグ中でなければ物理ピンも解除
                     if _sg is None or _sg.grabbed_vert != target_v_idx:
                         sim.release_pin(target_v_idx)
                     self.report({'INFO'}, i18n.trans("Unpinned vertex #%d") % target_v_idx)
                 else:
-                    # ピン留め (Pin)
-                    vg.add([target_v_idx], 1.0, 'REPLACE')
+                    # ピン留め (Pin: 紐頂点の場合は頂点グループ操作をスキップしランタイムピンのみ設定)
+                    if is_mesh_vert:
+                        vg.add([target_v_idx], 1.0, 'REPLACE')
                     self._pinned_verts.add(target_v_idx)
-                    # 現在のローカル目標位置（または頂点現在位置）で固定
-                    _grab_cur = _sg.grab_current_target_local if _sg is not None else None
+                    # 現在のワールド目標位置（または頂点現在位置）で固定
+                    _grab_cur = getattr(_sg, "grab_current_target_world", None) if _sg is not None else None
                     if _sg is not None and _sg.grabbed_vert == target_v_idx and _grab_cur is not None:
                         t_pos = _grab_cur
                     else:

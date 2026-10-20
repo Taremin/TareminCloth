@@ -23,6 +23,8 @@ _effective_substeps_cache = {}
 _collider_prev_locs_cache = {}
 # 伸縮グループの直前スケールキャッシュ（急激な変化の平滑化用）
 _prev_elastic_scales = {}
+# 紐パーツの直前スケールキャッシュ（引き絞りの平滑化用）
+_prev_string_scales = {}
 # タイムライン再生用フレーム座標キャッシュ (obj_name -> { frame_num: np.ndarray })
 _timeline_frame_cache = {}
 # バッファリング開始フレーム番号 (obj_name -> start_frame)
@@ -37,6 +39,21 @@ _prev_attachment_pin_targets = {}
 _waypoint_managers = {}
 # 縫合クラスタマップキャッシュ (obj_name -> dict[int, list[int]])
 _seam_cluster_maps = {}
+# 紐パーツランタイムデータキャッシュ (obj_name -> list[CurvePartRuntimeData])
+_curve_parts_runtime_cache = {}
+
+
+def get_curve_parts_runtime(obj_name: str) -> list:
+    """オブジェクトの紐パーツランタイムデータ一覧を取得する"""
+    return _curve_parts_runtime_cache.get(obj_name, [])
+
+
+def set_curve_parts_runtime(obj_name: str, parts: list):
+    """オブジェクトの紐パーツランタイムデータをキャッシュに登録する"""
+    if parts:
+        _curve_parts_runtime_cache[obj_name] = parts
+    else:
+        _curve_parts_runtime_cache.pop(obj_name, None)
 
 
 def get_seam_cluster_map(obj_name: str) -> dict[int, list[int]]:
@@ -109,9 +126,45 @@ def cache_rest_positions(obj, *, force=False):
         obj["_taremin_cloth_rest_signature"] = list(sig)
         obj["_taremin_cloth_is_deformed"] = False
 
+        settings = getattr(obj, "taremin_cloth", None)
+        string_parts = getattr(settings, "string_parts", None) if settings else None
+        if string_parts:
+            from ..utils.curve_extract import extract_curve_polyline
+            for sp in string_parts:
+                curve_obj = getattr(sp, "curve_object", None)
+                if curve_obj:
+                    c_local, _, _ = extract_curve_polyline(curve_obj, apply_world_matrix=False)
+                    if len(c_local) > 0:
+                        if "_taremin_cloth_rest_positions" in curve_obj:
+                            del curve_obj["_taremin_cloth_rest_positions"]
+                        curve_obj["_taremin_cloth_rest_positions"] = c_local.astype(np.float32).tobytes()
+
         logger.info(f"[Cache] Cached rest positions for '{obj.name}' ({n_verts} verts, sig={sig})")
     else:
         logger.debug(f"[Cache] Rest positions update skipped for '{obj.name}'")
+
+
+def _restore_curve_parts_rest_positions(obj, *, clear=False):
+    """布オブジェクトに関連付けられた紐（Curve）オブジェクトの制御点座標を初期状態に復元する"""
+    settings = getattr(obj, "taremin_cloth", None)
+    string_parts = getattr(settings, "string_parts", None) if settings else None
+    if not string_parts:
+        return
+
+    from ..utils.curve_extract import apply_coords_to_curve
+    for sp in string_parts:
+        curve_obj = getattr(sp, "curve_object", None)
+        if not curve_obj:
+            continue
+        if "_taremin_cloth_rest_positions" in curve_obj:
+            try:
+                raw_c_rest = curve_obj["_taremin_cloth_rest_positions"]
+                c_local = np.frombuffer(raw_c_rest, dtype=np.float32).reshape((-1, 3))
+                apply_coords_to_curve(curve_obj, c_local, is_world_coords=False)
+            except Exception as e:
+                logger.warning(f"[Reset] Failed to restore curve rest positions for '{curve_obj.name}': {e}")
+        if clear and "_taremin_cloth_rest_positions" in curve_obj:
+            del curve_obj["_taremin_cloth_rest_positions"]
 
 
 def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
@@ -126,6 +179,7 @@ def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
     restore_fn = getattr(topology, "restore_pre_subdivision_mesh", None)
     if restore_fn and restore_fn(obj):
         logger.info(f"[Reset] Successfully restored topology & coordinates from pre-subdivision backup for '{obj.name}'")
+        _restore_curve_parts_rest_positions(obj, clear=False)
         cache_rest_positions(obj, force=True)
         if clear:
             clear_backup_fn = getattr(topology, "clear_pre_subdivision_backup", None)
@@ -137,6 +191,7 @@ def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
                 del obj["_taremin_cloth_rest_signature"]
             if "_taremin_cloth_is_deformed" in obj:
                 del obj["_taremin_cloth_is_deformed"]
+            _restore_curve_parts_rest_positions(obj, clear=True)
         else:
             obj["_taremin_cloth_is_deformed"] = False
             obj.update_tag()
@@ -168,6 +223,8 @@ def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
             if not obj.get("_taremin_cloth_is_deformed", False):
                 cache_rest_positions(obj, force=True)
 
+    _restore_curve_parts_rest_positions(obj, clear=clear)
+
     if clear:
         clear_backup_fn = getattr(topology, "clear_pre_subdivision_backup", None)
         if clear_backup_fn:
@@ -187,7 +244,7 @@ def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
 def clear_simulator_for_object(obj_name, *, clear_timeline=True):
     """特定オブジェクトに対応するシミュレータおよび関連キャッシュを破棄する"""
     global _simulators, _prev_coords_cache, _mesh_char_len_cache
-    global _effective_substeps_cache, _prev_elastic_scales, _waypoint_managers, _seam_cluster_maps
+    global _effective_substeps_cache, _prev_elastic_scales, _prev_string_scales, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
     had_sim = obj_name in _simulators
     _simulators.pop(obj_name, None)
     _prev_coords_cache.pop(obj_name, None)
@@ -195,9 +252,11 @@ def clear_simulator_for_object(obj_name, *, clear_timeline=True):
     _effective_substeps_cache.pop(obj_name, None)
     _collider_prev_locs_cache.pop(obj_name, None)
     _prev_elastic_scales.pop(obj_name, None)
+    _prev_string_scales.pop(obj_name, None)
     _prev_attachment_pin_targets.pop(obj_name, None)
     _waypoint_managers.pop(obj_name, None)
     _seam_cluster_maps.pop(obj_name, None)
+    _curve_parts_runtime_cache.pop(obj_name, None)
     purge_applied_signature(obj_name)
     from .params import clear_wrinkle_signature_cache
     clear_wrinkle_signature_cache(obj_name)
@@ -218,8 +277,8 @@ def clear_simulators():
     from .runner import restore_fast_playback
     global _simulators, _prev_coords_cache
     global _mesh_char_len_cache, _effective_substeps_cache, _collider_prev_locs_cache
-    global _prev_elastic_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
-    global _attachment_pin_indices_cache, _prev_attachment_pin_targets, _waypoint_managers, _seam_cluster_maps
+    global _prev_elastic_scales, _prev_string_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
+    global _attachment_pin_indices_cache, _prev_attachment_pin_targets, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
     restore_fast_playback()
     clear_collider_cache()
     purge_applied_signature(None)
@@ -232,12 +291,14 @@ def clear_simulators():
     _effective_substeps_cache.clear()
     _collider_prev_locs_cache.clear()
     _prev_elastic_scales.clear()
+    _prev_string_scales.clear()
     _timeline_frame_cache.clear()
     _buffered_start_frames.clear()
     _cloth_param_signatures.clear()
     _attachment_pin_indices_cache.clear()
     _prev_attachment_pin_targets.clear()
     _waypoint_managers.clear()
+    _curve_parts_runtime_cache.clear()
     _seam_cluster_maps.clear()
     logger.debug(f"[Simulator] Cleared all {count} simulators and caches")
 
@@ -255,6 +316,23 @@ def get_cloth_params_signature(obj):
             for g in settings.elastic_groups
         )
 
+    string_tuples = ()
+    if hasattr(settings, "string_parts"):
+        string_tuples = tuple(
+            (
+                bool(getattr(sp, "enabled", True)),
+                getattr(sp.curve_object, "name", "") if getattr(sp, "curve_object", None) else "",
+                int(getattr(sp, "tail_vert_count_left", 8)),
+                int(getattr(sp, "tail_vert_count_right", 8)),
+                int(getattr(sp, "eyelet_stride", 3)),
+                round(float(getattr(sp, "linear_density", 0.015)), 5),
+                round(float(getattr(sp, "radius", 0.003)), 5),
+                str(getattr(sp, "guide_vert_indices_str", "")),
+                str(getattr(sp, "seam_bridge_pairs_str", "")),
+            )
+            for sp in settings.string_parts
+        )
+
     pin_obj_name = settings.pin_target_object.name if getattr(settings, "pin_target_object", None) else ""
     # 前半: トポロジー・再構築キー（SimConfigに含まれないBlender側構成キー）
     # 後半: Live物理キー（engine.simconfig の Single Source of Truth に完全委譲）
@@ -268,6 +346,7 @@ def get_cloth_params_signature(obj):
         str(getattr(settings, "self_collision_purpose", "STANDARD")),
         int(getattr(settings, "substeps", 20)),
         elastic_tuples,
+        string_tuples,
         sim_config_signature(collect_sim_config(settings)),
     )
 

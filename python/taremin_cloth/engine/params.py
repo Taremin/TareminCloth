@@ -8,6 +8,7 @@ import bpy
 import numpy as np
 from .cache import (
     _prev_elastic_scales,
+    _prev_string_scales,
     _attachment_pin_indices_cache,
     _prev_attachment_pin_targets,
 )
@@ -44,6 +45,9 @@ def sync_cloth_parameters(sim, obj, *, scene=None):
 
     # 6. 伸縮グループ (Elastic Bands / Edge Scaling)
     sync_elastic_groups(sim, obj)
+
+    # 6.5. 紐パーツ (Drawstring / Strap Edge Scaling & Cinch Transfer)
+    sync_string_parts(sim, obj)
 
     # 7. ドレープガイド (Wrinkle Field / Drape Guide 2D-SDF Texture)
     sync_wrinkle_field(sim, obj)
@@ -356,6 +360,7 @@ def sync_elastic_groups(sim, obj):
         if obj.name in _prev_elastic_scales:
             sim.reset_edge_rest_lengths()
             del _prev_elastic_scales[obj.name]
+            _prev_string_scales.pop(obj.name, None)
         return
 
     indices = list(edge_scale_map.keys())
@@ -383,6 +388,111 @@ def sync_elastic_groups(sim, obj):
     if has_change or is_first_sync:
         sim.set_edge_rest_length_scales(
             np.array(indices, dtype=np.uint32),
+            np.array(current_scales, dtype=np.float32),
+        )
+        prev_map["_is_synced"] = True
+
+
+def sync_string_parts(sim, obj):
+    """紐（Curve）パーツの引き絞りスライダーと弧長保存自然長トランスファーを同期する"""
+    settings = getattr(obj, "taremin_cloth", None)
+    if not settings or not hasattr(sim, "set_edge_rest_length_scales"):
+        return
+
+    from .cache import get_curve_parts_runtime
+    curve_parts = get_curve_parts_runtime(obj.name)
+    if not curve_parts:
+        return
+
+    string_parts = getattr(settings, "string_parts", None)
+    if not string_parts:
+        return
+
+    edge_indices = []
+    target_scales = []
+
+    # 縫合優先モードがアクティブかどうかの確認
+    is_sewing_priority = False
+    if hasattr(sim, "is_sewing_priority_active"):
+        try:
+            is_sewing_priority = sim.is_sewing_priority_active()
+        except Exception:
+            is_sewing_priority = False
+
+    enabled_parts = [sp for sp in string_parts if getattr(sp, "enabled", True) and getattr(sp, "curve_object", None)]
+    for idx, sp in enumerate(enabled_parts):
+        if idx >= len(curve_parts):
+            break
+        c_part = curve_parts[idx]
+
+        pull = float(getattr(sp, "pull_length", 0.0) or 0.0)
+        off_l = float(getattr(sp, "pull_offset_left", 0.0) or 0.0)
+        off_r = float(getattr(sp, "pull_offset_right", 0.0) or 0.0)
+
+        init_c_len = max(1e-4, c_part.initial_channel_len)
+        init_l_len = max(1e-4, c_part.initial_left_len)
+        init_r_len = max(1e-4, c_part.initial_right_len)
+
+        # 1. 左右の引き込み量とトンネル区間の縮小（最大90%＝片側45%まで短縮可能、弧長を厳密に保存）
+        if is_sewing_priority:
+            pull_l = 0.0
+            pull_r = 0.0
+        else:
+            max_half_pull = init_c_len * 0.45
+            pull_l = float(np.clip(pull * 0.5 + off_l, 0.0, max_half_pull))
+            pull_r = float(np.clip(pull * 0.5 + off_r, 0.0, max_half_pull))
+
+        cinch_len = pull_l + pull_r
+        channel_scale = max(0.1, (init_c_len - cinch_len) / init_c_len)
+
+        # 2. 縮んだ長さを左右のテール（垂れ下がり）へ転送（総弧長 L_total = L_c + L_l + L_r を保存）
+        target_l_len = max(1e-4, init_l_len + pull_l)
+        target_r_len = max(1e-4, init_r_len + pull_r)
+
+        left_scale = target_l_len / init_l_len
+        right_scale = target_r_len / init_r_len
+
+        for e_idx in c_part.channel_edge_indices:
+            edge_indices.append(e_idx)
+            target_scales.append(channel_scale)
+
+        for e_idx in c_part.left_tail_edge_indices:
+            edge_indices.append(e_idx)
+            target_scales.append(left_scale)
+
+        for e_idx in c_part.right_tail_edge_indices:
+            edge_indices.append(e_idx)
+            target_scales.append(right_scale)
+
+        # 3. 縫合ギャップ跨ぎエッジが通常エッジとして残っている場合の互換処理
+        for e_idx in c_part.seam_bridge_edge_indices:
+            edge_indices.append(e_idx)
+            target_scales.append(0.001)
+
+    if not edge_indices:
+        return
+
+    obj_name = obj.name
+    prev_map = _prev_string_scales.get(obj_name, {})
+    current_scales = []
+    has_change = False
+
+    for idx, target_s in zip(edge_indices, target_scales):
+        prev_s = prev_map.get(idx, 1.0)
+        # スライダー操作に滑らかに追従
+        curr_s = prev_s + (target_s - prev_s) * 0.25
+        if abs(curr_s - target_s) < 1e-4:
+            curr_s = target_s
+        if abs(curr_s - prev_s) > 1e-5 or idx not in prev_map:
+            has_change = True
+        current_scales.append(curr_s)
+        prev_map[idx] = curr_s
+
+    is_first_sync = not prev_map.get("_is_synced", False)
+    _prev_string_scales[obj_name] = prev_map
+    if has_change or is_first_sync:
+        sim.set_edge_rest_length_scales(
+            np.array(edge_indices, dtype=np.uint32),
             np.array(current_scales, dtype=np.float32),
         )
         prev_map["_is_synced"] = True

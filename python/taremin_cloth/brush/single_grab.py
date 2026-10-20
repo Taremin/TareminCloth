@@ -22,6 +22,12 @@ def _copy_vec(v):
         return v
 
 
+def _vec_len(v) -> float:
+    if hasattr(v, "length"):
+        return float(v.length)
+    return float((v.x ** 2 + v.y ** 2 + v.z ** 2) ** 0.5)
+
+
 class SingleGrabTool(BaseBrushTool):
     """1頂点を掴んでビュー平面上でドラッグする"""
 
@@ -58,6 +64,7 @@ class SingleGrabTool(BaseBrushTool):
         direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse_pos)
 
         best_idx = None
+        hit_world_dist = float('inf')
 
         # 1. 視線レイキャストによる最前面ポリゴンの交差判定
         if origin and direction:
@@ -68,6 +75,8 @@ class SingleGrabTool(BaseBrushTool):
 
             hit, hit_loc, hit_normal, face_idx = obj.ray_cast(ray_origin_local, ray_dir_local)
             if hit and face_idx is not None and 0 <= face_idx < len(obj.data.polygons):
+                hit_world = matrix_world @ hit_loc
+                hit_world_dist = _vec_len(hit_world - origin)
                 polygon = obj.data.polygons[face_idx]
                 min_dist_sq = float('inf')
                 # ヒットしたポリゴンの構成頂点から交点に最も近い頂点を選択
@@ -77,6 +86,25 @@ class SingleGrabTool(BaseBrushTool):
                     if dist_sq < min_dist_sq:
                         min_dist_sq = dist_sq
                         best_idx = v_idx
+
+        # 1b. 紐（Curve）頂点が手前またはマウス直下(30px以内)にある場合は紐頂点を優先選択
+        n_mesh_verts = len(obj.data.vertices)
+        if origin and n_mesh_verts > 0 and len(pos_2d) > n_mesh_verts:
+            best_curve_dist_sq = 900.0  # 30px 以内
+            best_curve_idx = None
+            for i in range(n_mesh_verts, len(pos_2d)):
+                world_p = mathutils.Vector(pos_2d[i])
+                screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_p)
+                if screen_co:
+                    dist_sq = (screen_co.x - mouse_pos[0]) ** 2 + (screen_co.y - mouse_pos[1]) ** 2
+                    if dist_sq < best_curve_dist_sq:
+                        cam_dist = _vec_len(world_p - origin)
+                        # 布ポリゴンにヒットしていない、または布ヒット位置より手前（許容誤差3cm含む）なら優先
+                        if cam_dist <= hit_world_dist + 0.03:
+                            best_curve_dist_sq = dist_sq
+                            best_curve_idx = i
+            if best_curve_idx is not None:
+                best_idx = best_curve_idx
 
         # 2. 面に直接ヒットしなかった場合のフォールバック（画面最近傍探索）
         if best_idx is None:

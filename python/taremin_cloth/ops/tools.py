@@ -10,6 +10,7 @@ from ..engine.cache import (
     cache_rest_positions,
     clear_simulator_for_object,
 )
+from ..properties import IntProperty, FloatProperty
 from ..utils import topology
 from .. import i18n
 
@@ -485,4 +486,215 @@ class TAREMIN_CLOTH_OT_clear_face_layers(bpy.types.Operator):
             mesh.update()
 
         self.report({'INFO'}, "Face レイヤー指定をクリアしました (オブジェクト共通 Layer ID を使用します)")
+        return {'FINISHED'}
+
+
+
+class TAREMIN_CLOTH_OT_add_string_part(bpy.types.Operator):
+    """選択された辺から紐（Curve）オブジェクトを自動生成し、布の紐パーツとして登録する"""
+    bl_idname = "taremin_cloth.add_string_part"
+    bl_label = "Generate Drawstring from Edges"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    tail_vert_count: IntProperty(
+        name="Tail Vertices",
+        description="Number of vertices to extend outward on both ends for hanging tails",
+        default=8,
+        min=0,
+        max=64,
+    )
+
+    string_radius: FloatProperty(
+        name="String Radius",
+        description="Collision radius and bevel depth of the curve (m)",
+        default=0.003,
+        min=0.0005,
+        max=0.05,
+        unit='LENGTH',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+
+    def execute(self, context):
+        import bmesh
+        from ..utils.curve_extract import build_ordered_path_across_seams
+        from ..utils.mesh_extract import extract_cloth_mesh_data
+        from ..engine.cache import get_seam_cluster_map
+
+        obj = context.active_object
+        settings = getattr(obj, "taremin_cloth", None)
+        if not settings:
+            return {'CANCELLED'}
+
+        # 1. 選択エッジインデックスの収集
+        if obj.mode == 'EDIT':
+            obj.update_from_editmode()
+            bm = bmesh.from_edit_mesh(obj.data)
+            selected_edges = [e.index for e in bm.edges if e.select]
+        else:
+            selected_edges = [e.index for e in obj.data.edges if e.select]
+
+        all_edges = np.array([[e.vertices[0], e.vertices[1]] for e in obj.data.edges], dtype=np.uint32)
+
+        if not selected_edges:
+            self.report({'WARNING'}, "フード等の縁エッジを選択してください（Alt+クリックでループ選択等）")
+            return {'CANCELLED'}
+
+        # 2. 共通ユーティリティでメッシュデータおよび縫合クラスタマップを取得（シミュレーション実行前でも有効）
+        cloth_data = extract_cloth_mesh_data(obj, settings=settings, apply_world_matrix=False)
+        seam_cluster_map = cloth_data.seam_cluster_map or get_seam_cluster_map(obj.name)
+        ordered_verts, seam_bridges = build_ordered_path_across_seams(
+            all_edges,
+            selected_edges,
+            seam_cluster_map=seam_cluster_map,
+        )
+
+        if len(ordered_verts) < 2:
+            self.report({'WARNING'}, "有効な連続境界パスが見つかりませんでした")
+            return {'CANCELLED'}
+
+        # 3. 頂点座標の取得 (ローカル座標: extract_cloth_mesh_data の先頭 n_verts 分)
+        n_verts = len(obj.data.vertices)
+        coords_2d = cloth_data.positions[:n_verts]
+
+        channel_coords = [coords_2d[v].copy() for v in ordered_verts]
+
+        # 4. 両端に垂れ紐（テール）を延ばす
+        tail_count = self.tail_vert_count
+        left_tail_pts = []
+        right_tail_pts = []
+
+        if tail_count > 0:
+            # 左端の接線方向 (外向き)
+            dir_left = channel_coords[0] - channel_coords[1]
+            len_left = float(np.linalg.norm(dir_left))
+            if len_left > 1e-5:
+                dir_left /= len_left
+            else:
+                dir_left = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+
+            step_left = max(0.01, len_left)
+            for k in range(tail_count, 0, -1):
+                left_tail_pts.append(channel_coords[0] + dir_left * (k * step_left))
+
+            # 右端の接線方向 (外向き)
+            dir_right = channel_coords[-1] - channel_coords[-2]
+            len_right = float(np.linalg.norm(dir_right))
+            if len_right > 1e-5:
+                dir_right /= len_right
+            else:
+                dir_right = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+
+            step_right = max(0.01, len_right)
+            for k in range(1, tail_count + 1):
+                right_tail_pts.append(channel_coords[-1] + dir_right * (k * step_right))
+
+        all_curve_points = left_tail_pts + channel_coords + right_tail_pts
+        total_curve_pts = len(all_curve_points)
+
+        # 5. Blender Curve オブジェクトの新規生成
+        curve_data = bpy.data.curves.new(name=f"{obj.name}_Drawstring", type='CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.bevel_depth = self.string_radius
+        curve_data.bevel_resolution = 2
+
+        spline = curve_data.splines.new('POLY')
+        spline.points.add(total_curve_pts - 1)
+
+        raw_points_4d = np.ones(total_curve_pts * 4, dtype=np.float32)
+        for i, pt in enumerate(all_curve_points):
+            raw_points_4d[i * 4:(i * 4) + 3] = pt
+        spline.points.foreach_set("co", raw_points_4d)
+
+        curve_obj = bpy.data.objects.new(name=f"{obj.name}_Drawstring", object_data=curve_data)
+        # 布オブジェクトと同一のワールド行列を設定
+        if hasattr(obj, "matrix_world"):
+            curve_obj.matrix_world = obj.matrix_world.copy()
+
+        # シーンコレクションへリンク
+        col = obj.users_collection[0] if obj.users_collection else context.scene.collection
+        col.objects.link(curve_obj)
+
+        # 6. 布オブジェクトの設定へ登録
+        part = settings.string_parts.add()
+        part.name = f"String {len(settings.string_parts)}"
+        part.curve_object = curve_obj
+        part.set_guide_vert_indices(ordered_verts)
+        part.set_seam_bridge_pairs(seam_bridges)
+        part.tail_vert_count_left = tail_count
+        part.tail_vert_count_right = tail_count
+        part.radius = self.string_radius
+        settings.active_string_part_index = len(settings.string_parts) - 1
+
+        # 分割型紙を跨ぐ場合または縫合が有効な場合は、縫合優先モードを自動でONにする
+        if seam_bridges or getattr(settings, "enable_sewing", False):
+            settings.enable_sewing_priority = True
+
+        self.report({'INFO'}, f"紐パーツ '{part.name}' を作成しました (頂点数: {total_curve_pts}, ガイド頂点: {len(ordered_verts)})")
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_remove_string_part(bpy.types.Operator):
+    """アクティブな紐パーツを削除する"""
+    bl_idname = "taremin_cloth.remove_string_part"
+    bl_label = "Remove String Part"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.type == 'MESH' and len(getattr(obj.taremin_cloth, "string_parts", [])) > 0
+
+    def execute(self, context):
+        settings = context.active_object.taremin_cloth
+        idx = settings.active_string_part_index
+        if 0 <= idx < len(settings.string_parts):
+            name = settings.string_parts[idx].name
+            settings.string_parts.remove(idx)
+            settings.active_string_part_index = max(0, idx - 1)
+            self.report({'INFO'}, f"紐パーツ '{name}' を削除しました")
+            return {'FINISHED'}
+        return {'CANCELLED'}
+
+
+class TAREMIN_CLOTH_OT_select_string_guide_verts(bpy.types.Operator):
+    """登録されたガイド頂点列を選択する"""
+    bl_idname = "taremin_cloth.select_string_guide_verts"
+    bl_label = "Select Guide Vertices"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and obj.type == 'MESH' and len(getattr(obj.taremin_cloth, "string_parts", [])) > 0
+
+    def execute(self, context):
+        import bmesh
+        obj = context.active_object
+        settings = obj.taremin_cloth
+        idx = settings.active_string_part_index
+        if idx < 0 or idx >= len(settings.string_parts):
+            return {'CANCELLED'}
+
+        part = settings.string_parts[idx]
+        guide_verts = set(part.get_guide_vert_indices())
+        if not guide_verts:
+            self.report({'WARNING'}, "ガイド頂点が登録されていません")
+            return {'CANCELLED'}
+
+        if obj.mode != 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        bm = bmesh.from_edit_mesh(obj.data)
+        for v in bm.verts:
+            if v.index in guide_verts:
+                v.select = True
+        bmesh.update_edit_mesh(obj.data)
+
+        self.report({'INFO'}, f"{len(guide_verts)} 個のガイド頂点を選択しました")
         return {'FINISHED'}
