@@ -299,8 +299,8 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     });
 
-    // 動的ピンバッファ (範囲グラブ等の多頂点ピンに備えて余裕を持たせる。8192×32B = 256KB)
-    let max_pins = 8192;
+    // 動的ピンバッファ (メッシュ全頂点の一時固定や範囲グラブ等に備えて、全頂点数または最低8192頂点分を確保)
+    let max_pins = (mesh.vertices.len() as usize).max(8192);
     let pin_buffer_size = (max_pins * std::mem::size_of::<GpuPinConstraint>()) as u64;
     let pin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Pin Buffer"),

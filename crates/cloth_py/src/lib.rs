@@ -2213,6 +2213,11 @@ impl ClothSimulator {
         self.simulator.release_pin(vertex_idx);
     }
 
+    /// 複数の動的ピンを一括解除する (単一upload_pinsで確定)。
+    fn release_pins_batch(&mut self, indices: Vec<u32>) {
+        self.simulator.release_pins_batch(&indices);
+    }
+
     /// すべての動的ピンを解除する
     fn clear_pins(&mut self) {
         self.simulator.clear_dynamic_pins();

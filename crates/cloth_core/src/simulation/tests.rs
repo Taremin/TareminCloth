@@ -1028,5 +1028,60 @@ mod tests {
         let s_disabled = sim.compute_effective_substeps(0.016, 20);
         assert_eq!(s_disabled, 4, "無効時は歪み超過による引き上げが発生しないべき (got {})", s_disabled);
     }
+
+    #[test]
+    fn test_large_pin_buffer_resize_and_batch_release() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 10,000 頂点のメッシュを作成 (初期確保が 10,000 以上になる)
+        let num_verts = 10000;
+        let positions = vec![[0.0, 0.0, 0.0]; num_verts];
+        let edges = vec![[0, 1]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None,
+            None, None, 0, 0.01, 1000.0, 10.0, 1000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+
+        // 初期バッファ容量は 10,000 以上
+        assert!(sim.pin_buffer_capacity >= 10000);
+
+        // 9,000 個のピンを一括設定 (オーバーランせず正常終了)
+        let pin_indices: Vec<u32> = (0..9000).collect();
+        let pin_targets: Vec<[f32; 3]> = vec![[1.0, 2.0, 3.0]; 9000];
+        let pin_weights: Vec<f32> = vec![1.0; 9000];
+        sim.set_pin_targets_batch(&pin_indices, &pin_targets, &pin_weights);
+        assert_eq!(sim.dynamic_pins.len(), 9000);
+
+        // 一括解除 (release_pins_batch)
+        sim.release_pins_batch(&pin_indices);
+        assert_eq!(sim.dynamic_pins.len(), 0);
+
+        // さらにバッファ容量を超えるピン設定による動的自動拡張を検証
+        let huge_count = (sim.pin_buffer_capacity + 1000) as u32;
+        for i in 0..huge_count {
+            sim.dynamic_pins.insert(
+                i,
+                crate::mesh::GpuPinConstraint {
+                    vertex_idx: 0,
+                    weight: 1.0,
+                    _pad: [0.0; 2],
+                    target_pos: [0.0, 0.0, 0.0],
+                    _pad2: 0.0,
+                },
+            );
+        }
+        let old_capacity = sim.pin_buffer_capacity;
+        sim.upload_pins();
+        // 容量が2のべき乗に拡張されていること
+        assert!(sim.pin_buffer_capacity > old_capacity);
+        assert!(sim.pin_buffer_capacity >= huge_count as usize);
+
+        sim.clear_dynamic_pins();
+        assert_eq!(sim.dynamic_pins.len(), 0);
+    }
 }
 

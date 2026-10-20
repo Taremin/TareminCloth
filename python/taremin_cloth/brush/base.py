@@ -69,27 +69,40 @@ class ActiveRegionManager:
 
         # 閾値より外側の頂点
         outer_indices = np.where(d2 > thresh2)[0]
-        exclude_set = set(exclude_pins) if exclude_pins else set()
+        if exclude_pins:
+            exclude_set = set(exclude_pins)
+            outer_indices = [int(idx) for idx in outer_indices if int(idx) not in exclude_set]
+        else:
+            outer_indices = [int(idx) for idx in outer_indices]
 
-        frozen = []
-        for v in outer_indices:
-            idx = int(v)
-            if idx not in exclude_set:
-                pos = coords_2d[idx]
-                sim.set_pin(idx, [float(pos[0]), float(pos[1]), float(pos[2])], 1.0)
-                frozen.append(idx)
-        self._temp_frozen_indices = frozen
+        if outer_indices:
+            targets = coords_2d[outer_indices]
+            weights = [1.0] * len(outer_indices)
+            if hasattr(sim, "set_pins_batch"):
+                sim.set_pins_batch(outer_indices, targets, weights)
+            else:
+                for idx, pos in zip(outer_indices, targets):
+                    sim.set_pin(idx, [float(pos[0]), float(pos[1]), float(pos[2])], 1.0)
+            self._temp_frozen_indices = outer_indices
+        else:
+            self._temp_frozen_indices = []
 
     def release_temp_pins(self, sim):
         """一時固定された全ピンを解放する"""
         if sim is None or not self._temp_frozen_indices:
             self._temp_frozen_indices = []
             return
-        for idx in self._temp_frozen_indices:
+        if hasattr(sim, "release_pins_batch"):
             try:
-                sim.release_pin(idx)
+                sim.release_pins_batch(self._temp_frozen_indices)
             except Exception:
                 pass
+        else:
+            for idx in self._temp_frozen_indices:
+                try:
+                    sim.release_pin(idx)
+                except Exception:
+                    pass
         self._temp_frozen_indices = []
 
 

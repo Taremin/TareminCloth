@@ -124,6 +124,7 @@ pub struct GpuClothSimulator {
     // 動的ピン用
     pub(crate) dynamic_pins: HashMap<u32, GpuPinConstraint>,
     pub(crate) pin_buffer: wgpu::Buffer,
+    pub(crate) pin_buffer_capacity: usize,
     pub(crate) pin_params_buffer: wgpu::Buffer,
     pub(crate) pin_bind_group: wgpu::BindGroup,
 
@@ -480,6 +481,7 @@ impl GpuClothSimulator {
             buffered_frame_count: 0,
             max_buffered_frames: res.max_buffered_frames,
             dynamic_pins: HashMap::new(),
+            pin_buffer_capacity: (res.pin_buffer.size() as usize) / std::mem::size_of::<GpuPinConstraint>(),
             pin_buffer: res.pin_buffer,
             pin_params_buffer: res.pin_params_buffer,
             pin_bind_group: res.pin_bind_group,
@@ -2548,6 +2550,24 @@ impl GpuClothSimulator {
         }
     }
 
+    /// 複数の動的ピンを一括解除する (GPU転送・upload_pinsは末尾で1回のみ実行)。
+    pub fn release_pins_batch(&mut self, indices: &[u32]) {
+        let mut removed_any = false;
+        for &vertex_idx in indices {
+            if self.dynamic_pins.remove(&vertex_idx).is_some() {
+                removed_any = true;
+                if (vertex_idx as usize) < self.original_inv_masses.len() {
+                    let orig_m = self.original_inv_masses[vertex_idx as usize];
+                    let offset = (vertex_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+                    self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&orig_m));
+                }
+            }
+        }
+        if removed_any {
+            self.upload_pins();
+        }
+    }
+
     /// すべての動的ピンを解除する
     pub fn clear_dynamic_pins(&mut self) {
         for &v_idx in self.dynamic_pins.keys() {
@@ -2589,20 +2609,61 @@ impl GpuClothSimulator {
         self.original_inv_masses.clone()
     }
 
-    pub(crate) fn upload_pins(&self) {
+    fn rebind_pins(&mut self) {
+        self.pin_bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TareminCloth Pin Bind Group (Rebound)"),
+            layout: &self.shared.pin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.pin_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.pin_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+    }
+
+    pub(crate) fn upload_pins(&mut self) {
         let pin_vec: Vec<GpuPinConstraint> = self.dynamic_pins.values().copied().collect();
         let num_pins = pin_vec.len() as u32;
 
-        if num_pins > 0 {
+        if num_pins as usize > self.pin_buffer_capacity {
+            let new_capacity = (num_pins as usize).next_power_of_two().max(8192);
+            let pin_buffer_size = (new_capacity * std::mem::size_of::<GpuPinConstraint>()) as u64;
+            self.pin_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TareminCloth Pin Buffer (Resized)"),
+                size: pin_buffer_size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.pin_buffer_capacity = new_capacity;
+            self.rebind_pins();
+        }
+
+        let write_count = (num_pins as usize).min(self.pin_buffer_capacity);
+        if write_count > 0 {
             self.context.queue.write_buffer(
                 &self.pin_buffer,
                 0,
-                bytemuck::cast_slice(&pin_vec),
+                bytemuck::cast_slice(&pin_vec[..write_count]),
             );
         }
 
         let pin_params = PinParams {
-            num_pins,
+            num_pins: write_count as u32,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,

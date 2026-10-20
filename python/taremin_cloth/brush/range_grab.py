@@ -214,7 +214,7 @@ class RangeGrabTool(BaseBrushTool):
             self.plane_normal = None
             self.initial_plane_hit = None
         self._prev_hit = _copy_vec(self.initial_plane_hit)
-        if brush_opt(ctx.brush, "use_active_region", True):
+        if brush_opt(ctx.brush, "use_active_region", False):
             scale = float(brush_opt(ctx.brush, "active_region_scale", 2.5))
             all_exclude = set(grab.keys())
             self.active_region.freeze_inactive_region(

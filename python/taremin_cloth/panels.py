@@ -1289,7 +1289,7 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
                 col.prop(brush, "strength", text=i18n.trans("Strength"))
                 col.prop(brush, "falloff_shape", text=i18n.trans("Falloff"))
                 col.prop(brush, "use_active_region", text=i18n.trans("Active-Region Sculpt"))
-                if getattr(brush, "use_active_region", True):
+                if getattr(brush, "use_active_region", False):
                     col.prop(brush, "active_region_scale", text=i18n.trans("Active Region Scale"))
         col.separator()
         col.operator("taremin_cloth.benchmark_fps", text=i18n.trans("Benchmark FPS (2 sec)"), icon='TIME')

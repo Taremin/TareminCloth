@@ -150,7 +150,7 @@ class TareminClothBrushSettings(PropertyGroup):
     use_active_region: BoolProperty(
         name="Active-Region Sculpt",
         description="Freeze vertices far outside brush radius to achieve high FPS during sculpting",
-        default=True,
+        default=False,
     )
     active_region_scale: FloatProperty(
         name="Active Region Scale",
