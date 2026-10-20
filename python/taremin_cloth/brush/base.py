@@ -9,6 +9,7 @@ import mathutils
 import numpy as np
 from bpy_extras import view3d_utils
 
+from ..utils.args_guard import allow_positional
 from ..utils import drawing
 from .math import (
     BRUSH_RADIUS_MIN,
@@ -34,6 +35,7 @@ class BrushContext:
         self.brush = getattr(settings, "brush", None)
 
 
+@allow_positional
 def brush_opt(brush, name, default):
     """ブラシ設定値の防御的取得 (未登録ブレンド対策)"""
     if brush is None:
@@ -51,7 +53,8 @@ class ActiveRegionManager:
     def is_active(self):
         return len(self._temp_frozen_indices) > 0
 
-    def freeze_inactive_region(self, sim, coords, center, radius, active_scale=2.5, exclude_pins=None):
+    @allow_positional
+    def freeze_inactive_region(self, sim, coords, center, radius, *, active_scale=2.5, exclude_pins=None):
         """centerからの距離が radius * active_scale を超える頂点を現在位置でピン固定する"""
         if sim is None or coords is None or len(coords) == 0:
             return
@@ -101,7 +104,7 @@ class BaseBrushTool:
         self.active_region = ActiveRegionManager()
         self.reset()
 
-    def hud_info(self, brush, radial=None):
+    def hud_info(self, brush, *, radial=None):
         """HUD Guidance用の構造化情報を返す（docs/hud.md:5）。
 
         戻り値: {"tool", "label_key", "radius", "strength",
@@ -139,7 +142,7 @@ class BaseBrushTool:
     def on_activate(self, ctx):
         pass
 
-    def on_deactivate(self, ctx, pinned_verts=None):
+    def on_deactivate(self, ctx, pinned_verts=None):  # audit: allow-positional
         pass
 
     def abort(self, ctx):
@@ -149,6 +152,7 @@ class BaseBrushTool:
         pass
 
 
+@allow_positional
 def resolve_brush_center(context, obj, coords, mouse_pos):
     """ブラシ中心 (ワールド) とレイ情報の解決。レイ外れ時は最近傍頂点にフォールバックする"""
     region = context.region
@@ -197,6 +201,7 @@ def resolve_brush_center(context, obj, coords, mouse_pos):
     }
 
 
+@allow_positional
 def update_brush_circle(context, obj, center, radius, mouse_pos):
     """ブラシカーソル円を更新する"""
     region = context.region
@@ -229,7 +234,7 @@ def init_brush_circle_at(ctx, radius):
     return False
 
 
-def nudge_brush_radius(obj, factor, mouse_pos):
+def nudge_brush_radius(obj, factor, *, mouse_pos):
     """ブラシ半径を段階変更し、表示円も同率で即時更新する"""
     settings = getattr(obj, "taremin_cloth", None)
     brush = getattr(settings, "brush", None) if settings else None
@@ -263,7 +268,7 @@ class RadialController:
     def active(self):
         return self.mode is not None
 
-    def enter(self, mode, start_x, brush):
+    def enter(self, mode, start_x, *, brush):
         if mode == 'STRENGTH':
             self.attr = 'strength'
             default, lo, hi = 0.8, BRUSH_STRENGTH_MIN, BRUSH_STRENGTH_MAX

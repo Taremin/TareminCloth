@@ -92,7 +92,7 @@ def _on_self_collision_purpose_updated(self, context):
         obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
         if obj:
             from .utils.self_collision_fit import fit_self_collision_for_object
-            fit_self_collision_for_object(obj, self, self.self_collision_purpose)
+            fit_self_collision_for_object(obj, settings=self, purpose=self.self_collision_purpose)
     except Exception:
         pass
 
@@ -104,7 +104,7 @@ def _on_enable_self_collision_updated(self, context):
             obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
             if obj:
                 from .utils.self_collision_fit import fit_self_collision_for_object
-                fit_self_collision_for_object(obj, self, self.self_collision_purpose)
+                fit_self_collision_for_object(obj, settings=self, purpose=self.self_collision_purpose)
     except Exception:
         pass
 

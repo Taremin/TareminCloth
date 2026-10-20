@@ -326,8 +326,8 @@ class TestStagedInitStateMachine(unittest.TestCase):
         op = self._make_op_self(_progress_active=True, _cursor_wait_set=True)
         ctx = _make_context()
         end = TAREMIN_CLOTH_OT_interactive._end_init_ui
-        end(op, ctx, True)
-        end(op, ctx, True)
+        end(op, ctx, success=True)
+        end(op, ctx, success=True)
         ctx.window_manager.progress_end.assert_called_once()
         ctx.window_manager.cursor_modal_restore.assert_called_once()
 

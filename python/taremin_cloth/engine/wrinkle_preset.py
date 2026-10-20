@@ -13,6 +13,7 @@ import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
+from ..utils.args_guard import allow_positional
 from .wrinkle_field import (
     WrinkleCurveItem,
     build_orthonormal_basis,
@@ -246,14 +247,17 @@ def get_builtin_presets() -> Dict[str, WrinklePreset]:
 # 幾何変換: ワールド座標 ⇔ プリセット正規化座標
 # =========================================================================
 
+@allow_positional
 def normalize_curves_to_preset(
     curves: Sequence[WrinkleCurveItem],
-    curve_types: Sequence[str],
-    bone_head: Sequence[float],
-    bone_tail: Sequence[float],
-    bone_radius: float,
+    curve_types: Optional[Sequence[str]] = None,
+    bone_head: Sequence[float] = (0.0, 0.0, 0.0),
+    bone_tail: Sequence[float] = (0.0, 0.0, 1.0),
+    bone_radius: float = 0.05,
+    *,
     normal: Optional[Sequence[float]] = None,
     name: str = "Custom_Preset",
+    preset_name: Optional[str] = None,
     category: str = "general",
     description: str = "",
 ) -> WrinklePreset:
@@ -277,6 +281,11 @@ def normalize_curves_to_preset(
         norm = norm - np.dot(norm, axis_norm) * axis_norm
         norm = norm / (np.linalg.norm(norm) + 1e-8)
         binorm = np.cross(axis_norm, norm)
+
+    if preset_name:
+        name = preset_name
+    if curve_types is None:
+        curve_types = ["crest"] * len(curves)
 
     preset_curves = []
     for idx, (item, c_type) in enumerate(zip(curves, curve_types)):
@@ -308,11 +317,13 @@ def normalize_curves_to_preset(
     )
 
 
+@allow_positional
 def instantiate_preset_on_bone(
     preset: WrinklePreset,
     bone_head: Sequence[float],
     bone_tail: Sequence[float],
     bone_radius: float,
+    *,
     normal: Optional[Sequence[float]] = None,
     scale_radius: float = 1.0,
 ) -> Tuple[List[WrinkleCurveItem], List[WrinkleCurveItem]]:
@@ -370,6 +381,7 @@ def instantiate_preset_on_bone(
 def instantiate_preset_on_chain(
     preset: WrinklePreset,
     chain: Any,
+    *,
     t_param: float = 0.5,
     scale_radius: float = 1.0,
     target_bone_len: Optional[float] = None,
@@ -433,7 +445,11 @@ def get_user_preset_files() -> List[str]:
         return []
 
 
-def save_preset_to_json(preset: WrinklePreset, filepath: Optional[str] = None) -> str:
+def save_preset_to_json(
+    preset: WrinklePreset,
+    *,
+    filepath: Optional[str] = None,
+) -> str:
     """プリセットをJSONファイルに保存し、保存先パスを返す"""
     if not filepath:
         safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in preset.name)

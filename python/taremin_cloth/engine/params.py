@@ -18,17 +18,18 @@ from .simconfig import (
     is_config_current,
     mark_config_applied,
 )
+from ..utils.args_guard import allow_positional
 from ..utils.logger import logger
 
 
-def sync_cloth_parameters(sim, obj, scene=None):
+def sync_cloth_parameters(sim, obj, *, scene=None):
     """シミュレーション実行中にNパネルのプロパティ変更やシーン重力をGPUへ同期する"""
     settings = getattr(obj, "taremin_cloth", None)
     if not settings:
         return
 
     # 設定収集 (単一経路) と差分スキップ
-    cfg = collect_sim_config(settings, scene)
+    cfg = collect_sim_config(settings, scene=scene)
     if scene is None:
         # 従来動作の維持: sceneなしでは重力に触れない
         cfg.pop("gravity", None)
@@ -68,6 +69,7 @@ def clear_wrinkle_signature_cache(obj_name=None):
 # 等価判定は wrinkles_descs_match（許容値付き、量子化境界の非決定性なし）。
 
 
+@allow_positional
 def _wrinkle_pose_params(bone_head, axis_n, normal, binormal, bone_rad, stiffness,
                          valley_window=0.015, crest_window=0.020):
     return dict(
@@ -386,6 +388,7 @@ def sync_elastic_groups(sim, obj):
         prev_map["_is_synced"] = True
 
 
+@allow_positional
 def _extract_vertex_pin_weight(v, vg, vg_idx) -> float:
     """MeshVertex から指定頂点グループのウェイトを取得する (v.groups / vg.weight 両対応)"""
     if vg_idx is not None and hasattr(v, "groups") and v.groups is not None:
@@ -475,7 +478,7 @@ def compute_attachment_pin_targets(obj):
     return v_indices, positions, weights, mat_sig
 
 
-def sync_attachment_pins(sim, obj, scene):
+def sync_attachment_pins(sim, obj, *, scene=None):
     """In-process シミュレータへアタッチメントピン座標を同期する（差分スキップ付き）"""
     res = compute_attachment_pin_targets(obj)
     if res is None:

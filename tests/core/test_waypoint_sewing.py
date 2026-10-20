@@ -105,7 +105,7 @@ class TestWaypointSewing(unittest.TestCase):
         e = np.array(edges, dtype=np.uint32)
 
         # トポロジー抽出のテスト
-        simple, waypoints = extract_sewing_topology(loose_edges, f, pos)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=f, positions=pos)
         self.assertEqual(len(simple), 0)
         self.assertEqual(len(waypoints), len(xs))
 

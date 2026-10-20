@@ -11,6 +11,7 @@ import numpy as np
 from gpu_extras.batch import batch_for_shader
 
 from .. import i18n
+from .args_guard import allow_positional
 
 _draw_handler = None
 _draw_handler_2d = None
@@ -48,6 +49,7 @@ def clear_overlay_caches():
     clear_sewing_cache()
 
 
+@allow_positional
 def set_interactive_active(active: bool):
     """インタラクティブモードの実行状態を設定する"""
     global _interactive_active
@@ -62,6 +64,7 @@ def is_interactive_active() -> bool:
     return _interactive_active
 
 
+@allow_positional
 def _setup_font(font_size: int, font_id: int = 0):
     """blf.size のバージョン差を吸収してフォントサイズを設定する（docs/hud.md:4）"""
     import blf
@@ -74,6 +77,7 @@ def _setup_font(font_size: int, font_id: int = 0):
             pass
 
 
+@allow_positional
 def _measure_text(text: str, font_id: int = 0) -> float:
     """blf.dimensions の例外を吸収してテキスト幅を返す。失敗時は0.0。"""
     import blf
@@ -86,6 +90,7 @@ def _measure_text(text: str, font_id: int = 0) -> float:
     return 0.0
 
 
+@allow_positional
 def set_interactive_fps_info(
     fps: float,
     frame_ms: float,
@@ -125,6 +130,7 @@ def get_interactive_fps_info():
     return _interactive_fps_info
 
 
+@allow_positional
 def set_bake_overlay_info(current_frame: int, end_frame: int, pct: int, sewing_text=None):
     """ベイク中のオーバーレイ描画情報を更新する"""
     global _bake_overlay_info
@@ -156,6 +162,7 @@ _init_overlay_info = None  # {"message": str, "current": int, "total": int, "can
 _toast_overlay_info = None  # {"message": str, "pct": int, "bar_color": tuple, "dismiss_cb": object}
 
 
+@allow_positional
 def set_init_overlay_info(message: str, current: int, total: int, can_cancel: bool = True):
     """インタラクティブ起動準備中または同期処理中のオーバーレイ描画情報を更新する"""
     global _init_overlay_info
@@ -183,6 +190,7 @@ def is_init_overlay_active() -> bool:
     return _init_overlay_info is not None
 
 
+@allow_positional
 def set_toast_overlay_info(
     message: str,
     duration: float = 1.8,
@@ -243,6 +251,7 @@ def is_toast_overlay_active() -> bool:
     return _toast_overlay_info is not None
 
 
+@allow_positional
 def set_active_grabbed_vertex(obj_name: str, vert_idx: int, target_world_pos=None):
     """現在ドラッグ中の頂点情報を設定する"""
     global _active_grabbed_info
@@ -259,6 +268,7 @@ def clear_active_grabbed_vertex():
     _active_grabbed_info = None
 
 
+@allow_positional
 def set_brush_info(x: float, y: float, radius_px: float):
     """範囲グラブブラシカーソル円の表示情報を更新する"""
     global _brush_info
@@ -280,6 +290,7 @@ def get_brush_info():
     return _brush_info
 
 
+@allow_positional
 def apply_view_depth_bias(coords, region_3d=None):
     """
     深度テスト有効時のZ-fighting（埋没・本来の辺や面と色が混ざって薄くなる現象）を解消するため、
@@ -397,6 +408,7 @@ def get_smooth_color_line_shader():
     return None
 
 
+@allow_positional
 def get_edge_initial_length(obj, v0_idx, v1_idx):
     """オブジェクトの初期座標からエッジの初期自然長を算出する"""
     if "_taremin_cloth_rest_positions" in obj:
@@ -830,6 +842,7 @@ def draw_callback_3d():
             gpu.state.depth_mask_set(orig_depth_mask)
 
 
+@allow_positional
 def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int, bar_color=None):
     """画面下部中央に進捗バー付きバッジを描画する（ベイク/起動準備/トーストの共通ヘルパー）"""
     pct = max(0, min(100, int(pct)))
@@ -911,6 +924,7 @@ def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int, bar_col
         pass
 
 
+@allow_positional
 def _draw_top_badge(region, shader_2d, margin_x: float, y_top: float, text: str,
                     text_color=(0.95, 0.95, 0.98, 1.0), font_size: int = 13, min_w: float = 200.0):
     """画面上部バッジ（背景＋1行テキスト）を描画する。テキスト幅に合わせて自動拡幅する。"""
@@ -967,6 +981,7 @@ def _draw_top_badge(region, shader_2d, margin_x: float, y_top: float, text: str,
         pass
 
 
+@allow_positional
 def _draw_bottom_badge_2row(region, shader_2d, line1: str, line2=None,
                             font_size: int = 12):
     """画面下部中央のガイダンスバッジ（最大2行）を描画する（docs/hud.md:4）。
@@ -1023,12 +1038,14 @@ def _draw_bottom_badge_2row(region, shader_2d, line1: str, line2=None,
         pass
 
 
+@allow_positional
 def draw_wrinkle_slide_hud(region, line1: str, line2: str = ""):
     """シワカーブのモーダルスライド操作用HUDバッジを描画する（docs/hud.md準拠）"""
     shader_2d = get_2d_uniform_color_shader()
     _draw_bottom_badge_2row(region, shader_2d, line1, line2 if line2 else None)
 
 
+@allow_positional
 def compute_octahedron_mesh(head, tail, radius=None):
     """
     ボーンのhead, tailから八面体（Octahedral）の三角形頂点リスト（TRIS: 24頂点）と
@@ -1080,6 +1097,7 @@ def compute_octahedron_mesh(head, tail, radius=None):
     return [tuple(x) for x in tris], [tuple(x) for x in lines]
 
 
+@allow_positional
 def compute_wrinkle_influence_mesh(
     origin: Sequence[float],
     axis: Sequence[float],
@@ -1130,6 +1148,7 @@ def compute_wrinkle_influence_mesh(
     if r_out <= r_in:
         return [], []
 
+    @allow_positional
     def _surf_point(theta: float, z: float, r: float):
         direction = math.cos(theta) * n_vec + math.sin(theta) * b_vec
         p = orig + ax * z + direction * r
@@ -1189,6 +1208,7 @@ def compute_wrinkle_influence_mesh(
     return tris, lines
 
 
+@allow_positional
 def build_wrinkle_influence_meshes(
     curves_data: Sequence[Tuple[str, Sequence[Sequence[float]], float, float]],
     origin: Sequence[float],
@@ -1266,6 +1286,7 @@ def build_wrinkle_influence_meshes(
     return out
 
 
+@allow_positional
 def _draw_bone_proxy_cylinder(b_head, axis_n, n_vec, bone_rad: float, bone_len: float):
     """骨半径代理の仮想円柱（先端〜末端）を薄い灰色で表示する。"""
     if bone_rad <= 1e-6 or bone_len <= 1e-6:
@@ -1278,6 +1299,7 @@ def _draw_bone_proxy_cylinder(b_head, axis_n, n_vec, bone_rad: float, bone_len: 
         draw_wrinkle_influence_meshes([("proxy", tris, lines)])
 
 
+@allow_positional
 def draw_wrinkle_influence_meshes(
     meshes_data: Sequence[tuple],
     alpha_mul: float = 1.0,
@@ -1354,6 +1376,7 @@ def draw_wrinkle_influence_meshes(
             pass
 
 
+@allow_positional
 def draw_wrinkle_armature_overlay(
     all_bones_data: list,
     active_bone_name: str = "",
@@ -1484,6 +1507,7 @@ def draw_wrinkle_armature_overlay(
         gpu.state.blend_set(orig_blend)
 
 
+@allow_positional
 def draw_wrinkle_bone_overlay(chain_bones_coords, active_bone_idx: int = 0):
     """
     シワスライドモーダル中のボーンチェーンを3D空間上に最前面で強調表示する（後方互換ラッパー）。

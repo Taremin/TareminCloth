@@ -60,6 +60,7 @@ class MeshValidationReport(NamedTuple):
 def detect_degenerate_faces(
     positions: np.ndarray,
     faces: Optional[np.ndarray],
+    *,
     mesh=None,
     threshold: float = 1e-7,
 ) -> DegenerateFaceReport:

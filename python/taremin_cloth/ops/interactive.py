@@ -29,7 +29,7 @@ from ..engine.runner import (
     _apply_coords_to_mesh,
 )
 from ..preferences import get_preferences
-from ..utils import drawing, topology, anim_driver
+from ..utils import drawing, topology, anim_driver, allow_positional
 from ..utils.logger import logger
 from ..utils.view3d import tag_redraw_view3d
 from ..engine.sewing_priority import sim_phase, phase_text
@@ -69,6 +69,7 @@ def get_interactive_cloth_object_name() -> str:
     return ""
 
 
+@allow_positional
 def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "jsonl.gz") -> str:
     """プレファレンスの設定値と現在のオブジェクト名・日時からデバッグ出力先ファイルパスを解決・生成する"""
     now = datetime.now()
@@ -174,6 +175,7 @@ _DEBUG_FILE_BONE_SDF_GZIP_RATIO = 0.55
 _DEBUG_FILE_BONE_POSE_BYTES_PER_BONE_FRAME = 140
 
 
+@allow_positional
 def estimate_debug_raw_bytes(frame_count, vertex_count, full_stride=1, bone_voxels=0, bone_count=0) -> int:
     """記録JSON全体の非圧縮サイズ概算 (バイト) を返す。
 
@@ -212,6 +214,7 @@ def estimate_debug_raw_bytes(frame_count, vertex_count, full_stride=1, bone_voxe
     return total
 
 
+@allow_positional
 def estimate_debug_file_bytes(frame_count, vertex_count, full_stride=1, bone_voxels=0, bone_count=0) -> int:
     """出力される .jsonl.gz ファイルサイズの概算 (バイト) を返す。
 
@@ -314,6 +317,7 @@ def _lookup_sim_coords(obj_name):
     return entry, None
 
 
+@allow_positional
 def _sim_vertex_count(sim, coords=None) -> int:
     """シミュレーターの頂点数を返す。取得不可時は 0。
 
@@ -371,6 +375,7 @@ def _deferred_invoke_debug_save_confirm():
     return None
 
 
+@allow_positional
 def request_debug_save_confirmation(context, obj_name, sim, frame_count, filepath, full_stride=1) -> str:
     """保存確認待ち情報を登録し、確認ダイアログ表示をスケジュールする。
 
@@ -866,6 +871,7 @@ def enter_isolated_view(context, cloth_obj):
     return isolated_areas, saved_selection, saved_active
 
 
+@allow_positional
 def exit_isolated_view(context, isolated_areas, saved_selection, saved_active):
     """ローカルビューから通常表示に復帰し、選択状態を復元する"""
     try:
@@ -924,6 +930,7 @@ def _is_viewport_window(context) -> bool:
         return True
 
 
+@allow_positional
 def _event_in_viewport_window(context, event=None) -> bool:
     """イベントがVIEW_3DのWINDOWリージョン上かを判定する。UIパネル上はFalse。
 
@@ -1107,7 +1114,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 brush = self._brush_settings_of(obj)
                 radial = getattr(self, "_radial", None)
                 tools = getattr(self, "_brush_tools", None) or None
-                hud = get_brush_hud_info(brush, radial, _tools=tools)
+                hud = get_brush_hud_info(brush, radial=radial, _tools=tools)
                 label = i18n.trans(hud.get("label_key", "Grab"))
                 # line1: ツール固有キー（共通キーはdrawing側で描画）
                 if hud.get("tool") == 'GRAB':
@@ -1172,12 +1179,14 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         settings = getattr(obj, "taremin_cloth", None)
         return getattr(settings, "brush", None) if settings else None
 
+    @allow_positional
     def _brush_ctx(self, context, obj, sim, coords, event, mouse_pos):
         return BrushContext(self, context, obj, sim, coords, event, mouse_pos)
 
     def _active_brush_tool(self, brush):
         return self._brush_tools.get(active_tool_name(brush))
 
+    @allow_positional
     def _start_interactive_wrinkle_slide(self, context, cloth_obj, event) -> bool:
         """インタラクティブモード中にシワカーブのスライドを開始する（実験的機能）"""
         try:
@@ -1368,7 +1377,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             pass
         self._update_init_progress(context)
 
-    def _end_init_ui(self, context, success: bool):
+    def _end_init_ui(self, context, *, success: bool):
         """準備終了・中断時のプログレス・カーソル・HUD後片付けを行う"""
         if self._progress_active:
             try:
@@ -1838,9 +1847,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 if brush is not None and self._radial is not None:
                     mouse_pos = (event.mouse_region_x, event.mouse_region_y)
                     if bool(getattr(event, 'shift', False)):
-                        self._radial.enter('STRENGTH', event.mouse_region_x, brush)
+                        self._radial.enter('STRENGTH', event.mouse_region_x, brush=brush)
                     else:
-                        self._radial.enter('RADIUS', event.mouse_region_x, brush)
+                        self._radial.enter('RADIUS', event.mouse_region_x, brush=brush)
                     # 円未表示の場合はこの場で初期化する
                     if drawing.get_brush_info() is None:
                         ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
@@ -1861,7 +1870,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             if not _event_in_viewport_window(context, event):
                 return {'PASS_THROUGH'}
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-            nudge_brush_radius(obj, 0.9, mouse_pos)
+            nudge_brush_radius(obj, 0.9, mouse_pos=mouse_pos)
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
@@ -1870,7 +1879,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             if not _event_in_viewport_window(context, event):
                 return {'PASS_THROUGH'}
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-            nudge_brush_radius(obj, 1.1, mouse_pos)
+            nudge_brush_radius(obj, 1.1, mouse_pos=mouse_pos)
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}

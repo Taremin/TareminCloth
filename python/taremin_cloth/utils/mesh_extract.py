@@ -72,7 +72,7 @@ def extract_mesh_vertices_and_triangles(mesh) -> Tuple[np.ndarray, Optional[np.n
     return positions, faces
 
 
-def get_pin_inv_masses(obj, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
+def get_pin_inv_masses(obj, *, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
     """
     布オブジェクトのピン留め頂点グループからインバースマス配列を計算する。
     ウェイト 1.0 -> 質量無限（inv_mass = 0.0, 完全固定）
@@ -106,6 +106,7 @@ def get_pin_inv_masses(obj, settings=None, n_verts: Optional[int] = None) -> np.
 def compute_areal_inv_masses(
     positions: np.ndarray,
     faces: Optional[np.ndarray],
+    *,
     pin_weights: Optional[np.ndarray] = None,
     areal_density: float = 0.15,
     min_mass: float = 1e-9,
@@ -163,7 +164,7 @@ def compute_areal_inv_masses(
     return inv_masses
 
 
-def get_pin_weights(obj, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
+def get_pin_weights(obj, *, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
     """ピン頂点グループのウェイト配列 (0.0〜1.0) を取得する。"""
     if n_verts is None:
         n_verts = len(obj.data.vertices)
@@ -187,6 +188,7 @@ def get_pin_weights(obj, settings=None, n_verts: Optional[int] = None) -> np.nda
 
 def extract_cloth_mesh_data(
     obj,
+    *,
     settings=None,
     enable_sewing: Optional[bool] = None,
     apply_world_matrix: bool = True,
@@ -269,7 +271,7 @@ def extract_cloth_mesh_data(
     edges_2d = np.array(normal_edges, dtype=np.uint32) if normal_edges else np.empty((0, 2), dtype=np.uint32)
 
     # 縫合エッジ（Loose Edges）から直線エッジとウェイポイント縫合パスを分類
-    simple_sewing, waypoint_seams = extract_sewing_topology(sewing_edges, faces_2d, pos_2d)
+    simple_sewing, waypoint_seams = extract_sewing_topology(sewing_edges, faces_2d=faces_2d, positions=pos_2d)
 
     # 直線縫合と中継点パスの各セグメントを展開・統合
     all_sewing = list(simple_sewing)
@@ -283,14 +285,14 @@ def extract_cloth_mesh_data(
     sew_2d = np.array(all_sewing, dtype=np.uint32) if all_sewing else None
 
 
-    inv_masses = get_pin_inv_masses(obj, settings, n_verts)
+    inv_masses = get_pin_inv_masses(obj, settings=settings, n_verts=n_verts)
     try:
         density = float(getattr(settings, "areal_density", 0.0) or 0.0)
     except (TypeError, ValueError):
         density = 0.0
     if density > 0.0 and faces_2d is not None and len(faces_2d) > 0:
-        pin_weights = get_pin_weights(obj, settings, n_verts)
-        inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights, density)
+        pin_weights = get_pin_weights(obj, settings=settings, n_verts=n_verts)
+        inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights=pin_weights, areal_density=density)
 
     # 中継点頂点（面を持たないガイディング頂点）は静止ガイドとして inv_mass = 0.0 に固定
     if waypoint_seams:
@@ -299,7 +301,7 @@ def extract_cloth_mesh_data(
                 if wp_idx < len(inv_masses):
                     inv_masses[wp_idx] = 0.0
 
-    layer_ids = get_cloth_layer_ids(obj, settings, n_verts, faces_2d)
+    layer_ids = get_cloth_layer_ids(obj, settings=settings, n_verts=n_verts, faces_2d=faces_2d)
     seam_cluster_map = build_seam_cluster_map(simple_sewing, waypoint_seams) if (simple_sewing or waypoint_seams) else None
 
     return ClothMeshData(
@@ -352,6 +354,7 @@ def build_seam_cluster_map(
 
 def extract_sewing_topology(
     loose_edges: list,
+    *,
     faces_2d: Optional[np.ndarray],
     positions: np.ndarray,
 ) -> tuple[list[tuple[int, int]], list[WaypointSeam]]:
@@ -465,6 +468,7 @@ def extract_sewing_topology(
 
 def get_cloth_layer_ids(
     obj,
+    *,
     settings=None,
     n_verts: Optional[int] = None,
     faces_2d: Optional[np.ndarray] = None,

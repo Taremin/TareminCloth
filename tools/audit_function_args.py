@@ -302,11 +302,14 @@ def main():
     parser.add_argument("--check", action="store_true", help="違反が1件以上ある場合に終了コード1で終了（CI向け）")
     parser.add_argument("--json", action="store_true", help="結果をJSON形式で出力")
     parser.add_argument("--verbose", action="store_true", help="詳細情報を出力")
+    parser.add_argument("--rule", choices=["boolean_trap", "optional_positional", "too_many_positional"], help="指定したルールのみをフィルタ表示")
 
     args = parser.parse_args()
     target_path = Path(args.path).resolve()
 
     violations, total_funcs, total_skipped = audit_path(target_path)
+    if args.rule:
+        violations = [v for v in violations if v["rule"] == args.rule]
 
     if args.json:
         result = {

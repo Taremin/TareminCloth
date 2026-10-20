@@ -57,7 +57,7 @@ def _get_mesh_topology_signature(mesh):
     return (len(mesh.vertices), len(mesh.edges), len(mesh.polygons))
 
 
-def cache_rest_positions(obj, force=False):
+def cache_rest_positions(obj, *, force=False):
     """メッシュのレストポーズ（初期頂点座標）をキャッシュする
     - 初回
     - トポロジー（頂点数、辺数、面数）が変更された場合 (Dirty)
@@ -114,7 +114,7 @@ def cache_rest_positions(obj, force=False):
         logger.debug(f"[Cache] Rest positions update skipped for '{obj.name}'")
 
 
-def restore_rest_positions(obj, clear=False, clear_timeline=True):
+def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
     """メッシュの頂点座標・トポロジーをレストポーズ（シミュレーション前の初期状態）に安全に復元する"""
     if not obj or obj.type != 'MESH':
         return
@@ -184,7 +184,7 @@ def restore_rest_positions(obj, clear=False, clear_timeline=True):
         obj.update_tag()
 
 
-def clear_simulator_for_object(obj_name, clear_timeline=True):
+def clear_simulator_for_object(obj_name, *, clear_timeline=True):
     """特定オブジェクトに対応するシミュレータおよび関連キャッシュを破棄する"""
     global _simulators, _prev_coords_cache, _mesh_char_len_cache
     global _effective_substeps_cache, _prev_elastic_scales, _waypoint_managers, _seam_cluster_maps

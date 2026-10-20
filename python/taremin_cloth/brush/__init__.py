@@ -39,7 +39,7 @@ def active_tool_name(brush_settings):
     return mode if mode in TOOLS else 'GRAB'
 
 
-def get_brush_hud_info(brush_settings, radial=None, _tools=None):
+def get_brush_hud_info(brush_settings, *, radial=None, _tools=None):
     """HUD表示用の構造化ブラシ情報を返す（docs/hud.md:5）。
 
     新規ブラシは TOOLS 登録のみで対応可能。呼出側での分岐直書き禁止。
@@ -55,7 +55,7 @@ def get_brush_hud_info(brush_settings, radial=None, _tools=None):
             return {"tool": 'GRAB', "label_key": 'Grab', "radius": None,
                     "strength": None, "falloff": None,
                     "show_falloff": False, "adjusting": None}
-        return tool.hud_info(brush_settings, radial)
+        return tool.hud_info(brush_settings, radial=radial)
     except Exception:
         return {"tool": 'GRAB', "label_key": 'Grab', "radius": None,
                 "strength": None, "falloff": None,

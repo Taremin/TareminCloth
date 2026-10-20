@@ -426,7 +426,7 @@ class TAREMIN_CLOTH_OT_auto_fit_self_collision(bpy.types.Operator):
         from ..utils.self_collision_fit import fit_self_collision_for_object
         obj = context.active_object
         settings = obj.taremin_cloth
-        params = fit_self_collision_for_object(obj, settings)
+        params = fit_self_collision_for_object(obj, settings=settings)
         if params:
             thick_mm = params['thickness'] * 1000.0
             purpose_items = dict(settings.rna_type.properties['self_collision_purpose'].enum_items)
@@ -875,7 +875,7 @@ class TAREMIN_CLOTH_OT_instant_drape(bpy.types.Operator):
                     self._sim = sim
                 else:
                     sync_colliders(self._sim, context.scene, cloth_obj=self._obj)
-                    sync_cloth_parameters(self._sim, self._obj, context.scene)
+                    sync_cloth_parameters(self._sim, self._obj, scene=context.scene)
                 self._advance(context, 3)
 
             elif stage == 3:
@@ -959,7 +959,7 @@ class TAREMIN_CLOTH_OT_instant_drape(bpy.types.Operator):
                 finalize_simulator_init(obj, sim, init_partial, scene=context.scene)
             else:
                 sync_colliders(sim, context.scene, cloth_obj=obj)
-                sync_cloth_parameters(sim, obj, context.scene)
+                sync_cloth_parameters(sim, obj, scene=context.scene)
 
             if sim is None:
                 self.report({'ERROR'}, "Failed to initialize cloth simulator")

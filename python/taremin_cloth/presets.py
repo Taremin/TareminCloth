@@ -281,7 +281,7 @@ def extract_properties_for_category(obj: bpy.types.Object, category: str) -> dic
     return data
 
 
-def apply_preset_values(obj: bpy.types.Object, category: str, values: dict):
+def apply_preset_values(obj: bpy.types.Object, category: str, *, values: dict):
     """オブジェクトにプロパティ値を適用"""
     info = CATEGORY_MAP.get(category)
     if not info:
@@ -330,7 +330,7 @@ class TAREMIN_CLOTH_OT_apply_preset(Operator):
             self.report({'ERROR'}, f"プリセット '{self.preset_name}' が見つかりません")
             return {'CANCELLED'}
 
-        apply_preset_values(obj, self.category, all_presets[self.preset_name])
+        apply_preset_values(obj, self.category, values=all_presets[self.preset_name])
 
         # 直近の適用プリセット名を記録
         if self.category == 'fabric' and hasattr(obj, "taremin_cloth"):

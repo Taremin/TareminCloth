@@ -81,7 +81,7 @@ class WaypointManager:
         """現在までにピン解除された全中継点頂点インデックスの集合"""
         return set(self._all_released)
 
-    def update(self, coords: np.ndarray, sim=None) -> list[int]:
+    def update(self, coords: np.ndarray, *, sim=None) -> list[int]:
         """
         現在の頂点座標から通過・合流状態を判定し、ピン解除すべき中継点頂点を更新する。
 

@@ -7,6 +7,7 @@ Blenderシーン内のコライダーオブジェクト（Sphere, Plane, Capsule
 import math
 import bpy
 import numpy as np
+from ..utils.args_guard import allow_positional
 from ..utils.logger import logger
 from .sdf_baker import (
     get_or_bake_bone_sdf_for_object,
@@ -89,6 +90,7 @@ def clear_collider_cache():
         pass
 
 
+@allow_positional
 def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_indices=None):
     """
     メッシュおよびコライダー設定からワールド座標系三角形配列、属性ブロック、および辞書リストを抽出する。
@@ -157,7 +159,7 @@ def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_in
     return tri_coords, attr_block, dict_list
 
 
-def extract_all_scene_colliders(scene=None, depsgraph=None):
+def extract_all_scene_colliders(*, scene=None, depsgraph=None):
     """
     シーン内のすべてのコライダー（球、平面、カプセル、一般メッシュ、および BONE_SDF の関節メッシュ）を抽出する。
     Blender In-process (sync_colliders) および Taremin Cloth GUI (gui_client) の両方で使用され、完全な挙動一致を保証する。
@@ -320,7 +322,7 @@ def extract_all_scene_colliders(scene=None, depsgraph=None):
     }
 
 
-def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
+def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
     """
     Blender シーン内のすべてのコライダーオブジェクトの最新位置・姿勢を
     GpuClothSimulator コアに同期する。

@@ -18,7 +18,7 @@ from .math import (
 )
 
 
-def _pinned_set_of(ctx, fallback=None):
+def _pinned_set_of(ctx, *, fallback=None):
     """コンテキストからピン留め集合を防御的に取得する"""
     if fallback is not None:
         try:
@@ -41,8 +41,8 @@ class SmoothTool(BaseBrushTool):
     name = 'SMOOTH'
     label_key = 'Smooth'
 
-    def hud_info(self, brush, radial=None):
-        base = super().hud_info(brush, radial)
+    def hud_info(self, brush, *, radial=None):
+        base = super().hud_info(brush, radial=radial)
         try:
             base["radius"] = float(brush_opt(brush, "radius", 0.05)) if brush is not None else None
         except Exception:

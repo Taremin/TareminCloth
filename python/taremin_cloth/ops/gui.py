@@ -232,11 +232,11 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
             # コライダー・ボーン・伸縮グループ・物理パラメータの定期同期 (約0.5秒に1回)
             self._sync_count = getattr(self, "_sync_count", 0) + 1
             if self._sync_count % 8 == 0:
-                client.send_update_colliders(context.scene)
+                client.send_update_colliders(scene=context.scene)
                 client.send_update_bone_transforms(context.scene)
                 client.send_update_elastic_scales(obj)
                 client.send_update_pins(obj, scene=context.scene)
-                client.send_update_params_from_settings(obj, context.scene)
+                client.send_update_params_from_settings(obj, scene=context.scene)
 
             return {'PASS_THROUGH'}
 

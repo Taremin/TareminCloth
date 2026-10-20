@@ -27,6 +27,16 @@ except Exception:
     _RUST_AUDIT = False
 
 
+try:
+    from .utils import allow_positional
+except ImportError:
+    try:
+        from taremin_cloth.utils import allow_positional
+    except ImportError:
+        def allow_positional(fn):
+            return fn
+
+
 def build_two_hop_sets(edges: np.ndarray, num_vertices: int) -> List[Set[int]]:
     """各頂点の2ホップ以内近傍集合を構築する (自身を含む)。"""
     adj: List[Set[int]] = [set() for _ in range(num_vertices)]
@@ -44,6 +54,7 @@ def build_two_hop_sets(edges: np.ndarray, num_vertices: int) -> List[Set[int]]:
     return near
 
 
+@allow_positional
 def per_vertex_mean_rest_length(
     edges: np.ndarray,
     rest_lengths: Optional[np.ndarray],
@@ -153,6 +164,7 @@ def point_triangle_distances(p: np.ndarray, tris: np.ndarray) -> np.ndarray:
     return out
 
 
+@allow_positional
 def segment_segment_distances(
     p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.ndarray
 ) -> np.ndarray:
@@ -192,6 +204,7 @@ def segment_segment_distances(
     return np.linalg.norm(c1 - c2, axis=1)
 
 
+@allow_positional
 def _grid_candidates_points(
     points: np.ndarray, boxes_min: np.ndarray, boxes_max: np.ndarray, cell: float
 ) -> List[List[int]]:
@@ -212,6 +225,7 @@ def _grid_candidates_points(
     return out
 
 
+@allow_positional
 def audit_frame(
     prev_pos: np.ndarray,
     prev_vel: Optional[np.ndarray],
@@ -439,6 +453,7 @@ def audit_frame(
     }
 
 
+@allow_positional
 def attribute_penetration(n_log: int, n_on: int, n_off: int) -> Tuple[str, str]:
     """ログ・キャッシュON再現・キャッシュOFF再現の交差数から起因を判定する。
 
@@ -467,6 +482,7 @@ def attribute_penetration(n_log: int, n_on: int, n_off: int) -> Tuple[str, str]:
             "penetration only in cache-OFF replay (requires investigation)")
 
 
+@allow_positional
 def collect_ground_truth_details(
     prev_pos: np.ndarray,
     prev_vel: Optional[np.ndarray],
@@ -603,6 +619,7 @@ def _closest_pt_single(p: np.ndarray, tri: np.ndarray) -> np.ndarray:
     return a + ab * v + ac * w
 
 
+@allow_positional
 def _seg_params_single(p1: np.ndarray, q1: np.ndarray,
                        p2: np.ndarray, q2: np.ndarray) -> Tuple[float, float]:
     """2線分の最近傍パラメータ (s, t)。"""
@@ -627,6 +644,7 @@ def _seg_params_single(p1: np.ndarray, q1: np.ndarray,
     return s, t
 
 
+@allow_positional
 def _score(pair: Dict[str, Any], mode: str, thickness: float) -> float:
     # GPU収集時に見えるのは開始時距離のみ (d_start基準が忠実な上限推定)
     if mode == "distance":
@@ -638,11 +656,13 @@ def _score(pair: Dict[str, Any], mode: str, thickness: float) -> float:
     raise ValueError(f"unknown score mode: {mode}")
 
 
+@allow_positional
 def simulate_quota_policy(
     vt_details: List[Dict[str, Any]],
     ee_details: List[Dict[str, Any]],
     num_vertices: int,
     thickness: float,
+    *,
     budgets: Tuple[int, ...] = (8192, 32768, 65536),
     per_vertex_k: Tuple[int, ...] = (1, 2, 4, 8),
     deep_factor: float = 1.0,

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
+from ..utils import allow_positional
 from ..utils.logger import logger
 from ..utils.mesh_extract import extract_cloth_mesh_data
 
@@ -27,7 +28,7 @@ def get_gui_client() -> 'ClothGuiClient':
     return _global_client
 
 
-def extract_scene_colliders(scene=None, depsgraph=None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def extract_scene_colliders(*, scene=None, depsgraph=None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     シーン内の全コライダー（アナリティックコライダー、メッシュコライダー、および BONE_SDF の関節メッシュ）を抽出する。
     collider.extract_all_scene_colliders を直接利用して Blender In-process との 100% のパリティを保証する。
@@ -43,7 +44,7 @@ def extract_scene_colliders(scene=None, depsgraph=None) -> Tuple[List[Dict[str, 
     except Exception:
         pass
 
-    col_data = extract_all_scene_colliders(scene, depsgraph)
+    col_data = extract_all_scene_colliders(scene=scene, depsgraph=depsgraph)
     return col_data["analytic_colliders"], col_data["mesh_triangles_data"]
 
 
@@ -373,7 +374,7 @@ class ClothGuiClient:
             logger.error(f"[GuiClient] JSON parse error: {e}")
             return None
 
-    def send_init_scene(self, obj, scene=None) -> bool:
+    def send_init_scene(self, obj, *, scene=None) -> bool:
         """Blenderオブジェクトからメッシュデータ、全物理パラメータ、全コライダー、SDFを抽出してGUIサーバーに初期化送信する"""
         try:
             import bpy
@@ -383,7 +384,7 @@ class ClothGuiClient:
             scene = None
 
         settings = getattr(obj, "taremin_cloth", None)
-        cloth_data = extract_cloth_mesh_data(obj, settings)
+        cloth_data = extract_cloth_mesh_data(obj, settings=settings)
         positions = cloth_data.positions.tolist()
         faces = cloth_data.faces.tolist() if cloth_data.faces is not None else []
         normal_edges = cloth_data.normal_edges.tolist()
@@ -392,14 +393,14 @@ class ClothGuiClient:
 
         # 全物理パラメータ収集 (単一経路: engine.simconfig)
         from .simconfig import collect_sim_config
-        cfg = collect_sim_config(settings, scene) if settings else {}
+        cfg = collect_sim_config(settings, scene=scene) if settings else {}
 
         # 重力ベクトル & 重力倍率 (コレクタ算出値を使用)
         gravity = [float(v) for v in cfg.get("gravity", [0.0, 0.0, -9.81])]
         scale = float(cfg.get("gravity_scale", 1.0))
 
         # コライダー抽出
-        colliders, mesh_triangles = extract_scene_colliders(scene)
+        colliders, mesh_triangles = extract_scene_colliders(scene=scene)
 
         # ボーンSDF & デバッグ可視化データ抽出
         bone_sdf_dict, joint_tris, voxels, extra_lines = extract_bone_sdf_data(scene)
@@ -476,7 +477,7 @@ class ClothGuiClient:
 
     def send_update_colliders(self, scene=None) -> bool:
         """シーン内のコライダー位置・姿勢の最新状態をGUIサーバーに更新送信する"""
-        colliders, mesh_triangles = extract_scene_colliders(scene)
+        colliders, mesh_triangles = extract_scene_colliders(scene=scene)
         return self.send_command("UpdateColliders", {
             "colliders": colliders,
             "mesh_triangles": mesh_triangles,
@@ -526,6 +527,7 @@ class ClothGuiClient:
             return True
         return self.send_command("UpdateBoneTransforms", {"transforms": transforms})
 
+    @allow_positional
     def send_update_elastic_scales(self, edge_indices_or_obj, scales=None) -> bool:
         """伸縮グループの最新スケールを送信する（直接リストまたはBlender obj）"""
         if scales is not None:
@@ -539,7 +541,8 @@ class ClothGuiClient:
             return True
         return self.send_command("UpdateElasticScales", eb)
 
-    def send_update_pins(self, indices_or_obj, positions=None, weights=None, scene=None) -> bool:
+    @allow_positional
+    def send_update_pins(self, indices_or_obj, positions=None, weights=None, *, scene=None) -> bool:
         """アタッチメントピンの最新位置を送信する（直接リストまたはBlender obj）"""
         if positions is not None and weights is not None:
             return self.send_command("UpdatePins", {
@@ -577,14 +580,14 @@ class ClothGuiClient:
 
         return self.send_command("SetParams", params)
 
-    def send_update_params_from_settings(self, obj, scene=None) -> bool:
+    def send_update_params_from_settings(self, obj, *, scene=None) -> bool:
         """Blenderオブジェクトおよびシーンの現在の設定をGUIへ同期送信する (差分検知付き)"""
         settings = getattr(obj, "taremin_cloth", None)
         if not settings:
             return False
 
         from .simconfig import collect_sim_config
-        cfg = collect_sim_config(settings, scene)
+        cfg = collect_sim_config(settings, scene=scene)
 
         params = {
             "gravity": [float(v) for v in cfg["gravity"]],
@@ -732,7 +735,8 @@ class ClothGuiClient:
 
         return np.array(pos_list, dtype=np.float32).flatten()
 
-    def send_command(self, cmd_type: str, data: Optional[Dict[str, Any]] = None, timeout: float = 1.0) -> bool:
+    @allow_positional
+    def send_command(self, cmd_type: str, data: Optional[Dict[str, Any]] = None, *, timeout: float = 1.0) -> bool:
         packet: Dict[str, Any] = {"type": cmd_type}
         if data is not None:
             packet["data"] = data
@@ -750,5 +754,5 @@ class ClothGuiClient:
     def reset(self) -> bool:
         return self.send_command("Reset")
 
-    def step(self, dt: float = 1.0 / 60.0, substeps: int = 15, solver_iterations: int = 2, timeout: float = 5.0) -> bool:
+    def step(self, *, dt: float = 1.0 / 60.0, substeps: int = 15, solver_iterations: int = 2, timeout: float = 5.0) -> bool:
         return self.send_command("Step", {"dt": dt, "substeps": substeps, "solver_iterations": solver_iterations}, timeout=timeout)

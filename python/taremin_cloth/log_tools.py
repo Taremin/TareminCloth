@@ -257,7 +257,7 @@ if __name__ == "__main__":
     print(f"実行コマンド: python -m unittest {out_path}")
 
 
-def parse_frame_spec(spec: str, max_frame: Optional[int] = None) -> List[int]:
+def parse_frame_spec(spec: str, *, max_frame: Optional[int] = None) -> List[int]:
     """
     フレーム指定文字列をフレーム番号リストにパースします。
     例: "71", "0-100", "1,5,10-20", "all"

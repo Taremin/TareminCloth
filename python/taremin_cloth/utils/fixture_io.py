@@ -9,6 +9,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from .args_guard import allow_positional
+
 
 def load_obj(path: str):
     verts, faces = [], []
@@ -51,8 +53,10 @@ def load_scene_manifest(path: str) -> Dict[str, Any]:
     return out
 
 
+@allow_positional
 def audit_seams(positions: np.ndarray, faces: np.ndarray,
                 sewing_springs: np.ndarray,
+                *,
                 seam_groups: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     """縫合ペアの辺長整合を検査する.
 

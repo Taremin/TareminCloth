@@ -28,7 +28,7 @@ from .collider import sync_colliders
 from .params import sync_cloth_parameters, sync_attachment_pins
 from .simconfig import resolve_self_collision_algorithm
 from .profiling import format_profile_table
-from ..utils import anim_driver
+from ..utils import anim_driver, allow_positional
 from ..utils.logger import logger
 from ..utils.mesh_extract import extract_cloth_mesh_data
 
@@ -36,7 +36,7 @@ _fast_playback_saved_mods = {}
 _is_baking = False
 
 
-def apply_fast_playback(scene, force=False, include_sim_objs=False):
+def apply_fast_playback(scene, *, force: bool = False, include_sim_objs: bool = False):
     """シミュレーションに関係のないオブジェクトの重いモディファイアを一時無効化してDepsgraphを軽量化"""
     global _fast_playback_saved_mods
     if not force and not getattr(scene, "taremin_cloth_fast_playback", False):
@@ -94,7 +94,7 @@ def begin_simulator_init(obj):
         return {"cached": True}
 
     settings = obj.taremin_cloth
-    cloth_data = extract_cloth_mesh_data(obj, settings)
+    cloth_data = extract_cloth_mesh_data(obj, settings=settings)
     pos_2d = cloth_data.positions
     coords = pos_2d.flatten().copy()
     n_verts = len(pos_2d)
@@ -178,7 +178,8 @@ def create_simulator_from_state(obj, state):
     return sim
 
 
-def finalize_simulator_init(obj, sim, state, scene=None):
+@allow_positional
+def finalize_simulator_init(obj, sim, state, *, scene=None):
     """シミュレータ初期化の後半: 特性長・レスト・コライダー/SDF同期・パラメータ同期・登録を行う"""
     sc = scene if scene is not None else bpy.context.scene
     pos_2d = state["pos_2d"]
@@ -202,7 +203,7 @@ def finalize_simulator_init(obj, sim, state, scene=None):
 
     cache_rest_positions(obj)
     sync_colliders(sim, sc, cloth_obj=obj)
-    sync_cloth_parameters(sim, obj, sc)
+    sync_cloth_parameters(sim, obj, scene=sc)
 
     if state.get("waypoint_seams"):
         from .waypoint import WaypointManager
@@ -264,6 +265,7 @@ def get_seam_merge_threshold(obj) -> float:
     return 0.02
 
 
+@allow_positional
 def get_connected_seam_partners(
     obj_name: str,
     vert_idx: int,
@@ -290,7 +292,7 @@ def get_connected_seam_partners(
     return connected
 
 
-def _gravity_active(settings, scene=None) -> bool:
+def _gravity_active(settings, *, scene=None) -> bool:
     """重力荷重が有効か (適応サブステップ下限の判定用)。"""
     try:
         scale = abs(float(getattr(settings, "gravity", 1.0)))
@@ -303,6 +305,7 @@ def _gravity_active(settings, scene=None) -> bool:
     return True
 
 
+@allow_positional
 def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None):
     """布およびコライダーの運動速度とCFL条件に基づき、最適なサブステップ数を動的に算出する。
 
@@ -410,12 +413,13 @@ def _apply_coords_to_mesh(obj, coords):
 def step_cloth_object(
     obj,
     scene,
+    *,
     dt: float = 1.0 / 60.0,
     depsgraph=None,
     force_sync_colliders: bool = False,
     update_mesh: bool = True,
-    substeps: int = None,
-    solver_iterations: int = None,
+    substeps: Optional[int] = None,
+    solver_iterations: Optional[int] = None,
     skip_sync: bool = False,
 ):
     """単一の布オブジェクトに対し、コライダー同期・パラメータ同期・物理ステップ・メッシュ更新を実行する。
@@ -464,8 +468,8 @@ def step_cloth_object(
                 depsgraph = None
 
         sync_colliders(sim, scene, depsgraph=depsgraph, force=force_sync_colliders, cloth_obj=obj)
-        sync_cloth_parameters(sim, obj, scene)
-        sync_attachment_pins(sim, obj, scene)
+        sync_cloth_parameters(sim, obj, scene=scene)
+        sync_attachment_pins(sim, obj, scene=scene)
 
     # substeps未指定(None)時は、非適応ならsettings.substepsを使用し、適応サブステップ有効時はコア側に判定委譲(None)
     if substeps is not None:
@@ -583,7 +587,7 @@ def step_cloth_scene(
     return results
 
 
-def set_profiling_enabled_all(enable: bool = True) -> dict:
+def set_profiling_enabled_all(*, enable: bool = True) -> dict:
     """登録済み全シミュレータのGPU計測を切替える。{obj名: 可否} を返す。"""
     out = {}
     for name, (sim, _coords) in list(_simulators.items()):
@@ -630,7 +634,7 @@ def save_profile_traces(directory: str = "scratch") -> dict:
     return out
 
 
-def flush_async_simulation(obj, update_mesh: bool = True) -> bool:
+def flush_async_simulation(obj, *, update_mesh: bool = True) -> bool:
     """指定オブジェクトの未回収非同期シミュレーション結果を待機・回収してメッシュに反映する。"""
     if obj.name not in _simulators:
         return False
@@ -643,7 +647,7 @@ def flush_async_simulation(obj, update_mesh: bool = True) -> bool:
     return False
 
 
-def flush_all_async_simulations(update_mesh: bool = True) -> int:
+def flush_all_async_simulations(*, update_mesh: bool = True) -> int:
     """全登録シミュレータの未回収非同期シミュレーション結果をフラッシュする。回収数を返す。"""
     count = 0
     for name, (sim, coords) in list(_simulators.items()):
@@ -699,7 +703,7 @@ def cloth_frame_handler(scene):
                     restore_rest_positions(obj, clear_timeline=False)
 
 
-def bake_init_simulation(scene, start_frame=None, end_frame=None):
+def bake_init_simulation(scene, *, start_frame=None, end_frame=None):
     """ベイクの準備処理（初期化、シミュレータクリア、F1キャッシュ格納）を行い、コンテキスト辞書を返す"""
     if not scene:
         return None
@@ -835,7 +839,7 @@ def bake_finalize_simulation(bake_ctx):
     logger.info(f"[Bake] Completed simulation bake: {bake_ctx['baked_count']} frames cached.")
 
 
-def bake_cloth_simulation(scene, start_frame=None, end_frame=None, progress_callback=None, cancel_check=None):
+def bake_cloth_simulation(scene, *, start_frame=None, end_frame=None, progress_callback=None, cancel_check=None):
     """シーン内の全Clothシミュレーションを指定フレーム範囲で一括計算してキャッシュ（ベイク）する（同期実行）"""
     global _is_baking
     bake_ctx = bake_init_simulation(scene, start_frame=start_frame, end_frame=end_frame)

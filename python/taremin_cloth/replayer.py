@@ -14,6 +14,15 @@ try:
 except ImportError:
     from . import taremin_cloth_core
 
+try:
+    from .utils import allow_positional
+except ImportError:
+    try:
+        from taremin_cloth.utils import allow_positional
+    except ImportError:
+        def allow_positional(fn):
+            return fn
+
 
 def read_metadata(log_path: str) -> Dict[str, Any]:
     """ログファイル (.jsonl.gz) の1行目からメタデータを読み取ります。"""
@@ -88,6 +97,7 @@ def nearest_full_frame(log_path: str, target_frame_idx: int) -> Optional[int]:
     return best
 
 
+@allow_positional
 def config_at_frame(log_path: str, metadata: Dict[str, Any], target_frame_idx: int) -> Optional[Dict[str, Any]]:
     """指定フレーム時点の有効設定を返す (metadata.config + それ以前の最新param_deltas)。
 
@@ -565,6 +575,7 @@ class ClothReplayer:
         self,
         start_frame_idx: int,
         end_frame_idx: int,
+        *,
         compare: bool = True,
         force_enable_pair_cache: bool = False,
         force_pair_cache: Optional[bool] = None,
@@ -761,6 +772,7 @@ class ClothReplayer:
         self,
         start_frame_idx: int,
         end_frame_idx: int,
+        *,
         stop_on=None,
         stride: int = 1,
     ) -> Optional[Dict[str, Any]]:
@@ -898,6 +910,7 @@ class ClothReplayer:
 
 
 def build_stop_predicate(
+    *,
     disp_mm: Optional[float] = None,
     intersections: bool = False,
     faces=None,
@@ -957,6 +970,7 @@ def build_stop_predicate(
 
 def build_release_persist_predicate(
     base_pred=None,
+    *,
     persist: int = 1,
     require_release: bool = False,
 ):

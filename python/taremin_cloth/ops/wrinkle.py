@@ -13,6 +13,7 @@ import bpy
 from bpy.types import Operator
 import numpy as np
 
+from ..utils.args_guard import allow_positional
 from .. import i18n
 from ..properties import (
     BoolProperty,
@@ -90,7 +91,7 @@ def _get_preset_items(self, context):
     return items
 
 
-def _find_or_create_collection(context, name: str = COLLECTION_NAME) -> bpy.types.Collection:
+def _find_or_create_collection(context, *, name: str = COLLECTION_NAME) -> bpy.types.Collection:
     """シワカーブ格納用コレクションを取得または新規作成"""
     col = bpy.data.collections.get(name)
     if not col:
@@ -222,10 +223,12 @@ def _get_3d_view_window_region(context) -> Tuple[Any, Any]:
     return getattr(context, "region", None), getattr(context, "region_data", None)
 
 
+@allow_positional
 def find_nearest_bone_to_mouse(
     context,
     armature: Optional[bpy.types.Object],
     mouse_pos_2d: Tuple[float, float],
+    *,
     all_bones_data: Optional[List[Tuple[str, List[float], List[float], float]]] = None,
 ) -> Optional[str]:
     """
@@ -330,6 +333,7 @@ def find_nearest_bone_to_mouse(
     return best_bone_name or armature.pose.bones[0].name
 
 
+@allow_positional
 def _auto_setup_cloth_wrinkle_settings(context, col: bpy.types.Collection, armature: Optional[bpy.types.Object], bone_name: str):
     """
     対象の布オブジェクトにシワコレクションとドレープガイド設定を自動割り当てする。

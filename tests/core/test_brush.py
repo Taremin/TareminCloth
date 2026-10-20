@@ -267,7 +267,7 @@ class TestBrushHudInfo(unittest.TestCase):
         required = {"tool", "label_key", "radius", "strength",
                     "falloff", "show_falloff", "adjusting"}
         for name, cls in brush_pkg.TOOLS.items():
-            info = cls().hud_info(None, None)
+            info = cls().hud_info(None, radial=None)
             self.assertTrue(required.issubset(info.keys()), name)
             self.assertEqual(info["tool"], name)
 
@@ -277,7 +277,7 @@ class TestBrushHudInfo(unittest.TestCase):
         class FakeGrab:
             tool_mode = 'GRAB'
 
-        info = get_brush_hud_info(FakeGrab(), None)
+        info = get_brush_hud_info(FakeGrab(), radial=None)
         self.assertEqual(info["tool"], 'GRAB')
         self.assertIsNone(info["radius"])
         self.assertIsNone(info["strength"])
@@ -292,7 +292,7 @@ class TestBrushHudInfo(unittest.TestCase):
             strength = 0.8
             falloff_shape = 'SPHERE'
 
-        info = get_brush_hud_info(FakeBrush(), None)
+        info = get_brush_hud_info(FakeBrush(), radial=None)
         self.assertAlmostEqual(info["radius"], 0.05)
         self.assertAlmostEqual(info["strength"], 0.8)
         self.assertFalse(info["show_falloff"])
@@ -303,7 +303,7 @@ class TestBrushHudInfo(unittest.TestCase):
             strength = 0.5
             falloff_shape = 'SHARP'
 
-        info = get_brush_hud_info(FakeSharp(), None)
+        info = get_brush_hud_info(FakeSharp(), radial=None)
         self.assertTrue(info["show_falloff"])
         self.assertEqual(info["falloff"], 'SHARP')
 
@@ -318,10 +318,10 @@ class TestBrushHudInfo(unittest.TestCase):
             falloff_shape = 'SPHERE'
 
         brush = FakeBrush()
-        self.assertIsNone(get_brush_hud_info(brush, None)["adjusting"])
+        self.assertIsNone(get_brush_hud_info(brush, radial=None)["adjusting"])
         radial = RadialController()
-        radial.enter('STRENGTH', 100.0, brush)
-        self.assertEqual(get_brush_hud_info(brush, radial)["adjusting"], 'STRENGTH')
+        radial.enter('STRENGTH', 100.0, brush=brush)
+        self.assertEqual(get_brush_hud_info(brush, radial=radial)["adjusting"], 'STRENGTH')
 
     def test_unknown_tool_falls_back_to_grab(self):
         from taremin_cloth.brush import get_brush_hud_info
@@ -329,7 +329,7 @@ class TestBrushHudInfo(unittest.TestCase):
         class FakeUnknown:
             tool_mode = 'NO_SUCH_BRUSH'
 
-        info = get_brush_hud_info(FakeUnknown(), None)
+        info = get_brush_hud_info(FakeUnknown(), radial=None)
         self.assertEqual(info["tool"], 'GRAB')
 
 

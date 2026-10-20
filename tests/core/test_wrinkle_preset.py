@@ -146,7 +146,7 @@ class TestWrinklePreset(unittest.TestCase):
         orig = presets["y_branch_joint"]
 
         fpath = os.path.join(self.temp_dir, "y_branch_test.json")
-        save_preset_to_json(orig, fpath)
+        save_preset_to_json(orig, filepath=fpath)
         self.assertTrue(os.path.exists(fpath))
 
         loaded = load_preset_from_json(fpath)

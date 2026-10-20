@@ -6,7 +6,7 @@ Blenderの画面再描画要求およびアニメーション再生停止を一�
 import bpy
 
 
-def tag_redraw_view3d(context=None, extra_area_types=None):
+def tag_redraw_view3d(context=None, *, extra_area_types=None):
     """
     現在のスクリーン内のすべての 3D Viewport エリア（および必要に応じて追加エリア）に対して再描画（tag_redraw）を要求する。
     context が指定されていない場合は bpy.context を参照する。

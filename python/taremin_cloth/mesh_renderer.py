@@ -22,7 +22,17 @@ try:
 except ImportError:
     _HAS_PIL = False
 
+try:
+    from .utils import allow_positional
+except ImportError:
+    try:
+        from taremin_cloth.utils import allow_positional
+    except ImportError:
+        def allow_positional(fn):
+            return fn
 
+
+@allow_positional
 def _prepare_scene_arrays(
     positions: np.ndarray,
     faces: np.ndarray,
@@ -61,6 +71,7 @@ def _prepare_scene_arrays(
     return pos, fcs, sew, cols, vc, lines, vox
 
 
+@allow_positional
 def render_scene_to_file(
     filepath: str,
     positions: np.ndarray,
@@ -134,6 +145,7 @@ def render_scene_to_file(
         raise RuntimeError("taremin_cloth_core のレンダリング機能が利用できません。")
 
 
+@allow_positional
 def render_scene_to_image(
     positions: np.ndarray,
     faces: np.ndarray,
@@ -219,6 +231,7 @@ def render_scene_to_image(
                     pass
 
 
+@allow_positional
 def render_mesh_to_file(
     filepath: str,
     positions: np.ndarray,
@@ -229,6 +242,7 @@ def render_mesh_to_file(
     return render_scene_to_file(filepath, positions, faces, **kwargs)
 
 
+@allow_positional
 def render_mesh_to_image(
     positions: np.ndarray,
     faces: np.ndarray,
@@ -248,6 +262,7 @@ def render_mesh_to_image(
     )
 
 
+@allow_positional
 def count_red_pixels(
     image,
     red_threshold: int = 200,
@@ -268,6 +283,7 @@ def count_red_pixels(
     return int(np.sum(red_mask))
 
 
+@allow_positional
 def create_animation_file(
     frames: Sequence[Union[str, "Image.Image"]],
     output_path: str,
@@ -342,6 +358,7 @@ def create_animation_file(
 # コライダープリミティブの三角形メッシュ自動生成 (Step 3)
 # ==============================================================================
 
+@allow_positional
 def generate_sphere_mesh(center: Sequence[float], radius: float, u_segments: int = 16, v_segments: int = 8) -> np.ndarray:
     """球コライダーを三角形メッシュ配列 [T, 9] に変換します"""
     c = np.asarray(center, dtype=np.float32)
@@ -369,6 +386,7 @@ def generate_sphere_mesh(center: Sequence[float], radius: float, u_segments: int
     return np.array(tris, dtype=np.float32) if tris else np.empty((0, 9), dtype=np.float32)
 
 
+@allow_positional
 def generate_capsule_mesh(point_a: Sequence[float], point_b: Sequence[float], radius: float, segments: int = 12) -> np.ndarray:
     """カプセルコライダーを三角形メッシュ配列 [T, 9] に変換します"""
     pa = np.asarray(point_a, dtype=np.float32)
@@ -413,6 +431,7 @@ def generate_capsule_mesh(point_a: Sequence[float], point_b: Sequence[float], ra
     return np.vstack(parts)
 
 
+@allow_positional
 def generate_plane_mesh(point: Sequence[float], normal: Sequence[float], size: float = 2.0) -> np.ndarray:
     """平面コライダーを有限四角形メッシュ配列 [2, 9] に変換します"""
     pt = np.asarray(point, dtype=np.float32)
@@ -439,6 +458,7 @@ def generate_plane_mesh(point: Sequence[float], normal: Sequence[float], size: f
     return np.array([t0, t1], dtype=np.float32)
 
 
+@allow_positional
 def convert_colliders_to_mesh(colliders: Sequence[dict], scene_bbox_size: float = 2.0) -> Optional[np.ndarray]:
     """
     ログやフレームデータ内の全コライダー（Mesh, Sphere, Capsule, Plane）を
@@ -474,6 +494,7 @@ def convert_colliders_to_mesh(colliders: Sequence[dict], scene_bbox_size: float 
 # ヒートマップ・各種解析カラーマップ計算 (Step 4)
 # ==============================================================================
 
+@allow_positional
 def colormap_jet(values: np.ndarray, vmin: Optional[float] = None, vmax: Optional[float] = None) -> np.ndarray:
     """
     1D 配列を Jet カラーマップ (青 -> シアン -> 緑 -> 黄 -> 赤) の RGB [N, 3] uint8 配列に変換します。
@@ -498,6 +519,7 @@ def colormap_jet(values: np.ndarray, vmin: Optional[float] = None, vmax: Optiona
     return rgb.astype(np.uint8)
 
 
+@allow_positional
 def compute_velocity_colors(velocities: np.ndarray, vmin: float = 0.0, vmax: Optional[float] = None) -> np.ndarray:
     """頂点移動速度ノルム ||v|| の Jet ヒートマップ頂点カラー [N, 3] を計算します"""
     vel = np.asarray(velocities, dtype=np.float32)
@@ -508,6 +530,7 @@ def compute_velocity_colors(velocities: np.ndarray, vmin: float = 0.0, vmax: Opt
     return colormap_jet(speeds, vmin=vmin, vmax=vmax)
 
 
+@allow_positional
 def compute_strain_colors(positions: np.ndarray, edges: np.ndarray, rest_lengths: np.ndarray, max_strain: float = 0.2) -> np.ndarray:
     """
     拘束エッジ伸長率 (L - L0) / L0 のテンションカラーマップ [N, 3] を計算します。
@@ -566,6 +589,7 @@ def compute_normal_colors(positions: np.ndarray, faces: np.ndarray) -> np.ndarra
     return np.clip(rgb, 0, 255).astype(np.uint8)
 
 
+@allow_positional
 def generate_sdf_bbox_lines(
     bone_infos: Sequence[dict],
     bone_transforms: Sequence[dict],
@@ -609,6 +633,7 @@ def generate_sdf_bbox_lines(
     return None
 
 
+@allow_positional
 def extract_sdf_surface_voxels(
     bake_res,
     alpha_threshold: float = 0.03,
@@ -719,6 +744,7 @@ def extract_sdf_surface_voxels(
     return bone_voxels
 
 
+@allow_positional
 def transform_sdf_voxels_to_world(
     bone_surface_voxels: List[Tuple[str, np.ndarray, np.ndarray, Tuple[int, int, int]]],
     bone_world_matrices: dict,
@@ -757,6 +783,7 @@ def transform_sdf_voxels_to_world(
     return None
 
 
+@allow_positional
 def extract_joint_mesh_wireframe_lines(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
@@ -806,6 +833,7 @@ def extract_joint_mesh_wireframe_lines(
     return np.array(lines, dtype=np.float32)
 
 
+@allow_positional
 def filter_active_joint_faces(
     joint_faces_by_pair: dict,
     bone_rotations: dict,
@@ -848,6 +876,7 @@ def filter_active_joint_faces(
     return np.empty(0, dtype=np.int32)
 
 
+@allow_positional
 def generate_wrinkle_curve_lines(
     crest_curves: Optional[Sequence[np.ndarray]] = None,
     root_curves: Optional[Sequence[np.ndarray]] = None,
@@ -889,6 +918,7 @@ def generate_wrinkle_curve_lines(
     return None
 
 
+@allow_positional
 def compute_wrinkle_weight_colors(
     positions: np.ndarray,
     origin: Sequence[float],
@@ -943,6 +973,7 @@ def compute_wrinkle_weight_colors(
     return colormap_jet(weights, vmin=0.0, vmax=1.0)
 
 
+@allow_positional
 def compute_wrinkle_texture_2d_weight_colors(
     positions: np.ndarray,
     texture_rgba: np.ndarray,

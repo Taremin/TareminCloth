@@ -6,6 +6,7 @@ taremin_cloth 自己衝突パラメータ自動フィッティングユーティ
 
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
+from .args_guard import allow_positional
 
 
 SELF_COLLISION_PURPOSE_ITEMS = [
@@ -74,10 +75,12 @@ def calculate_mesh_edge_stats(obj) -> Optional[Tuple[float, float, int]]:
     return avg_len, min_len, len(vertices)
 
 
+@allow_positional
 def compute_self_collision_params(
     avg_edge_len: float,
     min_edge_len: float,
     num_vertices: int,
+    *,
     purpose: str = 'STANDARD',
 ) -> Dict[str, Any]:
     """
@@ -137,7 +140,7 @@ def compute_self_collision_params(
     }
 
 
-def fit_self_collision_for_object(obj, settings=None, purpose: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def fit_self_collision_for_object(obj, *, settings=None, purpose: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     オブジェクトのメッシュを解析し、settings に最適な自己衝突パラメータを適用する。
     適用されたパラメータ辞書を返す（失敗時は None）。
@@ -160,7 +163,7 @@ def fit_self_collision_for_object(obj, settings=None, purpose: Optional[str] = N
     else:
         avg_len, min_len, n_verts = stats
 
-    params = compute_self_collision_params(avg_len, min_len, n_verts, target_purpose)
+    params = compute_self_collision_params(avg_len, min_len, n_verts, purpose=target_purpose)
 
     # settings に適用
     for k, v in params.items():

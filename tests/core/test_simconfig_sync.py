@@ -73,7 +73,7 @@ class TestSimconfigSync(unittest.TestCase):
         edges = np.array([[0, 1]], dtype=np.uint32)
         sim = core.ClothSimulator(pos, edges)
         rust_keys = set(json.loads(sim.get_config_json()).keys())
-        cfg = self.sc.collect_sim_config(make_settings(), make_scene())
+        cfg = self.sc.collect_sim_config(make_settings(), scene=make_scene())
         missing = rust_keys - set(cfg.keys())
         self.assertEqual(missing, set(), f"収集漏れ: {missing}")
 
@@ -103,7 +103,7 @@ class TestSimconfigSync(unittest.TestCase):
         cfg = self.sc.collect_sim_config(
             make_settings(tension_stiffness=2000.0, coupled_self_collision_mode="FULL_COUPLED",
                           pair_cache_max_pairs=4096, sewing_stiffness=5000.0),
-            make_scene(),
+            scene=make_scene(),
         )
         route = self.sc.apply_sim_config(sim, cfg)
         self.assertEqual(route, "config")
@@ -149,7 +149,7 @@ class TestSimconfigSync(unittest.TestCase):
 
     def test_signature_sensitivity(self):
         """全Liveキーの変更が署名に反映されること"""
-        base = self.sc.collect_sim_config(make_settings(), make_scene())
+        base = self.sc.collect_sim_config(make_settings(), scene=make_scene())
         base_sig = self.sc.sim_config_signature(base)
         for key in self.sc.SIGNATURE_KEYS:
             mod = dict(base)
@@ -178,7 +178,7 @@ class TestSimconfigSync(unittest.TestCase):
                     return rec
                 raise AttributeError(name)
 
-        cfg = self.sc.collect_sim_config(make_settings(), make_scene())
+        cfg = self.sc.collect_sim_config(make_settings(), scene=make_scene())
         route = self.sc.apply_sim_config(FakeSim(), cfg)
         self.assertEqual(route, "legacy")
         called = {c[0] for c in calls}
@@ -193,12 +193,12 @@ class TestSimconfigSync(unittest.TestCase):
             self.assertIn(expected, called, f"legacy未呼出: {expected}")
 
     def test_gravity_variants(self):
-        vec, scale = self.sc.gravity_from_settings(make_settings(gravity=2.0), make_scene())
+        vec, scale = self.sc.gravity_from_settings(make_settings(gravity=2.0), scene=make_scene())
         self.assertEqual(vec, [0.0, 0.0, -19.62])
         self.assertEqual(scale, 2.0)
-        vec, _ = self.sc.gravity_from_settings(make_settings(), make_scene(use_gravity=False))
+        vec, _ = self.sc.gravity_from_settings(make_settings(), scene=make_scene(use_gravity=False))
         self.assertEqual(vec, [0.0, 0.0, 0.0])
-        vec, _ = self.sc.gravity_from_settings(make_settings(gravity=0.5), None)
+        vec, _ = self.sc.gravity_from_settings(make_settings(gravity=0.5), scene=None)
         self.assertAlmostEqual(vec[2], -4.905)
 
     def test_gui_wire_mapping_has_max_iterations(self):

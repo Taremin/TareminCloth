@@ -27,8 +27,8 @@ class RangeGrabTool(BaseBrushTool):
     name = 'RANGE_GRAB'
     label_key = 'Range Grab'
 
-    def hud_info(self, brush, radial=None):
-        base = super().hud_info(brush, radial)
+    def hud_info(self, brush, *, radial=None):
+        base = super().hud_info(brush, radial=radial)
         try:
             base["radius"] = float(brush_opt(brush, "radius", 0.05)) if brush is not None else None
         except Exception:

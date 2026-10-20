@@ -110,11 +110,11 @@ class TestElasticGroups(unittest.TestCase):
         # シミュレータ取得とフレーム進行
         from taremin_cloth.operators import get_or_create_simulator, sync_cloth_parameters
         sim, coords = get_or_create_simulator(obj)
-        sync_cloth_parameters(sim, obj, bpy.context.scene)
+        sync_cloth_parameters(sim, obj, scene=bpy.context.scene)
 
         # 40ステップシミュレーション
         for _ in range(40):
-            sync_cloth_parameters(sim, obj, bpy.context.scene)
+            sync_cloth_parameters(sim, obj, scene=bpy.context.scene)
             sim.step(dt=1.0 / 60.0, substeps=20)
 
         sim.get_positions(coords)
