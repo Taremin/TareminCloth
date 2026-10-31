@@ -111,6 +111,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let p_local = params.local_min + uvw * (params.local_max - params.local_min);
 
     var min_dist_sq = 1e10;
+    var best_abs_proj = -1.0;
     var best_signed_dist = 10.0;
     var best_alpha = 0.0;
 
@@ -120,13 +121,49 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let res_closest = closest_point_on_triangle(p_local, tri.p0, tri.p1, tri.p2);
         let diff = p_local - res_closest.closest_pt;
         let d_sq = dot(diff, diff);
+        let normal_proj = dot(diff, tri.normal);
+        let abs_proj = abs(normal_proj);
+        let eps_sq = 1e-7 * max(1.0, min_dist_sq);
 
-        if (d_sq < min_dist_sq) {
-            min_dist_sq = d_sq;
+        // 共有エッジ・共有頂点での同着時は法線射影の絶対値が大きい面を優先 (Baerentzen & Aanaes 2005)
+        let is_closer = (d_sq + eps_sq < min_dist_sq);
+        let is_tie_better = (abs(d_sq - min_dist_sq) <= eps_sq && abs_proj > best_abs_proj);
+
+        if (is_closer || is_tie_better) {
+            if (d_sq < min_dist_sq) {
+                min_dist_sq = d_sq;
+            }
+            best_abs_proj = abs_proj;
             let d = sqrt(d_sq);
 
             // 面法線との内積で内外判定（外側: 正, 内側: 負）
-            let sign = select(-1.0, 1.0, dot(diff, tri.normal) >= 0.0);
+            var sign = select(-1.0, 1.0, normal_proj >= 0.0);
+
+            // 開放境界エッジ（穴の縁）の外側領域における誤った負符号（内部判定）の防止
+            let bmask = u32(tri._pad + 0.5);
+            if (bmask != 0u && sign < 0.0) {
+                let bary = res_closest.barycentric;
+                var out_proj = -1.0;
+                // bit 0: AB辺 (bary.z == 0)
+                if ((bmask & 1u) != 0u && bary.z <= 1e-5) {
+                    let edge_out = normalize(cross(tri.p1 - tri.p0, tri.normal));
+                    out_proj = max(out_proj, dot(diff, edge_out));
+                }
+                // bit 1: BC辺 (bary.x == 0)
+                if ((bmask & 2u) != 0u && bary.x <= 1e-5) {
+                    let edge_out = normalize(cross(tri.p2 - tri.p1, tri.normal));
+                    out_proj = max(out_proj, dot(diff, edge_out));
+                }
+                // bit 2: CA辺 (bary.y == 0)
+                if ((bmask & 4u) != 0u && bary.y <= 1e-5) {
+                    let edge_out = normalize(cross(tri.p0 - tri.p2, tri.normal));
+                    out_proj = max(out_proj, dot(diff, edge_out));
+                }
+                if (out_proj > 0.0 && out_proj >= abs_proj * 0.25) {
+                    sign = 1.0;
+                }
+            }
+
             best_signed_dist = d * sign;
 
             // 重心座標でボーンウェイトを補間

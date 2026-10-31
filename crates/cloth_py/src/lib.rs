@@ -6,9 +6,9 @@ use cloth_core::{
     audit_pairs as core_audit_pairs,
     find_proximity_violations as core_proximity_violations,
     find_triangle_intersections as core_triangle_intersections,
-    bake_bone_sdf_gpu as core_bake_bone_sdf_gpu,
-    bake_mesh_sdf_gpu as core_bake_mesh_sdf_gpu,
-    bake_mesh_sdf_hierarchical as core_bake_mesh_sdf_hierarchical,
+    bake_bone_sdf_gpu_ext as core_bake_bone_sdf_gpu_ext,
+    bake_mesh_sdf_gpu_ext as core_bake_mesh_sdf_gpu_ext,
+    bake_mesh_sdf_hierarchical_ext as core_bake_mesh_sdf_hierarchical_ext,
     BoneInput, ClothMesh, DynamicBoneSdfSetup,
     color_edge_pairs as core_color_edge_pairs,
     tri_tri_intersect as core_tri_tri_intersect,
@@ -1037,7 +1037,8 @@ fn render_mesh_to_png<'py>(
     blend_k=0.05,
     friction=0.5,
     thickness=0.005,
-    restitution=0.0
+    restitution=0.0,
+    close_open_boundaries=true
 ))]
 fn bake_bone_sdf_gpu<'py>(
     py: Python<'py>,
@@ -1053,6 +1054,7 @@ fn bake_bone_sdf_gpu<'py>(
     friction: f32,
     thickness: f32,
     restitution: f32,
+    close_open_boundaries: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let verts_view = mesh_verts.as_array();
     let n_verts = verts_view.shape()[0];
@@ -1100,7 +1102,7 @@ fn bake_bone_sdf_gpu<'py>(
         });
     }
 
-    let res = core_bake_bone_sdf_gpu(
+    let res = core_bake_bone_sdf_gpu_ext(
         &verts_vec,
         &tris_vec,
         &bones_input,
@@ -1111,6 +1113,7 @@ fn bake_bone_sdf_gpu<'py>(
         friction,
         thickness,
         restitution,
+        close_open_boundaries,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU SDFベイク失敗: {e}")))?;
 
     let dict = PyDict::new(py);
@@ -1156,7 +1159,8 @@ fn bake_bone_sdf_gpu<'py>(
     margin=0.02,
     friction=0.5,
     thickness=0.005,
-    restitution=0.0
+    restitution=0.0,
+    close_open_boundaries=true
 ))]
 fn bake_mesh_sdf_gpu<'py>(
     py: Python<'py>,
@@ -1167,6 +1171,7 @@ fn bake_mesh_sdf_gpu<'py>(
     friction: f32,
     thickness: f32,
     restitution: f32,
+    close_open_boundaries: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let verts_view = mesh_verts.as_array();
     let n_verts = verts_view.shape()[0];
@@ -1186,7 +1191,7 @@ fn bake_mesh_sdf_gpu<'py>(
         }
     }
 
-    let res = core_bake_mesh_sdf_gpu(
+    let res = core_bake_mesh_sdf_gpu_ext(
         &verts_vec,
         &tris_vec,
         voxel_size,
@@ -1194,6 +1199,7 @@ fn bake_mesh_sdf_gpu<'py>(
         friction,
         thickness,
         restitution,
+        close_open_boundaries,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU Mesh SDFベイク失敗: {e}")))?;
 
     let dict = PyDict::new(py);
@@ -1218,7 +1224,8 @@ fn bake_mesh_sdf_gpu<'py>(
     margin=0.02,
     friction=0.5,
     thickness=0.005,
-    restitution=0.0
+    restitution=0.0,
+    close_open_boundaries=true
 ))]
 fn bake_mesh_sdf_hierarchical_gpu<'py>(
     py: Python<'py>,
@@ -1229,6 +1236,7 @@ fn bake_mesh_sdf_hierarchical_gpu<'py>(
     friction: f32,
     thickness: f32,
     restitution: f32,
+    close_open_boundaries: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let verts_view = mesh_verts.as_array();
     let n_verts = verts_view.shape()[0];
@@ -1248,7 +1256,7 @@ fn bake_mesh_sdf_hierarchical_gpu<'py>(
         }
     }
 
-    let res = core_bake_mesh_sdf_hierarchical(
+    let res = core_bake_mesh_sdf_hierarchical_ext(
         &verts_vec,
         &tris_vec,
         voxel_size,
@@ -1256,6 +1264,7 @@ fn bake_mesh_sdf_hierarchical_gpu<'py>(
         friction,
         thickness,
         restitution,
+        close_open_boundaries,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU階層Mesh SDFベイク失敗: {e}")))?;
 
     let dict = PyDict::new(py);

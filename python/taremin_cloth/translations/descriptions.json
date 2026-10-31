@@ -33,6 +33,7 @@
   "Auto-select best collider type from object structure",
   "Automatically adjust voxel size if estimated VRAM exceeds budget",
   "Automatically calculate and apply self-collision parameters based on edge length and preset (disabled for Custom)",
+  "Automatically cap open boundary holes (such as neck or limb openings) when baking SDF or extracting mesh colliders to prevent sign inversion",
   "Automatically execute post-processing on simulation stop",
   "Automatically force Coupled Collider mode when substeps are low or penetration risk is detected to prevent falling through",
   "Automatically increase solver iterations when substeps are low to maintain cloth stiffness and prevent stretching",

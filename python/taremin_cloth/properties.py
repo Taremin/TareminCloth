@@ -1420,6 +1420,12 @@ class TareminClothColliderSettings(PropertyGroup):
         default=True,
         update=_on_collider_prop_updated,
     )
+    close_open_boundaries: BoolProperty(
+        name="Close Open Boundaries",
+        description="Automatically cap open boundary holes (such as neck or limb openings) when baking SDF or extracting mesh colliders to prevent sign inversion",
+        default=True,
+        update=_on_collider_prop_updated,
+    )
     enable_cluster_culling: BoolProperty(
         name="Linear BVH Culling",
         description="Cluster BVH culling for fast collision against dense meshes",

@@ -9,6 +9,7 @@ import bpy
 import numpy as np
 from ..utils.args_guard import allow_positional
 from ..utils.logger import logger
+from ..utils.validation import close_open_boundary_loops_numpy
 from .sdf_baker import (
     get_or_bake_bone_sdf_for_object,
     get_or_bake_mesh_sdf_for_object,
@@ -126,8 +127,10 @@ def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_in
         tri_coords = v_world[tri_indices_2d[valid_idx]]
         selected_count = len(valid_idx)
     else:
+        if bool(getattr(col_settings, "close_open_boundaries", True)):
+            v_world, tri_indices_2d, _ = close_open_boundary_loops_numpy(v_world, tri_indices_2d)
         tri_coords = v_world[tri_indices_2d]
-        selected_count = n_tris
+        selected_count = len(tri_indices_2d)
 
     cur_friction = float(col_settings.friction)
     cur_thickness = float(col_settings.thickness)
@@ -405,6 +408,7 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                 round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
                 int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                 bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
+                bool(getattr(col_settings, "close_open_boundaries", True)),
             ))
 
     sim_id = id(sim)
@@ -488,10 +492,12 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                             tri_indices = np.empty(n_tris * 3, dtype=np.int32)
                             mesh.loop_triangles.foreach_get("vertices", tri_indices)
                             tri_indices_2d = tri_indices.reshape((n_tris, 3))
+                            if bool(getattr(col_settings, "close_open_boundaries", True)):
+                                v_world, tri_indices_2d, _ = close_open_boundary_loops_numpy(v_world, tri_indices_2d)
                             all_mesh_triangles.append(v_world[tri_indices_2d])
 
                             attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
-                            attr_block = np.tile(attr_row, (n_tris, 1))
+                            attr_block = np.tile(attr_row, (len(tri_indices_2d), 1))
                             all_mesh_attributes.append(attr_block)
                 finally:
                     cleanup_collider_eval_mesh(eval_obj, disabled_mods)
@@ -515,6 +521,7 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                     round(float(getattr(col_settings, "blend_k", 0.05)), 4),
                     bool(getattr(col_settings, "enable_joint_mesh", True)),
                     round(float(getattr(col_settings, "joint_weight_threshold", 0.85)), 2),
+                    bool(getattr(col_settings, "close_open_boundaries", True)),
                 )
 
                 needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_bone_sig)
@@ -587,6 +594,7 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                     round(float(getattr(col_settings, "restitution", 0.0)), 3),
                     int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                     bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
+                bool(getattr(col_settings, "close_open_boundaries", True)),
                 )
                 needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_mesh_sig)
                 if needs_rebake:

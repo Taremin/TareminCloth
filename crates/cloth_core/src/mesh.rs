@@ -508,7 +508,10 @@ impl ClothMesh {
                 .map(|&[a, b]| (a.min(b), a.max(b)))
                 .collect();
 
-            for opps in edge_to_opp.values() {
+            let mut shear_edge_keys: Vec<(u32, u32)> = edge_to_opp.keys().copied().collect();
+            shear_edge_keys.sort_unstable();
+            for key in shear_edge_keys {
+                let opps = &edge_to_opp[&key];
                 if opps.len() == 2 {
                     let v0 = opps[0].min(opps[1]);
                     let v1 = opps[0].max(opps[1]);
@@ -643,7 +646,11 @@ impl ClothMesh {
                 }
             }
 
-            for ((v0, v1), opps) in edge_to_opp_verts {
+            let mut edge_keys: Vec<(u32, u32)> = edge_to_opp_verts.keys().copied().collect();
+            edge_keys.sort_unstable();
+
+            for (v0, v1) in edge_keys {
+                let opps = &edge_to_opp_verts[&(v0, v1)];
                 if opps.len() == 2 {
                     let v2 = opps[0];
                     let v3 = opps[1];
@@ -663,6 +670,139 @@ impl ClothMesh {
                         rest_length,
                         compliance: bend_compliance,
                         _pad: [0.0; 2],
+                    });
+                }
+            }
+
+            // 2b. 縫合シーム（sewing_springs）を跨ぐ隣接境界三角形間の曲げ拘束 (Seam-Gated Bending)
+            if let Some(sew_pairs) = sewing_springs {
+                let mut parent: Vec<usize> = (0..n_verts).collect();
+                let mut has_sew = vec![false; n_verts];
+                fn find_sew_root(p: &mut [usize], mut i: usize) -> usize {
+                    let mut root = i;
+                    while root != p[root] {
+                        root = p[root];
+                    }
+                    while i != root {
+                        let next = p[i];
+                        p[i] = root;
+                        i = next;
+                    }
+                    root
+                }
+                for &[u, v] in sew_pairs {
+                    let ui = u as usize;
+                    let vi = v as usize;
+                    if ui < n_verts && vi < n_verts && ui != vi {
+                        has_sew[ui] = true;
+                        has_sew[vi] = true;
+                        let ru = find_sew_root(&mut parent, ui);
+                        let rv = find_sew_root(&mut parent, vi);
+                        if ru != rv {
+                            let min_r = ru.min(rv);
+                            let max_r = ru.max(rv);
+                            parent[max_r] = min_r;
+                        }
+                    }
+                }
+                let sew_rep: Vec<u32> = (0..n_verts)
+                    .map(|i| find_sew_root(&mut parent, i) as u32)
+                    .collect();
+
+                let mut seam_edge_map: HashMap<(u32, u32), Vec<(u32, u32, u32)>> = HashMap::new();
+                for (&(ea, eb), opps) in &edge_to_opp_verts {
+                    if opps.len() != 1 {
+                        continue;
+                    }
+                    if (ea as usize) >= n_verts || (eb as usize) >= n_verts {
+                        continue;
+                    }
+                    // 縫合シーム辺は両端点とも縫合スプリングに接続されている必要がある
+                    if !has_sew[ea as usize] || !has_sew[eb as usize] {
+                        continue;
+                    }
+                    let ra = sew_rep[ea as usize];
+                    let rb = sew_rep[eb as usize];
+                    if ra == rb {
+                        continue;
+                    }
+                    let (canon_key, u_aligned, v_aligned) = if ra < rb {
+                        ((ra, rb), ea, eb)
+                    } else {
+                        ((rb, ra), eb, ea)
+                    };
+                    seam_edge_map
+                        .entry(canon_key)
+                        .or_default()
+                        .push((u_aligned, v_aligned, opps[0]));
+                }
+
+                let mut seam_keys: Vec<(u32, u32)> = seam_edge_map.keys().copied().collect();
+                seam_keys.sort_unstable();
+
+                for key in seam_keys {
+                    let entries = &seam_edge_map[&key];
+                    if entries.len() != 2 {
+                        continue;
+                    }
+                    let (a0, a1, v2) = entries[0];
+                    let (b0, b1, v3) = entries[1];
+                    // 端点を共有する開放断面エッジや、対向頂点が同一（または同一縫合グループ）の極薄チューブは除外
+                    if a0 == b0 || a1 == b1 || v2 == v3 || sew_rep[v2 as usize] == sew_rep[v3 as usize] {
+                        continue;
+                    }
+                    if (v2 as usize) >= n_verts || (v3 as usize) >= n_verts {
+                        continue;
+                    }
+
+                    let pa0 = positions[a0 as usize];
+                    let pa1 = positions[a1 as usize];
+                    let pv2 = positions[v2 as usize];
+                    let ea_vec = [pa1[0] - pa0[0], pa1[1] - pa0[1], pa1[2] - pa0[2]];
+                    let len_a = (ea_vec[0] * ea_vec[0] + ea_vec[1] * ea_vec[1] + ea_vec[2] * ea_vec[2]).sqrt();
+
+                    let pb0 = positions[b0 as usize];
+                    let pb1 = positions[b1 as usize];
+                    let pv3 = positions[v3 as usize];
+                    let eb_vec = [pb1[0] - pb0[0], pb1[1] - pb0[1], pb1[2] - pb0[2]];
+                    let len_b = (eb_vec[0] * eb_vec[0] + eb_vec[1] * eb_vec[1] + eb_vec[2] * eb_vec[2]).sqrt();
+
+                    if len_a <= 1e-6 || len_b <= 1e-6 {
+                        continue;
+                    }
+
+                    let ua = [ea_vec[0] / len_a, ea_vec[1] / len_a, ea_vec[2] / len_a];
+                    let da = [pv2[0] - pa0[0], pv2[1] - pa0[1], pv2[2] - pa0[2]];
+                    let sa = da[0] * ua[0] + da[1] * ua[1] + da[2] * ua[2];
+                    let perp_a = [da[0] - sa * ua[0], da[1] - sa * ua[1], da[2] - sa * ua[2]];
+                    let ha = (perp_a[0] * perp_a[0] + perp_a[1] * perp_a[1] + perp_a[2] * perp_a[2]).sqrt();
+
+                    let ub = [eb_vec[0] / len_b, eb_vec[1] / len_b, eb_vec[2] / len_b];
+                    let db = [pv3[0] - pb0[0], pv3[1] - pb0[1], pv3[2] - pb0[2]];
+                    let sb = db[0] * ub[0] + db[1] * ub[1] + db[2] * ub[2];
+                    let perp_b = [db[0] - sb * ub[0], db[1] - sb * ub[1], db[2] - sb * ub[2]];
+                    let hb = (perp_b[0] * perp_b[0] + perp_b[1] * perp_b[1] + perp_b[2] * perp_b[2]).sqrt();
+
+                    // シーム軸周りに2三角形を180度平坦展開した際の真の対向頂点間距離
+                    let ds = sa - sb;
+                    let dh = ha + hb;
+                    let flat_rest_len = (ds * ds + dh * dh).sqrt();
+                    if flat_rest_len <= 1e-5 {
+                        continue;
+                    }
+
+                    let gate_dist = (flat_rest_len * 0.5).max(0.01);
+                    let gate_v0 = if a0 != b0 { a0 } else { a1 };
+                    let gate_v1 = if a0 != b0 { b0 } else { b1 };
+
+                    bending_constraints.push(GpuBendingConstraint {
+                        v0: gate_v0,
+                        v1: gate_v1,
+                        v2,
+                        v3,
+                        rest_length: flat_rest_len,
+                        compliance: bend_compliance,
+                        _pad: [1.0, gate_dist],
                     });
                 }
             }
@@ -696,7 +836,10 @@ impl ClothMesh {
                 .map(|bc| (bc.v2.min(bc.v3), bc.v2.max(bc.v3)))
                 .collect();
 
-            for (&u, neighbors) in &strand_adj {
+            let mut strand_keys: Vec<u32> = strand_adj.keys().copied().collect();
+            strand_keys.sort_unstable();
+            for u in strand_keys {
+                let neighbors = &strand_adj[&u];
                 if neighbors.len() >= 2 {
                     for i in 0..neighbors.len() {
                         for j in (i + 1)..neighbors.len() {
@@ -889,8 +1032,6 @@ impl ClothMesh {
             }
         }
 
-
-
         let mut local_edge_lengths = Vec::with_capacity(n_verts);
         for i in 0..n_verts {
             if edge_counts[i] > 0 {
@@ -952,11 +1093,10 @@ impl ClothMesh {
             two_hop_offsets.push(current_two_hop_offset);
             for &nbr in &neighbors {
                 two_hop_indices.push(nbr);
-                // 元のメッシュ内の2ホップ近傍であれば初期レスト距離を記録（Bridson動的折り畳み検出用）。
-                // 縫合トポロジーによって追加されたペアは、本来の目標レスト長が0.0（密着）であるため、
-                // 0.0 を設定して動的折り畳み検出（current_dist < l0 * 0.5）による自己衝突除外解除を防止する。
+                // 元のメッシュ内の2ホップ近傍であれば初期レスト距離を記録（Bridson動的折り畳み検出・V-V反発用）。
+                // 縫合トポロジーによって追加されたペアや自身（0ホップ）は 0.0 を設定し、常時除外する。
                 let is_orig = orig_neighbors.binary_search(&nbr).is_ok();
-                let dist = if is_orig {
+                let dist = if is_orig && nbr != i as u32 {
                     let p_i = positions[i];
                     let p_nbr = positions[nbr as usize];
                     let dx = p_i[0] - p_nbr[0];
@@ -1458,7 +1598,12 @@ mod tests {
 
         let nbr_2 = v0_pairs.iter().find(|(idx, _)| *idx == 2);
         if let Some(p) = nbr_2 {
-            assert_eq!(p.1, 0.0, "縫合トポロジーで追加されたペアはレスト長0.0: {}", p.1);
+            assert_eq!(p.1, 0.0, "縫合トポロジーで追加された1ホップペアはレスト長0.0: {}", p.1);
+        }
+
+        let nbr_3 = v0_pairs.iter().find(|(idx, _)| *idx == 3);
+        if let Some(p) = nbr_3 {
+            assert_eq!(p.1, 0.0, "縫合トポロジーで追加された2ホップペアはレスト長0.0: {}", p.1);
         }
 
         // 頂点1の2ホップ:
@@ -1549,6 +1694,63 @@ mod tests {
         for bc in &mesh.bending_constraints {
             assert!((bc.rest_length - 2.0).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn test_seam_gated_bending_constraints_across_sewn_panels() {
+        // 2枚の離れた直角二等辺三角形パネル:
+        // パネルA: 0=(0,0,0), 1=(0,1,0), 2=(-1,0.5,0) (シーム辺 0-1, 高さ 1.0, s_a = 0.5)
+        // パネルB: 3=(5,0,0), 4=(5,1,0), 5=( 6,0.5,2) (5m離れかつ傾いているが、シーム辺 3-4 長さ1.0, 高さ sqrt(1+4)=sqrt(5), s_b = 0.5)
+        // 縫合ペア: (0, 3), (1, 4)
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.5, 0.0],
+            [5.0, 0.0, 0.0],
+            [5.0, 1.0, 0.0],
+            [6.0, 0.5, 0.0],
+        ];
+        let edges = [
+            [0, 1], [1, 2], [2, 0],
+            [3, 4], [4, 5], [5, 3],
+        ];
+        let faces = [
+            [0, 1, 2],
+            [4, 3, 5],
+        ];
+        let sewing = [[0, 3], [1, 4]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            Some(&sewing),
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            1000.0,
+            10.0,
+            1.0,
+            Some(10000.0),
+            Some(true),
+        );
+
+        // 同一パネル内には共有エッジがないため、生成される曲げ拘束はシーム跨ぎの1件のみ
+        assert_eq!(mesh.bending_constraints.len(), 1);
+        let bc = &mesh.bending_constraints[0];
+        assert_eq!((bc.v2.min(bc.v3), bc.v2.max(bc.v3)), (2, 5));
+        // 初期3D距離は ||(-1,0.5,0) - (6,0.5,0)|| = 7.0 だが、平坦展開時の自然長は h_a(1.0) + h_b(1.0) = 2.0 であること
+        assert!(
+            (bc.rest_length - 2.0).abs() < 1e-5,
+            "シーム跨ぎ曲げ拘束の自然長は初期配置距離(7.0)ではなく平坦展開距離(2.0)であること: {}",
+            bc.rest_length
+        );
+        assert!(bc._pad[0] > 0.5, "シームゲートフラグが有効であること");
+        assert!((bc._pad[1] - 1.0).abs() < 1e-5, "ゲート距離が rest_length * 0.5 であること");
     }
 }
 

@@ -158,6 +158,41 @@ class TestSdfBakerGpu(unittest.TestCase):
 
         self.assertLess(elapsed, max_allowed, f"10ボーンの64^3ベイクが{max_allowed}秒未満で完了すること (デバイス: {dev_name})")
 
+    def test_open_boundary_detection_and_capping(self):
+        """開放境界チェッカー (detect_open_boundaries) と自動キャップ閉鎖のテスト"""
+        from taremin_cloth.utils.validation import detect_open_boundaries, close_open_boundary_loops_numpy
+
+        # 上下端が開いた正8角柱 (首切断端モデル)
+        n_seg = 8
+        th = np.linspace(0.0, 2.0 * np.pi, n_seg, endpoint=False)
+        bot = np.column_stack([0.045 * np.cos(th), 0.045 * np.sin(th), np.zeros(n_seg)])
+        top = np.column_stack([0.055 * np.cos(th), 0.055 * np.sin(th), np.full(n_seg, 0.10)])
+        verts = np.vstack([bot, top]).astype(np.float32)
+
+        tris = []
+        for i in range(n_seg):
+            b0 = i
+            b1 = (i + 1) % n_seg
+            t0 = n_seg + i
+            t1 = n_seg + ((i + 1) % n_seg)
+            tris.append([b0, b1, t1])
+            tris.append([b0, t1, t0])
+        tris = np.array(tris, dtype=np.int32)
+
+        rep = detect_open_boundaries(tris, num_verts=len(verts))
+        self.assertTrue(rep.has_open_boundaries)
+        self.assertEqual(rep.open_edge_count, n_seg * 2)
+        self.assertEqual(rep.open_loop_count, 2)
+        self.assertEqual(rep.non_manifold_edge_count, 0)
+
+        c_verts, c_tris, closed_cnt = close_open_boundary_loops_numpy(verts, tris)
+        self.assertEqual(closed_cnt, 2)
+        self.assertEqual(len(c_verts), len(verts) + 2)
+        self.assertEqual(len(c_tris), len(tris) + n_seg * 2)
+
+        rep_after = detect_open_boundaries(c_tris, num_verts=len(c_verts))
+        self.assertFalse(rep_after.has_open_boundaries)
+        self.assertEqual(rep_after.open_edge_count, 0)
 
 
 if __name__ == "__main__":

@@ -199,7 +199,269 @@ fn normalize(v: &[f32; 3]) -> [f32; 3] {
     }
 }
 
+/// 三角形集合における開放境界エッジ（1回しか出現しない無向辺）の集合を返す
+fn collect_open_boundary_undirected_edges(
+    mesh_tris: &[[i32; 3]],
+    num_verts: usize,
+) -> std::collections::HashSet<(i32, i32)> {
+    let mut edge_counts: std::collections::HashMap<(i32, i32), u32> =
+        std::collections::HashMap::new();
+    for tri in mesh_tris {
+        let (i0, i1, i2) = (tri[0], tri[1], tri[2]);
+        if i0 < 0
+            || i1 < 0
+            || i2 < 0
+            || (i0 as usize) >= num_verts
+            || (i1 as usize) >= num_verts
+            || (i2 as usize) >= num_verts
+            || i0 == i1
+            || i1 == i2
+            || i2 == i0
+        {
+            continue;
+        }
+        for &(u, v) in &[(i0, i1), (i1, i2), (i2, i0)] {
+            let key = (u.min(v), u.max(v));
+            *edge_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    edge_counts
+        .into_iter()
+        .filter_map(|(k, cnt)| if cnt == 1 { Some(k) } else { None })
+        .collect()
+}
+
+/// 開放境界ループ（Open Boundary Loops）を検出して扇状キャップ三角形で閉じる。
+///
+/// 立体メッシュ（三角形数 >= 4）において1回しか出現しない有向境界エッジ (u -> v) を辿り、
+/// 閉じた境界ループ L = [v_0, v_1, ..., v_{K-1}] (3 <= K < mesh_verts.len()) ごとに
+/// 重心頂点 v_center と逆向き有向エッジを持つ扇状三角形 [v_{(k+1)%K}, v_k, v_center] を追加する。
+/// ボーン入力が与えられた場合は、重心頂点の各ボーンウェイトをループ頂点の平均ウェイトとして補間する。
+///
+/// 戻り値: (capped_verts, capped_tris, capped_bones, closed_loop_count)
+pub fn close_open_boundary_loops(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    bones: &[BoneInput],
+) -> (Vec<[f32; 3]>, Vec<[i32; 3]>, Vec<BoneInput>, usize) {
+    let mut out_verts = mesh_verts.to_vec();
+    let mut out_tris = mesh_tris.to_vec();
+    let mut out_bones: Vec<BoneInput> = bones
+        .iter()
+        .map(|b| BoneInput {
+            name: b.name.clone(),
+            weights: b.weights.clone(),
+            bind_matrix: b.bind_matrix,
+        })
+        .collect();
+
+    let n_verts = mesh_verts.len();
+    if mesh_tris.len() < 4 || n_verts < 4 {
+        return (out_verts, out_tris, out_bones, 0);
+    }
+
+    let mut edge_counts: std::collections::HashMap<(i32, i32), u32> =
+        std::collections::HashMap::new();
+    let mut existing_tri_sets: std::collections::HashSet<[i32; 3]> =
+        std::collections::HashSet::new();
+
+    for tri in mesh_tris {
+        let (i0, i1, i2) = (tri[0], tri[1], tri[2]);
+        if i0 < 0
+            || i1 < 0
+            || i2 < 0
+            || (i0 as usize) >= n_verts
+            || (i1 as usize) >= n_verts
+            || (i2 as usize) >= n_verts
+            || i0 == i1
+            || i1 == i2
+            || i2 == i0
+        {
+            continue;
+        }
+        let mut sorted_tri = [i0, i1, i2];
+        sorted_tri.sort_unstable();
+        existing_tri_sets.insert(sorted_tri);
+
+        for &(u, v) in &[(i0, i1), (i1, i2), (i2, i0)] {
+            let key = (u.min(v), u.max(v));
+            *edge_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    let mut boundary_edges: Vec<(i32, i32)> = Vec::new();
+    let mut boundary_edge_adj_normal: Vec<[f32; 3]> = Vec::new();
+    let mut next_map: std::collections::HashMap<i32, Vec<usize>> =
+        std::collections::HashMap::new();
+
+    for tri in mesh_tris {
+        let (i0, i1, i2) = (tri[0], tri[1], tri[2]);
+        if i0 < 0
+            || i1 < 0
+            || i2 < 0
+            || (i0 as usize) >= n_verts
+            || (i1 as usize) >= n_verts
+            || (i2 as usize) >= n_verts
+            || i0 == i1
+            || i1 == i2
+            || i2 == i0
+        {
+            continue;
+        }
+        let p0 = mesh_verts[i0 as usize];
+        let p1 = mesh_verts[i1 as usize];
+        let p2 = mesh_verts[i2 as usize];
+        let e01 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e02 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        let tri_n = normalize(&cross(&e01, &e02));
+
+        for &(u, v) in &[(i0, i1), (i1, i2), (i2, i0)] {
+            let key = (u.min(v), u.max(v));
+            if edge_counts.get(&key) == Some(&1) {
+                let idx = boundary_edges.len();
+                boundary_edges.push((u, v));
+                boundary_edge_adj_normal.push(tri_n);
+                next_map.entry(u).or_default().push(idx);
+            }
+        }
+    }
+
+    if boundary_edges.is_empty() {
+        return (out_verts, out_tris, out_bones, 0);
+    }
+
+    let mut used = vec![false; boundary_edges.len()];
+    let mut closed_loops = 0usize;
+
+    for start_idx in 0..boundary_edges.len() {
+        if used[start_idx] {
+            continue;
+        }
+        used[start_idx] = true;
+        let (start_u, start_v) = boundary_edges[start_idx];
+        let mut loop_verts = vec![start_u, start_v];
+        let mut loop_edge_indices = vec![start_idx];
+        let mut curr = start_v;
+        let mut is_closed = false;
+
+        while loop_verts.len() <= n_verts {
+            if curr == start_u {
+                loop_verts.pop();
+                is_closed = true;
+                break;
+            }
+            let mut found_next = None;
+            if let Some(candidates) = next_map.get(&curr) {
+                for &e_idx in candidates {
+                    if !used[e_idx] {
+                        used[e_idx] = true;
+                        loop_edge_indices.push(e_idx);
+                        found_next = Some(boundary_edges[e_idx].1);
+                        break;
+                    }
+                }
+            }
+            if let Some(nxt) = found_next {
+                loop_verts.push(nxt);
+                curr = nxt;
+            } else {
+                break;
+            }
+        }
+
+        let k = loop_verts.len();
+        if !is_closed || k < 3 || k >= n_verts {
+            continue;
+        }
+
+        let inv_k = 1.0 / (k as f32);
+        let mut center = [0.0f32; 3];
+        for &v_idx in &loop_verts {
+            let p = out_verts[v_idx as usize];
+            center[0] += p[0];
+            center[1] += p[1];
+            center[2] += p[2];
+        }
+        center[0] *= inv_k;
+        center[1] *= inv_k;
+        center[2] *= inv_k;
+
+        // キャップ面の平均法線と、周囲の境界三角形の法線との内積を検査する。
+        // 平坦な2Dシートの外周ループではキャップ法線がシート法線と真逆 (dot ≈ -1.0) になり
+        // 表裏が同一平面上で重なってしまうため、立体開口部 (dot > -0.85) のみを閉じる。
+        let mut cap_n_sum = [0.0f32; 3];
+        for idx in 0..k {
+            let pu = out_verts[loop_verts[idx] as usize];
+            let pv = out_verts[loop_verts[(idx + 1) % k] as usize];
+            let d1 = [pu[0] - pv[0], pu[1] - pv[1], pu[2] - pv[2]];
+            let d2 = [center[0] - pv[0], center[1] - pv[1], center[2] - pv[2]];
+            let cn = cross(&d1, &d2);
+            cap_n_sum[0] += cn[0];
+            cap_n_sum[1] += cn[1];
+            cap_n_sum[2] += cn[2];
+        }
+        let cap_normal = normalize(&cap_n_sum);
+        let mut adj_dot_sum = 0.0f32;
+        for &e_idx in &loop_edge_indices {
+            let an = boundary_edge_adj_normal[e_idx];
+            adj_dot_sum += an[0] * cap_normal[0] + an[1] * cap_normal[1] + an[2] * cap_normal[2];
+        }
+        let mean_adj_dot = adj_dot_sum / (loop_edge_indices.len().max(1) as f32);
+        if mean_adj_dot <= -0.85 {
+            continue;
+        }
+
+        if k == 3 {
+            let mut sorted_tri = [loop_verts[0], loop_verts[1], loop_verts[2]];
+            sorted_tri.sort_unstable();
+            if existing_tri_sets.contains(&sorted_tri) {
+                continue;
+            }
+            out_tris.push([loop_verts[0], loop_verts[2], loop_verts[1]]);
+            existing_tri_sets.insert(sorted_tri);
+            closed_loops += 1;
+            continue;
+        }
+
+        let center_idx = out_verts.len() as i32;
+        out_verts.push(center);
+
+        for b in &mut out_bones {
+            let mut w_sum = 0.0f32;
+            for &v_idx in &loop_verts {
+                let vi = v_idx as usize;
+                if vi < b.weights.len() {
+                    w_sum += b.weights[vi];
+                }
+            }
+            while b.weights.len() < (center_idx as usize) {
+                b.weights.push(0.0);
+            }
+            b.weights.push(w_sum * inv_k);
+        }
+
+        for idx in 0..k {
+            let u = loop_verts[idx];
+            let v = loop_verts[(idx + 1) % k];
+            out_tris.push([v, u, center_idx]);
+        }
+        closed_loops += 1;
+    }
+
+    (out_verts, out_tris, out_bones, closed_loops)
+}
+
+/// 単一メッシュ用の開放境界ループ閉鎖ヘルパー（ボーン情報なし）
+pub fn close_open_boundary_loops_mesh(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+) -> (Vec<[f32; 3]>, Vec<[i32; 3]>, usize) {
+    let (v, t, _, loops) = close_open_boundary_loops(mesh_verts, mesh_tris, &[]);
+    (v, t, loops)
+}
+
 /// GPUコンピュートシェーダーを用いたボーンSDFベイクの実行
+#[allow(clippy::too_many_arguments)]
 pub fn bake_bone_sdf_gpu(
     mesh_verts: &[[f32; 3]],
     mesh_tris: &[[i32; 3]],
@@ -212,6 +474,48 @@ pub fn bake_bone_sdf_gpu(
     thickness: f32,
     restitution: f32,
 ) -> Result<GpuBoneSdfBakeResult, String> {
+    bake_bone_sdf_gpu_ext(
+        mesh_verts,
+        mesh_tris,
+        bones,
+        resolution,
+        margin,
+        weight_threshold,
+        blend_k,
+        friction,
+        thickness,
+        restitution,
+        true,
+    )
+}
+
+/// GPUコンピュートシェーダーを用いたボーンSDFベイクの実行（開放境界閉鎖オプション付き）
+#[allow(clippy::too_many_arguments)]
+pub fn bake_bone_sdf_gpu_ext(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    bones: &[BoneInput],
+    resolution: usize,
+    margin: f32,
+    weight_threshold: f32,
+    blend_k: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+    close_open_boundaries: bool,
+) -> Result<GpuBoneSdfBakeResult, String> {
+    let capped_storage;
+    let (mesh_verts, mesh_tris, bones) = if close_open_boundaries {
+        capped_storage = close_open_boundary_loops(mesh_verts, mesh_tris, bones);
+        (
+            capped_storage.0.as_slice(),
+            capped_storage.1.as_slice(),
+            capped_storage.2.as_slice(),
+        )
+    } else {
+        (mesh_verts, mesh_tris, bones)
+    };
+    let open_edges = collect_open_boundary_undirected_edges(mesh_tris, mesh_verts.len());
     // 1. 有効なボーンの選定
     let mut active_indices = Vec::new();
     for (i, b) in bones.iter().enumerate() {
@@ -368,6 +672,18 @@ pub fn bake_bone_sdf_gpu(
                 let e02 = [p2_local[0] - p0_local[0], p2_local[1] - p0_local[1], p2_local[2] - p0_local[2]];
                 let normal = normalize(&cross(&e01, &e02));
 
+                let mut bmask = 0u32;
+                let (ti0, ti1, ti2) = (tri[0], tri[1], tri[2]);
+                if open_edges.contains(&(ti0.min(ti1), ti0.max(ti1))) {
+                    bmask |= 1;
+                }
+                if open_edges.contains(&(ti1.min(ti2), ti1.max(ti2))) {
+                    bmask |= 2;
+                }
+                if open_edges.contains(&(ti2.min(ti0), ti2.max(ti0))) {
+                    bmask |= 4;
+                }
+
                 all_bake_triangles.push(GpuBakeTriangle {
                     p0: p0_local,
                     w0,
@@ -376,7 +692,7 @@ pub fn bake_bone_sdf_gpu(
                     p2: p2_local,
                     w2,
                     normal,
-                    _pad: 0.0,
+                    _pad: bmask as f32,
                 });
             }
         }
@@ -745,9 +1061,40 @@ pub fn bake_mesh_sdf_gpu(
     thickness: f32,
     restitution: f32,
 ) -> Result<GpuMeshSdfBakeResult, String> {
+    bake_mesh_sdf_gpu_ext(
+        mesh_verts,
+        mesh_tris,
+        voxel_size,
+        margin,
+        friction,
+        thickness,
+        restitution,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn bake_mesh_sdf_gpu_ext(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+    close_open_boundaries: bool,
+) -> Result<GpuMeshSdfBakeResult, String> {
     if mesh_verts.is_empty() {
         return Err("メッシュ頂点が空です".to_string());
     }
+
+    let capped_storage;
+    let (mesh_verts, mesh_tris) = if close_open_boundaries {
+        capped_storage = close_open_boundary_loops_mesh(mesh_verts, mesh_tris);
+        (capped_storage.0.as_slice(), capped_storage.1.as_slice())
+    } else {
+        (mesh_verts, mesh_tris)
+    };
 
     // 1-2. ドメイン算出と20要素パラメータ構築 (共有ヘルパー。式は従来通り)
     let (min_pt, max_pt, size, width, height, depth) =
@@ -945,9 +1292,40 @@ pub fn bake_mesh_sdf_coarse(
     thickness: f32,
     restitution: f32,
 ) -> Result<GpuMeshSdfCoarseResult, String> {
+    bake_mesh_sdf_coarse_ext(
+        mesh_verts,
+        mesh_tris,
+        voxel_size,
+        margin,
+        friction,
+        thickness,
+        restitution,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn bake_mesh_sdf_coarse_ext(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+    close_open_boundaries: bool,
+) -> Result<GpuMeshSdfCoarseResult, String> {
     if mesh_verts.is_empty() {
         return Err("メッシュ頂点が空です".to_string());
     }
+
+    let capped_storage;
+    let (mesh_verts, mesh_tris) = if close_open_boundaries {
+        capped_storage = close_open_boundary_loops_mesh(mesh_verts, mesh_tris);
+        (capped_storage.0.as_slice(), capped_storage.1.as_slice())
+    } else {
+        (mesh_verts, mesh_tris)
+    };
 
     let coarse_voxel = (voxel_size * MESH_SDF_HIER_RATIO as f32).max(0.001);
     let (min_pt, max_pt, size, width, height, depth) =
@@ -1181,9 +1559,40 @@ pub fn bake_mesh_sdf_hierarchical(
     thickness: f32,
     restitution: f32,
 ) -> Result<GpuMeshSdfBakeResult, String> {
+    bake_mesh_sdf_hierarchical_ext(
+        mesh_verts,
+        mesh_tris,
+        voxel_size,
+        margin,
+        friction,
+        thickness,
+        restitution,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn bake_mesh_sdf_hierarchical_ext(
+    mesh_verts: &[[f32; 3]],
+    mesh_tris: &[[i32; 3]],
+    voxel_size: f32,
+    margin: f32,
+    friction: f32,
+    thickness: f32,
+    restitution: f32,
+    close_open_boundaries: bool,
+) -> Result<GpuMeshSdfBakeResult, String> {
     if mesh_verts.is_empty() {
         return Err("メッシュ頂点が空です".to_string());
     }
+
+    let capped_storage;
+    let (mesh_verts, mesh_tris) = if close_open_boundaries {
+        capped_storage = close_open_boundary_loops_mesh(mesh_verts, mesh_tris);
+        (capped_storage.0.as_slice(), capped_storage.1.as_slice())
+    } else {
+        (mesh_verts, mesh_tris)
+    };
 
     // 密ドメイン (legacyと同一式 → 同一dims・同一ドメイン)
     let (min_pt, max_pt, size, width, height, depth) =
@@ -1192,9 +1601,9 @@ pub fn bake_mesh_sdf_hierarchical(
         mesh_sdf_bone_info(min_pt, max_pt, size, width, friction, thickness, restitution);
     let bake_triangles = collect_mesh_bake_triangles(mesh_verts, mesh_tris);
 
-    // Pass1: 粗グリッド
+    // Pass1: 粗グリッド（すでに close_open_boundaries を適用済みのため false で渡す）
     let coarse =
-        bake_mesh_sdf_coarse(mesh_verts, mesh_tris, voxel_size, margin, friction, thickness, restitution)?;
+        bake_mesh_sdf_coarse_ext(mesh_verts, mesh_tris, voxel_size, margin, friction, thickness, restitution, false)?;
 
     // 近傍band = 4 x 密ボクセル幅（最大軸）。ステンシル半径r=1ではband<=H_effが条件だが、
     // Pass2はr=2（125セル）のため余裕を持つ。粗実効幅の下限検証のみ行う。
@@ -1665,5 +2074,106 @@ mod tests {
         assert_eq!(near_mismatch, 0, "近傍場はbit等価であること");
         assert_eq!(far_sign_mismatch, 0, "遠方場の符号は一致すること");
         assert!(far_max_diff <= 0.18, "遠方場の差分は粗半対角以下であること");
+    }
+
+    #[test]
+    fn test_open_cylinder_neck_sdf_no_sign_inversion_above_top() {
+        if GpuContext::get_or_init().is_err() {
+            println!("GPUが利用できない環境のためスキップします");
+            return;
+        }
+
+        // 上端に向かってわずかに広がる開放円筒（首の切断端モデル: 側面外向き法線が負のZ成分を持つ）
+        let n_seg = 8usize;
+        let r_bot = 0.045f32;
+        let r_top = 0.055f32;
+        let z_bot = 0.0f32;
+        let z_top = 0.10f32;
+
+        let mut verts = Vec::with_capacity(n_seg * 2);
+        for i in 0..n_seg {
+            let theta = (i as f32) * std::f32::consts::TAU / (n_seg as f32);
+            verts.push([r_bot * theta.cos(), r_bot * theta.sin(), z_bot]);
+        }
+        for i in 0..n_seg {
+            let theta = (i as f32) * std::f32::consts::TAU / (n_seg as f32);
+            verts.push([r_top * theta.cos(), r_top * theta.sin(), z_top]);
+        }
+
+        let mut tris = Vec::with_capacity(n_seg * 2);
+        for i in 0..n_seg {
+            let b0 = i as i32;
+            let b1 = ((i + 1) % n_seg) as i32;
+            let t0 = (n_seg + i) as i32;
+            let t1 = (n_seg + (i + 1) % n_seg) as i32;
+            // 外向き法線になる反時計回り配置
+            tris.push([b0, b1, t1]);
+            tris.push([b0, t1, t0]);
+        }
+
+        let (capped_v, capped_t, _, closed_cnt) = close_open_boundary_loops(&verts, &tris, &[]);
+        assert_eq!(closed_cnt, 2, "上下2つの開放境界ループが検出・閉鎖されること");
+        assert_eq!(capped_v.len(), verts.len() + 2);
+        assert_eq!(capped_t.len(), tris.len() + n_seg * 2);
+
+        let bone = BoneInput {
+            name: "Neck".to_string(),
+            weights: vec![1.0; verts.len()],
+            bind_matrix: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+
+        for close_flag in [true, false] {
+            let res = bake_bone_sdf_gpu_ext(
+                &verts,
+                &tris,
+                std::slice::from_ref(&bone),
+                32,
+                0.35,
+                0.02,
+                0.05,
+                0.5,
+                0.01,
+                0.0,
+                close_flag,
+            )
+            .expect("開放円筒ボーンSDFベイクが成功すること");
+
+            let min_z = res.bone_infos[0][2];
+            let max_z = res.bone_infos[0][6];
+            let dim = res.width as usize;
+
+            let mut neg_above_top = 0usize;
+            for vz in 0..dim {
+                let z = min_z + ((vz as f32 + 0.5) / (dim as f32)) * (max_z - min_z);
+                if z <= z_top + 0.015 {
+                    continue;
+                }
+                for vy in 0..dim {
+                    for vx in 0..dim {
+                        let flat = ((vz * dim + vy) * dim + vx) * 4;
+                        let packed = u32::from_le_bytes([
+                            res.texture_bytes[flat],
+                            res.texture_bytes[flat + 1],
+                            res.texture_bytes[flat + 2],
+                            res.texture_bytes[flat + 3],
+                        ]);
+                        let dist = half::f16::from_bits((packed & 0xFFFF) as u16).to_f32();
+                        if dist < 0.0 {
+                            neg_above_top += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                neg_above_top, 0,
+                "close_open_boundaries={} において首上端より上空のボクセルが負符号（内部）にならないこと",
+                close_flag
+            );
+        }
     }
 }

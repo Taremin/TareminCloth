@@ -86,6 +86,40 @@ fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
     return n % table_size;
 }
 
+// 純粋な2ホップ近傍判定（V-T 隣接三角形除外用: 距離による除外解除を行わない）
+fn is_within_two_hops(vert_a: u32, vert_b: u32) -> bool {
+    if (vert_a == vert_b) {
+        return true;
+    }
+    let start = two_hop_offsets[vert_a];
+    let end = two_hop_offsets[vert_a + 1u];
+    if (start >= end) {
+        return false;
+    }
+
+    var low = start;
+    var high = end - 1u;
+
+    for (var step = 0u; step < 7u; step = step + 1u) {
+        if (low > high) {
+            break;
+        }
+        let mid = low + ((high - low) >> 1u);
+        let val = two_hop_indices[mid];
+        if (val == vert_b) {
+            return true;
+        } else if (val < vert_b) {
+            low = mid + 1u;
+        } else {
+            if (mid == 0u) {
+                break;
+            }
+            high = mid - 1u;
+        }
+    }
+    return false;
+}
+
 // 2ホップ近傍CSR配列に対する二分探索 (Bridson 2002: レスト長比率による動的折り畳み検出)
 // 初期距離 L0 の 50% 未満に圧縮された場合、鋭角なシワ・折り畳みと判定してペア収集を許可（除外解除）
 fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> bool {
@@ -303,7 +337,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 // 1. V-T (頂点 対 面) ペア収集
                                 // ==============================================
                                 let vt_bound = effective_thick + local_len_j * 1.3 + margin + horizon_i_eff + horizon_j;
-                                if (dist_sq_vv <= vt_bound * vt_bound) {
+                                let is_near_2hop_j = (params.exclude_neighbors != 0u) && is_within_two_hops(index, j);
+                                if (dist_sq_vv <= vt_bound * vt_bound && !is_near_2hop_j) {
                                     let star_start = star_offsets[j];
                                     let star_end = star_offsets[j + 1u];
                                     if (star_start < star_end) {
@@ -325,6 +360,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                                 let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
                                                 if (dist_sq_vt < check_thick * check_thick) {
+                                                    if (params.exclude_neighbors != 0u) {
+                                                        if (is_within_two_hops(index, v0) ||
+                                                            is_within_two_hops(index, v1)) {
+                                                            continue;
+                                                        }
+                                                    }
                                                     // V-T候補を受理: 面トリプルで重複排除し距離上位quota件を保持
                                                     // (同一面は中心違いで最大3回評価されるため)
                                                     let t0 = min(min(j, v0), v1);

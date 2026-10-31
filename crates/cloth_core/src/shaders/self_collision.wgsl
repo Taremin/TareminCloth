@@ -214,8 +214,34 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     return vec2<f32>(s, t);
 }
 
-// トポロジー2ホップ近傍判定（Bridson 2002: レスト長比率による動的折り畳み検出）
-// 初期距離 L0 の 50% 未満に圧縮された場合、鋭角なシワ・折り畳みと判定して衝突判定を許可（除外解除）
+// 純粋な2ホップ近傍判定（V-T 隣接三角形除外用: 距離による除外解除を行わない）
+// 三角形の頂点が1つでも2ホップ以内にある場合、その三角形はヒンジを共有する局所隣接面であるため、
+// V-T CCD や面反発を発火させるとシワ・折り畳み時に自己興奮振動（暴れ）を引き起こす。
+fn is_within_two_hops(vert_a: u32, vert_b: u32) -> bool {
+    if (vert_a == vert_b) {
+        return true;
+    }
+    let start = two_hop_offsets[vert_a];
+    let end = two_hop_offsets[vert_a + 1u];
+
+    var low = start;
+    var high = end;
+    while (low < high) {
+        let mid = low + (high - low) / 2u;
+        let val = two_hop_indices[mid];
+        if (val == vert_b) {
+            return true;
+        } else if (val < vert_b) {
+            low = mid + 1u;
+        } else {
+            high = mid;
+        }
+    }
+    return false;
+}
+
+// トポロジー2ホップ近傍判定（Bridson 2002: レスト長比率による動的折り畳み検出・V-V球反発用）
+// 初期距離 L0 の 50% 未満に圧縮された場合、鋭角なシワ・折り畳みと判定して V-V 球反発のみを許可（除外解除）
 fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> bool {
     if (vert_a == vert_b) {
         return true;
@@ -323,10 +349,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 // index < j の有無にかかわらず自スレッドが必ず処理して自頂点を退避させる。
                                 let both_dynamic = (v_j.inv_mass > 0.0);
                                 let n_j_raw = normals[j].xyz;
+                                let n_j_len = length(n_j_raw);
+                                let h_j_vv = select(0.0, dot(delta_vv, n_j_raw / max(n_j_len, EPSILON)), n_j_len > 0.5);
                                 let is_untangling_vv = (params.enable_normal_untangling != 0u)
                                     && (v_i.layer_id > v_j.layer_id)
-                                    && (length(n_j_raw) > 0.5)
-                                    && (dot(delta_vv, n_j_raw) < 0.0);
+                                    && (n_j_len > 0.5)
+                                    && (h_j_vv < -effective_thick * 0.25);
 
                                 let eff_thick_sq = effective_thick * effective_thick;
 
@@ -356,7 +384,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 }
 
                                 // 多層布Untangling (外側レイヤー i が内側レイヤー j の裏側に潜り込んだ場合のみ法線脱出)
-                                if (params.enable_normal_untangling != 0u) {
+                                if (params.enable_normal_untangling != 0u && !is_pinned_i) {
                                     let layer_i = v_i.layer_id;
                                     let layer_j = v_j.layer_id;
                                     let n_j = normals[j].xyz;
@@ -371,9 +399,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let r_max = effective_thick * 2.5;
                                             let h_max = effective_thick * 2.5;
                                             if (r_sq < r_max * r_max && h_j > -h_max) {
-                                                let pen = min(effective_thick - h_j, effective_thick * 2.0);
-                                                // 相手の表側法線方向へ自頂点（外側レイヤー）を脱出させる
-                                                add_ccd_atomic(index, n_j_unit * pen);
+                                                let r = sqrt(max(r_sq, 0.0));
+                                                let radial_w = clamp(1.0 - r / r_max, 0.0, 1.0);
+                                                // h_j = 0 境界でのステップ不連続（チャタリング振動）を防ぐ連続ランプ係数
+                                                let depth_w = clamp(-h_j / max(effective_thick * 0.5, EPSILON), 0.0, 1.0);
+                                                let pen = min(effective_thick - h_j, effective_thick * 2.0) * radial_w * depth_w;
+                                                let w_i = v_i.inv_mass;
+                                                let w_j = v_j.inv_mass;
+                                                let w_sum = w_i + w_j;
+                                                if (w_sum > EPSILON) {
+                                                    if (w_j <= 0.0) {
+                                                        // 相手がピン留め基準面の場合は自頂点のみ脱出
+                                                        add_disp_atomic(index, n_j_unit * pen);
+                                                    } else {
+                                                        // 動的頂点同士は運動量保存則に従い質量比で作用・反作用を対称分配
+                                                        let disp = n_j_unit * (pen * 0.5);
+                                                        add_disp_atomic(index, disp * (w_i / w_sum));
+                                                        add_disp_atomic(j, -disp * (w_j / w_sum));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -383,11 +427,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 // 2. Vertex-Triangle (頂点 対 面) 相対CCD & 幾何反発
                                 // ==========================================
                                 // 【早期枝切り 2】V-T 接触可能半径（点 i から相手三角形への距離上界）
+                                // ※ V-T は j が純粋な2ホップ外（3ホップ以上）である場合のみ評価する
                                 let move_len_i = length(p_i - x_old_i);
                                 let move_len_j = length(p_j - p_j_old);
                                 let vt_bound = effective_thick + local_len_j * 1.3 + move_len_i + move_len_j;
 
-                                if (dist_sq_vv <= vt_bound * vt_bound) {
+                                if (dist_sq_vv <= vt_bound * vt_bound && !is_within_two_hops(index, j)) {
                                     let star_start = star_offsets[j];
                                     let star_end = star_offsets[j + 1u];
 
@@ -402,17 +447,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let p_v0 = v_v0.prev_pos;
                                             let p_v1 = v_v1.prev_pos;
 
+                                            let p_v0_old = v_v0.position;
+                                            let p_v1_old = v_v1.position;
+
                                             // 【重複排除 1】三角形 (j, v0, v1) のセル内局所代表制約 (Local Canonical Triangle)
-                                            // 自頂点 index の走査セル (27近傍) 内に存在する頂点群の中で最小の頂点のみが代表して評価する。
-                                            // これにより同一面に対するCCD・点面最短距離の重複計算が 1/3 に激減し、かつ境界面も脱落ゼロ。
-                                            let v0_in_sweep = all(abs(vec3<i32>(floor(p_v0 / params.cell_size)) - cell) <= vec3<i32>(1));
-                                            let v1_in_sweep = all(abs(vec3<i32>(floor(p_v1 / params.cell_size)) - cell) <= vec3<i32>(1));
+                                            // 自頂点 index の走査セル (27近傍) 内に存在し、かつ V-T 距離上界内にある頂点群の中で
+                                            // 最小の頂点のみが代表して評価する。
+                                            let delta_v0 = p_i - p_v0;
+                                            let local_len_v0 = local_edge_lengths[v0];
+                                            let eff_thick_v0 = max(thick_i + v_v0.thickness, min(local_len_i, local_len_v0) * 0.06);
+                                            let vt_bound_v0 = eff_thick_v0 + local_len_v0 * 1.3 + move_len_i + length(p_v0 - p_v0_old);
+                                            let v0_in_sweep = all(abs(vec3<i32>(floor(p_v0 / params.cell_size)) - cell) <= vec3<i32>(1))
+                                                && (dot(delta_v0, delta_v0) <= vt_bound_v0 * vt_bound_v0);
+
+                                            let delta_v1 = p_i - p_v1;
+                                            let local_len_v1 = local_edge_lengths[v1];
+                                            let eff_thick_v1 = max(thick_i + v_v1.thickness, min(local_len_i, local_len_v1) * 0.06);
+                                            let vt_bound_v1 = eff_thick_v1 + local_len_v1 * 1.3 + move_len_i + length(p_v1 - p_v1_old);
+                                            let v1_in_sweep = all(abs(vec3<i32>(floor(p_v1 / params.cell_size)) - cell) <= vec3<i32>(1))
+                                                && (dot(delta_v1, delta_v1) <= vt_bound_v1 * vt_bound_v1);
+
                                             if ((v0_in_sweep && j > v0) || (v1_in_sweep && j > v1)) {
                                                 continue;
                                             }
-
-                                            let p_v0_old = v_v0.position;
-                                            let p_v1_old = v_v1.position;
 
                                             // 相手三角形の移動ベクトル
                                             let tri_move = ((p_j - p_j_old) + (p_v0 - p_v0_old) + (p_v1 - p_v1_old)) / 3.0;
@@ -430,6 +487,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let tri_aabb_max = max(max(p_j, p_v0), p_v1);
 
                                             if (any(sweep_pt_min > tri_aabb_max) || any(sweep_pt_max < tri_aabb_min)) {
+                                                continue;
+                                            }
+
+                                            // 【遅延評価】掃引AABBを通過した近接三角形に対してのみ、残りの2頂点 (v0, v1) の
+                                            // 純粋2ホップトポロジー除外を検証する。
+                                            if (is_within_two_hops(index, v0) || is_within_two_hops(index, v1)) {
                                                 continue;
                                             }
 
@@ -467,7 +530,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                                 let tri_cross = cross(p_v0 - p_j, p_v1 - p_j);
                                                 let tri_len = length(tri_cross);
-                                                let is_behind = (tri_len > EPSILON) && (dot(delta_vt, tri_cross) < 0.0);
+                                                let h_vt = select(0.0, dot(delta_vt, tri_cross / max(tri_len, EPSILON)), tri_len > EPSILON);
+                                                let is_behind = (tri_len > EPSILON) && (h_vt < -effective_thick * 0.25);
 
                                                 // 多層布Untangling (外側レイヤー i が内側レイヤー j の裏側に潜り込んだ場合のみ法線脱出)
                                                 let is_untangling_vt = (params.enable_normal_untangling != 0u)

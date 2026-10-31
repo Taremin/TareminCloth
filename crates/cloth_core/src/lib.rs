@@ -33,7 +33,9 @@ pub use renderer::{
     render_scene_to_png_file, RenderOptions, RenderResult, SceneData,
 };
 pub use sdf_baker::{
-    bake_bone_sdf_gpu, bake_mesh_sdf_coarse, bake_mesh_sdf_gpu, bake_mesh_sdf_hierarchical,
+    bake_bone_sdf_gpu, bake_bone_sdf_gpu_ext, bake_mesh_sdf_coarse, bake_mesh_sdf_coarse_ext,
+    bake_mesh_sdf_gpu, bake_mesh_sdf_gpu_ext, bake_mesh_sdf_hierarchical,
+    bake_mesh_sdf_hierarchical_ext, close_open_boundary_loops, close_open_boundary_loops_mesh,
     BoneInput, GpuBakeMeshParams, GpuBakeMeshTriangle, GpuHierFineParams, GpuMeshSdfBakeResult,
     GpuMeshSdfCoarseResult, GpuBakeParams, GpuBakeTriangle, GpuBoneSdfBakeResult,
     MESH_SDF_HIER_RATIO, MESH_SDF_HIER_SLAB_LAYERS,

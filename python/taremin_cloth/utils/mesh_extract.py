@@ -537,6 +537,10 @@ def extract_cloth_mesh_data(
             all_thicknesses.append(c_radii)
             all_inv_masses.append(c_inv_masses)
             c_layer_id = getattr(settings, "layer_id", 0) or 0
+            if layer_ids is not None and guide_cloth_verts:
+                valid_g = [g for g in guide_cloth_verts if 0 <= g < len(layer_ids)]
+                if valid_g:
+                    c_layer_id = int(np.max(layer_ids[valid_g]))
             all_layer_ids.append(np.full(n_curve_verts, c_layer_id, dtype=np.uint32))
 
             curr_vert_offset += n_curve_verts
@@ -677,9 +681,13 @@ def extract_sewing_topology(
         endpoints = [x for x in comp if x in face_vertex_set]
         internal = [x for x in comp if x not in face_vertex_set]
 
-        # ケース 1: 単一エッジで両端が面頂点（通常の直接縫合）
-        if len(comp) == 2 and len(endpoints) == 2 and len(internal) == 0:
-            simple_edges.append((endpoints[0], endpoints[1]))
+        # ケース 1: 内部頂点なし (純粋な直接縫合ネットワーク)
+        # 布頂点同士を直接結ぶエッジは、脇下十字点などで頂点を共有していても正常な物理拘束として解かれる
+        if len(internal) == 0:
+            for cu in comp:
+                for cv in adj[cu]:
+                    if cu < cv:
+                        simple_edges.append((cu, cv))
             continue
 
         # ケース 2: 両端が面頂点、中間が面を持たない頂点の単純パス（A - W1 - ... - Wk - B）

@@ -494,10 +494,11 @@ def compute_mesh_signature(
     weight_threshold: float = 0.02,
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
+    close_open_boundaries: bool = True,
 ) -> str:
     """メッシュと設定からユニークなキャッシュハッシュキーを生成する"""
     hasher = hashlib.sha256()
-    prefix = f"v9_sdf_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}_{margin:.3f}_{thickness:.5f}_{weight_threshold:.4f}"
+    prefix = f"v10_sdf_{int(enable_joint_mesh)}_{int(close_open_boundaries)}_{joint_weight_threshold:.2f}_{margin:.3f}_{thickness:.5f}_{weight_threshold:.4f}"
     hasher.update(f"{prefix}_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
     # 先頭と末尾の数頂点をサンプリングしてハッシュ化
     sample_verts = verts[::max(1, len(verts) // 20)]
@@ -522,6 +523,7 @@ def bake_bone_sdf_from_data(
     restitution: float = 0.0,
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
+    close_open_boundaries: bool = True,
     overlap_rings: int = 1,
     bone_parent_map: Optional[Dict[str, Optional[str]]] = None,
 ) -> BoneSdfBakeResult:
@@ -572,6 +574,7 @@ def bake_bone_sdf_from_data(
             friction=float(friction),
             thickness=float(thickness),
             restitution=float(restitution),
+            close_open_boundaries=bool(close_open_boundaries),
         )
     except Exception as e:
         raise RuntimeError(f"[SDF Baker] GPUベイクに失敗しました: {e}") from e
@@ -963,6 +966,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
     friction = float(getattr(col_settings, "friction", 0.5))
     restitution = float(getattr(col_settings, "restitution", 0.0))
     blend_k = float(getattr(col_settings, "blend_k", 0.05))
+    close_open_boundaries = bool(getattr(col_settings, "close_open_boundaries", True))
 
     # キャッシュチェック (thickness, margin, weight_threshold もシグネチャに含めて不整合を防止)
     cache_key = compute_mesh_signature(
@@ -975,6 +979,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
         weight_threshold=weight_threshold,
         enable_joint_mesh=enable_joint_mesh,
         joint_weight_threshold=joint_weight_threshold,
+        close_open_boundaries=close_open_boundaries,
     )
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
@@ -1020,6 +1025,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
             restitution=float(getattr(col_settings, "restitution", 0.0)),
             enable_joint_mesh=enable_joint_mesh,
             joint_weight_threshold=joint_weight_threshold,
+        close_open_boundaries=close_open_boundaries,
             bone_parent_map=bone_parent_map,
         )
     except Exception as e:
@@ -1054,6 +1060,7 @@ def bake_mesh_sdf_from_data(
     thickness: float = 0.005,
     restitution: float = 0.0,
     method: str = "auto",
+    close_open_boundaries: bool = True,
 ) -> Optional[MeshSdfBakeResult]:
     """
     メッシュ頂点・三角形データからGPUコンピュートシェーダーを用いて単一メッシュSDFをベイクする。
@@ -1087,6 +1094,7 @@ def bake_mesh_sdf_from_data(
                 friction=float(friction),
                 thickness=float(thickness),
                 restitution=float(restitution),
+            close_open_boundaries=bool(close_open_boundaries),
             )
             return MeshSdfBakeResult(
                 texture_bytes=gpu_res["texture_bytes"],
@@ -1116,6 +1124,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
     max_vram_mb = int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB))
     auto_scale = bool(getattr(col_settings, "mesh_sdf_auto_scale", True))
     cache_enabled = bool(getattr(col_settings, "mesh_sdf_cache_enabled", True))
+    close_open_boundaries = bool(getattr(col_settings, "close_open_boundaries", True))
 
     depsgraph = bpy.context.evaluated_depsgraph_get() if bpy and hasattr(bpy, "context") and bpy.context else None
     eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
@@ -1169,7 +1178,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
     mesh_sig = hasher.hexdigest()[:16]
 
     cache_key = hashlib.md5(
-        f"mesh_sdf_{obj.name}_{mesh_sig}_{voxel_size:.5f}_{margin:.4f}_{friction:.3f}_{thickness:.4f}_{restitution:.3f}".encode()
+        f"v2_mesh_sdf_{obj.name}_{mesh_sig}_{int(close_open_boundaries)}_{voxel_size:.5f}_{margin:.4f}_{friction:.3f}_{thickness:.4f}_{restitution:.3f}".encode()
     ).hexdigest()
 
     if cache_enabled and not force_rebake:
@@ -1195,6 +1204,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
         friction=friction,
         thickness=thickness,
         restitution=restitution,
+        close_open_boundaries=close_open_boundaries,
     )
     elapsed = time.time() - t0
 

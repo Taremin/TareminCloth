@@ -2,6 +2,7 @@ import bpy
 from . import i18n
 from .operators import is_interactive_running, get_interactive_cloth_object_name
 from .utils import topology
+from .utils.self_collision_fit import draw_thickness_warning_ui
 from .utils.validation import validate_cloth_mesh
 
 
@@ -546,6 +547,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 row_sc.prop(settings, "self_collision_purpose", text=i18n.trans("Purpose"))
                 row_sc.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
                 col_sc.prop(settings, "thickness", text=i18n.trans("Thickness"))
+                draw_thickness_warning_ui(col_sc, obj, settings=settings)
 
             # 6. 重力 (Forces & Gravity)
             box_grav = layout_params.box()
@@ -675,6 +677,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
         row_thick = layout.row(align=True)
         row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
         row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+        draw_thickness_warning_ui(layout, obj, settings=settings, compact=True)
         row_dens = layout.row(align=True)
         row_dens.prop(settings, "areal_density", text=i18n.trans("Areal Density"))
 
@@ -766,6 +769,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
             op_rst_sc = row_p.operator("taremin_cloth.reset_cloth_settings", text="", icon='LOOP_BACK')
             if op_rst_sc:
                 op_rst_sc.scope = 'COLLISION'
+            draw_thickness_warning_ui(l_col, obj, settings=settings)
 
             self_sub = l_col.column(align=True)
             self_sub.prop(settings, "self_collision_algorithm", text=i18n.trans("Algorithm"))
@@ -1459,6 +1463,19 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
         if not col_settings.is_collider:
             return
 
+        if obj.type == 'MESH' and col_settings.collider_type in {'BONE_SDF', 'MESH_SDF', 'MESH'}:
+            from .utils.validation import validate_collider_mesh
+            ob_report = validate_collider_mesh(obj)
+            if ob_report and ob_report.has_open_boundaries:
+                box_ob = layout.box()
+                box_ob.alert = not getattr(col_settings, "close_open_boundaries", True)
+                icon_ob = 'INFO' if getattr(col_settings, "close_open_boundaries", True) else 'ERROR'
+                box_ob.label(
+                    text=f"{i18n.trans('Open Boundaries Detected:')} {ob_report.open_loop_count} ({ob_report.open_edge_count} {i18n.trans('edges')})",
+                    icon=icon_ob,
+                )
+                box_ob.prop(col_settings, "close_open_boundaries", text=i18n.trans("Close Open Boundaries"))
+
         ui_mode = getattr(scene, "taremin_cloth_ui_mode", "SIMPLE") if scene else "SIMPLE"
 
         if ui_mode == 'SIMPLE':
@@ -1525,6 +1542,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 b_col.prop(col_settings, "radius")
             elif col_settings.collider_type == 'MESH':
                 b_col.prop(col_settings, "thickness")
+                b_col.prop(col_settings, "close_open_boundaries")
                 b_col.prop(col_settings, "single_sided")
                 if col_settings.single_sided:
                     sub_rec = b_col.column(align=True)
@@ -1588,6 +1606,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                     col_h.prop(col_settings, "joint_rotation_threshold", text=i18n.trans("Activation Angle (°)"))
                     col_h.label(text=i18n.trans("Dynamically mesh only bent joints for speedup"), icon='INFO')
 
+                b_col.prop(col_settings, "close_open_boundaries")
                 b_col.prop(col_settings, "sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)
@@ -1626,6 +1645,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                     else:
                         box_mem.label(text=f"{i18n.trans('Resolution:')} {w_est}x{h_est}x{d_est} ({i18n.trans('Approx.')}{vram_est:.1f}MB)", icon='INFO')
 
+                b_col.prop(col_settings, "close_open_boundaries")
                 b_col.prop(col_settings, "mesh_sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)
