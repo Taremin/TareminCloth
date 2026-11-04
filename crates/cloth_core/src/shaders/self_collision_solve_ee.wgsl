@@ -88,22 +88,22 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let e = dot(d2, d2);
     let f = dot(d2, r);
 
-    if (a <= EPSILON && e <= EPSILON) {
+    if (a <= 1e-12 && e <= 1e-12) {
         return vec2<f32>(0.0, 0.0);
     }
-    if (a <= EPSILON) {
+    if (a <= 1e-12) {
         return vec2<f32>(0.0, clamp(f / e, 0.0, 1.0));
     }
 
     let c = dot(d1, r);
-    if (e <= EPSILON) {
+    if (e <= 1e-12) {
         return vec2<f32>(clamp(-c / a, 0.0, 1.0), 0.0);
     }
 
     let b = dot(d1, d2);
     let denom = a * e - b * b;
     var s = 0.0;
-    if (abs(denom) > EPSILON) {
+    if (denom > a * e * 1e-7) {
         s = clamp((b * f - c * e) / denom, 0.0, 1.0);
     }
 

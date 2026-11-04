@@ -94,13 +94,31 @@ pub fn color_bending_constraints(
     for (i, c) in constraints.iter().enumerate() {
         vertex_to_constraints[c.v2 as usize].push(i);
         vertex_to_constraints[c.v3 as usize].push(i);
+        // シーム跨ぎ曲げ拘束 (_pad[0] > 0.5) は GPU シェーダー内で v0, v1 の prev_pos を参照するため、
+        // 同一色グループ内で他スレッドが v0, v1 を書き換える Read-Write データ競合を防止する
+        if c._pad[0] > 0.5 {
+            if (c.v0 as usize) < num_vertices && c.v0 != c.v2 && c.v0 != c.v3 {
+                vertex_to_constraints[c.v0 as usize].push(i);
+            }
+            if (c.v1 as usize) < num_vertices && c.v1 != c.v2 && c.v1 != c.v3 && c.v1 != c.v0 {
+                vertex_to_constraints[c.v1 as usize].push(i);
+            }
+        }
     }
 
     // Welsh-Powell法: 拘束の接続次数が大きい順にソート (タイブレークとしてインデックスを使用)
     let mut order: Vec<usize> = (0..num_constraints).collect();
     order.sort_by_key(|&i| {
         let c = &constraints[i];
-        let deg = vertex_to_constraints[c.v2 as usize].len() + vertex_to_constraints[c.v3 as usize].len();
+        let mut deg = vertex_to_constraints[c.v2 as usize].len() + vertex_to_constraints[c.v3 as usize].len();
+        if c._pad[0] > 0.5 {
+            if (c.v0 as usize) < num_vertices {
+                deg += vertex_to_constraints[c.v0 as usize].len();
+            }
+            if (c.v1 as usize) < num_vertices {
+                deg += vertex_to_constraints[c.v1 as usize].len();
+            }
+        }
         (std::cmp::Reverse(deg), i)
     });
 
@@ -110,11 +128,17 @@ pub fn color_bending_constraints(
         let c = &constraints[i];
         let mut used_colors = std::collections::HashSet::new();
 
-        let verts = [c.v2, c.v3];
-        for &v in &verts {
-            for &adj_i in &vertex_to_constraints[v as usize] {
-                if adj_i != i && constraint_colors[adj_i] != u32::MAX {
-                    used_colors.insert(constraint_colors[adj_i]);
+        let verts: &[u32] = if c._pad[0] > 0.5 {
+            &[c.v0, c.v1, c.v2, c.v3]
+        } else {
+            &[c.v2, c.v3]
+        };
+        for &v in verts {
+            if (v as usize) < num_vertices {
+                for &adj_i in &vertex_to_constraints[v as usize] {
+                    if adj_i != i && constraint_colors[adj_i] != u32::MAX {
+                        used_colors.insert(constraint_colors[adj_i]);
+                    }
                 }
             }
         }

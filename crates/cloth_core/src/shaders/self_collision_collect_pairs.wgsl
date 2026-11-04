@@ -215,22 +215,22 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let e = dot(d2, d2);
     let f = dot(d2, r);
 
-    if (a <= EPSILON && e <= EPSILON) {
+    if (a <= 1e-12 && e <= 1e-12) {
         return vec2<f32>(0.0, 0.0);
     }
-    if (a <= EPSILON) {
+    if (a <= 1e-12) {
         return vec2<f32>(0.0, clamp(f / e, 0.0, 1.0));
     }
 
     let c = dot(d1, r);
-    if (e <= EPSILON) {
+    if (e <= 1e-12) {
         return vec2<f32>(clamp(-c / a, 0.0, 1.0), 0.0);
     }
 
     let b = dot(d1, d2);
     let denom = a * e - b * b;
     var s = 0.0;
-    if (abs(denom) > EPSILON) {
+    if (denom > a * e * 1e-7) {
         s = clamp((b * f - c * e) / denom, 0.0, 1.0);
     }
 
@@ -351,10 +351,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                                             // 自頂点が三角形を構成する頂点でなければ
                                             if (index != v0 && index != v1 && v0 < params.num_vertices && v1 < params.num_vertices) {
-                                                let p_v0 = vertices[v0].prev_pos;
-                                                let p_v1 = vertices[v1].prev_pos;
+                                                // 巡回正規化: 法線向き (CCW) を保ったまま最小頂点番号 c0 を先頭に揃えることで、
+                                                // 空間ハッシュ走査順によらず closest_point_on_triangle_bary と格納ペアを完全決定論化
+                                                var c0 = j;
+                                                var c1 = v0;
+                                                var c2 = v1;
+                                                if (v0 < j && v0 < v1) {
+                                                    c0 = v0;
+                                                    c1 = v1;
+                                                    c2 = j;
+                                                } else if (v1 < j && v1 < v0) {
+                                                    c0 = v1;
+                                                    c1 = j;
+                                                    c2 = v0;
+                                                }
 
-                                                let res = closest_point_on_triangle_bary(p_i, p_j, p_v0, p_v1);
+                                                let p_c0 = vertices[c0].prev_pos;
+                                                let p_c1 = vertices[c1].prev_pos;
+                                                let p_c2 = vertices[c2].prev_pos;
+
+                                                let res = closest_point_on_triangle_bary(p_i, p_c0, p_c1, p_c2);
                                                 let diff_vt = p_i - res.pt;
                                                 let dist_sq_vt = dot(diff_vt, diff_vt);
 
@@ -366,21 +382,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                             continue;
                                                         }
                                                     }
-                                                    // V-T候補を受理: 面トリプルで重複排除し距離上位quota件を保持
-                                                    // (同一面は中心違いで最大3回評価されるため)
-                                                    let t0 = min(min(j, v0), v1);
-                                                    let t2 = max(max(j, v0), v1);
-                                                    let t1 = j + v0 + v1 - t0 - t2;
+                                                    // V-T候補を受理: 正規化済み (c0, c1, c2) で重複排除し距離上位quota件を保持
                                                     var dup = false;
                                                     for (var qk = 0u; qk < 8u; qk = qk + 1u) {
                                                         if (qk >= vt_n) {
                                                             break;
                                                         }
                                                         let e = vt_data[qk];
-                                                        let s0 = min(min(e.vert_j, e.v0), e.v1);
-                                                        let s2 = max(max(e.vert_j, e.v0), e.v1);
-                                                        let s1 = e.vert_j + e.v0 + e.v1 - s0 - s2;
-                                                        if (s0 == t0 && s1 == t1 && s2 == t2) {
+                                                        if (e.vert_j == c0 && e.v0 == c1 && e.v1 == c2) {
                                                             dup = true;
                                                             break;
                                                         }
@@ -389,9 +398,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                         vt_eval = vt_eval + 1u;
                                                         var pos = vt_n;
                                                         for (var qk = 0u; qk < 8u; qk = qk + 1u) {
-                                                            if (qk < vt_n && dist_sq_vt < vt_dists[qk]) {
-                                                                pos = qk;
-                                                                break;
+                                                            if (qk < vt_n) {
+                                                                let e_qk = vt_data[qk];
+                                                                let tie_lt = (dist_sq_vt == vt_dists[qk]) && (
+                                                                    c0 < e_qk.vert_j ||
+                                                                    (c0 == e_qk.vert_j && (c1 < e_qk.v0 || (c1 == e_qk.v0 && c2 < e_qk.v1)))
+                                                                );
+                                                                if (dist_sq_vt < vt_dists[qk] || tie_lt) {
+                                                                    pos = qk;
+                                                                    break;
+                                                                }
                                                             }
                                                         }
                                                         if (pos < quota_vt) {
@@ -406,7 +422,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                                 qk = qk - 1u;
                                                             }
                                                             vt_dists[pos] = dist_sq_vt;
-                                                            vt_data[pos] = GpuVtPair(index, j, v0, v1);
+                                                            vt_data[pos] = GpuVtPair(index, c0, c1, c2);
                                                             if (vt_n < quota_vt) {
                                                                 vt_n = vt_n + 1u;
                                                             }
@@ -440,7 +456,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 continue;
                                             }
                                             let v_ui = vertices[ui];
+                                            // 動的エッジ {index, ui} は小頂点側のみが所有し、重複収集を防ぐ
+                                            if (v_ui.inv_mass > 0.0 && index > ui) {
+                                                continue;
+                                            }
                                             let p_ui = v_ui.prev_pos;
+                                            let len_sq_i = dot(p_ui - p_i, p_ui - p_i);
+                                            let max_len_i = (local_len_i + local_edge_lengths[ui]) * 1.5;
+                                            if (len_sq_i > max_len_i * max_len_i || len_sq_i <= 1e-12) {
+                                                continue;
+                                            }
 
                                             for (var ej = 0u; ej < num_edges_j; ej = ej + 1u) {
                                                 let vj = adj_indices[adj_j_start + ej];
@@ -451,46 +476,82 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                     let v_vj = vertices[vj];
                                                     let edge_j_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
 
-                                                    // 重複排除: 相手がピンでない動的エッジ同士なら index < j
-                                                    if (!is_pinned_i && (edge_j_has_pin || index < j)) {
+                                                    let c_j = min(j, vj);
+                                                    let c_vj = max(j, vj);
+
+                                                    // 重複排除: 相手がピンでない動的エッジ同士なら index < c_j
+                                                    if (!is_pinned_i && (edge_j_has_pin || index < c_j)) {
                                                         let p_vj = v_vj.prev_pos;
-                                                        let st = closest_points_segments(p_i, p_ui, p_j, p_vj);
+                                                        let len_sq_j = dot(p_vj - p_j, p_vj - p_j);
+                                                        let max_len_j = (local_len_j + local_edge_lengths[vj]) * 1.5;
+                                                        if (len_sq_j > max_len_j * max_len_j || len_sq_j <= 1e-12) {
+                                                            continue;
+                                                        }
+
+                                                        let p_cj = select(p_vj, p_j, j < vj);
+                                                        let p_cvj = select(p_j, p_vj, j < vj);
+                                                        let st = closest_points_segments(p_i, p_ui, p_cj, p_cvj);
                                                         let pt1 = p_i + st.x * (p_ui - p_i);
-                                                        let pt2 = p_j + st.y * (p_vj - p_j);
+                                                        let pt2 = p_cj + st.y * (p_cvj - p_cj);
 
                                                         let diff_ee = pt1 - pt2;
                                                         let dist_sq_ee = dot(diff_ee, diff_ee);
                                                         let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
 
                                                         if (dist_sq_ee < check_thick * check_thick && dist_sq_ee > EPSILON) {
-                                                            // E-E候補を受理: 距離上位quota件を保持
-                                                            // (index<j重複排除済みのためスレッド内重複なし)
-                                                            ee_eval = ee_eval + 1u;
-                                                            var pos = ee_n;
+                                                            if (params.exclude_neighbors != 0u) {
+                                                                if (is_topologically_near_folded(index, vj, length(p_i - p_vj)) ||
+                                                                    is_topologically_near_folded(ui, j, length(p_ui - p_j)) ||
+                                                                    is_topologically_near_folded(ui, vj, length(p_ui - p_vj))) {
+                                                                    continue;
+                                                                }
+                                                            }
+                                                            var dup_ee = false;
                                                             for (var qk = 0u; qk < 8u; qk = qk + 1u) {
-                                                                if (qk < ee_n && dist_sq_ee < ee_dists[qk]) {
-                                                                    pos = qk;
+                                                                if (qk >= ee_n) {
+                                                                    break;
+                                                                }
+                                                                let e = ee_data[qk];
+                                                                if (e.v_ui == ui && e.v_j == c_j && e.v_vj == c_vj) {
+                                                                    dup_ee = true;
                                                                     break;
                                                                 }
                                                             }
-                                                            if (pos < quota_ee) {
-                                                                var up = min(ee_n, quota_ee - 1u);
-                                                                var qk = up;
-                                                                loop {
-                                                                    if (qk <= pos) {
-                                                                        break;
+                                                            if (!dup_ee) {
+                                                                ee_eval = ee_eval + 1u;
+                                                                var pos = ee_n;
+                                                                for (var qk = 0u; qk < 8u; qk = qk + 1u) {
+                                                                    if (qk < ee_n) {
+                                                                        let e_qk = ee_data[qk];
+                                                                        let tie_lt = (dist_sq_ee == ee_dists[qk]) && (
+                                                                            ui < e_qk.v_ui ||
+                                                                            (ui == e_qk.v_ui && (c_j < e_qk.v_j || (c_j == e_qk.v_j && c_vj < e_qk.v_vj)))
+                                                                        );
+                                                                        if (dist_sq_ee < ee_dists[qk] || tie_lt) {
+                                                                            pos = qk;
+                                                                            break;
+                                                                        }
                                                                     }
-                                                                    ee_dists[qk] = ee_dists[qk - 1u];
-                                                                    ee_data[qk] = ee_data[qk - 1u];
-                                                                    qk = qk - 1u;
                                                                 }
-                                                                ee_dists[pos] = dist_sq_ee;
-                                                                ee_data[pos] = GpuEePair(index, ui, j, vj);
-                                                                if (ee_n < quota_ee) {
-                                                                    ee_n = ee_n + 1u;
+                                                                if (pos < quota_ee) {
+                                                                    var up = min(ee_n, quota_ee - 1u);
+                                                                    var qk = up;
+                                                                    loop {
+                                                                        if (qk <= pos) {
+                                                                            break;
+                                                                        }
+                                                                        ee_dists[qk] = ee_dists[qk - 1u];
+                                                                        ee_data[qk] = ee_data[qk - 1u];
+                                                                        qk = qk - 1u;
+                                                                    }
+                                                                    ee_dists[pos] = dist_sq_ee;
+                                                                    ee_data[pos] = GpuEePair(index, ui, c_j, c_vj);
+                                                                    if (ee_n < quota_ee) {
+                                                                        ee_n = ee_n + 1u;
+                                                                    }
+                                                                } else {
+                                                                    ee_drop = ee_drop + 1u;
                                                                 }
-                                                            } else {
-                                                                ee_drop = ee_drop + 1u;
                                                             }
                                                         }
                                                     }

@@ -52,6 +52,11 @@ struct SelfCollisionAccum {
 @group(0) @binding(7) var<storage, read> two_hop_indices: array<u32>;
 @group(0) @binding(8) var<storage, read_write> accum: array<SelfCollisionAccum>;
 @group(0) @binding(9) var<storage, read> two_hop_rest_lengths: array<f32>;
+@group(0) @binding(10) var<storage, read> edge_boundary_bits: array<u32>;
+
+fn is_open_boundary_edge(e_idx: u32) -> bool {
+    return ((edge_boundary_bits[e_idx >> 5u] >> (e_idx & 31u)) & 1u) != 0u;
+}
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
@@ -93,14 +98,14 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let e = dot(d2, d2);
     let f = dot(d2, r);
 
-    if (a <= EPSILON && e <= EPSILON) {
+    if (a <= 1e-12 && e <= 1e-12) {
         return vec2<f32>(0.0, 0.0);
     }
-    if (a <= EPSILON) {
+    if (a <= 1e-12) {
         return vec2<f32>(0.0, clamp(f / e, 0.0, 1.0));
     }
     let c = dot(d1, r);
-    if (e <= EPSILON) {
+    if (e <= 1e-12) {
         return vec2<f32>(clamp(-c / a, 0.0, 1.0), 0.0);
     }
 
@@ -108,7 +113,8 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let denom = a * e - b * b;
 
     var s = 0.0;
-    if (abs(denom) > EPSILON) {
+    // denom は m^4 次元であるため、a * e に対する相対閾値で平行判定を行う
+    if (denom > a * e * 1e-7) {
         s = clamp((b * f - c * e) / denom, 0.0, 1.0);
     }
 
@@ -121,6 +127,43 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
         s = clamp((b - c) / a, 0.0, 1.0);
     }
     return vec2<f32>(s, t);
+}
+
+struct SegmentEval {
+    dist_sq: f32,
+    st: vec2<f32>,
+};
+
+fn eval_segment_dist_sq(
+    a0_old: vec3<f32>, a0_cur: vec3<f32>,
+    a1_old: vec3<f32>, a1_cur: vec3<f32>,
+    b0_old: vec3<f32>, b0_cur: vec3<f32>,
+    b1_old: vec3<f32>, b1_cur: vec3<f32>,
+    tau: f32
+) -> SegmentEval {
+    let a0 = mix(a0_old, a0_cur, tau);
+    let a1 = mix(a1_old, a1_cur, tau);
+    let b0 = mix(b0_old, b0_cur, tau);
+    let b1 = mix(b1_old, b1_cur, tau);
+    let st = closest_points_segments(a0, a1, b0, b1);
+    let pa = mix(a0, a1, st.x);
+    let pb = mix(b0, b1, st.y);
+    let d = pa - pb;
+    return SegmentEval(dot(d, d), st);
+}
+
+fn eval_segment_volume(
+    a0_old: vec3<f32>, a0_cur: vec3<f32>,
+    a1_old: vec3<f32>, a1_cur: vec3<f32>,
+    b0_old: vec3<f32>, b0_cur: vec3<f32>,
+    b1_old: vec3<f32>, b1_cur: vec3<f32>,
+    tau: f32
+) -> f32 {
+    let a0 = mix(a0_old, a0_cur, tau);
+    let a1 = mix(a1_old, a1_cur, tau);
+    let b0 = mix(b0_old, b0_cur, tau);
+    let b1 = mix(b1_old, b1_cur, tau);
+    return dot(cross(a1 - a0, b1 - b0), b0 - a0);
 }
 
 // トポロジー2ホップ近傍判定（二乗距離版: sqrt不要）
@@ -183,9 +226,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let thick_u1 = v_u1.thickness;
     let max_thick_a = max(thick_u0, thick_u1);
 
-    // エッジ A の AABB（マージン付き）
-    let aabb_a_min = min(p_u0, p_u1) - vec3<f32>(max_thick_a * 2.0);
-    let aabb_a_max = max(p_u0, p_u1) + vec3<f32>(max_thick_a * 2.0);
+    // エッジ A の AABB（マージン付き。相手が境界エッジである場合も考慮し常に開始位置も含めた掃引 AABB）
+    let is_boundary_a = is_open_boundary_edge(edge_idx);
+    let aabb_a_min = min(min(p_u0, p_u1), min(p_u0_old, p_u1_old)) - vec3<f32>(max_thick_a * 2.0);
+    let aabb_a_max = max(max(p_u0, p_u1), max(p_u0_old, p_u1_old)) + vec3<f32>(max_thick_a * 2.0);
 
     // エッジ中点の空間セル座標（周囲27セルを均一・定数走査）
     let p_mid = (p_u0 + p_u1) * 0.5;
@@ -206,11 +250,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                 let count = end - start;
                 for (var idx = 0u; idx < count; idx = idx + 1u) {
-                    search_count = search_count + 1u;
-                    if (search_count > params.max_search_iterations) {
-                        return;
-                    }
-
                     let edge_b_idx = edge_sorted_indices[start + idx];
 
                     // 【辞書順序制約】全世界で edge_idx < edge_b_idx のペアのみを厳密に 1 回処理
@@ -239,11 +278,213 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         continue;
                     }
 
-                    // 【早期枝切り】エッジ AABB 重なり判定 (Edge-Edge AABB Overlap)
-                    let aabb_b_min = min(p_j, p_vj);
-                    let aabb_b_max = max(p_j, p_vj);
+                    // 【早期枝切り】エッジ掃引 AABB 重なり判定 (Edge-Edge Sweep AABB Overlap)
+                    let p_j_old = v_j.position;
+                    let p_vj_old = v_vj.position;
+                    let aabb_b_min = min(min(p_j, p_vj), min(p_j_old, p_vj_old));
+                    let aabb_b_max = max(max(p_j, p_vj), max(p_j_old, p_vj_old));
                     if (any(aabb_a_min > aabb_b_max) || any(aabb_a_max < aabb_b_min)) {
                         continue;
+                    }
+
+                    search_count = search_count + 1u;
+                    if (search_count > params.max_search_iterations) {
+                        return;
+                    }
+
+                    let is_boundary_b = is_open_boundary_edge(edge_b_idx);
+                    let is_boundary_pair = is_boundary_a || is_boundary_b;
+
+                    // 開放境界エッジペア限定の CCD 軌道最接近探索およびクロスオーバー遮断
+                    if (is_boundary_pair) {
+                        // 粗サンプル（9点: tau = 0/8 .. 8/8）による最小距離と体積符号反転の探索
+                        var min_sample_dist_sq = 1e20;
+                        var min_k = 0u;
+                        var min_st = vec2<f32>(0.0, 0.0);
+                        var prev_vol = eval_segment_volume(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, 0.0);
+                        var zero_cross_tau = -1.0;
+
+                        for (var k = 0u; k <= 8u; k = k + 1u) {
+                            let tau_k = f32(k) * 0.125;
+                            let eval_res = eval_segment_dist_sq(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, tau_k);
+                            if (eval_res.dist_sq < min_sample_dist_sq) {
+                                min_sample_dist_sq = eval_res.dist_sq;
+                                min_k = k;
+                                min_st = eval_res.st;
+                            }
+                            if (k > 0u) {
+                                let vol = eval_segment_volume(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, tau_k);
+                                if (prev_vol * vol <= 0.0 && zero_cross_tau < 0.0) {
+                                    zero_cross_tau = tau_k - 0.0625;
+                                }
+                                prev_vol = vol;
+                            }
+                        }
+
+                        // 体積符号反転点（共面クロス候補）があれば評価
+                        if (zero_cross_tau >= 0.0) {
+                            let eval_zc = eval_segment_dist_sq(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, zero_cross_tau);
+                            if (eval_zc.dist_sq < min_sample_dist_sq) {
+                                min_sample_dist_sq = eval_zc.dist_sq;
+                                min_k = u32(clamp(round(zero_cross_tau * 8.0), 0.0, 8.0));
+                                min_st = eval_zc.st;
+                            }
+                        }
+
+                        // 三分探索（6回）で最接近点 (tau*, s*, t*) を特定
+                        var t_lo = max(0.0, (f32(min_k) - 1.0) * 0.125);
+                        var t_hi = min(1.0, (f32(min_k) + 1.0) * 0.125);
+                        var tau_star = f32(min_k) * 0.125;
+                        var dist_sq_star = min_sample_dist_sq;
+                        var st_star = min_st;
+
+                        for (var iter = 0u; iter < 6u; iter = iter + 1u) {
+                            let m1 = t_lo + (t_hi - t_lo) * (1.0 / 3.0);
+                            let m2 = t_hi - (t_hi - t_lo) * (1.0 / 3.0);
+                            let eval1 = eval_segment_dist_sq(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, m1);
+                            let eval2 = eval_segment_dist_sq(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, m2);
+
+                            if (eval1.dist_sq < dist_sq_star) {
+                                dist_sq_star = eval1.dist_sq;
+                                tau_star = m1;
+                                st_star = eval1.st;
+                            }
+                            if (eval2.dist_sq < dist_sq_star) {
+                                dist_sq_star = eval2.dist_sq;
+                                tau_star = m2;
+                                st_star = eval2.st;
+                            }
+
+                            if (eval1.dist_sq < eval2.dist_sq) {
+                                t_hi = m2;
+                            } else {
+                                t_lo = m1;
+                            }
+                        }
+
+                        let s_star = st_star.x;
+                        let t_star = st_star.y;
+                        let thick_j_ccd = v_j.thickness;
+                        let thick_vj_ccd = v_vj.thickness;
+                        let eff_thick_star = mix(thick_u0, thick_u1, s_star) + mix(thick_j_ccd, thick_vj_ccd, t_star);
+
+                        // 軌道全体で厚み内に侵入しない場合は非接触
+                        if (dist_sq_star >= eff_thick_star * eff_thick_star) {
+                            continue;
+                        }
+
+                        // Step B: トポロジー2ホップ除外判定
+                        if (params.exclude_neighbors != 0u) {
+                            let a0_star = mix(p_u0_old, p_u0, tau_star);
+                            let a1_star = mix(p_u1_old, p_u1, tau_star);
+                            let b0_star = mix(p_j_old, p_j, tau_star);
+                            let b1_star = mix(p_vj_old, p_vj, tau_star);
+                            let td0 = a0_star - b0_star;
+                            let td1 = a0_star - b1_star;
+                            let td2 = a1_star - b0_star;
+                            let td3 = a1_star - b1_star;
+                            if (is_topologically_near_folded_sq(u0, j, dot(td0, td0)) ||
+                                is_topologically_near_folded_sq(u0, vj, dot(td1, td1)) ||
+                                is_topologically_near_folded_sq(u1, j, dot(td2, td2)) ||
+                                is_topologically_near_folded_sq(u1, vj, dot(td3, td3))) {
+                                continue;
+                            }
+                        }
+
+                        // 多層布 untangling
+                        var is_untangling_ccd = false;
+                        if (params.enable_normal_untangling != 0u && v_u0.layer_id > v_j.layer_id) {
+                            let n_j_raw = normals[j].xyz;
+                            let pa_star = mix(mix(p_u0_old, p_u0, tau_star), mix(p_u1_old, p_u1, tau_star), s_star);
+                            let pb_star = mix(mix(p_j_old, p_j, tau_star), mix(p_vj_old, p_vj, tau_star), t_star);
+                            let delta_star = pa_star - pb_star;
+                            is_untangling_ccd = (dot(n_j_raw, n_j_raw) > 0.25) && (dot(delta_star, n_j_raw) < 0.0);
+                        }
+                        if (is_untangling_ccd) {
+                            continue;
+                        }
+
+                        // Step C: 開始時分離法線 n0 の算出とクロスオーバー判定
+                        let st0 = closest_points_segments(p_u0_old, p_u1_old, p_j_old, p_vj_old);
+                        let pt0_a = mix(p_u0_old, p_u1_old, st0.x);
+                        let pt0_b = mix(p_j_old, p_vj_old, st0.y);
+                        let delta0 = pt0_a - pt0_b;
+                        let dist0 = length(delta0);
+
+                        if (dist0 > EPSILON) {
+                            let n0 = delta0 / dist0;
+
+                            let st1 = closest_points_segments(p_u0, p_u1, p_j, p_vj);
+                            let pt1_a = mix(p_u0, p_u1, st1.x);
+                            let pt1_b = mix(p_j, p_vj, st1.y);
+                            let delta1 = pt1_a - pt1_b;
+                            let dist1 = length(delta1);
+
+                            let pt_end_a = mix(p_u0, p_u1, s_star);
+                            let pt_end_b = mix(p_j, p_vj, t_star);
+                            let delta_end = pt_end_a - pt_end_b;
+                            let h_end = dot(delta_end, n0);
+
+                            let is_crossover = (h_end <= 0.0) ||
+                                               (dot(delta1, n0) <= 0.0) ||
+                                               (dist1 >= eff_thick_star && tau_star < 1.0);
+
+                            if (h_end < eff_thick_star && is_crossover) {
+                                // Step D: 運動量保存を満たす 100% ハード CCD 変位の分配
+                                let pen_ccd = eff_thick_star - h_end;
+                                let edge_b_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
+                                if (edge_a_has_pin && edge_b_has_pin) {
+                                    continue;
+                                }
+
+                                if (edge_b_has_pin) {
+                                    let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
+                                    if (v_u0.inv_mass > 0.0) {
+                                        let col_disp_0 = n0 * (pen_ccd * (1.0 - s_star)) + edge_move * ((1.0 - s_star) * 0.5);
+                                        add_ccd_atomic(u0, col_disp_0);
+                                    }
+                                    if (v_u1.inv_mass > 0.0) {
+                                        let col_disp_1 = n0 * (pen_ccd * s_star) + edge_move * (s_star * 0.5);
+                                        add_ccd_atomic(u1, col_disp_1);
+                                    }
+                                } else if (edge_a_has_pin) {
+                                    let edge_move = ((p_u0 - p_u0_old) + (p_u1 - p_u1_old)) * 0.5;
+                                    if (v_j.inv_mass > 0.0) {
+                                        let col_disp_j = -n0 * (pen_ccd * (1.0 - t_star)) + edge_move * ((1.0 - t_star) * 0.5);
+                                        add_ccd_atomic(j, col_disp_j);
+                                    }
+                                    if (v_vj.inv_mass > 0.0) {
+                                        let col_disp_vj = -n0 * (pen_ccd * t_star) + edge_move * (t_star * 0.5);
+                                        add_ccd_atomic(vj, col_disp_vj);
+                                    }
+                                } else {
+                                    let w_u0 = v_u0.inv_mass;
+                                    let w_u1 = v_u1.inv_mass;
+                                    let w_j = v_j.inv_mass;
+                                    let w_vj = v_vj.inv_mass;
+                                    let w_e1 = (1.0 - s_star) * (1.0 - s_star) * w_u0 + s_star * s_star * w_u1;
+                                    let w_e2 = (1.0 - t_star) * (1.0 - t_star) * w_j + t_star * t_star * w_vj;
+                                    let w_tot = w_e1 + w_e2;
+
+                                    if (w_tot > EPSILON) {
+                                        let total_ccd = n0 * pen_ccd;
+                                        if (w_u0 > 0.0) {
+                                            add_ccd_atomic(u0, total_ccd * ((1.0 - s_star) * w_u0 / w_tot));
+                                        }
+                                        if (w_u1 > 0.0) {
+                                            add_ccd_atomic(u1, total_ccd * (s_star * w_u1 / w_tot));
+                                        }
+                                        if (w_j > 0.0) {
+                                            add_ccd_atomic(j, -total_ccd * ((1.0 - t_star) * w_j / w_tot));
+                                        }
+                                        if (w_vj > 0.0) {
+                                            add_ccd_atomic(vj, -total_ccd * (t_star * w_vj / w_tot));
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                        }
                     }
 
                     // 【早期枝切り】線分間最短距離の二乗判定（レジスタ演算のみで先に判定）
@@ -296,9 +537,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         if (edge_a_has_pin && edge_b_has_pin) {
                             continue;
                         }
-
-                        let p_j_old = v_j.position;
-                        let p_vj_old = v_vj.position;
 
                         if (edge_b_has_pin) {
                             // 相手エッジがピン -> 自エッジ側を変位

@@ -3,7 +3,10 @@
 Blenderの画面再描画要求およびアニメーション再生停止を一元的に提供する。
 """
 
-import bpy
+try:
+    import bpy
+except ImportError:
+    bpy = None
 
 
 def tag_redraw_view3d(context=None, *, extra_area_types=None):

@@ -1083,5 +1083,417 @@ mod tests {
         sim.clear_dynamic_pins();
         assert_eq!(sim.dynamic_pins.len(), 0);
     }
+
+    #[test]
+    fn test_boundary_ee_ccd_blocking() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 正中面 X=0 を挟んで対向する2枚の独立三角形パネル
+        // パネルA (X < 0): 辺 0-1 が X=-0.03 の開放境界エッジ
+        // パネルB (X > 0): 辺 3-4 が X=+0.03 の開放境界エッジ
+        let positions = vec![
+            [-0.03, 0.0, 0.0],  // 0
+            [-0.03, 0.1, 0.0],  // 1
+            [-0.10, 0.05, 0.0], // 2
+            [0.03, 0.0, 0.0],   // 3
+            [0.03, 0.1, 0.0],   // 4
+            [0.10, 0.05, 0.0],  // 5
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0],
+            [3, 4], [4, 5], [5, 3],
+        ];
+        let faces = vec![
+            [0, 1, 2],
+            [3, 4, 5],
+        ];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.01,    // thickness = 1cm (半径 5mm)
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_gravity(0.0, 0.0, 0.0); // 無重力
+
+        // 1 サブステップで相手を完全に突き抜ける大速度を設定 (+5.0 m/s と -5.0 m/s)
+        let velocities = vec![
+            [5.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+
+        // 1 ステップ実行 (substeps = 10)
+        sim.step(1.0 / 60.0, 10);
+
+        let verts = sim.read_vertices();
+        let x_a0 = verts[0].position[0];
+        let x_a1 = verts[1].position[0];
+        let x_b0 = verts[3].position[0];
+        let x_b1 = verts[4].position[0];
+
+        println!(
+            "[Test EE CCD] Final X - A0: {:.4}, A1: {:.4}, B0: {:.4}, B1: {:.4}",
+            x_a0, x_a1, x_b0, x_b1
+        );
+
+        // CCD により開放境界エッジ同士が裏返らず、X_A <= X_B を維持して押し留められていること
+        assert!(
+            x_a0 <= x_b0 + 1e-4 && x_a1 <= x_b1 + 1e-4,
+            "開放境界エッジが相手側へ貫通・裏返ってはならない (A0={:.4}, B0={:.4})",
+            x_a0, x_b0
+        );
+    }
+
+    #[test]
+    fn test_one_sided_boundary_ee_ccd_blocking() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 片側が開放境界エッジ（または1Dストランド）、もう片側が2面に挟まれた内部エッジの衝突
+        // エッジA (0-1): 開放境界エッジ (X = -0.03)
+        // エッジB (3-4): 三角形 2-3-4 と 3-4-5 に共有される内部エッジ (X = +0.03)
+        let positions = vec![
+            [-0.03, 0.0, 0.05],  // 0 (境界エッジ)
+            [-0.03, 0.1, 0.05],  // 1 (境界エッジ)
+            [-0.10, 0.05, 0.05], // 2 (パネルAの背面頂点)
+            [0.03, 0.0, 0.05],   // 3 (内部エッジ始点)
+            [0.03, 0.1, 0.05],   // 4 (内部エッジ終点)
+            [0.08, 0.05, 0.00],  // 5 (パネルBの下三角形頂点)
+            [0.08, 0.05, 0.10],  // 6 (パネルBの上三角形頂点)
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0], // パネルA (0-1 は開放境界)
+            [3, 4], [4, 5], [5, 3], // パネルB 三角形1
+            [3, 6], [6, 4],         // パネルB 三角形2 (3-4 を共有)
+        ];
+        let faces = vec![
+            [0, 1, 2],
+            [3, 4, 5],
+            [3, 6, 4], // 3-4 は2面で共有される内部エッジ
+        ];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.01, // thickness = 1cm
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        // 3-4 エッジ (gpu_edges 内) が開放境界ではないことを確認
+        let edge_34_idx = mesh.edges.iter().position(|e| (e.v0 == 3 && e.v1 == 4) || (e.v0 == 4 && e.v1 == 3)).unwrap();
+        let is_b_open = ((mesh.edge_boundary_bits[edge_34_idx >> 5] >> (edge_34_idx & 31)) & 1) != 0;
+        assert!(!is_b_open, "エッジ 3-4 は2面で共有される内部エッジでなければならない");
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        // 1 サブステップで相手を完全に突き抜ける大速度を設定 (+5.0 m/s と -5.0 m/s)
+        let velocities = vec![
+            [5.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+            [-5.0, 0.0, 0.0],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+
+        // 1 ステップ実行 (substeps = 10)
+        sim.step(1.0 / 60.0, 10);
+
+        let verts = sim.read_vertices();
+        let x_a0 = verts[0].position[0];
+        let x_a1 = verts[1].position[0];
+        let x_b0 = verts[3].position[0];
+        let x_b1 = verts[4].position[0];
+
+        println!(
+            "[Test One-Sided EE CCD] Final X - A0: {:.4}, A1: {:.4}, B0: {:.4}, B1: {:.4}",
+            x_a0, x_a1, x_b0, x_b1
+        );
+
+        // 片側開放境界フラグにより E-E CCD が発動し、内部エッジを突き抜けて裏返らないこと
+        assert!(
+            x_a0 <= x_b0 + 1e-4 && x_a1 <= x_b1 + 1e-4,
+            "開放境界エッジが内部エッジを突き抜けて裏返ってはならない (A0={:.4}, B0={:.4})",
+            x_a0, x_b0
+        );
+    }
+
+    #[test]
+    fn test_vt_ccd_moving_triangle_penetration_blocking() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 上から下（-Z方向）へ高速移動してくる三角形 (0, 1, 2) と、
+        // 下で静止している（あるいは上へ向かう）頂点 3
+        let positions = vec![
+            [-0.05, -0.05, 0.04], // 0
+            [0.05, -0.05, 0.04],  // 1
+            [0.0, 0.05, 0.04],   // 2
+            [0.0, 0.0, 0.00],    // 3 (ターゲット頂点)
+            [0.02, 0.0, 0.00],   // 4 (頂点3のダミーエッジ用)
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0], // 三角形
+            [3, 4],                 // 孤立回避エッジ
+        ];
+        let faces = vec![
+            [0, 1, 2],
+        ];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.01, // thickness = 1cm
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        // 三角形に下向き大速度 -4.0 m/s、頂点3に上向き速度 +2.0 m/s を設定
+        let velocities = vec![
+            [0.0, 0.0, -4.0],
+            [0.0, 0.0, -4.0],
+            [0.0, 0.0, -4.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+
+        // 1 ステップ実行 (substeps = 10)
+        sim.step(1.0 / 60.0, 10);
+
+        let verts = sim.read_vertices();
+        let z_tri = (verts[0].position[2] + verts[1].position[2] + verts[2].position[2]) / 3.0;
+        let z_pt3 = verts[3].position[2];
+
+        println!(
+            "[Test VT CCD] Final Z - Tri: {:.4}, Pt3: {:.4}",
+            z_tri, z_pt3
+        );
+
+        // V-T CCD により頂点3が三角形を突き抜けて上に突き抜けていないこと (Z_pt3 <= Z_tri)
+        assert!(
+            z_pt3 <= z_tri + 1e-4,
+            "頂点3が移動三角形を上方に突き抜けてはならない (Pt3={:.4}, Tri={:.4})",
+            z_pt3, z_tri
+        );
+    }
+
+    #[test]
+    fn test_seam_flap_closure_no_inversion() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // フード顔開口の最小モデル:
+        // 下端頂点 0 (左) と 3 (右) をアンカー固定し、
+        // 頂点 2 と 5 を上端縫合で引き寄せる2枚の対向三角形フラップ。
+        // 辺 1-2 (左リム自由縁) と 辺 4-5 (右リム自由縁) が正面から合掌する。
+        let positions = vec![
+            [-0.05, 0.0, 0.0],  // 0 (固定アンカー)
+            [-0.05, 0.1, 0.0],  // 1 (自由縁下)
+            [-0.05, 0.2, 0.0],  // 2 (縫合端)
+            [0.05, 0.0, 0.0],   // 3 (固定アンカー)
+            [0.05, 0.1, 0.0],   // 4 (自由縁下)
+            [0.05, 0.2, 0.0],   // 5 (縫合端)
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0],
+            [3, 4], [4, 5], [5, 3],
+        ];
+        let faces = vec![
+            [0, 1, 2],
+            [3, 4, 5],
+        ];
+        let sewing_pairs = vec![
+            [2u32, 5u32], // 上端縫合
+        ];
+        let inv_masses = vec![
+            0.0, 1.0, 1.0, // 0 固定
+            0.0, 1.0, 1.0, // 3 固定
+        ];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            Some(&inv_masses),
+            Some(&sewing_pairs),
+            None,
+            None,
+            0,
+            0.005,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0, 10);
+        }
+
+        let verts = sim.read_vertices();
+        let x1 = verts[1].position[0];
+        let x4 = verts[4].position[0];
+
+        println!("[Test Flap Closure] Mid Flap X - L: {:.4}, R: {:.4}", x1, x4);
+
+        // 自由縁リム中央が左右逆転（クロスオーバー）していないこと
+        assert!(
+            x1 <= x4 + 1e-4,
+            "合掌したフラップの自由縁が左右逆転してはならない (L={:.4}, R={:.4})",
+            x1, x4
+        );
+    }
+
+    #[test]
+    fn test_flat_seam_closure_no_stagnation() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 2枚の平面クアッドを X 方向に 0.05m 離して配置し、シーム辺 1-2 と 4-5 を縫合
+        let positions = vec![
+            [-0.05, 0.0, 0.0], // 0
+            [0.0, 0.0, 0.0],   // 1 (シーム)
+            [0.0, 0.1, 0.0],   // 2 (シーム)
+            [-0.05, 0.1, 0.0], // 3
+            [0.05, 0.0, 0.0],  // 4 (シーム)
+            [0.05, 0.1, 0.0],  // 5 (シーム)
+            [0.10, 0.1, 0.0],  // 6
+            [0.10, 0.0, 0.0],  // 7
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 3], [3, 0], [0, 2],
+            [4, 5], [5, 6], [6, 7], [7, 4], [4, 6],
+        ];
+        let faces = vec![
+            [0, 1, 2], [0, 2, 3],
+            [4, 5, 6], [4, 6, 7],
+        ];
+        let sewing_pairs = vec![
+            [1u32, 4u32],
+            [2u32, 5u32],
+        ];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            Some(&sewing_pairs),
+            None,
+            None,
+            0,
+            0.005,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        // 縫合収縮を実行 (30フレーム)
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0, 15);
+        }
+
+        let verts = sim.read_vertices();
+        let p1 = verts[1].position;
+        let p4 = verts[4].position;
+        let p2 = verts[2].position;
+        let p5 = verts[5].position;
+
+        let d14 = ((p1[0] - p4[0]).powi(2) + (p1[1] - p4[1]).powi(2) + (p1[2] - p4[2]).powi(2)).sqrt();
+        let d25 = ((p2[0] - p5[0]).powi(2) + (p2[1] - p5[1]).powi(2) + (p2[2] - p5[2]).powi(2)).sqrt();
+
+        println!("[Test Flat Seam Closure] Final Seam Distances: d(1,4)={:.5}, d(2,5)={:.5}", d14, d25);
+
+        // 展開レスト距離の誤設定による膠着がなく、1mm (0.001m) 未満まで完全に密着閉鎖すること
+        assert!(
+            d14 < 0.001,
+            "縫合ペア 1-4 が完全密着閉鎖しなければならない (実測={:.5})",
+            d14
+        );
+        assert!(
+            d25 < 0.001,
+            "縫合ペア 2-5 が完全密着閉鎖しなければならない (実測={:.5})",
+            d25
+        );
+        assert_eq!(sim.dynamic_pins.len(), 0);
+    }
 }
 

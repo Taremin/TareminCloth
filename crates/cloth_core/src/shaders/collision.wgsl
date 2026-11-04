@@ -323,8 +323,8 @@ fn intersect_segment_triangle(
     a: vec3<f32>, b: vec3<f32>, c: vec3<f32>
 ) -> vec4<f32> {
     let d = p_new - p_old;
-    let len_d = length(d);
-    if (len_d < EPSILON) {
+    let len_d_sq = dot(d, d);
+    if (len_d_sq < 1e-12) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -333,7 +333,8 @@ fn intersect_segment_triangle(
     let pvec = cross(d, e2);
     let det = dot(e1, pvec);
 
-    if (abs(det) < EPSILON) {
+    let tri_norm_sq = dot(e1, e1) * dot(e2, e2);
+    if (det * det <= tri_norm_sq * len_d_sq * 1e-10 || tri_norm_sq <= 1e-20) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 

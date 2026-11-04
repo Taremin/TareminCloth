@@ -879,7 +879,7 @@ def _build_rigid_angled_hood_panel(bm, x_sign: float) -> list[list[object]]:
         t_v = vi / (num_v_hood - 1)
         z_base = 1.040 + t_v * (1.185 - 1.040)
         y_face = -0.070 + 0.025 * (t_v ** 2)
-        y_back = 0.075 - 0.015 * t_v
+        y_back = 0.085 - 0.015 * t_v
 
         row = []
         for ui in range(num_u_hood):
@@ -933,13 +933,15 @@ def _setup_hood_drawstring(hood_obj, col, *, start_hood_vert: int) -> object:
 
     tail_count = 12
     p_start = channel_pts[0]
+    # 前身頃パネル (Y = -0.115m, 上端 Z >= 0.995m) の裏側へ潜り込むのを防ぐため、
+    # セグメント長 (~12mm) を維持したまま斜め前下方 (-Y, -Z) へ引き出して前身頃の表側を通す
     left_tail = [
-        p_start + np.array([-0.010 * (k / tail_count), -0.050 * (k / tail_count), -0.012 * k], dtype=np.float32)
+        p_start + np.array([-0.005 * (k / tail_count), -0.008 * k, -0.009 * k], dtype=np.float32)
         for k in range(tail_count, 0, -1)
     ]
     p_end = channel_pts[-1]
     right_tail = [
-        p_end + np.array([+0.010 * (k / tail_count), -0.050 * (k / tail_count), -0.012 * k], dtype=np.float32)
+        p_end + np.array([+0.005 * (k / tail_count), -0.008 * k, -0.009 * k], dtype=np.float32)
         for k in range(1, tail_count + 1)
     ]
 

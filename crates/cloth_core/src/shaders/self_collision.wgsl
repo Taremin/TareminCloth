@@ -146,8 +146,8 @@ fn intersect_segment_triangle(
     a: vec3<f32>, b: vec3<f32>, c: vec3<f32>
 ) -> vec4<f32> {
     let d = p_new - p_old;
-    let len_d = length(d);
-    if (len_d < EPSILON) {
+    let len_d_sq = dot(d, d);
+    if (len_d_sq < 1e-12) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -156,7 +156,9 @@ fn intersect_segment_triangle(
     let pvec = cross(d, e2);
     let det = dot(e1, pvec);
 
-    if (abs(det) < EPSILON) {
+    // det は体積次元 (m^3) であるため、スケール不変な無次元平行判定を行う
+    let tri_norm_sq = dot(e1, e1) * dot(e2, e2);
+    if (det * det <= tri_norm_sq * len_d_sq * 1e-10 || tri_norm_sq <= 1e-20) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -190,14 +192,14 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let e = dot(d2, d2);
     let f = dot(d2, r);
 
-    if (a <= EPSILON && e <= EPSILON) {
+    if (a <= 1e-12 && e <= 1e-12) {
         return vec2<f32>(0.0, 0.0);
     }
-    if (a <= EPSILON) {
+    if (a <= 1e-12) {
         return vec2<f32>(0.0, clamp(f / e, 0.0, 1.0));
     }
     let c = dot(d1, r);
-    if (e <= EPSILON) {
+    if (e <= 1e-12) {
         return vec2<f32>(clamp(-c / a, 0.0, 1.0), 0.0);
     }
 
@@ -205,12 +207,20 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     let denom = a * e - b * b;
 
     var s = 0.0;
-    if (denom > EPSILON) {
+    // denom は m^4 次元であるため、a * e に対する相対閾値で平行判定を行う
+    if (denom > a * e * 1e-7) {
         s = clamp((b * f - c * e) / denom, 0.0, 1.0);
     } else {
         s = 0.0;
     }
-    let t = clamp((b * s + f) / e, 0.0, 1.0);
+    var t = (b * s + f) / e;
+    if (t < 0.0) {
+        t = 0.0;
+        s = clamp(-c / a, 0.0, 1.0);
+    } else if (t > 1.0) {
+        t = 1.0;
+        s = clamp((b - c) / a, 0.0, 1.0);
+    }
     return vec2<f32>(s, t);
 }
 
@@ -475,8 +485,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             let tri_move = ((p_j - p_j_old) + (p_v0 - p_v0_old) + (p_v1 - p_v1_old)) / 3.0;
                                             let tri_has_pin = (v_j.inv_mass <= 0.0) || (v_v0.inv_mass <= 0.0) || (v_v1.inv_mass <= 0.0);
 
-                                            // 相手の移動を考慮した相対始点（トンネリング検知用）
-                                            let rel_old_i = x_old_i - tri_move;
+                                            // 終点三角形 (p_j, p_v0, p_v1) 静止系における時刻 tau=0 の相対始点: P_i(0) + (T_new - T_old)
+                                            let rel_old_i = x_old_i + tri_move;
 
                                             // 【早期枝切り 2-A】V-T 掃引 AABB 判定 (Sweep AABB Early Exit)
                                             // 点 i の相対移動軌道 [rel_old_i, p_i] の AABB と三角形 (p_j, p_v0, p_v1) の AABB を比較。
@@ -503,25 +513,63 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                             // 相対移動量が極小（静止または微小変位）の場合はトンネリングが発生し得ないため、
                                             // 重厚な Möller-Trumbore 判定をスキップして直接 B の幾何反発へ直行する。
                                             var ccd_hit = vec4<f32>(0.0, 1.0, 0.0, 0.0);
-                                            if (move_sq > 1e-8) {
+                                            if (move_sq > 1e-12) {
                                                 ccd_hit = intersect_segment_triangle(rel_old_i, p_i, p_j, p_v0, p_v1);
                                             }
 
                                             if (ccd_hit.x > 0.5) {
                                                 let t = ccd_hit.y;
-                                                var push_disp = vec3<f32>(0.0);
-                                                if (tri_has_pin) {
-                                                    push_disp = tri_move * (1.0 - t);
-                                                }
+                                                let hit_pt = rel_old_i + t * move_vec;
+                                                let tri_cross_ccd = cross(p_v0 - p_j, p_v1 - p_j);
+                                                let tri_len_ccd = length(tri_cross_ccd);
+                                                let tri_n_ccd = select(vec3<f32>(0.0, 1.0, 0.0), tri_cross_ccd / tri_len_ccd, tri_len_ccd > 1e-12);
+                                                let h_old_raw = dot(rel_old_i - p_j, tri_n_ccd);
+                                                let side_sign = select(dot(-move_vec, tri_n_ccd), h_old_raw, abs(h_old_raw) > 1e-6);
+                                                let n_side = select(-tri_n_ccd, tri_n_ccd, side_sign >= 0.0);
+                                                let h_old = max(dot(rel_old_i - hit_pt, n_side), 0.0);
+                                                let h_safe = max(h_old, effective_thick * 0.25);
+                                                let p_safe = hit_pt + n_side * h_safe;
+                                                let total_ccd = p_safe - p_i;
+                                                let pen_ccd_soft = max(0.0, effective_thick - h_safe);
 
-                                                // 面の手前への安全クリアランス
-                                                let move_len = sqrt(move_sq);
-                                                let margin_t = min(effective_thick / max(move_len, 1e-4), 0.3);
-                                                let t_safe = max(0.0, t - margin_t);
-                                                let p_safe = rel_old_i + t_safe * move_vec;
-                                                
-                                                let ccd_disp = (p_safe - p_i) + push_disp;
-                                                add_ccd_atomic(index, ccd_disp);
+                                                if (tri_has_pin) {
+                                                    if (!is_pinned_i) {
+                                                        add_ccd_atomic(index, total_ccd + n_side * pen_ccd_soft);
+                                                    }
+                                                } else if (is_pinned_i) {
+                                                    let bary_ccd = vec3<f32>(clamp(1.0 - ccd_hit.z - ccd_hit.w, 0.0, 1.0), clamp(ccd_hit.z, 0.0, 1.0), clamp(ccd_hit.w, 0.0, 1.0));
+                                                    let w_j = v_j.inv_mass;
+                                                    let w_v0 = v_v0.inv_mass;
+                                                    let w_v1 = v_v1.inv_mass;
+                                                    let w_tri = bary_ccd.x * bary_ccd.x * w_j + bary_ccd.y * bary_ccd.y * w_v0 + bary_ccd.z * bary_ccd.z * w_v1;
+                                                    if (w_tri > EPSILON) {
+                                                        let full_ccd = total_ccd + n_side * pen_ccd_soft;
+                                                        if (w_j > 0.0) { add_ccd_atomic(j, -full_ccd * (bary_ccd.x * w_j / w_tri)); }
+                                                        if (w_v0 > 0.0) { add_ccd_atomic(v0, -full_ccd * (bary_ccd.y * w_v0 / w_tri)); }
+                                                        if (w_v1 > 0.0) { add_ccd_atomic(v1, -full_ccd * (bary_ccd.z * w_v1 / w_tri)); }
+                                                    }
+                                                } else {
+                                                    let bary_ccd = vec3<f32>(clamp(1.0 - ccd_hit.z - ccd_hit.w, 0.0, 1.0), clamp(ccd_hit.z, 0.0, 1.0), clamp(ccd_hit.w, 0.0, 1.0));
+                                                    let w_i = v_i.inv_mass;
+                                                    let w_j = v_j.inv_mass;
+                                                    let w_v0 = v_v0.inv_mass;
+                                                    let w_v1 = v_v1.inv_mass;
+                                                    let w_tri = bary_ccd.x * bary_ccd.x * w_j + bary_ccd.y * bary_ccd.y * w_v0 + bary_ccd.z * bary_ccd.z * w_v1;
+                                                    let w_tot = w_i + w_tri;
+                                                    if (w_tot > EPSILON) {
+                                                        add_ccd_atomic(index, total_ccd * (w_i / w_tot));
+                                                        if (w_j > 0.0) { add_ccd_atomic(j, -total_ccd * (bary_ccd.x * w_j / w_tot)); }
+                                                        if (w_v0 > 0.0) { add_ccd_atomic(v0, -total_ccd * (bary_ccd.y * w_v0 / w_tot)); }
+                                                        if (w_v1 > 0.0) { add_ccd_atomic(v1, -total_ccd * (bary_ccd.z * w_v1 / w_tot)); }
+                                                        if (pen_ccd_soft > EPSILON) {
+                                                            let total_pen_ccd = n_side * (pen_ccd_soft * 0.6);
+                                                            add_disp_atomic(index, total_pen_ccd * (w_i / w_tot));
+                                                            if (w_j > 0.0) { add_disp_atomic(j, -total_pen_ccd * (bary_ccd.x * w_j / w_tot)); }
+                                                            if (w_v0 > 0.0) { add_disp_atomic(v0, -total_pen_ccd * (bary_ccd.y * w_v0 / w_tot)); }
+                                                            if (w_v1 > 0.0) { add_disp_atomic(v1, -total_pen_ccd * (bary_ccd.z * w_v1 / w_tot)); }
+                                                        }
+                                                    }
+                                                }
                                             } else {
                                                 // B) 最近傍点幾何反発（重心座標による作用反作用の対称分配）
                                                 let res_vt = closest_point_on_triangle_bary(p_i, p_j, p_v0, p_v1);

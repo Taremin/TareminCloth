@@ -81,6 +81,7 @@ pub struct SimulationResources {
     pub two_hop_offsets_buffer: wgpu::Buffer,
     pub two_hop_indices_buffer: wgpu::Buffer,
     pub two_hop_rest_lengths_buffer: wgpu::Buffer,
+    pub edge_boundary_bits_buffer: wgpu::Buffer,
     pub island_ids_buffer: wgpu::Buffer,
     pub compute_normals_bind_group: wgpu::BindGroup,
     pub predict_bind_group: wgpu::BindGroup,
@@ -883,7 +884,8 @@ pub fn build_simulation_resources(
         .max(edge_based_size)
         .max(0.01);
     let hash_capacity = num_total_particles;
-    let table_size = (hash_capacity * 4).next_power_of_two().max(1024);
+    // 2階層 Blelloch Scan (256 x 256) の上限である 65536 バケット以下にクランプする
+    let table_size = (hash_capacity * 4).next_power_of_two().clamp(1024, 65536);
     let spatial_hash = GpuSpatialHash::new(context, &shared.hash_bgl, &vertex_buffer, hash_capacity, cell_size, table_size);
 
     let self_col_params = SelfCollisionParams {
@@ -1006,6 +1008,18 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
+    let dummy_u32 = [0u32];
+    let edge_boundary_bits_contents: &[u8] = if mesh.edge_boundary_bits.is_empty() {
+        bytemuck::cast_slice(&dummy_u32)
+    } else {
+        bytemuck::cast_slice(&mesh.edge_boundary_bits)
+    };
+    let edge_boundary_bits_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Edge Boundary Bits Buffer"),
+        contents: edge_boundary_bits_contents,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
     let dummy_star_pair = [GpuStarPair { v0: 0, v1: 0 }];
     let star_indices_contents: &[u8] = if mesh.star_indices.is_empty() {
         bytemuck::cast_slice(&dummy_star_pair)
@@ -1042,7 +1056,8 @@ pub fn build_simulation_resources(
     });
 
     let num_edges = mesh.edges.len() as u32;
-    let edge_table_size = (num_edges * 4).next_power_of_two().max(1024);
+    // self_collision_ee_direct.wgsl は params.table_size を参照するため、頂点ハッシュと同一の table_size に統一する
+    let edge_table_size = table_size;
     let edge_spatial_hash = GpuEdgeSpatialHash::new(
         context,
         &shared.edge_hash_bgl,
@@ -1253,6 +1268,10 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 9,
                 resource: two_hop_rest_lengths_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: edge_boundary_bits_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1659,6 +1678,7 @@ pub fn build_simulation_resources(
         two_hop_offsets_buffer,
         two_hop_indices_buffer,
         two_hop_rest_lengths_buffer,
+        edge_boundary_bits_buffer,
         island_ids_buffer,
         compute_normals_bind_group,
         predict_bind_group,

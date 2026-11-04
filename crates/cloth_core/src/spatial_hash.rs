@@ -41,6 +41,7 @@ impl GpuSpatialHash {
         table_size: u32,
     ) -> Self {
         let device = &context.device;
+        let table_size = table_size.clamp(256, 65536);
         let num_blocks = table_size.div_ceil(256);
 
         let cell_counts_init = vec![0u32; table_size as usize];
@@ -252,6 +253,7 @@ impl GpuEdgeSpatialHash {
         table_size: u32,
     ) -> Self {
         let device = &context.device;
+        let table_size = table_size.clamp(256, 65536);
         let num_blocks = table_size.div_ceil(256);
 
         let cell_counts_init = vec![0u32; table_size as usize];
