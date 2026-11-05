@@ -58,6 +58,14 @@ class Affine2D:
         inv_sy = 1.0 / self.sy if abs(self.sy) > 1e-9 else 0.0
         return (rx * inv_sx, ry * inv_sy)
 
+    def transform_point(self, point: Vec2) -> Vec2:
+        """単一の2D点にアフィン変換を適用する (apply の別名)."""
+        return self.apply(point)
+
+    def inverse_point(self, point: Vec2) -> Vec2:
+        """逆アフィン変換を単一の点に適用する (inverse_apply の別名)."""
+        return self.inverse_apply(point)
+
 
 def compute_bounding_box(points: Sequence[Vec2]) -> tuple[Vec2, Vec2]:
     """点列から軸平行バウンディングボックス ((min_x, min_y), (max_x, max_y)) を返す."""
