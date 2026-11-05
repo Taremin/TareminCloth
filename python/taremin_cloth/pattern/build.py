@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Optional
 import bpy
 
-from ..simulators import clear_simulators
+from ..engine import clear_simulators
 from .build_types import GarmentMeshGeometry, build_garment_mesh_geometry
 from .document import Document
 
