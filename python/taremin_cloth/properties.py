@@ -84,6 +84,124 @@ class TareminClothElasticGroup(PropertyGroup):
         self.edge_indices_str = ",".join(str(i) for i in indices)
 
 
+class TareminClothStringPart(PropertyGroup):
+    """紐（Curve）オブジェクトと布メッシュの連動・絞りパーツ設定"""
+    name: StringProperty(
+        name="Name",
+        description="Name of the drawstring or strap part",
+        default="Drawstring",
+    )
+    enabled: BoolProperty(
+        name="Enabled",
+        description="Enable simulation and cinch control for this string part",
+        default=True,
+    )
+    curve_object: PointerProperty(
+        name="Curve Object",
+        type=bpy.types.Object,
+        description="Target Curve object representing the string",
+        poll=lambda self, obj: obj and obj.type == 'CURVE',
+    )
+    guide_vert_indices_str: StringProperty(
+        name="Guide Vertex Indices",
+        description="Ordered cloth border vertex indices defining the tunnel channel",
+        default="",
+    )
+    seam_bridge_pairs_str: StringProperty(
+        name="Seam Bridge Pairs",
+        description="Vertex pairs bridging across seam gaps (v0,v1;v2,v3)",
+        default="",
+    )
+    tail_vert_count_left: IntProperty(
+        name="Left Tail Vertices",
+        description="Number of string vertices extending outside the channel on the left end",
+        default=8,
+        min=0,
+        max=64,
+    )
+    tail_vert_count_right: IntProperty(
+        name="Right Tail Vertices",
+        description="Number of string vertices extending outside the channel on the right end",
+        default=8,
+        min=0,
+        max=64,
+    )
+    eyelet_stride: IntProperty(
+        name="Eyelet Stride",
+        description="Connect eyelet every N guide vertices to allow wrinkles and gathers to buckle naturally",
+        default=3,
+        min=1,
+        max=16,
+    )
+    pull_length: FloatProperty(
+        name="Pull Length (Cinch)",
+        description="Length to cinch/shorten the channel section and transfer to tails (m)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        unit='LENGTH',
+    )
+    pull_offset_left: FloatProperty(
+        name="Left Pull Offset",
+        description="Additional length offset transferred specifically to the left tail (m)",
+        default=0.0,
+        min=-0.5,
+        max=0.5,
+        unit='LENGTH',
+    )
+    pull_offset_right: FloatProperty(
+        name="Right Pull Offset",
+        description="Additional length offset transferred specifically to the right tail (m)",
+        default=0.0,
+        min=-0.5,
+        max=0.5,
+        unit='LENGTH',
+    )
+    linear_density: FloatProperty(
+        name="Linear Density",
+        description="Mass per unit length of the string (kg/m)",
+        default=0.015,
+        min=0.001,
+        max=1.0,
+    )
+    radius: FloatProperty(
+        name="String Radius",
+        description="Collision radius and thickness of the string (m)",
+        default=0.003,
+        min=0.0005,
+        max=0.05,
+        unit='LENGTH',
+    )
+
+    def get_guide_vert_indices(self) -> list[int]:
+        """登録されたガイド頂点インデックスのリストを取得する"""
+        if not self.guide_vert_indices_str:
+            return []
+        try:
+            return [int(x.strip()) for x in self.guide_vert_indices_str.split(",") if x.strip().isdigit()]
+        except ValueError:
+            return []
+
+    def set_guide_vert_indices(self, indices: list[int]) -> None:
+        """ガイド頂点インデックスのリストを文字列として保存する"""
+        self.guide_vert_indices_str = ",".join(str(i) for i in indices)
+
+    def get_seam_bridge_pairs(self) -> set[tuple[int, int]]:
+        """縫合ギャップ跨ぎ頂点ペアの集合を取得する"""
+        if not self.seam_bridge_pairs_str:
+            return set()
+        pairs = set()
+        for item in self.seam_bridge_pairs_str.split(";"):
+            parts = [int(x.strip()) for x in item.split(",") if x.strip().isdigit()]
+            if len(parts) == 2:
+                pairs.add((min(parts[0], parts[1]), max(parts[0], parts[1])))
+        return pairs
+
+    def set_seam_bridge_pairs(self, pairs: set[tuple[int, int]]) -> None:
+        """縫合ギャップ跨ぎ頂点ペアの集合を文字列として保存する"""
+        self.seam_bridge_pairs_str = ";".join(f"{p[0]},{p[1]}" for p in sorted(pairs))
+
+
 def _on_self_collision_purpose_updated(self, context):
     """自己衝突の用途プリセットが変更された時にパラメータを自動更新する"""
     try:
@@ -92,7 +210,7 @@ def _on_self_collision_purpose_updated(self, context):
         obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
         if obj:
             from .utils.self_collision_fit import fit_self_collision_for_object
-            fit_self_collision_for_object(obj, self, self.self_collision_purpose)
+            fit_self_collision_for_object(obj, settings=self, purpose=self.self_collision_purpose)
     except Exception:
         pass
 
@@ -104,7 +222,7 @@ def _on_enable_self_collision_updated(self, context):
             obj = getattr(self, "id_data", None) or getattr(context, "active_object", None)
             if obj:
                 from .utils.self_collision_fit import fit_self_collision_for_object
-                fit_self_collision_for_object(obj, self, self.self_collision_purpose)
+                fit_self_collision_for_object(obj, settings=self, purpose=self.self_collision_purpose)
     except Exception:
         pass
 
@@ -146,6 +264,18 @@ class TareminClothBrushSettings(PropertyGroup):
             ('CONSTANT', "Constant", "Constant weight inside the brush"),
         ],
         default='SPHERE',
+    )
+    use_active_region: BoolProperty(
+        name="Active-Region Sculpt",
+        description="Freeze vertices far outside brush radius to achieve high FPS during sculpting",
+        default=False,
+    )
+    active_region_scale: FloatProperty(
+        name="Active Region Scale",
+        description="Multiplier for brush radius defining active simulation area",
+        default=2.5,
+        min=1.2,
+        max=10.0,
     )
 
 
@@ -748,6 +878,14 @@ class TareminClothObjectSettings(PropertyGroup):
         name="Active Group Index",
         default=0,
     )
+    # 紐（Drawstring）パーツ設定
+    string_parts: CollectionProperty(
+        type=TareminClothStringPart,
+    )
+    active_string_part_index: IntProperty(
+        name="Active String Part Index",
+        default=0,
+    )
     show_elastic_overlay: BoolProperty(
         name="Show Elastic Lines",
         description="Show elastic line tension colors in 3D viewport",
@@ -1282,6 +1420,12 @@ class TareminClothColliderSettings(PropertyGroup):
         default=True,
         update=_on_collider_prop_updated,
     )
+    close_open_boundaries: BoolProperty(
+        name="Close Open Boundaries",
+        description="Automatically cap open boundary holes (such as neck or limb openings) when baking SDF or extracting mesh colliders to prevent sign inversion",
+        default=True,
+        update=_on_collider_prop_updated,
+    )
     enable_cluster_culling: BoolProperty(
         name="Linear BVH Culling",
         description="Cluster BVH culling for fast collision against dense meshes",
@@ -1419,6 +1563,7 @@ class TareminPatternPieceSettings(PropertyGroup):
 def register():
     for cls in (
         TareminClothElasticGroup,
+        TareminClothStringPart,
         TareminClothBrushSettings,
         TareminClothObjectSettings,
         TareminClothColliderAnimSettings,
@@ -1479,6 +1624,7 @@ def unregister():
         del bpy.types.Object.taremin_cloth_collider
     for cls in (
         TareminPatternPieceSettings,
+        TareminClothStringPart,
         TareminWrinkleCurveSettings,
         TareminClothColliderSettings,
         TareminClothColliderAnimSettings,

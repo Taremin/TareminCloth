@@ -20,7 +20,7 @@ def main() -> int:
         tol = float(sys.argv[sys.argv.index("--tolerance-mm") + 1]) / 1000.0
     m = load_scene_manifest(sys.argv[1])
     rep = audit_seams(m["positions"], m["faces"], m["sewing_springs"],
-                      m.get("seam_groups"))
+                      seam_groups=m.get("seam_groups"))
     print(f"pairs={rep['num_pairs']} chains={rep['num_chains']} "
           f"gap_max={rep['gap_max_m']*1000:.1f}mm gap_mean={rep['gap_mean_m']*1000:.1f}mm "
           f"orphans={len(rep['orphan_pairs'])}")

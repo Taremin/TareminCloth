@@ -8,6 +8,8 @@ import math
 
 import numpy as np
 
+from ..utils.args_guard import allow_positional
+
 BRUSH_RADIUS_MIN = 0.005
 BRUSH_RADIUS_MAX = 0.5
 BRUSH_STRENGTH_MIN = 0.01
@@ -52,6 +54,7 @@ def _clamp01_finite(v):
     return max(0.0, min(1.0, f))
 
 
+@allow_positional
 def falloff_weights(distances, radius, shape='SMOOTH'):
     """距離から減衰重み (0..1) を求める。中心=1、半径外=0"""
     if _RUST_MATH and shape in _FALLOFF_IDS:
@@ -78,6 +81,7 @@ def falloff_weights(distances, radius, shape='SMOOTH'):
     return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
 
 
+@allow_positional
 def verts_in_brush(vert_positions, brush_center, radius, shape='SMOOTH'):
     """ブラシ球内の頂点を列挙する。戻り値は (indices, weights)"""
     pos = np.asarray(vert_positions, dtype=np.float32)
@@ -101,6 +105,7 @@ def verts_in_brush(vert_positions, brush_center, radius, shape='SMOOTH'):
     return found, falloff_weights(dists[mask], radius, shape)
 
 
+@allow_positional
 def depth_keep_mask(world_points, origin, direction, hit_t, eps):
     """レイ命中面より奥の点を除外するマスク。レイ外れ (hit_t=None) 時は全て残す"""
     if hit_t is None:
@@ -123,6 +128,7 @@ def depth_keep_mask(world_points, origin, direction, hit_t, eps):
     return t <= float(hit_t) + float(eps)
 
 
+@allow_positional
 def select_grab_pins(found_indices, falloff_weights_, threshold=0.01):
     """グラブ対象の選別: 閾値未満の裾野はピン留めせず物理に任せる。
 
@@ -150,6 +156,7 @@ def select_grab_pins(found_indices, falloff_weights_, threshold=0.01):
     return out_idx, out_w
 
 
+@allow_positional
 def radial_adjust(start_value, dx_px, min_value, max_value, px_scale=200.0):
     """ラジアル操作の相対式: 開始値×(1+dx/px_scale)を範囲へクリップする"""
     if _RUST_MATH and float(px_scale) == 200.0:
@@ -208,6 +215,7 @@ def build_adjacency_csr(num_vertices, edges):
     return (offsets.astype(np.uint32), indices.astype(np.uint32))
 
 
+@allow_positional
 def laplacian_smooth_targets(positions, adj_offsets, adj_indices,
                              brush_indices, brush_weights, strength, exclude=None):
     """1-ring平均への減衰ブレンド目標を計算する (Blender非依存)。
@@ -282,6 +290,7 @@ def laplacian_smooth_targets(positions, adj_offsets, adj_indices,
 TENSION_EXPAND = 0.05
 
 
+@allow_positional
 def radial_expand_targets(positions, center, brush_indices, brush_weights, strength,
                           expand=TENSION_EXPAND):
     """ブラシ中心からの放射方向へ目標をわずかに拡張する (張力アシスト)。
@@ -340,6 +349,7 @@ def radial_expand_targets(positions, center, brush_indices, brush_weights, stren
     return out
 
 
+@allow_positional
 def grab_drag_targets(initial_positions, delta, weights, strength):
     """範囲グラブのドラッグ目標: target = init + delta * (w * strength)。
 
@@ -372,6 +382,7 @@ def grab_drag_targets(initial_positions, delta, weights, strength):
     return (init + d[None, :] * k[:, None]).astype(np.float32)
 
 
+@allow_positional
 def ray_plane_hit(origin, direction, plane_point, plane_normal):
     """レイと平面の交点。平行時は None を返す。
 

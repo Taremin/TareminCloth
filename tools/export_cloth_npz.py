@@ -17,7 +17,7 @@ name = sys.argv[sys.argv.index("--") + 3]
 
 cloth_obj = bpy.data.objects.get(name)
 settings = cloth_obj.taremin_cloth
-data = extract_cloth_mesh_data(cloth_obj, settings)
+data = extract_cloth_mesh_data(cloth_obj, settings=settings)
 np.savez(out_path,
          positions=np.asarray(data.positions, dtype=np.float32),
          edges=np.asarray(data.normal_edges, dtype=np.uint32),

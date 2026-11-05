@@ -124,6 +124,7 @@ pub struct GpuClothSimulator {
     // 動的ピン用
     pub(crate) dynamic_pins: HashMap<u32, GpuPinConstraint>,
     pub(crate) pin_buffer: wgpu::Buffer,
+    pub(crate) pin_buffer_capacity: usize,
     pub(crate) pin_params_buffer: wgpu::Buffer,
     pub(crate) pin_bind_group: wgpu::BindGroup,
 
@@ -249,6 +250,11 @@ pub struct GpuClothSimulator {
     pub solver_iterations: u32,
     pub gravity: [f32; 3],
     pub damping: f32,
+    pub air_damping: f32,
+    pub tension_damping: f32,
+    pub compression_damping: f32,
+    pub shear_damping: f32,
+    pub bending_damping: f32,
     pub enable_self_collision: bool,
     pub self_collision_relief_factor: f32,
     pub self_collision_max_displacement_ratio: f32,
@@ -475,6 +481,7 @@ impl GpuClothSimulator {
             buffered_frame_count: 0,
             max_buffered_frames: res.max_buffered_frames,
             dynamic_pins: HashMap::new(),
+            pin_buffer_capacity: (res.pin_buffer.size() as usize) / std::mem::size_of::<GpuPinConstraint>(),
             pin_buffer: res.pin_buffer,
             pin_params_buffer: res.pin_params_buffer,
             pin_bind_group: res.pin_bind_group,
@@ -577,6 +584,11 @@ impl GpuClothSimulator {
             solver_iterations: 2,
             gravity: [0.0, 0.0, -9.81],
             damping: 1.0,
+            air_damping: 1.0,
+            tension_damping: 0.0,
+            compression_damping: 0.0,
+            shear_damping: 0.0,
+            bending_damping: 0.0,
             enable_self_collision: true,
             self_collision_relief_factor: res.self_collision_relief_factor,
             self_collision_max_displacement_ratio: res.self_collision_max_displacement_ratio,
@@ -1317,12 +1329,22 @@ impl GpuClothSimulator {
     }
 
     /// 大域空気減衰率（Air Damping / Velocity Damping）を設定する
-    pub fn set_damping(&mut self, damping: f32) {
-
-        self.damping = damping.max(0.0);
+    /// 空気減衰と4種内部減衰から実効減衰率 (self.damping) を決定論的に再計算する
+    fn recompute_effective_damping(&mut self) {
+        let internal_damp = (self.tension_damping
+            + self.compression_damping
+            + self.shear_damping
+            + self.bending_damping)
+            * 0.05;
+        self.damping = (self.air_damping + internal_damp).max(0.0);
     }
 
-    /// 減衰4種（引張・圧縮・せん断・曲げ）を反映して減衰率を設定する
+    pub fn set_damping(&mut self, damping: f32) {
+        self.air_damping = damping.max(0.0);
+        self.recompute_effective_damping();
+    }
+
+    /// 減衰4種（引張・圧縮・せん断・曲げ）を反映して減衰率を設定する（冪等）
     pub fn set_damping_all(
         &mut self,
         tension_damp: f32,
@@ -1330,8 +1352,11 @@ impl GpuClothSimulator {
         shear_damp: f32,
         bending_damp: f32,
     ) {
-        let internal_damp = (tension_damp + compression_damp + shear_damp + bending_damp) * 0.05;
-        self.damping = (self.damping + internal_damp).max(0.0);
+        self.tension_damping = tension_damp.max(0.0);
+        self.compression_damping = compression_damp.max(0.0);
+        self.shear_damping = shear_damp.max(0.0);
+        self.bending_damping = bending_damp.max(0.0);
+        self.recompute_effective_damping();
     }
 
     /// 指定された元エッジインデックス群に対して自然長スケール（倍率）を設定し、GPUバッファに反映する
@@ -1650,6 +1675,11 @@ impl GpuClothSimulator {
                 row[8..12].copy_from_slice(&b.uvw_scale);
                 row[12..16].copy_from_slice(&b.uvw_offset);
                 row[16..20].copy_from_slice(&b.params);
+                // ランタイム最適化用の外接球キャッシュ成分を静的メタデータとして0クリア
+                row[3] = 0.0;
+                row[7] = 0.0;
+                row[11] = 0.0;
+                row[15] = 0.0;
                 row
             })
             .collect()
@@ -1704,6 +1734,54 @@ impl GpuClothSimulator {
                 0,
                 bytemuck::cast_slice(&self.bone_transforms),
             );
+
+            // ボーン外接球のワールド空間中心と半径を計算し、bone_infosの未使用.wスロットに格納
+            if !self.bone_infos.is_empty() {
+                let n = self.bone_infos.len().min(self.bone_transforms.len());
+                for b in 0..n {
+                    let info = &mut self.bone_infos[b];
+                    let trans = &self.bone_transforms[b];
+
+                    let min_x = info.aabb_min[0];
+                    let min_y = info.aabb_min[1];
+                    let min_z = info.aabb_min[2];
+                    let max_x = info.aabb_max[0];
+                    let max_y = info.aabb_max[1];
+                    let max_z = info.aabb_max[2];
+
+                    let c_local = [
+                        (min_x + max_x) * 0.5,
+                        (min_y + max_y) * 0.5,
+                        (min_z + max_z) * 0.5,
+                    ];
+                    let r_local = 0.5 * ((max_x - min_x).powi(2) + (max_y - min_y).powi(2) + (max_z - min_z).powi(2)).sqrt();
+
+                    let m = trans.world_matrix;
+                    let c_world = [
+                        m[0][0] * c_local[0] + m[1][0] * c_local[1] + m[2][0] * c_local[2] + m[3][0],
+                        m[0][1] * c_local[0] + m[1][1] * c_local[1] + m[2][1] * c_local[2] + m[3][1],
+                        m[0][2] * c_local[0] + m[1][2] * c_local[1] + m[2][2] * c_local[2] + m[3][2],
+                    ];
+
+                    let s_x = (m[0][0].powi(2) + m[0][1].powi(2) + m[0][2].powi(2)).sqrt();
+                    let s_y = (m[1][0].powi(2) + m[1][1].powi(2) + m[1][2].powi(2)).sqrt();
+                    let s_z = (m[2][0].powi(2) + m[2][1].powi(2) + m[2][2].powi(2)).sqrt();
+                    let max_scale = s_x.max(s_y).max(s_z);
+
+                    let r_world = r_local * max_scale + 0.1; // 10cmマージン
+
+                    info.aabb_min[3] = c_world[0];
+                    info.aabb_max[3] = c_world[1];
+                    info.uvw_scale[3] = c_world[2];
+                    info.uvw_offset[3] = r_world;
+                }
+
+                self.context.queue.write_buffer(
+                    &self.bone_info_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.bone_infos),
+                );
+            }
 
             if need_recreate {
                 self.recreate_collider_bind_group();
@@ -2272,6 +2350,34 @@ impl GpuClothSimulator {
 
         let num_mesh_triangles = self.mesh_triangles.len() as u32;
         if num_mesh_triangles > 0 {
+            // クラスタカリング効率向上のため、三角形重心のMorton Code順に空間ソート
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for t in &self.mesh_triangles {
+                let c = [
+                    (t.p0[0] + t.p1[0] + t.p2[0]) / 3.0,
+                    (t.p0[1] + t.p1[1] + t.p2[1]) / 3.0,
+                    (t.p0[2] + t.p1[2] + t.p2[2]) / 3.0,
+                ];
+                for ax in 0..3 {
+                    bmin[ax] = bmin[ax].min(c[ax]);
+                    bmax[ax] = bmax[ax].max(c[ax]);
+                }
+            }
+            let inv_ext = [
+                1.0 / (bmax[0] - bmin[0]).max(1e-5),
+                1.0 / (bmax[1] - bmin[1]).max(1e-5),
+                1.0 / (bmax[2] - bmin[2]).max(1e-5),
+            ];
+            self.mesh_triangles.sort_by_cached_key(|t| {
+                let c = [
+                    (t.p0[0] + t.p1[0] + t.p2[0]) / 3.0,
+                    (t.p0[1] + t.p1[1] + t.p2[1]) / 3.0,
+                    (t.p0[2] + t.p1[2] + t.p2[2]) / 3.0,
+                ];
+                crate::mesh::morton_code_3d(c, bmin, inv_ext)
+            });
+
             self.context.queue.write_buffer(
                 &self.mesh_triangles_buffer,
                 0,
@@ -2444,6 +2550,24 @@ impl GpuClothSimulator {
         }
     }
 
+    /// 複数の動的ピンを一括解除する (GPU転送・upload_pinsは末尾で1回のみ実行)。
+    pub fn release_pins_batch(&mut self, indices: &[u32]) {
+        let mut removed_any = false;
+        for &vertex_idx in indices {
+            if self.dynamic_pins.remove(&vertex_idx).is_some() {
+                removed_any = true;
+                if (vertex_idx as usize) < self.original_inv_masses.len() {
+                    let orig_m = self.original_inv_masses[vertex_idx as usize];
+                    let offset = (vertex_idx as usize * std::mem::size_of::<crate::mesh::GpuVertex>() + 12) as u64;
+                    self.context.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::bytes_of(&orig_m));
+                }
+            }
+        }
+        if removed_any {
+            self.upload_pins();
+        }
+    }
+
     /// すべての動的ピンを解除する
     pub fn clear_dynamic_pins(&mut self) {
         for &v_idx in self.dynamic_pins.keys() {
@@ -2485,20 +2609,61 @@ impl GpuClothSimulator {
         self.original_inv_masses.clone()
     }
 
-    pub(crate) fn upload_pins(&self) {
+    fn rebind_pins(&mut self) {
+        self.pin_bind_group = self.context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TareminCloth Pin Bind Group (Rebound)"),
+            layout: &self.shared.pin_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.pin_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.pin_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+    }
+
+    pub(crate) fn upload_pins(&mut self) {
         let pin_vec: Vec<GpuPinConstraint> = self.dynamic_pins.values().copied().collect();
         let num_pins = pin_vec.len() as u32;
 
-        if num_pins > 0 {
+        if num_pins as usize > self.pin_buffer_capacity {
+            let new_capacity = (num_pins as usize).next_power_of_two().max(8192);
+            let pin_buffer_size = (new_capacity * std::mem::size_of::<GpuPinConstraint>()) as u64;
+            self.pin_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TareminCloth Pin Buffer (Resized)"),
+                size: pin_buffer_size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.pin_buffer_capacity = new_capacity;
+            self.rebind_pins();
+        }
+
+        let write_count = (num_pins as usize).min(self.pin_buffer_capacity);
+        if write_count > 0 {
             self.context.queue.write_buffer(
                 &self.pin_buffer,
                 0,
-                bytemuck::cast_slice(&pin_vec),
+                bytemuck::cast_slice(&pin_vec[..write_count]),
             );
         }
 
         let pin_params = PinParams {
-            num_pins,
+            num_pins: write_count as u32,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,

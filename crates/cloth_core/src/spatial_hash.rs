@@ -41,6 +41,7 @@ impl GpuSpatialHash {
         table_size: u32,
     ) -> Self {
         let device = &context.device;
+        let table_size = table_size.clamp(256, 65536);
         let num_blocks = table_size.div_ceil(256);
 
         let cell_counts_init = vec![0u32; table_size as usize];
@@ -152,19 +153,9 @@ impl GpuSpatialHash {
         let num_blocks = self.table_size.div_ceil(256);
         let vert_workgroups = num_vertices.div_ceil(256);
 
-        // 1. カウンタクリア
-        {
-            let query = prof.begin_pass_with_parent("hash_clear", encoder, parent);
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("SpatialGrid Clear Pass"),
-                timestamp_writes: prof.pass_writes(&query),
-            });
-            cpass.set_pipeline(&hash.clear);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
-            cpass.dispatch_workgroups(num_blocks, 1, 1);
-            drop(cpass);
-            prof.end_pass(encoder, query);
-        }
+        // 1. カウンタクリア (ハードウェアDMAゼロクリア)
+        encoder.clear_buffer(&self.cell_counts_buffer, 0, None);
+        encoder.clear_buffer(&self.cell_currents_buffer, 0, None);
 
         // 2. 頂点セルカウント
         if num_vertices > 0 {
@@ -262,6 +253,7 @@ impl GpuEdgeSpatialHash {
         table_size: u32,
     ) -> Self {
         let device = &context.device;
+        let table_size = table_size.clamp(256, 65536);
         let num_blocks = table_size.div_ceil(256);
 
         let cell_counts_init = vec![0u32; table_size as usize];
@@ -374,19 +366,9 @@ impl GpuEdgeSpatialHash {
         let num_blocks = self.table_size.div_ceil(256);
         let edge_workgroups = num_edges.div_ceil(256);
 
-        // 1. カウンタクリア
-        {
-            let query = prof.begin_pass_with_parent("edge_hash_clear", encoder, parent);
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("EdgeSpatialGrid Clear Pass"),
-                timestamp_writes: prof.pass_writes(&query),
-            });
-            cpass.set_pipeline(&hash.clear);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
-            cpass.dispatch_workgroups(num_blocks, 1, 1);
-            drop(cpass);
-            prof.end_pass(encoder, query);
-        }
+        // 1. カウンタクリア (ハードウェアDMAゼロクリア)
+        encoder.clear_buffer(&self.cell_counts_buffer, 0, None);
+        encoder.clear_buffer(&self.cell_currents_buffer, 0, None);
 
         // 2. エッジセルカウント
         if num_edges > 0 {

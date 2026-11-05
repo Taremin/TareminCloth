@@ -81,6 +81,7 @@ pub struct SimulationResources {
     pub two_hop_offsets_buffer: wgpu::Buffer,
     pub two_hop_indices_buffer: wgpu::Buffer,
     pub two_hop_rest_lengths_buffer: wgpu::Buffer,
+    pub edge_boundary_bits_buffer: wgpu::Buffer,
     pub island_ids_buffer: wgpu::Buffer,
     pub compute_normals_bind_group: wgpu::BindGroup,
     pub predict_bind_group: wgpu::BindGroup,
@@ -299,13 +300,15 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     });
 
-    // 動的ピンバッファ (範囲グラブ等の多頂点ピンに備えて余裕を持たせる。8192×32B = 256KB)
-    let max_pins = 8192;
+    // 動的ピンバッファ (メッシュ全頂点の一時固定や範囲グラブ等に備えて、全頂点数または最低8192頂点分を確保)
+    let max_pins = (mesh.vertices.len() as usize).max(8192);
     let pin_buffer_size = (max_pins * std::mem::size_of::<GpuPinConstraint>()) as u64;
     let pin_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Pin Buffer"),
         size: pin_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
@@ -317,7 +320,9 @@ pub fn build_simulation_resources(
             _pad1: 0,
             _pad2: 0,
         }),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     // コライダーバッファ
@@ -326,7 +331,9 @@ pub fn build_simulation_resources(
     let collider_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Collider Buffer"),
         size: collider_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
@@ -336,7 +343,9 @@ pub fn build_simulation_resources(
     let mesh_triangles_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Mesh Triangles Buffer"),
         size: mesh_triangles_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
@@ -375,7 +384,9 @@ pub fn build_simulation_resources(
             num_bones: 0,
             enable_bone_sdf: 0,
         }),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     // ボーンSDF用バッファ & 初期ダミー3Dテクスチャ
@@ -442,7 +453,9 @@ pub fn build_simulation_resources(
     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth SimParams Buffer"),
         contents: bytemuck::bytes_of(&default_params),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     let staging_buffer_size = (num_vertices as u64) * std::mem::size_of::<GpuVertex>() as u64;
@@ -871,7 +884,8 @@ pub fn build_simulation_resources(
         .max(edge_based_size)
         .max(0.01);
     let hash_capacity = num_total_particles;
-    let table_size = (hash_capacity * 4).next_power_of_two().max(1024);
+    // 2階層 Blelloch Scan (256 x 256) の上限である 65536 バケット以下にクランプする
+    let table_size = (hash_capacity * 4).next_power_of_two().clamp(1024, 65536);
     let spatial_hash = GpuSpatialHash::new(context, &shared.hash_bgl, &vertex_buffer, hash_capacity, cell_size, table_size);
 
     let self_col_params = SelfCollisionParams {
@@ -891,7 +905,9 @@ pub fn build_simulation_resources(
     let self_collision_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Self Collision Params Buffer"),
         contents: bytemuck::bytes_of(&self_col_params),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     let mut self_col_params_ee_off = self_col_params;
@@ -899,7 +915,9 @@ pub fn build_simulation_resources(
     let self_collision_params_buffer_ee_off = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Self Collision Params Buffer (EE Off)"),
         contents: bytemuck::bytes_of(&self_col_params_ee_off),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     let normals_buffer_size = ((num_vertices as u64) * 16).max(64);
@@ -990,6 +1008,18 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
+    let dummy_u32 = [0u32];
+    let edge_boundary_bits_contents: &[u8] = if mesh.edge_boundary_bits.is_empty() {
+        bytemuck::cast_slice(&dummy_u32)
+    } else {
+        bytemuck::cast_slice(&mesh.edge_boundary_bits)
+    };
+    let edge_boundary_bits_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Edge Boundary Bits Buffer"),
+        contents: edge_boundary_bits_contents,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
     let dummy_star_pair = [GpuStarPair { v0: 0, v1: 0 }];
     let star_indices_contents: &[u8] = if mesh.star_indices.is_empty() {
         bytemuck::cast_slice(&dummy_star_pair)
@@ -1026,7 +1056,8 @@ pub fn build_simulation_resources(
     });
 
     let num_edges = mesh.edges.len() as u32;
-    let edge_table_size = (num_edges * 4).next_power_of_two().max(1024);
+    // self_collision_ee_direct.wgsl は params.table_size を参照するため、頂点ハッシュと同一の table_size に統一する
+    let edge_table_size = table_size;
     let edge_spatial_hash = GpuEdgeSpatialHash::new(
         context,
         &shared.edge_hash_bgl,
@@ -1238,6 +1269,10 @@ pub fn build_simulation_resources(
                 binding: 9,
                 resource: two_hop_rest_lengths_buffer.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: edge_boundary_bits_buffer.as_entire_binding(),
+            },
         ],
     });
 
@@ -1335,7 +1370,9 @@ pub fn build_simulation_resources(
     let pair_collect_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Pair Collect Params Buffer"),
         contents: bytemuck::bytes_of(&pair_collect_params),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     let pair_solve_params = PairSolveParams {
@@ -1347,7 +1384,9 @@ pub fn build_simulation_resources(
     let pair_solve_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Pair Solve Params Buffer"),
         contents: bytemuck::bytes_of(&pair_solve_params),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
     });
 
     let pair_collect_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1639,6 +1678,7 @@ pub fn build_simulation_resources(
         two_hop_offsets_buffer,
         two_hop_indices_buffer,
         two_hop_rest_lengths_buffer,
+        edge_boundary_bits_buffer,
         island_ids_buffer,
         compute_normals_bind_group,
         predict_bind_group,

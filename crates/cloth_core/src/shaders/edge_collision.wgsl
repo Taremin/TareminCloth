@@ -97,23 +97,23 @@ fn closest_points_segments(
     var s = 0.0;
     var t = 0.0;
 
-    if (a <= EPSILON && e <= EPSILON) {
+    if (a <= 1e-12 && e <= 1e-12) {
         let diff = p0 - q0;
         return SegmentDistanceResult(0.0, 0.0, length(diff));
     }
-    if (a <= EPSILON) {
+    if (a <= 1e-12) {
         s = 0.0;
         t = clamp(f / e, 0.0, 1.0);
     } else {
         let c = dot(d1, r);
-        if (e <= EPSILON) {
+        if (e <= 1e-12) {
             t = 0.0;
             s = clamp(-c / a, 0.0, 1.0);
         } else {
             let b = dot(d1, d2);
             let denom = a * e - b * b;
 
-            if (abs(denom) > EPSILON) {
+            if (denom > a * e * 1e-7) {
                 s = clamp((b * f - c * e) / denom, 0.0, 1.0);
             } else {
                 s = 0.0;

@@ -26,9 +26,10 @@ from ..engine.runner import (
     step_cloth_scene,
     step_cloth_object,
     restore_fast_playback,
+    _apply_coords_to_mesh,
 )
 from ..preferences import get_preferences
-from ..utils import drawing, topology, anim_driver
+from ..utils import drawing, topology, anim_driver, allow_positional
 from ..utils.logger import logger
 from ..utils.view3d import tag_redraw_view3d
 from ..engine.sewing_priority import sim_phase, phase_text
@@ -68,6 +69,7 @@ def get_interactive_cloth_object_name() -> str:
     return ""
 
 
+@allow_positional
 def resolve_debug_filepath(prefs, obj_name: str, frame_count: int, ext: str = "jsonl.gz") -> str:
     """プレファレンスの設定値と現在のオブジェクト名・日時からデバッグ出力先ファイルパスを解決・生成する"""
     now = datetime.now()
@@ -173,6 +175,7 @@ _DEBUG_FILE_BONE_SDF_GZIP_RATIO = 0.55
 _DEBUG_FILE_BONE_POSE_BYTES_PER_BONE_FRAME = 140
 
 
+@allow_positional
 def estimate_debug_raw_bytes(frame_count, vertex_count, full_stride=1, bone_voxels=0, bone_count=0) -> int:
     """記録JSON全体の非圧縮サイズ概算 (バイト) を返す。
 
@@ -211,6 +214,7 @@ def estimate_debug_raw_bytes(frame_count, vertex_count, full_stride=1, bone_voxe
     return total
 
 
+@allow_positional
 def estimate_debug_file_bytes(frame_count, vertex_count, full_stride=1, bone_voxels=0, bone_count=0) -> int:
     """出力される .jsonl.gz ファイルサイズの概算 (バイト) を返す。
 
@@ -313,6 +317,7 @@ def _lookup_sim_coords(obj_name):
     return entry, None
 
 
+@allow_positional
 def _sim_vertex_count(sim, coords=None) -> int:
     """シミュレーターの頂点数を返す。取得不可時は 0。
 
@@ -370,6 +375,7 @@ def _deferred_invoke_debug_save_confirm():
     return None
 
 
+@allow_positional
 def request_debug_save_confirmation(context, obj_name, sim, frame_count, filepath, full_stride=1) -> str:
     """保存確認待ち情報を登録し、確認ダイアログ表示をスケジュールする。
 
@@ -865,6 +871,7 @@ def enter_isolated_view(context, cloth_obj):
     return isolated_areas, saved_selection, saved_active
 
 
+@allow_positional
 def exit_isolated_view(context, isolated_areas, saved_selection, saved_active):
     """ローカルビューから通常表示に復帰し、選択状態を復元する"""
     try:
@@ -923,6 +930,7 @@ def _is_viewport_window(context) -> bool:
         return True
 
 
+@allow_positional
 def _event_in_viewport_window(context, event=None) -> bool:
     """イベントがVIEW_3DのWINDOWリージョン上かを判定する。UIパネル上はFalse。
 
@@ -1058,12 +1066,12 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         realtime_sync = getattr(settings, "interactive_realtime_sync", True) if settings else True
         max_steps = getattr(settings, "interactive_max_steps", 4) if settings else 4
 
-        # インタラクティブモードでは描画レスポンスと実時間同期の両立を図る。
-        # 最大2ステップ/フレームに制限し、最大蓄積を3ステップ分 (約50ms) に抑えて遅延スパイラルを防止。
-        step_limit = min(max_steps, 2) if realtime_sync else 1
+        # インタラクティブモードでは1描画フレームにつき最大1ステップに制限し、
+        # 重いシーンで2ステップ連続実行されてFPSが半減し続けるスパイラル（Spiral of Death）を防止する。
+        step_limit = 1
         if realtime_sync:
             self._accumulator += delta_time
-            self._accumulator = min(self._accumulator, FIXED_DT * 3.0)
+            self._accumulator = min(self._accumulator, FIXED_DT * 1.5)
         else:
             self._accumulator = FIXED_DT
 
@@ -1079,7 +1087,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         # アキュムレータが 1/60 秒以上蓄積されていた場合、共通の step_cloth_scene を呼び出して実行
         if step_count > 0:
             t0 = time.perf_counter()
-            step_cloth_scene(
+            results = step_cloth_scene(
                 context.scene,
                 dt=FIXED_DT,
                 anim_frame=self._anim_frame_counter,
@@ -1106,7 +1114,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 brush = self._brush_settings_of(obj)
                 radial = getattr(self, "_radial", None)
                 tools = getattr(self, "_brush_tools", None) or None
-                hud = get_brush_hud_info(brush, radial, _tools=tools)
+                hud = get_brush_hud_info(brush, radial=radial, _tools=tools)
                 label = i18n.trans(hud.get("label_key", "Grab"))
                 # line1: ツール固有キー（共通キーはdrawing側で描画）
                 if hud.get("tool") == 'GRAB':
@@ -1171,12 +1179,14 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         settings = getattr(obj, "taremin_cloth", None)
         return getattr(settings, "brush", None) if settings else None
 
+    @allow_positional
     def _brush_ctx(self, context, obj, sim, coords, event, mouse_pos):
         return BrushContext(self, context, obj, sim, coords, event, mouse_pos)
 
     def _active_brush_tool(self, brush):
         return self._brush_tools.get(active_tool_name(brush))
 
+    @allow_positional
     def _start_interactive_wrinkle_slide(self, context, cloth_obj, event) -> bool:
         """インタラクティブモード中にシワカーブのスライドを開始する（実験的機能）"""
         try:
@@ -1367,7 +1377,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             pass
         self._update_init_progress(context)
 
-    def _end_init_ui(self, context, success: bool):
+    def _end_init_ui(self, context, *, success: bool):
         """準備終了・中断時のプログレス・カーソル・HUD後片付けを行う"""
         if self._progress_active:
             try:
@@ -1763,9 +1773,10 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     if tool is not None:
                         tool.on_release(ctx, self._pinned_verts)
                     self._brush_dragging = None
-                    if context.area:
-                        context.area.tag_redraw()
-                    return {'RUNNING_MODAL'}
+
+                if context.area:
+                    context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
 
         elif event.type == 'MOUSEMOVE':
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
@@ -1836,9 +1847,9 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 if brush is not None and self._radial is not None:
                     mouse_pos = (event.mouse_region_x, event.mouse_region_y)
                     if bool(getattr(event, 'shift', False)):
-                        self._radial.enter('STRENGTH', event.mouse_region_x, brush)
+                        self._radial.enter('STRENGTH', event.mouse_region_x, brush=brush)
                     else:
-                        self._radial.enter('RADIUS', event.mouse_region_x, brush)
+                        self._radial.enter('RADIUS', event.mouse_region_x, brush=brush)
                     # 円未表示の場合はこの場で初期化する
                     if drawing.get_brush_info() is None:
                         ctx = self._brush_ctx(context, obj, sim, coords, event, mouse_pos)
@@ -1859,7 +1870,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             if not _event_in_viewport_window(context, event):
                 return {'PASS_THROUGH'}
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-            nudge_brush_radius(obj, 0.9, mouse_pos)
+            nudge_brush_radius(obj, 0.9, mouse_pos=mouse_pos)
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
@@ -1868,7 +1879,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             if not _event_in_viewport_window(context, event):
                 return {'PASS_THROUGH'}
             mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-            nudge_brush_radius(obj, 1.1, mouse_pos)
+            nudge_brush_radius(obj, 1.1, mouse_pos=mouse_pos)
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
@@ -1911,9 +1922,12 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     vg = obj.vertex_groups.new(name="Pin")
                     settings.pin_vertex_group = "Pin"
 
+                n_mesh_verts = len(obj.data.vertices)
+                is_mesh_vert = (0 <= target_v_idx < n_mesh_verts)
+
                 # すでにピン留めされているか判定
                 is_pinned = (target_v_idx in self._pinned_verts)
-                if not is_pinned:
+                if not is_pinned and is_mesh_vert:
                     try:
                         w = vg.weight(target_v_idx)
                         if w > 0.0:
@@ -1923,21 +1937,23 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
                 if is_pinned:
                     # ピン解除 (Unpin)
-                    try:
-                        vg.remove([target_v_idx])
-                    except RuntimeError:
-                        pass
+                    if is_mesh_vert:
+                        try:
+                            vg.remove([target_v_idx])
+                        except RuntimeError:
+                            pass
                     self._pinned_verts.discard(target_v_idx)
                     # ドラッグ中でなければ物理ピンも解除
                     if _sg is None or _sg.grabbed_vert != target_v_idx:
                         sim.release_pin(target_v_idx)
                     self.report({'INFO'}, i18n.trans("Unpinned vertex #%d") % target_v_idx)
                 else:
-                    # ピン留め (Pin)
-                    vg.add([target_v_idx], 1.0, 'REPLACE')
+                    # ピン留め (Pin: 紐頂点の場合は頂点グループ操作をスキップしランタイムピンのみ設定)
+                    if is_mesh_vert:
+                        vg.add([target_v_idx], 1.0, 'REPLACE')
                     self._pinned_verts.add(target_v_idx)
-                    # 現在のローカル目標位置（または頂点現在位置）で固定
-                    _grab_cur = _sg.grab_current_target_local if _sg is not None else None
+                    # 現在のワールド目標位置（または頂点現在位置）で固定
+                    _grab_cur = getattr(_sg, "grab_current_target_world", None) if _sg is not None else None
                     if _sg is not None and _sg.grabbed_vert == target_v_idx and _grab_cur is not None:
                         t_pos = _grab_cur
                     else:

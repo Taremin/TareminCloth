@@ -83,6 +83,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+    // シーム跨ぎ曲げ拘束 (c._pad0 > 0.5) のゲート処理:
+    // 1. 平坦展開距離 (rest_length) よりも開いている場合 (dist >= c.rest_length) は引っ張らず、
+    //    折れ曲がり（圧縮方向: dist < c.rest_length）のみに復元力を働かせる
+    // 2. 縫合ペア (v0, v1) がまだ閉じきっていない場合 (距離 > c._pad1) はスキップ
+    if (c._pad0 > 0.5) {
+        if (dist >= c.rest_length) {
+            return;
+        }
+        let seam_gap = length(vertices[c.v0].prev_pos - vertices[c.v1].prev_pos);
+        if (seam_gap > c._pad1) {
+            return;
+        }
+    }
+
     let dir = delta / dist;
     let dt = params.gravity.w;
     let alpha = c.compliance / (dt * dt);

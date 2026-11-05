@@ -27,8 +27,8 @@ class RangeGrabTool(BaseBrushTool):
     name = 'RANGE_GRAB'
     label_key = 'Range Grab'
 
-    def hud_info(self, brush, radial=None):
-        base = super().hud_info(brush, radial)
+    def hud_info(self, brush, *, radial=None):
+        base = super().hud_info(brush, radial=radial)
         try:
             base["radius"] = float(brush_opt(brush, "radius", 0.05)) if brush is not None else None
         except Exception:
@@ -48,6 +48,7 @@ class RangeGrabTool(BaseBrushTool):
         return base
 
     def __init__(self):
+        super().__init__()
         self.reset()
 
     def reset(self):
@@ -130,6 +131,7 @@ class RangeGrabTool(BaseBrushTool):
 
     def abort(self, sim, pinned_verts):
         self.dragging = False
+        self.active_region.release_temp_pins(sim)
         if self.grab:
             for v_idx in list(self.grab.keys()):
                 if v_idx not in pinned_verts:
@@ -212,6 +214,12 @@ class RangeGrabTool(BaseBrushTool):
             self.plane_normal = None
             self.initial_plane_hit = None
         self._prev_hit = _copy_vec(self.initial_plane_hit)
+        if brush_opt(ctx.brush, "use_active_region", False):
+            scale = float(brush_opt(ctx.brush, "active_region_scale", 2.5))
+            all_exclude = set(grab.keys())
+            self.active_region.freeze_inactive_region(
+                sim, pos_2d, res["center"], radius, active_scale=scale, exclude_pins=all_exclude
+            )
         update_brush_circle(ctx.context, obj, res["center"], radius, ctx.mouse_pos)
         return True
 
@@ -288,6 +296,7 @@ class RangeGrabTool(BaseBrushTool):
                         ctx.sim.release_pin(v_idx)
                     except Exception:
                         pass
+        self.active_region.release_temp_pins(ctx.sim)
         self.grab = None
         self.plane_point = None
         self.plane_normal = None

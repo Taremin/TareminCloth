@@ -3,10 +3,13 @@
 Blenderの画面再描画要求およびアニメーション再生停止を一元的に提供する。
 """
 
-import bpy
+try:
+    import bpy
+except ImportError:
+    bpy = None
 
 
-def tag_redraw_view3d(context=None, extra_area_types=None):
+def tag_redraw_view3d(context=None, *, extra_area_types=None):
     """
     現在のスクリーン内のすべての 3D Viewport エリア（および必要に応じて追加エリア）に対して再描画（tag_redraw）を要求する。
     context が指定されていない場合は bpy.context を参照する。
@@ -50,3 +53,18 @@ def stop_animation(context=None):
             bpy.ops.screen.animation_cancel(restore_frame=False)
         except Exception:
             pass
+
+
+def force_redraw_view3d(context=None):
+    """
+    現在の3Dビューポートの即時再描画を強制する。
+    同期的に実行されるオペレーター（一瞬ドレープ等）の実行途中でHUDプログレスを即座に画面へ反映させる。
+    """
+    tag_redraw_view3d(context)
+    try:
+        if not getattr(bpy.app, "background", False):
+            wm = getattr(bpy.ops, "wm", None)
+            if wm and hasattr(wm, "redraw_timer"):
+                wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+    except Exception:
+        pass

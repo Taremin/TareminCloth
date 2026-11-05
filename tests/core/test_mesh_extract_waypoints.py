@@ -34,7 +34,7 @@ class TestExtractSewingTopology(unittest.TestCase):
     def test_direct_simple_sewing(self):
         """中継点のない直線縫合 (0 <-> 3)"""
         loose_edges = [(0, 3)]
-        simple, waypoints = extract_sewing_topology(loose_edges, self.faces, self.positions)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=self.faces, positions=self.positions)
         self.assertEqual(len(simple), 1)
         self.assertEqual(simple[0], (0, 3))
         self.assertEqual(len(waypoints), 0)
@@ -42,7 +42,7 @@ class TestExtractSewingTopology(unittest.TestCase):
     def test_single_waypoint_seam(self):
         """1つの中継点を持つ縫合 (0 - 6 - 3)"""
         loose_edges = [(0, 6), (6, 3)]
-        simple, waypoints = extract_sewing_topology(loose_edges, self.faces, self.positions)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=self.faces, positions=self.positions)
         self.assertEqual(len(simple), 0)
         self.assertEqual(len(waypoints), 1)
 
@@ -55,7 +55,7 @@ class TestExtractSewingTopology(unittest.TestCase):
         """複数の中継点を持つ縫合 (0 - 6 - 7 - 3)"""
         # エッジの並び順がシャッフルされていても順序付けられること
         loose_edges = [(7, 3), (0, 6), (6, 7)]
-        simple, waypoints = extract_sewing_topology(loose_edges, self.faces, self.positions)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=self.faces, positions=self.positions)
         self.assertEqual(len(simple), 0)
         self.assertEqual(len(waypoints), 1)
 
@@ -83,7 +83,7 @@ class TestExtractSewingTopology(unittest.TestCase):
             (0, 6), (6, 7), (7, 3), # 2中継点 (0 - 6 - 7 - 3)
             (2, 8), (8, 5),       # 1中継点 (2 - 8 - 5)
         ]
-        simple, waypoints = extract_sewing_topology(loose_edges, self.faces, self.positions)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=self.faces, positions=self.positions)
         self.assertEqual(len(simple), 1)
         self.assertEqual(simple[0], (1, 4))
         self.assertEqual(len(waypoints), 2)
@@ -92,7 +92,7 @@ class TestExtractSewingTopology(unittest.TestCase):
         """分岐や閉ループなどの不正トポロジーでクラッシュせず安全に除外されること"""
         # T字分岐: 0 - 6 - 3 かつ 6 - 7 (7は行き止まり)
         loose_edges = [(0, 6), (6, 3), (6, 7)]
-        simple, waypoints = extract_sewing_topology(loose_edges, self.faces, self.positions)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=self.faces, positions=self.positions)
         # 単一経路保証のため、枝分かれした不正トポロジーはシミュレーションから安全に除外される
         self.assertEqual(len(simple), 0)
         self.assertEqual(len(waypoints), 0)

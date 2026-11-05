@@ -5,6 +5,7 @@ GPU設定適用、オブジェクト選択オペレーターを提供する。
 """
 
 import bpy
+import numpy as np
 from ..engine.cache import (
     cache_rest_positions,
     restore_rest_positions,
@@ -14,8 +15,8 @@ from ..engine.cache import (
 )
 from ..utils import topology
 from ..utils.logger import logger
-from ..utils.view3d import tag_redraw_view3d, stop_animation
-from ..properties import BoolProperty, StringProperty, EnumProperty
+from ..utils.view3d import tag_redraw_view3d, stop_animation, force_redraw_view3d
+from ..properties import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty
 from .. import i18n
 
 
@@ -425,7 +426,7 @@ class TAREMIN_CLOTH_OT_auto_fit_self_collision(bpy.types.Operator):
         from ..utils.self_collision_fit import fit_self_collision_for_object
         obj = context.active_object
         settings = obj.taremin_cloth
-        params = fit_self_collision_for_object(obj, settings)
+        params = fit_self_collision_for_object(obj, settings=settings)
         if params:
             thick_mm = params['thickness'] * 1000.0
             purpose_items = dict(settings.rna_type.properties['self_collision_purpose'].enum_items)
@@ -670,6 +671,328 @@ class TAREMIN_CLOTH_OT_toggle_weight_paint(bpy.types.Operator):
         logger.info(f"[Pin] {msg}")
         self.report({'INFO'}, msg)
         return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_instant_drape(bpy.types.Operator):
+    """準静的一瞬ドレープ: 高減衰ステップを一括実行し、タイムライン再生なしで重力ドレープ形状へ即座に収束させる"""
+    bl_idname = "taremin_cloth.instant_drape"
+    bl_label = "Instant Drape"
+    bl_description = "Run quasi-static high-damping simulation steps to instantly settle cloth drape without timeline playback"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    substeps: IntProperty(
+        name="Substeps",
+        description="Number of simulation substeps to execute",
+        default=40,
+        min=5,
+        max=200,
+    )
+    damping: FloatProperty(
+        name="Damping",
+        description="Air damping factor during drape settlement (higher values suppress oscillations)",
+        default=0.85,
+        min=0.1,
+        max=1.0,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(
+            obj
+            and obj.type == 'MESH'
+            and getattr(obj, "taremin_cloth", None)
+            and obj.taremin_cloth.is_cloth
+        )
+
+    _STAGE_MESSAGES = (
+        "Extracting mesh...",
+        "Initializing GPU...",
+        "Syncing colliders...",
+        "Settling cloth drape...",
+        "Updating mesh...",
+    )
+
+    _timer = None
+    _init_stage = 0
+    _init_partial = None
+    _sim = None
+    _obj = None
+    _executed_substeps = 0
+    _progress_active = False
+    _cursor_wait_set = False
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return bool(
+            obj
+            and obj.type == 'MESH'
+            and getattr(obj, "taremin_cloth", None)
+            and obj.taremin_cloth.is_cloth
+        )
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        settings = getattr(obj, "taremin_cloth", None)
+        if not settings or not settings.is_cloth:
+            return {'CANCELLED'}
+
+        self._obj = obj
+        self._init_stage = 0
+        self._init_partial = None
+        self._sim = None
+        self._executed_substeps = 0
+        self._timer = None
+        self._progress_active = False
+        self._cursor_wait_set = False
+
+        wm = context.window_manager
+        try:
+            wm.progress_begin(0, len(self._STAGE_MESSAGES))
+            self._progress_active = True
+        except Exception:
+            pass
+
+        try:
+            cursor_set = getattr(wm, "cursor_modal_set", None)
+            if callable(cursor_set):
+                cursor_set('WAIT')
+                self._cursor_wait_set = True
+        except Exception:
+            pass
+
+        from ..utils import drawing
+        drawing.set_init_overlay_info(self._STAGE_MESSAGES[0], 0, len(self._STAGE_MESSAGES), can_cancel=True)
+        self._update_status(context, 0)
+        tag_redraw_view3d(context)
+
+        self._timer = wm.event_timer_add(0.001, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _update_status(self, context, stage_idx):
+        msg = self._STAGE_MESSAGES[stage_idx]
+        total = len(self._STAGE_MESSAGES)
+        if hasattr(context, "workspace") and hasattr(context.workspace, "status_text_set"):
+            cancel_txt = i18n.trans("[Esc] Cancel")
+            context.workspace.status_text_set(f"{i18n.trans(msg)} ({stage_idx + 1}/{total})  |  {cancel_txt}")
+
+    def _advance(self, context, next_stage):
+        self._init_stage = next_stage
+        try:
+            context.window_manager.progress_update(next_stage)
+        except Exception:
+            pass
+        from ..utils import drawing
+        msg = self._STAGE_MESSAGES[next_stage]
+        drawing.set_init_overlay_info(msg, next_stage, len(self._STAGE_MESSAGES), can_cancel=True)
+        self._update_status(context, next_stage)
+        tag_redraw_view3d(context)
+
+    def _cleanup(self, context):
+        wm = getattr(context, "window_manager", None)
+        if wm and self._timer is not None:
+            try:
+                wm.event_timer_remove(self._timer)
+            except Exception:
+                pass
+            self._timer = None
+
+        if wm and self._progress_active:
+            try:
+                wm.progress_end()
+            except Exception:
+                pass
+            self._progress_active = False
+
+        if wm and self._cursor_wait_set:
+            try:
+                cursor_restore = getattr(wm, "cursor_modal_restore", None)
+                if callable(cursor_restore):
+                    cursor_restore()
+            except Exception:
+                pass
+            self._cursor_wait_set = False
+
+        if hasattr(context, "workspace") and hasattr(context.workspace, "status_text_set"):
+            context.workspace.status_text_set(None)
+
+        from ..utils import drawing
+        drawing.clear_init_overlay_info()
+        tag_redraw_view3d(context)
+
+    def modal(self, context, event):
+        from ..engine.runner import (
+            begin_simulator_init,
+            create_simulator_from_state,
+            finalize_simulator_init,
+            sync_colliders,
+            sync_cloth_parameters,
+            _apply_coords_to_mesh,
+        )
+        from ..engine.cache import _simulators
+        from ..utils import drawing
+
+        if event.type == 'ESC':
+            self._cleanup(context)
+            self._report({'INFO'}, "Instant drape cancelled")
+            return {'CANCELLED'}
+
+        if event.type != 'TIMER':
+            return {'RUNNING_MODAL'}
+
+        stage = self._init_stage
+
+        try:
+            if stage == 0:
+                # 段階 0: メッシュ抽出（Warm Resume時は即時復帰）
+                if self._obj.name in _simulators:
+                    sim_entry = _simulators[self._obj.name]
+                    self._sim = sim_entry[0] if isinstance(sim_entry, tuple) else sim_entry
+                    self._init_partial = {"cached": True}
+                else:
+                    self._init_partial = begin_simulator_init(self._obj)
+                self._advance(context, 1)
+
+            elif stage == 1:
+                # 段階 1: GPU初期化
+                if not self._init_partial.get("cached"):
+                    sim = create_simulator_from_state(self._obj, self._init_partial)
+                    self._init_partial["sim"] = sim
+                    self._sim = sim
+                self._advance(context, 2)
+
+            elif stage == 2:
+                # 段階 2: コライダー/SDF同期およびパラメータ同期
+                if not self._init_partial.get("cached"):
+                    sim = self._init_partial.get("sim")
+                    if sim is None:
+                        sim = create_simulator_from_state(self._obj, self._init_partial)
+                        self._init_partial["sim"] = sim
+                    finalize_simulator_init(self._obj, sim, self._init_partial, scene=context.scene)
+                    self._sim = sim
+                else:
+                    sync_colliders(self._sim, context.scene, cloth_obj=self._obj)
+                    sync_cloth_parameters(self._sim, self._obj, scene=context.scene)
+                self._advance(context, 3)
+
+            elif stage == 3:
+                # 段階 3: 高速準静的ドレープ収束計算
+                if self._sim is None:
+                    raise RuntimeError("Cloth simulator instance is not available")
+                self._executed_substeps = self._sim.instant_drape(int(self.substeps), float(self.damping))
+                self._advance(context, 4)
+
+            elif stage == 4:
+                # 段階 4: 最新座標の取得とメッシュ書き戻し
+                coords = np.zeros(len(self._obj.data.vertices) * 3, dtype=np.float32)
+                self._sim.get_positions(coords)
+                _apply_coords_to_mesh(self._obj, coords)
+                _simulators[self._obj.name] = (self._sim, coords)
+
+                msg = f"Instant drape converged ({self._executed_substeps} substeps)"
+                logger.info(f"[Drape] {msg}")
+                self._report({'INFO'}, msg)
+
+                # 完了トーストHUDバッジを2.0秒間画面下部中央に表示
+                drawing.set_toast_overlay_info(msg, duration=2.0)
+
+                self._cleanup(context)
+                return {'FINISHED'}
+
+        except Exception as e:
+            self._cleanup(context)
+            logger.error(f"[Drape] Failed during modal step {stage}: {e}", exc_info=True)
+            self._report({'ERROR'}, f"Instant drape failed: {e}")
+            return {'CANCELLED'}
+
+        return {'RUNNING_MODAL'}
+
+    def _report(self, level, msg):
+        try:
+            if hasattr(self, "report") and callable(self.report):
+                self.report(level, msg)
+        except Exception:
+            pass
+
+    def execute(self, context):
+        """ヘッドレス環境・スクリプト直接呼出し用の同期フォールバック"""
+        obj = context.active_object
+        settings = getattr(obj, "taremin_cloth", None)
+        if not settings or not settings.is_cloth:
+            return {'CANCELLED'}
+
+        from ..engine.runner import (
+            begin_simulator_init,
+            create_simulator_from_state,
+            finalize_simulator_init,
+            sync_colliders,
+            sync_cloth_parameters,
+            _apply_coords_to_mesh,
+        )
+        from ..engine.cache import _simulators
+        from ..utils import drawing
+
+        wm = getattr(context, "window_manager", None)
+        total_steps = len(self._STAGE_MESSAGES)
+        if wm and hasattr(wm, "progress_begin"):
+            try:
+                wm.progress_begin(0, total_steps)
+            except Exception:
+                pass
+
+        try:
+            # 段階 0: メッシュ抽出
+            if obj.name in _simulators:
+                sim_entry = _simulators[obj.name]
+                sim = sim_entry[0] if isinstance(sim_entry, tuple) else sim_entry
+                init_partial = {"cached": True}
+            else:
+                init_partial = begin_simulator_init(obj)
+                sim = None
+
+            # 段階 1 & 2: GPU初期化 & コライダー同期
+            if not init_partial.get("cached"):
+                sim = create_simulator_from_state(obj, init_partial)
+                finalize_simulator_init(obj, sim, init_partial, scene=context.scene)
+            else:
+                sync_colliders(sim, context.scene, cloth_obj=obj)
+                sync_cloth_parameters(sim, obj, scene=context.scene)
+
+            if sim is None:
+                self.report({'ERROR'}, "Failed to initialize cloth simulator")
+                return {'CANCELLED'}
+
+            # 段階 3: instant_drape で高速準静的収束
+            executed = sim.instant_drape(int(self.substeps), float(self.damping))
+
+            # 段階 4: 最新の収束座標を取得してメッシュへ書き戻し
+            coords = np.zeros(len(obj.data.vertices) * 3, dtype=np.float32)
+            sim.get_positions(coords)
+            _apply_coords_to_mesh(obj, coords)
+            _simulators[obj.name] = (sim, coords)
+
+            msg = f"Instant drape converged ({executed} substeps)"
+            logger.info(f"[Drape] {msg}")
+            self.report({'INFO'}, msg)
+
+            drawing.clear_init_overlay_info()
+            drawing.set_toast_overlay_info(msg, duration=2.0)
+            tag_redraw_view3d(context)
+            return {'FINISHED'}
+
+        finally:
+            drawing.clear_init_overlay_info()
+            if wm and hasattr(wm, "progress_end"):
+                try:
+                    wm.progress_end()
+                except Exception:
+                    pass
+            if hasattr(context, "workspace") and hasattr(context.workspace, "status_text_set"):
+                context.workspace.status_text_set(None)
+            tag_redraw_view3d(context)
 
 
 

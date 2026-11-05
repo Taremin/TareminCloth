@@ -106,7 +106,7 @@ class TestMeshExtract(unittest.TestCase):
 
     def test_get_pin_inv_masses_default(self):
         """ピン未設定時は全頂点の inv_mass が 1.0 であること"""
-        inv_m = get_pin_inv_masses(self.mock_obj, None, 4)
+        inv_m = get_pin_inv_masses(self.mock_obj, n_verts=4)
         self.assertEqual(len(inv_m), 4)
         np.testing.assert_array_equal(inv_m, np.ones(4, dtype=np.float32))
 
@@ -125,7 +125,7 @@ class TestMeshExtract(unittest.TestCase):
         settings = MagicMock()
         settings.pin_vertex_group = "Cloth_Pin"
 
-        inv_m = get_pin_inv_masses(self.mock_obj, settings, 4)
+        inv_m = get_pin_inv_masses(self.mock_obj, settings=settings, n_verts=4)
         self.assertAlmostEqual(inv_m[0], 0.0)  # 1.0 - 1.0 = 0.0 (固定)
         self.assertAlmostEqual(inv_m[1], 0.5)  # 1.0 - 0.5 = 0.5
         self.assertAlmostEqual(inv_m[2], 1.0)  # 1.0 - 0.0 = 1.0
@@ -137,7 +137,7 @@ class TestMeshExtract(unittest.TestCase):
         settings.enable_sewing = True
         settings.pin_vertex_group = ""
 
-        data = extract_cloth_mesh_data(self.mock_obj, settings)
+        data = extract_cloth_mesh_data(self.mock_obj, settings=settings)
         self.assertIsInstance(data, ClothMeshData)
         self.assertEqual(data.positions.shape, (4, 3))
         self.assertEqual(data.faces.shape, (2, 3))
@@ -154,7 +154,7 @@ class TestMeshExtract(unittest.TestCase):
         settings.enable_sewing = False
         settings.pin_vertex_group = ""
 
-        data = extract_cloth_mesh_data(self.mock_obj, settings)
+        data = extract_cloth_mesh_data(self.mock_obj, settings=settings)
         self.assertEqual(len(data.normal_edges), 6)
         self.assertIsNone(data.sewing_edges)
 
@@ -241,7 +241,7 @@ class TestMeshExtract(unittest.TestCase):
         faces_2d = np.array([[0, 10, 11], [2, 12, 13], [3, 14, 15]], dtype=np.uint32)
         positions = np.zeros((16, 3), dtype=np.float32)
 
-        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d, positions)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=faces_2d, positions=positions)
         self.assertEqual(len(simple), 0)
         self.assertEqual(len(waypoints), 0)
 

@@ -21,7 +21,17 @@ except Exception:
     _core = None
     _RUST_GEOMETRY = False
 
+try:
+    from .utils import allow_positional
+except ImportError:
+    try:
+        from taremin_cloth.utils import allow_positional
+    except ImportError:
+        def allow_positional(fn):
+            return fn
 
+
+@allow_positional
 def coplanar_tri_tri_2d(
     p0: np.ndarray, p1: np.ndarray, p2: np.ndarray,
     q0: np.ndarray, q1: np.ndarray, q2: np.ndarray,
@@ -31,9 +41,11 @@ def coplanar_tri_tri_2d(
     同一平面上にある2つの2D三角形が真に交差・重なり合っているかを判定します。
     エッジ共有や頂点接触は交差とみなしません。
     """
+    @allow_positional
     def orient(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
         return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
 
+    @allow_positional
     def edge_cross_2d(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> bool:
         o1 = orient(a, b, c)
         o2 = orient(a, b, d)
@@ -41,6 +53,7 @@ def coplanar_tri_tri_2d(
         o4 = orient(c, d, b)
         return (o1 * o2 < -eps * eps) and (o3 * o4 < -eps * eps)
 
+    @allow_positional
     def point_in_tri(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
         o1 = orient(a, b, p)
         o2 = orient(b, c, p)
@@ -66,6 +79,7 @@ def coplanar_tri_tri_2d(
     return False
 
 
+@allow_positional
 def tri_tri_intersection_moller(
     v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
     u0: np.ndarray, u1: np.ndarray, u2: np.ndarray,
@@ -154,6 +168,7 @@ def tri_tri_intersection_moller(
     vp0, vp1, vp2 = float(v0[max_idx]), float(v1[max_idx]), float(v2[max_idx])
     up0, up1, up2 = float(u0[max_idx]), float(u1[max_idx]), float(u2[max_idx])
 
+    @allow_positional
     def compute_intervals(p0: float, p1: float, p2: float, d0: float, d1: float, d2: float, d0d1: float, d0d2: float) -> Tuple[float, float]:
         if d0d1 > 0.0:
             return (p2 + (p0 - p2) * (d2 / (d2 - d0)), p2 + (p1 - p2) * (d2 / (d1 - d2)))
@@ -175,6 +190,7 @@ def tri_tri_intersection_moller(
 tri_tri_intersection_sat = tri_tri_intersection_moller
 
 
+@allow_positional
 def find_triangle_intersections(
     positions: np.ndarray,
     faces: np.ndarray,
@@ -273,6 +289,7 @@ def find_triangle_intersections(
     return sorted(intersections)
 
 
+@allow_positional
 def find_displacement_spikes(
     prev_pos: np.ndarray,
     curr_pos: np.ndarray,
@@ -300,6 +317,7 @@ def find_displacement_spikes(
     return spikes
 
 
+@allow_positional
 def detect_inverted_faces(
     positions: np.ndarray,
     faces: np.ndarray,
@@ -325,6 +343,7 @@ def detect_inverted_faces(
     return [int(idx) for idx in inverted_indices]
 
 
+@allow_positional
 def find_proximity_violations(
     positions: np.ndarray,
     faces: np.ndarray,
@@ -364,6 +383,7 @@ def find_proximity_violations(
     return violations
 
 
+@allow_positional
 def export_obj(filepath: str, positions: np.ndarray, faces: np.ndarray) -> None:
     """
     頂点配列と面インデックス配列を標準Wavefront OBJ形式として保存します。

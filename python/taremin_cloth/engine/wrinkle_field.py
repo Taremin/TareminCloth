@@ -18,6 +18,15 @@ try:
 except ImportError:
     _HAS_BPY = False
 
+try:
+    from ..utils import allow_positional
+except ImportError:
+    try:
+        from taremin_cloth.utils import allow_positional
+    except ImportError:
+        def allow_positional(fn):
+            return fn
+
 
 @dataclass
 class WrinkleProfile:
@@ -129,6 +138,7 @@ def build_orthonormal_basis(axis: Sequence[float]) -> Tuple[np.ndarray, np.ndarr
     return a, n, bn
 
 
+@allow_positional
 def project_points_to_cylindrical(
     points: np.ndarray,
     origin: Sequence[float],
@@ -166,6 +176,7 @@ def project_points_to_cylindrical(
     return theta, z, r
 
 
+@allow_positional
 def interpolate_curve_to_profile(
     curve_points: np.ndarray,
     origin: Sequence[float],
@@ -247,6 +258,7 @@ def interpolate_curve_to_profile(
     return z_prof, r_prof, w_prof
 
 
+@allow_positional
 def build_wrinkle_profile_from_curves(
     crest_curves: Sequence[np.ndarray],
     root_curves: Sequence[np.ndarray],
@@ -316,6 +328,7 @@ def build_wrinkle_profile_from_curves(
     )
 
 
+@allow_positional
 def extract_curves_from_blender_collection(
     collection_name: str,
     default_influence_radius: float = 0.03,
@@ -457,6 +470,7 @@ class WrinkleCurveDesc:
     influence_radius: float
 
 
+@allow_positional
 def describe_wrinkle_curves(
     crest_curves: Sequence[Any],
     root_curves: Sequence[Any],
@@ -493,6 +507,7 @@ def describe_wrinkle_curves(
     return descs
 
 
+@allow_positional
 def wrinkles_descs_match(
     a: Sequence[WrinkleCurveDesc],
     b: Sequence[WrinkleCurveDesc],
@@ -528,6 +543,7 @@ def wrinkles_descs_match(
     return True
 
 
+@allow_positional
 def wrinkle_shape_signature(
     descs: Sequence[WrinkleCurveDesc],
     width: int,
@@ -553,6 +569,7 @@ def wrinkle_shape_signature(
     return h.hexdigest()
 
 
+@allow_positional
 def match_slide_transform(
     cached: Sequence[WrinkleCurveDesc],
     current: Sequence[WrinkleCurveDesc],
@@ -659,6 +676,7 @@ class WrinkleTexture2D:
     rgba_array: np.ndarray     # shape: [height, width, 4], uint8
 
 
+@allow_positional
 def bake_wrinkle_2d_sdf_texture(
     crest_curves: Sequence[Union[np.ndarray, WrinkleCurveItem]],
     root_curves: Sequence[Union[np.ndarray, WrinkleCurveItem]],
@@ -756,6 +774,7 @@ def bake_wrinkle_2d_sdf_texture(
     xs_centers = np.arange(width, dtype=np.float64) * dx_tex
     zs_centers = float(z_min) + np.arange(height, dtype=np.float64) * dz_tex
 
+    @allow_positional
     def sample_single_curve_canonical(pts: np.ndarray, target_r: Optional[float] = None):
         """単一カーブを稠密サンプリングして正準点群 (x in [0, circ), z, r) を生成。
 
@@ -885,6 +904,7 @@ def bake_wrinkle_2d_sdf_texture(
     )
 
 
+@allow_positional
 def resolve_bone_radius(
     explicit: float = 0.0,
     head_r: float = 0.0,
@@ -906,6 +926,7 @@ def resolve_bone_radius(
     return float(max(1e-4, float(length) * 0.15))
 
 
+@allow_positional
 def derive_wrinkle_influence_spans(
     points: np.ndarray,
     origin: Sequence[float],

@@ -8,10 +8,12 @@ import json
 import math
 import bpy
 import mathutils
+from .args_guard import allow_positional
 from .logger import logger
 
 
 
+@allow_positional
 def apply_easing(t: float, easing_type: str = 'SMOOTH') -> float:
     """進行度 t (0.0 - 1.0) に対するイージング補間を計算する"""
     clamped = max(0.0, min(1.0, t))
@@ -25,6 +27,7 @@ def apply_easing(t: float, easing_type: str = 'SMOOTH') -> float:
 def compute_cycle_progress(
     frame_index: int,
     cycle_frames: int,
+    *,
     play_mode: str = 'ONCE',
     loop_count: int = 1,
     infinite_loop: bool = False,
@@ -99,6 +102,7 @@ def capture_pose_snapshot(armature_obj: bpy.types.Object) -> str:
     return json.dumps(data)
 
 
+@allow_positional
 def apply_pose_blend(
     armature_obj: bpy.types.Object,
     snapshot_a_json: str,
@@ -200,6 +204,7 @@ def get_action_fcurves(action: bpy.types.Action):
     return fcurves
 
 
+@allow_positional
 def apply_action_frame(
     armature_obj: bpy.types.Object,
     action: bpy.types.Action,

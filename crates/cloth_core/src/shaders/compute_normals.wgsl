@@ -50,7 +50,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (len > EPSILON) {
         normals[index] = vec4<f32>(n_sum / len, 0.0);
     } else {
-        // 三角形が存在しない頂点（ワイヤー等）はデフォルト上向き
-        normals[index] = vec4<f32>(0.0, 0.0, 1.0, 0.0);
+        // 三角形が存在しない頂点（1Dストランド・中継ウェイポイント等）は面法線を持たないためゼロベクトルとする
+        normals[index] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 }

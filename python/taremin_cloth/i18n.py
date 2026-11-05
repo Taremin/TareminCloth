@@ -155,7 +155,7 @@ def unregister():
         print(f"[TareminCloth] i18n unregister error: {e}")
 
 
-def trans(msgid: str, context: str = CONTEXT) -> str:
+def trans(msgid: str, *, context: str = CONTEXT) -> str:
     """UI文字列を現在のBlender言語設定に合わせて翻訳するヘルパー関数"""
     if HAS_BPY and hasattr(bpy, "app") and hasattr(bpy.app, "translations"):
         pget = getattr(bpy.app.translations, "pgettext_iface", bpy.app.translations.pgettext)

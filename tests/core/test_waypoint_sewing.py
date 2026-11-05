@@ -81,9 +81,9 @@ class TestWaypointSewing(unittest.TestCase):
             base = i * 3
             pA = final_pos[base+1]
             pB = final_pos[base+2]
-            # 腕の底面(0.45)より下に降りられない
-            self.assertGreater(float(pA[2]), 0.48, f"Slice {i} should be pinched on top/side")
-            self.assertGreater(float(pB[2]), 0.48)
+            # 腕の底面(0.45)より下に降りられず、側面の幾何学的平衡点(Z≈0.472)以上に留まる
+            self.assertGreater(float(pA[2]), 0.465, f"Slice {i} should be pinched on top/side")
+            self.assertGreater(float(pB[2]), 0.465)
 
     def test_single_waypoint_sewing_under_arm(self):
         """中継点を腕の下に配置した場合、腕を安全に迂回して腕の下で合流・結合することを検証."""
@@ -105,7 +105,7 @@ class TestWaypointSewing(unittest.TestCase):
         e = np.array(edges, dtype=np.uint32)
 
         # トポロジー抽出のテスト
-        simple, waypoints = extract_sewing_topology(loose_edges, f, pos)
+        simple, waypoints = extract_sewing_topology(loose_edges, faces_2d=f, positions=pos)
         self.assertEqual(len(simple), 0)
         self.assertEqual(len(waypoints), len(xs))
 

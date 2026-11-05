@@ -10,6 +10,7 @@ import time
 import hashlib
 import numpy as np
 from typing import Dict, List, Tuple, Optional
+from ..utils import allow_positional
 from ..utils.logger import logger
 
 try:
@@ -30,6 +31,7 @@ MAX_MESH_SDF_VRAM_MB = 4096
 MESH_SDF_HIER_AUTO_MIN_ITERS = 2_000_000_000
 
 
+@allow_positional
 def estimate_mesh_sdf_voxel_dims(
     mesh_verts: np.ndarray,
     voxel_size: float,
@@ -137,6 +139,7 @@ class BoneSdfBakeResult:
         self.joint_faces_by_pair = joint_faces_by_pair if joint_faces_by_pair is not None else {}
 
 
+@allow_positional
 def extract_joint_mesh_from_sdf(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
@@ -240,6 +243,7 @@ def extract_joint_mesh_from_sdf(
     return np.where(tri_mask)[0].astype(np.int32)
 
 
+@allow_positional
 def extract_joint_mesh_indices(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
@@ -336,6 +340,7 @@ def is_major_joint_pair(b1: str, b2: str) -> bool:
 is_limb_joint_pair = is_major_joint_pair
 
 
+@allow_positional
 def extract_major_joint_mesh_indices(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
@@ -371,6 +376,7 @@ def extract_major_joint_mesh_indices(
 extract_limb_joint_mesh_indices = extract_major_joint_mesh_indices
 
 
+@allow_positional
 def extract_hierarchy_joint_mesh_indices(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
@@ -425,6 +431,7 @@ def extract_hierarchy_joint_mesh_indices(
     return all_faces, joint_faces_by_pair
 
 
+@allow_positional
 def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) -> Tuple[int, int, int, int, int, int, int]:
     """
     ボーン数と解像度から、3D Brick Atlas のタイル分割数とテクスチャ寸法を計算する。
@@ -456,6 +463,7 @@ def compute_3d_atlas_layout(n_bones: int, resolution: int, max_dim: int = 2048) 
     return n_cols, n_rows, n_layers, safe_res, total_width, total_height, total_depth
 
 
+@allow_positional
 def update_bone_sdf_params(
     bone_infos: np.ndarray,
     friction: float = 0.5,
@@ -475,6 +483,7 @@ def update_bone_sdf_params(
     return updated
 
 
+@allow_positional
 def compute_mesh_signature(
     verts: np.ndarray,
     tris: np.ndarray,
@@ -485,10 +494,11 @@ def compute_mesh_signature(
     weight_threshold: float = 0.02,
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
+    close_open_boundaries: bool = True,
 ) -> str:
     """メッシュと設定からユニークなキャッシュハッシュキーを生成する"""
     hasher = hashlib.sha256()
-    prefix = f"v9_sdf_{int(enable_joint_mesh)}_{joint_weight_threshold:.2f}_{margin:.3f}_{thickness:.5f}_{weight_threshold:.4f}"
+    prefix = f"v10_sdf_{int(enable_joint_mesh)}_{int(close_open_boundaries)}_{joint_weight_threshold:.2f}_{margin:.3f}_{thickness:.5f}_{weight_threshold:.4f}"
     hasher.update(f"{prefix}_{verts.shape}_{tris.shape}_{res}_{len(bone_names)}".encode("utf-8"))
     # 先頭と末尾の数頂点をサンプリングしてハッシュ化
     sample_verts = verts[::max(1, len(verts) // 20)]
@@ -498,6 +508,7 @@ def compute_mesh_signature(
     return hasher.hexdigest()[:16]
 
 
+@allow_positional
 def bake_bone_sdf_from_data(
     mesh_verts: np.ndarray,               # shape: [V, 3] (メッシュ空間)
     mesh_tris: np.ndarray,                # shape: [F, 3] (三角形インデックス)
@@ -512,6 +523,7 @@ def bake_bone_sdf_from_data(
     restitution: float = 0.0,
     enable_joint_mesh: bool = False,
     joint_weight_threshold: float = 0.85,
+    close_open_boundaries: bool = True,
     overlap_rings: int = 1,
     bone_parent_map: Optional[Dict[str, Optional[str]]] = None,
 ) -> BoneSdfBakeResult:
@@ -562,6 +574,7 @@ def bake_bone_sdf_from_data(
             friction=float(friction),
             thickness=float(thickness),
             restitution=float(restitution),
+            close_open_boundaries=bool(close_open_boundaries),
         )
     except Exception as e:
         raise RuntimeError(f"[SDF Baker] GPUベイクに失敗しました: {e}") from e
@@ -636,6 +649,7 @@ def get_cache_dir() -> str:
 SDF_INTEGRITY_SAMPLES = 8192
 
 
+@allow_positional
 def check_sdf_texture_integrity(
     texture_bytes: Optional[bytes], width: int, height: int, depth: int
 ) -> Tuple[bool, str]:
@@ -842,7 +856,7 @@ def cleanup_pre_armature_eval_mesh(eval_obj, disabled_mods):
         pass
 
 
-def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = False) -> Optional[BoneSdfBakeResult]:
+def get_or_bake_bone_sdf_for_object(obj, col_settings, *, force_rebake: bool = False) -> Optional[BoneSdfBakeResult]:
     """
     Blenderオブジェクトからアーマチュアとメッシュを解析し、SDFベイク結果を取得（またはキャッシュから読込）する
     """
@@ -952,6 +966,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     friction = float(getattr(col_settings, "friction", 0.5))
     restitution = float(getattr(col_settings, "restitution", 0.0))
     blend_k = float(getattr(col_settings, "blend_k", 0.05))
+    close_open_boundaries = bool(getattr(col_settings, "close_open_boundaries", True))
 
     # キャッシュチェック (thickness, margin, weight_threshold もシグネチャに含めて不整合を防止)
     cache_key = compute_mesh_signature(
@@ -964,6 +979,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         weight_threshold=weight_threshold,
         enable_joint_mesh=enable_joint_mesh,
         joint_weight_threshold=joint_weight_threshold,
+        close_open_boundaries=close_open_boundaries,
     )
     if cache_enabled and not force_rebake:
         cached = load_cached_sdf(cache_key)
@@ -1009,6 +1025,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
             restitution=float(getattr(col_settings, "restitution", 0.0)),
             enable_joint_mesh=enable_joint_mesh,
             joint_weight_threshold=joint_weight_threshold,
+        close_open_boundaries=close_open_boundaries,
             bone_parent_map=bone_parent_map,
         )
     except Exception as e:
@@ -1033,6 +1050,7 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     return result
 
 
+@allow_positional
 def bake_mesh_sdf_from_data(
     mesh_verts: np.ndarray,
     mesh_tris: np.ndarray,
@@ -1042,6 +1060,7 @@ def bake_mesh_sdf_from_data(
     thickness: float = 0.005,
     restitution: float = 0.0,
     method: str = "auto",
+    close_open_boundaries: bool = True,
 ) -> Optional[MeshSdfBakeResult]:
     """
     メッシュ頂点・三角形データからGPUコンピュートシェーダーを用いて単一メッシュSDFをベイクする。
@@ -1075,6 +1094,7 @@ def bake_mesh_sdf_from_data(
                 friction=float(friction),
                 thickness=float(thickness),
                 restitution=float(restitution),
+            close_open_boundaries=bool(close_open_boundaries),
             )
             return MeshSdfBakeResult(
                 texture_bytes=gpu_res["texture_bytes"],
@@ -1089,7 +1109,7 @@ def bake_mesh_sdf_from_data(
     return None
 
 
-def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = False) -> Optional[MeshSdfBakeResult]:
+def get_or_bake_mesh_sdf_for_object(obj, col_settings, *, force_rebake: bool = False) -> Optional[MeshSdfBakeResult]:
     """
     Blenderオブジェクト（アーマチュア不要）からメッシュを解析し、直方体SDFベイク結果を取得（またはキャッシュから読込）する
     """
@@ -1104,6 +1124,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     max_vram_mb = int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB))
     auto_scale = bool(getattr(col_settings, "mesh_sdf_auto_scale", True))
     cache_enabled = bool(getattr(col_settings, "mesh_sdf_cache_enabled", True))
+    close_open_boundaries = bool(getattr(col_settings, "close_open_boundaries", True))
 
     depsgraph = bpy.context.evaluated_depsgraph_get() if bpy and hasattr(bpy, "context") and bpy.context else None
     eval_obj = obj.evaluated_get(depsgraph) if depsgraph else obj
@@ -1157,7 +1178,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     mesh_sig = hasher.hexdigest()[:16]
 
     cache_key = hashlib.md5(
-        f"mesh_sdf_{obj.name}_{mesh_sig}_{voxel_size:.5f}_{margin:.4f}_{friction:.3f}_{thickness:.4f}_{restitution:.3f}".encode()
+        f"v2_mesh_sdf_{obj.name}_{mesh_sig}_{int(close_open_boundaries)}_{voxel_size:.5f}_{margin:.4f}_{friction:.3f}_{thickness:.4f}_{restitution:.3f}".encode()
     ).hexdigest()
 
     if cache_enabled and not force_rebake:
@@ -1183,6 +1204,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
         friction=friction,
         thickness=thickness,
         restitution=restitution,
+        close_open_boundaries=close_open_boundaries,
     )
     elapsed = time.time() - t0
 
@@ -1207,6 +1229,7 @@ def get_or_bake_mesh_sdf_for_object(obj, col_settings, force_rebake: bool = Fals
     return res
 
 
+@allow_positional
 def compute_effective_voxel_size(
     size_xyz: np.ndarray,
     requested_voxel_size: float,
@@ -1247,6 +1270,7 @@ def compute_effective_voxel_size(
     return effective_v, True, raw_vram_mb
 
 
+@allow_positional
 def estimate_mesh_sdf_info(
     obj,
     voxel_size: float = 0.004,
@@ -1287,6 +1311,7 @@ def estimate_mesh_sdf_info(
     return w, h, d, effective_vram_mb, effective_v, is_clamped, raw_vram_mb
 
 
+@allow_positional
 def extract_dynamic_sdf_setup_data(obj, arm_obj, bake_res: BoneSdfBakeResult) -> Dict[str, np.ndarray]:
     """
     GPU LBSスキニングと動的SDFベイクに必要な静止ポーズ頂点・ウェイト・三角形ソースデータを抽出する。

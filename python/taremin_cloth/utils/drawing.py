@@ -11,6 +11,7 @@ import numpy as np
 from gpu_extras.batch import batch_for_shader
 
 from .. import i18n
+from .args_guard import allow_positional
 
 _draw_handler = None
 _draw_handler_2d = None
@@ -27,6 +28,7 @@ _cached_line_shader = None
 _cached_3d_uniform_shader = None
 _cached_2d_shader = None
 _cached_smooth_line_shader = None
+_cached_3d_smooth_shader = None
 
 
 def clear_pin_cache():
@@ -47,6 +49,7 @@ def clear_overlay_caches():
     clear_sewing_cache()
 
 
+@allow_positional
 def set_interactive_active(active: bool):
     """インタラクティブモードの実行状態を設定する"""
     global _interactive_active
@@ -61,6 +64,7 @@ def is_interactive_active() -> bool:
     return _interactive_active
 
 
+@allow_positional
 def _setup_font(font_size: int, font_id: int = 0):
     """blf.size のバージョン差を吸収してフォントサイズを設定する（docs/hud.md:4）"""
     import blf
@@ -73,6 +77,7 @@ def _setup_font(font_size: int, font_id: int = 0):
             pass
 
 
+@allow_positional
 def _measure_text(text: str, font_id: int = 0) -> float:
     """blf.dimensions の例外を吸収してテキスト幅を返す。失敗時は0.0。"""
     import blf
@@ -85,6 +90,7 @@ def _measure_text(text: str, font_id: int = 0) -> float:
     return 0.0
 
 
+@allow_positional
 def set_interactive_fps_info(
     fps: float,
     frame_ms: float,
@@ -124,6 +130,7 @@ def get_interactive_fps_info():
     return _interactive_fps_info
 
 
+@allow_positional
 def set_bake_overlay_info(current_frame: int, end_frame: int, pct: int, sewing_text=None):
     """ベイク中のオーバーレイ描画情報を更新する"""
     global _bake_overlay_info
@@ -151,16 +158,19 @@ def is_bake_overlay_active() -> bool:
     return _bake_overlay_info is not None
 
 
-_init_overlay_info = None  # {"message": str, "current": int, "total": int}
+_init_overlay_info = None  # {"message": str, "current": int, "total": int, "can_cancel": bool}
+_toast_overlay_info = None  # {"message": str, "pct": int, "bar_color": tuple, "dismiss_cb": object}
 
 
-def set_init_overlay_info(message: str, current: int, total: int):
-    """インタラクティブ起動準備中のオーバーレイ描画情報を更新する"""
+@allow_positional
+def set_init_overlay_info(message: str, current: int, total: int, can_cancel: bool = True):
+    """インタラクティブ起動準備中または同期処理中のオーバーレイ描画情報を更新する"""
     global _init_overlay_info
     _init_overlay_info = {
         "message": str(message),
         "current": int(current),
         "total": int(total),
+        "can_cancel": bool(can_cancel),
     }
 
 
@@ -180,6 +190,68 @@ def is_init_overlay_active() -> bool:
     return _init_overlay_info is not None
 
 
+@allow_positional
+def set_toast_overlay_info(
+    message: str,
+    duration: float = 1.8,
+    pct: int = 100,
+    bar_color=(0.3, 0.95, 0.4, 0.95),
+):
+    """
+    画面下部中央に一定時間（duration秒）完了通知バッジ（トースト）を表示する。
+    自動的に bpy.app.timers で消去され、ビューポートが再描画される。
+    """
+    global _toast_overlay_info
+    clear_toast_overlay_info()
+
+    def _dismiss():
+        global _toast_overlay_info
+        _toast_overlay_info = None
+        from .view3d import tag_redraw_view3d
+        tag_redraw_view3d()
+        return None
+
+    timer_handle = None
+    if duration > 0 and hasattr(bpy, "app") and hasattr(bpy.app, "timers"):
+        try:
+            bpy.app.timers.register(_dismiss, first_interval=duration)
+            timer_handle = _dismiss
+        except Exception:
+            pass
+
+    _toast_overlay_info = {
+        "message": str(message),
+        "pct": int(pct),
+        "bar_color": bar_color,
+        "dismiss_cb": timer_handle,
+    }
+
+
+def clear_toast_overlay_info():
+    """トースト通知バッジをクリアする"""
+    global _toast_overlay_info
+    if _toast_overlay_info:
+        cb = _toast_overlay_info.get("dismiss_cb")
+        if cb and hasattr(bpy, "app") and hasattr(bpy.app, "timers"):
+            try:
+                if bpy.app.timers.is_registered(cb):
+                    bpy.app.timers.unregister(cb)
+            except Exception:
+                pass
+        _toast_overlay_info = None
+
+
+def get_toast_overlay_info():
+    """現在のトースト描画情報を取得する（テストまたはUI用）"""
+    return _toast_overlay_info
+
+
+def is_toast_overlay_active() -> bool:
+    """トースト通知描画が有効かどうかを取得する"""
+    return _toast_overlay_info is not None
+
+
+@allow_positional
 def set_active_grabbed_vertex(obj_name: str, vert_idx: int, target_world_pos=None):
     """現在ドラッグ中の頂点情報を設定する"""
     global _active_grabbed_info
@@ -196,6 +268,7 @@ def clear_active_grabbed_vertex():
     _active_grabbed_info = None
 
 
+@allow_positional
 def set_brush_info(x: float, y: float, radius_px: float):
     """範囲グラブブラシカーソル円の表示情報を更新する"""
     global _brush_info
@@ -217,6 +290,7 @@ def get_brush_info():
     return _brush_info
 
 
+@allow_positional
 def apply_view_depth_bias(coords, region_3d=None):
     """
     深度テスト有効時のZ-fighting（埋没・本来の辺や面と色が混ざって薄くなる現象）を解消するため、
@@ -261,6 +335,22 @@ def get_3d_uniform_color_shader():
         try:
             _cached_3d_uniform_shader = gpu.shader.from_builtin(name)
             return _cached_3d_uniform_shader
+        except Exception:
+            pass
+    return None
+
+get_3d_uniform_shader = get_3d_uniform_color_shader
+
+
+def get_3d_smooth_color_shader():
+    """3Dサーフェス（TRIS）やライン向けの頂点カラー補間シェーダーを取得する"""
+    global _cached_3d_smooth_shader
+    if _cached_3d_smooth_shader is not None:
+        return _cached_3d_smooth_shader
+    for name in ('3D_SMOOTH_COLOR', 'SMOOTH_COLOR'):
+        try:
+            _cached_3d_smooth_shader = gpu.shader.from_builtin(name)
+            return _cached_3d_smooth_shader
         except Exception:
             pass
     return None
@@ -318,6 +408,7 @@ def get_smooth_color_line_shader():
     return None
 
 
+@allow_positional
 def get_edge_initial_length(obj, v0_idx, v1_idx):
     """オブジェクトの初期座標からエッジの初期自然長を算出する"""
     if "_taremin_cloth_rest_positions" in obj:
@@ -751,9 +842,11 @@ def draw_callback_3d():
             gpu.state.depth_mask_set(orig_depth_mask)
 
 
-def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
-    """画面下部中央に進捗バー付きバッジを描画する（ベイク/起動準備の共通ヘルパー）"""
+@allow_positional
+def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int, bar_color=None):
+    """画面下部中央に進捗バー付きバッジを描画する（ベイク/起動準備/トーストの共通ヘルパー）"""
     pct = max(0, min(100, int(pct)))
+    effective_bar_color = bar_color if bar_color is not None else (0.2, 0.7, 1.0, 0.9)
     guide_h = 32.0
     pad_x = 18.0
     text_w = 400.0
@@ -816,7 +909,7 @@ def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
                 bar_batch = batch_for_shader(shader_2d, 'TRIS', {"pos": bar_verts})
                 if bar_batch:
                     shader_2d.bind()
-                    shader_2d.uniform_float("color", (0.2, 0.7, 1.0, 0.9))
+                    shader_2d.uniform_float("color", effective_bar_color)
                     bar_batch.draw(shader_2d)
         finally:
             gpu.state.blend_set(orig_blend)
@@ -831,6 +924,7 @@ def _draw_bottom_center_progress(region, shader_2d, text: str, pct: int):
         pass
 
 
+@allow_positional
 def _draw_top_badge(region, shader_2d, margin_x: float, y_top: float, text: str,
                     text_color=(0.95, 0.95, 0.98, 1.0), font_size: int = 13, min_w: float = 200.0):
     """画面上部バッジ（背景＋1行テキスト）を描画する。テキスト幅に合わせて自動拡幅する。"""
@@ -887,6 +981,7 @@ def _draw_top_badge(region, shader_2d, margin_x: float, y_top: float, text: str,
         pass
 
 
+@allow_positional
 def _draw_bottom_badge_2row(region, shader_2d, line1: str, line2=None,
                             font_size: int = 12):
     """画面下部中央のガイダンスバッジ（最大2行）を描画する（docs/hud.md:4）。
@@ -943,12 +1038,14 @@ def _draw_bottom_badge_2row(region, shader_2d, line1: str, line2=None,
         pass
 
 
+@allow_positional
 def draw_wrinkle_slide_hud(region, line1: str, line2: str = ""):
     """シワカーブのモーダルスライド操作用HUDバッジを描画する（docs/hud.md準拠）"""
     shader_2d = get_2d_uniform_color_shader()
     _draw_bottom_badge_2row(region, shader_2d, line1, line2 if line2 else None)
 
 
+@allow_positional
 def compute_octahedron_mesh(head, tail, radius=None):
     """
     ボーンのhead, tailから八面体（Octahedral）の三角形頂点リスト（TRIS: 24頂点）と
@@ -1000,6 +1097,7 @@ def compute_octahedron_mesh(head, tail, radius=None):
     return [tuple(x) for x in tris], [tuple(x) for x in lines]
 
 
+@allow_positional
 def compute_wrinkle_influence_mesh(
     origin: Sequence[float],
     axis: Sequence[float],
@@ -1050,6 +1148,7 @@ def compute_wrinkle_influence_mesh(
     if r_out <= r_in:
         return [], []
 
+    @allow_positional
     def _surf_point(theta: float, z: float, r: float):
         direction = math.cos(theta) * n_vec + math.sin(theta) * b_vec
         p = orig + ax * z + direction * r
@@ -1109,6 +1208,7 @@ def compute_wrinkle_influence_mesh(
     return tris, lines
 
 
+@allow_positional
 def build_wrinkle_influence_meshes(
     curves_data: Sequence[Tuple[str, Sequence[Sequence[float]], float, float]],
     origin: Sequence[float],
@@ -1186,6 +1286,7 @@ def build_wrinkle_influence_meshes(
     return out
 
 
+@allow_positional
 def _draw_bone_proxy_cylinder(b_head, axis_n, n_vec, bone_rad: float, bone_len: float):
     """骨半径代理の仮想円柱（先端〜末端）を薄い灰色で表示する。"""
     if bone_rad <= 1e-6 or bone_len <= 1e-6:
@@ -1198,6 +1299,7 @@ def _draw_bone_proxy_cylinder(b_head, axis_n, n_vec, bone_rad: float, bone_len: 
         draw_wrinkle_influence_meshes([("proxy", tris, lines)])
 
 
+@allow_positional
 def draw_wrinkle_influence_meshes(
     meshes_data: Sequence[tuple],
     alpha_mul: float = 1.0,
@@ -1274,6 +1376,7 @@ def draw_wrinkle_influence_meshes(
             pass
 
 
+@allow_positional
 def draw_wrinkle_armature_overlay(
     all_bones_data: list,
     active_bone_name: str = "",
@@ -1404,6 +1507,7 @@ def draw_wrinkle_armature_overlay(
         gpu.state.blend_set(orig_blend)
 
 
+@allow_positional
 def draw_wrinkle_bone_overlay(chain_bones_coords, active_bone_idx: int = 0):
     """
     シワスライドモーダル中のボーンチェーンを3D空間上に最前面で強調表示する（後方互換ラッパー）。
@@ -1433,7 +1537,7 @@ def draw_wrinkle_bone_overlay(chain_bones_coords, active_bone_idx: int = 0):
 
 def draw_callback_2d():
     """3Dビューポートの2D（POST_PIXEL）HUD描画コールバック"""
-    if not _interactive_active and not _bake_overlay_info and not _init_overlay_info:
+    if not _interactive_active and not _bake_overlay_info and not _init_overlay_info and not _toast_overlay_info:
         return
 
     context = bpy.context
@@ -1616,16 +1720,31 @@ def draw_callback_2d():
         message = _init_overlay_info.get("message", "")
         cur = _init_overlay_info.get("current", 0)
         total = _init_overlay_info.get("total", 1)
+        can_cancel = _init_overlay_info.get("can_cancel", True)
         pct = int(min(1.0, max(0.0, cur / max(1, total))) * 100)
 
         stage_text = i18n.trans(message) if message else ""
-        cancel_text = i18n.trans("[Esc] Cancel")
-        try:
-            init_text = f"{stage_text} {cur}/{total} ({pct}%)  |  {cancel_text}"
-        except Exception:
-            init_text = f"{message} {cur}/{total} ({pct}%)"
+        if can_cancel:
+            cancel_text = i18n.trans("[Esc] Cancel")
+            try:
+                init_text = f"{stage_text} {cur}/{total} ({pct}%)  |  {cancel_text}"
+            except Exception:
+                init_text = f"{message} {cur}/{total} ({pct}%)  |  {cancel_text}"
+        else:
+            try:
+                init_text = f"{stage_text} {cur}/{total} ({pct}%)"
+            except Exception:
+                init_text = f"{message} {cur}/{total} ({pct}%)"
 
         _draw_bottom_center_progress(region, shader_2d, init_text, pct)
+
+    # --- 4. 完了通知トーストバッジの描画 (画面下部中央) ---
+    elif _toast_overlay_info:
+        message = _toast_overlay_info.get("message", "")
+        pct = _toast_overlay_info.get("pct", 100)
+        bar_color = _toast_overlay_info.get("bar_color", (0.3, 0.95, 0.4, 0.95))
+        toast_text = i18n.trans(message) if message else ""
+        _draw_bottom_center_progress(region, shader_2d, toast_text, pct, bar_color=bar_color)
 
 
 def register_draw_handler():

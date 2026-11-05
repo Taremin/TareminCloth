@@ -338,6 +338,7 @@ impl SharedPipelines {
                     storage_ro(7),     // two_hop_indices
                     storage_rw_at(8),  // accum
                     storage_ro(9),     // two_hop_rest_lengths
+                    storage_ro(10),    // edge_boundary_bits
                 ],
             });
         let self_collision_apply_bgl =

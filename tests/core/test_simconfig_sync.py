@@ -19,42 +19,7 @@ python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
 
-# bpyモック登録 (test_sparse_recording.py と同一preamble)
-try:
-    import tests  # noqa: F401
-except Exception:
-    from unittest.mock import MagicMock
-
-    class _DummyTypesModule:
-        def __init__(self):
-            self._types = {
-                name: type(name, (object,), {})
-                for name in ("Operator", "Panel", "PropertyGroup", "UIList",
-                             "AddonPreferences", "Menu", "Header", "Gizmo",
-                             "GizmoGroup", "Node", "NodeTree", "NodeSocket", "UILayout")
-            }
-
-        def __getattr__(self, name):
-            if name.startswith("__"):
-                raise AttributeError(name)
-            if name not in self._types:
-                self._types[name] = type(name, (object,), {})
-            return self._types[name]
-
-    if "bpy.types" not in sys.modules:
-        sys.modules["bpy.types"] = _DummyTypesModule()
-    for _mod_name in ("bpy", "bpy.props", "bpy.ops", "bpy.utils", "bpy.context",
-                      "bpy.path", "bpy.app", "bpy_extras", "bpy_extras.view3d_utils",
-                      "gpu", "blf", "bmesh", "mathutils"):
-        if _mod_name not in sys.modules:
-            try:
-                __import__(_mod_name)
-            except Exception:
-                _m = MagicMock()
-                _m.__name__ = _mod_name
-                if _mod_name == "bpy":
-                    _m.types = sys.modules.get("bpy.types")
-                sys.modules[_mod_name] = _m
+import tests  # noqa: F401
 
 import numpy as np
 
@@ -108,7 +73,7 @@ class TestSimconfigSync(unittest.TestCase):
         edges = np.array([[0, 1]], dtype=np.uint32)
         sim = core.ClothSimulator(pos, edges)
         rust_keys = set(json.loads(sim.get_config_json()).keys())
-        cfg = self.sc.collect_sim_config(make_settings(), make_scene())
+        cfg = self.sc.collect_sim_config(make_settings(), scene=make_scene())
         missing = rust_keys - set(cfg.keys())
         self.assertEqual(missing, set(), f"収集漏れ: {missing}")
 
@@ -138,24 +103,34 @@ class TestSimconfigSync(unittest.TestCase):
         cfg = self.sc.collect_sim_config(
             make_settings(tension_stiffness=2000.0, coupled_self_collision_mode="FULL_COUPLED",
                           pair_cache_max_pairs=4096, sewing_stiffness=5000.0),
-            make_scene(),
+            scene=make_scene(),
         )
         route = self.sc.apply_sim_config(sim, cfg)
         self.assertEqual(route, "config")
         exported = json.loads(sim.get_config_json())
         for key in self.sc.LIVE_KEYS:
-            if key == "damping":
-                # 実効値 = air + detail合計*0.05
-                expect = (cfg["damping"] + (cfg["tension_damping"] + cfg["compression_damping"]
-                                            + cfg["shear_damping"] + cfg["bending_damping"]) * 0.05)
-                self.assertAlmostEqual(exported[key], expect, places=5, msg=key)
-            elif key in ("tension_damping", "compression_damping", "shear_damping", "bending_damping"):
-                continue  # 実効値に折り畳まれるためexport側は0
-            elif isinstance(cfg[key], float):
+            if isinstance(cfg[key], float):
                 # f32 compliance往復のため相対誤差で判定
                 self.assertAlmostEqual(exported[key], cfg[key], delta=abs(cfg[key]) * 1e-4 + 1e-6, msg=key)
             else:
                 self.assertEqual(exported[key], cfg[key], msg=key)
+
+    def test_damping_idempotency_on_repeated_apply(self):
+        """set_damping_all および apply_config_json を複数回呼んでも減衰率が累積増加しないこと (冪等性)"""
+        import taremin_cloth_core as core
+        pos = np.array([[0.0, 0.0, 0.0], [0.05, 0.0, 0.0]], dtype=np.float32)
+        edges = np.array([[0, 1]], dtype=np.uint32)
+        sim = core.ClothSimulator(pos, edges)
+
+        sim.set_damping(1.0)
+        sim.set_damping_all(5.0, 5.0, 5.0, 0.5)
+        cfg_first = json.loads(sim.get_config_json())
+
+        # set_damping を挟まずに再度 set_damping_all を呼んでも値が変わらないこと
+        sim.set_damping_all(5.0, 5.0, 5.0, 0.5)
+        cfg_second = json.loads(sim.get_config_json())
+        self.assertAlmostEqual(cfg_first["damping"], cfg_second["damping"], places=6)
+        self.assertAlmostEqual(cfg_first["tension_damping"], 5.0, places=6)
 
     def test_coupled_mapping(self):
         s = make_settings(coupled_self_collision_mode="OFF", post_collision_relaxation_iters=5)
@@ -174,7 +149,7 @@ class TestSimconfigSync(unittest.TestCase):
 
     def test_signature_sensitivity(self):
         """全Liveキーの変更が署名に反映されること"""
-        base = self.sc.collect_sim_config(make_settings(), make_scene())
+        base = self.sc.collect_sim_config(make_settings(), scene=make_scene())
         base_sig = self.sc.sim_config_signature(base)
         for key in self.sc.SIGNATURE_KEYS:
             mod = dict(base)
@@ -203,7 +178,7 @@ class TestSimconfigSync(unittest.TestCase):
                     return rec
                 raise AttributeError(name)
 
-        cfg = self.sc.collect_sim_config(make_settings(), make_scene())
+        cfg = self.sc.collect_sim_config(make_settings(), scene=make_scene())
         route = self.sc.apply_sim_config(FakeSim(), cfg)
         self.assertEqual(route, "legacy")
         called = {c[0] for c in calls}
@@ -218,12 +193,12 @@ class TestSimconfigSync(unittest.TestCase):
             self.assertIn(expected, called, f"legacy未呼出: {expected}")
 
     def test_gravity_variants(self):
-        vec, scale = self.sc.gravity_from_settings(make_settings(gravity=2.0), make_scene())
+        vec, scale = self.sc.gravity_from_settings(make_settings(gravity=2.0), scene=make_scene())
         self.assertEqual(vec, [0.0, 0.0, -19.62])
         self.assertEqual(scale, 2.0)
-        vec, _ = self.sc.gravity_from_settings(make_settings(), make_scene(use_gravity=False))
+        vec, _ = self.sc.gravity_from_settings(make_settings(), scene=make_scene(use_gravity=False))
         self.assertEqual(vec, [0.0, 0.0, 0.0])
-        vec, _ = self.sc.gravity_from_settings(make_settings(gravity=0.5), None)
+        vec, _ = self.sc.gravity_from_settings(make_settings(gravity=0.5), scene=None)
         self.assertAlmostEqual(vec[2], -4.905)
 
     def test_gui_wire_mapping_has_max_iterations(self):

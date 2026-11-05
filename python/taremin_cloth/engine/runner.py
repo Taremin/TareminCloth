@@ -6,6 +6,7 @@ ClothSimulatorのライフサイクル生成、CFL適応サブステップ計算
 
 import bpy
 import numpy as np
+from typing import Optional
 from .cache import (
     _simulators,
     _prev_coords_cache,
@@ -27,7 +28,7 @@ from .collider import sync_colliders
 from .params import sync_cloth_parameters, sync_attachment_pins
 from .simconfig import resolve_self_collision_algorithm
 from .profiling import format_profile_table
-from ..utils import anim_driver
+from ..utils import anim_driver, allow_positional
 from ..utils.logger import logger
 from ..utils.mesh_extract import extract_cloth_mesh_data
 
@@ -35,7 +36,7 @@ _fast_playback_saved_mods = {}
 _is_baking = False
 
 
-def apply_fast_playback(scene, force=False, include_sim_objs=False):
+def apply_fast_playback(scene, *, force: bool = False, include_sim_objs: bool = False):
     """シミュレーションに関係のないオブジェクトの重いモディファイアを一時無効化してDepsgraphを軽量化"""
     global _fast_playback_saved_mods
     if not force and not getattr(scene, "taremin_cloth_fast_playback", False):
@@ -93,7 +94,7 @@ def begin_simulator_init(obj):
         return {"cached": True}
 
     settings = obj.taremin_cloth
-    cloth_data = extract_cloth_mesh_data(obj, settings)
+    cloth_data = extract_cloth_mesh_data(obj, settings=settings)
     pos_2d = cloth_data.positions
     coords = pos_2d.flatten().copy()
     n_verts = len(pos_2d)
@@ -104,18 +105,47 @@ def begin_simulator_init(obj):
 
     is_deformed = obj.get("_taremin_cloth_is_deformed", False)
     rest_pos_2d = None
+    n_mesh_verts = len(obj.data.vertices)
     # レスト頂点座標の取得 (未変形キャッシュがあれば優先して使用)
     if is_deformed and "_taremin_cloth_rest_positions" in obj:
         raw_rest = obj["_taremin_cloth_rest_positions"]
-        if len(raw_rest) == n_verts * 3 * 4:
-            rest_pos_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3)).copy()
+        if len(raw_rest) == n_mesh_verts * 3 * 4:
+            cloth_rest_2d = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_mesh_verts, 3)).copy()
             if hasattr(obj, "matrix_world"):
                 try:
                     mat = np.array(obj.matrix_world, dtype=np.float32)
                     if mat.ndim == 2 and mat.shape == (4, 4):
-                        rest_pos_2d = (rest_pos_2d @ mat[:3, :3].T) + mat[:3, 3]
+                        cloth_rest_2d = (cloth_rest_2d @ mat[:3, :3].T) + mat[:3, 3]
                 except (ValueError, TypeError, AttributeError):
                     pass
+
+            if cloth_data.curve_parts:
+                rest_blocks = [cloth_rest_2d]
+                string_parts = getattr(settings, "string_parts", None) or []
+                enabled_sp = [sp for sp in string_parts if getattr(sp, "enabled", True) and getattr(sp, "curve_object", None)]
+                for idx, c_part in enumerate(cloth_data.curve_parts):
+                    c_obj = enabled_sp[idx].curve_object if idx < len(enabled_sp) else None
+                    c_rest_world = None
+                    if c_obj is not None and "_taremin_cloth_rest_positions" in c_obj:
+                        raw_c = c_obj["_taremin_cloth_rest_positions"]
+                        if len(raw_c) == c_part.vertex_count * 3 * 4:
+                            c_rest_local = np.frombuffer(raw_c, dtype=np.float32).reshape((c_part.vertex_count, 3)).copy()
+                            if hasattr(c_obj, "matrix_world"):
+                                try:
+                                    c_mat = np.array(c_obj.matrix_world, dtype=np.float32).reshape((4, 4))
+                                    c_rest_world = (c_rest_local @ c_mat[:3, :3].T) + c_mat[:3, 3]
+                                except Exception:
+                                    c_rest_world = c_rest_local
+                            else:
+                                c_rest_world = c_rest_local
+                    if c_rest_world is None:
+                        v_s = c_part.vertex_offset
+                        v_e = v_s + c_part.vertex_count
+                        c_rest_world = pos_2d[v_s:v_e].copy()
+                    rest_blocks.append(c_rest_world.astype(np.float32))
+                rest_pos_2d = np.vstack(rest_blocks)
+            else:
+                rest_pos_2d = cloth_rest_2d
 
     return {
         "cached": False,
@@ -134,6 +164,8 @@ def begin_simulator_init(obj):
         "sim_init_pos": rest_pos_2d if rest_pos_2d is not None else pos_2d,
         "waypoint_seams": cloth_data.waypoint_seams,
         "seam_cluster_map": cloth_data.seam_cluster_map,
+        "thicknesses": cloth_data.thicknesses,
+        "curve_parts": cloth_data.curve_parts,
     }
 
 
@@ -150,6 +182,7 @@ def create_simulator_from_state(obj, state):
         inv_masses=state["inv_masses"],
         sewing_springs=state["sew_2d"],
         layer_ids=state.get("layer_ids"),
+        thicknesses=state.get("thicknesses"),
         layer_id=settings.layer_id,
         thickness=settings.thickness,
         stiffness=settings.tension_stiffness,
@@ -177,7 +210,8 @@ def create_simulator_from_state(obj, state):
     return sim
 
 
-def finalize_simulator_init(obj, sim, state, scene=None):
+@allow_positional
+def finalize_simulator_init(obj, sim, state, *, scene=None):
     """シミュレータ初期化の後半: 特性長・レスト・コライダー/SDF同期・パラメータ同期・登録を行う"""
     sc = scene if scene is not None else bpy.context.scene
     pos_2d = state["pos_2d"]
@@ -199,9 +233,16 @@ def finalize_simulator_init(obj, sim, state, scene=None):
     char_len = max(0.001, min(min_edge_len, thickness * 2.0))
     _mesh_char_len_cache[obj.name] = char_len
 
+    if state.get("seam_cluster_map"):
+        set_seam_cluster_map(obj.name, state["seam_cluster_map"])
+
+    if state.get("curve_parts"):
+        from .cache import set_curve_parts_runtime
+        set_curve_parts_runtime(obj.name, state["curve_parts"])
+
     cache_rest_positions(obj)
     sync_colliders(sim, sc, cloth_obj=obj)
-    sync_cloth_parameters(sim, obj, sc)
+    sync_cloth_parameters(sim, obj, scene=sc)
 
     if state.get("waypoint_seams"):
         from .waypoint import WaypointManager
@@ -211,9 +252,6 @@ def finalize_simulator_init(obj, sim, state, scene=None):
             merge_dist=max(0.01, float(thickness) * 2.0),
             pass_dist=max(0.015, float(thickness) * 3.0),
         )
-
-    if state.get("seam_cluster_map"):
-        set_seam_cluster_map(obj.name, state["seam_cluster_map"])
 
     _simulators[obj.name] = (sim, coords)
     n_faces = len(faces_2d) if faces_2d is not None else 0
@@ -263,6 +301,7 @@ def get_seam_merge_threshold(obj) -> float:
     return 0.02
 
 
+@allow_positional
 def get_connected_seam_partners(
     obj_name: str,
     vert_idx: int,
@@ -289,7 +328,7 @@ def get_connected_seam_partners(
     return connected
 
 
-def _gravity_active(settings, scene=None) -> bool:
+def _gravity_active(settings, *, scene=None) -> bool:
     """重力荷重が有効か (適応サブステップ下限の判定用)。"""
     try:
         scale = abs(float(getattr(settings, "gravity", 1.0)))
@@ -302,6 +341,7 @@ def _gravity_active(settings, scene=None) -> bool:
     return True
 
 
+@allow_positional
 def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None):
     """布およびコライダーの運動速度とCFL条件に基づき、最適なサブステップ数を動的に算出する。
 
@@ -320,34 +360,122 @@ def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None)
     return base_steps
 
 
+_collider_armature_pose_cache = {}
+
+
+def clear_collider_armature_cache(obj_name=None):
+    """アーマチュアポーズ比較キャッシュを破棄する"""
+    global _collider_armature_pose_cache
+    if obj_name:
+        _collider_armature_pose_cache.pop(obj_name, None)
+    else:
+        _collider_armature_pose_cache.clear()
+
+
+def _has_collider_armature_moved(col_o) -> bool:
+    """コライダーに紐づくアーマチュアのポーズ行列またはワールド行列が前フレームから変化したかを判定する"""
+    global _collider_armature_pose_cache
+    arm_o = col_o.find_armature() if hasattr(col_o, "find_armature") else None
+    if arm_o is None:
+        for mod in getattr(col_o, "modifiers", []):
+            if getattr(mod, "type", None) == 'ARMATURE' and getattr(mod, "object", None):
+                arm_o = mod.object
+                break
+
+    # アーマチュアがない場合はオブジェクトレベルのアニメーション有無をチェック
+    if arm_o is None or not getattr(arm_o, "pose", None):
+        return bool(col_o.animation_data and col_o.animation_data.action)
+
+    # オブジェクト行列および全ボーン行列の全16成分をシグネチャ化（回転・移動・スケールを100%検知）
+    sig_parts = []
+    w_mat = getattr(col_o, "matrix_world", None)
+    if w_mat is not None:
+        for r in range(4):
+            for c in range(4):
+                sig_parts.append(round(float(w_mat[r][c]), 4))
+
+    arm_mat = getattr(arm_o, "matrix_world", None)
+    if arm_mat is not None:
+        for r in range(4):
+            for c in range(4):
+                sig_parts.append(round(float(arm_mat[r][c]), 4))
+
+    for pb in arm_o.pose.bones:
+        m = pb.matrix
+        for r in range(4):
+            for c in range(4):
+                sig_parts.append(round(float(m[r][c]), 4))
+
+    sig = tuple(sig_parts)
+    key = getattr(col_o, "name", "")
+    prev_sig = _collider_armature_pose_cache.get(key)
+    if prev_sig != sig:
+        _collider_armature_pose_cache[key] = sig
+        return prev_sig is not None
+    return False
+
+
 def _apply_coords_to_mesh(obj, coords):
-    """計算済み座標配列をBlenderメッシュ頂点に適用する。"""
-    pos_world = coords.reshape(-1, 3)
+    """計算済み座標配列をBlenderメッシュ頂点および紐Curveに適用する（単位行列時はゼロコピー直書き）。"""
+    n_mesh_verts = len(obj.data.vertices)
+    total_verts = len(coords) // 3
+    mesh_coords = coords[:n_mesh_verts * 3]
+
     pos_local = None
     if hasattr(obj, "matrix_world"):
         try:
-            inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
-            if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
-                pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
+            mat = obj.matrix_world
+            is_identity = True
+            for r in range(4):
+                for c in range(4):
+                    expected = 1.0 if r == c else 0.0
+                    if abs(mat[r][c] - expected) > 1e-5:
+                        is_identity = False
+                        break
+                if not is_identity:
+                    break
+
+            if not is_identity:
+                inv_mat = np.array([list(row) for row in mat.inverted()], dtype=np.float32)
+                if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                    pos_world = mesh_coords.reshape(-1, 3)
+                    pos_local = (pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]
         except (ValueError, TypeError, AttributeError):
             pos_local = None
     if pos_local is not None:
         obj.data.vertices.foreach_set("co", pos_local.flatten())
     else:
-        obj.data.vertices.foreach_set("co", coords)
+        obj.data.vertices.foreach_set("co", mesh_coords)
     obj.data.update()
     obj["_taremin_cloth_is_deformed"] = True
+
+    # 紐（Curve）オブジェクトへの書き戻し
+    if total_verts > n_mesh_verts:
+        from .cache import get_curve_parts_runtime
+        from ..utils.curve_extract import apply_coords_to_curve
+
+        curve_parts = get_curve_parts_runtime(obj.name)
+        coords_2d = coords.reshape(-1, 3)
+        for c_part in curve_parts:
+            v_start = c_part.vertex_offset
+            v_end = v_start + c_part.vertex_count
+            if v_end <= total_verts:
+                c_world_coords = coords_2d[v_start:v_end]
+                curve_obj = bpy.data.objects.get(c_part.curve_obj_name)
+                if curve_obj:
+                    apply_coords_to_curve(curve_obj, c_world_coords)
 
 
 def step_cloth_object(
     obj,
     scene,
+    *,
     dt: float = 1.0 / 60.0,
     depsgraph=None,
     force_sync_colliders: bool = False,
     update_mesh: bool = True,
-    substeps: int = None,
-    solver_iterations: int = None,
+    substeps: Optional[int] = None,
+    solver_iterations: Optional[int] = None,
     skip_sync: bool = False,
 ):
     """単一の布オブジェクトに対し、コライダー同期・パラメータ同期・物理ステップ・メッシュ更新を実行する。
@@ -396,8 +524,8 @@ def step_cloth_object(
                 depsgraph = None
 
         sync_colliders(sim, scene, depsgraph=depsgraph, force=force_sync_colliders, cloth_obj=obj)
-        sync_cloth_parameters(sim, obj, scene)
-        sync_attachment_pins(sim, obj, scene)
+        sync_cloth_parameters(sim, obj, scene=scene)
+        sync_attachment_pins(sim, obj, scene=scene)
 
     # substeps未指定(None)時は、非適応ならsettings.substepsを使用し、適応サブステップ有効時はコア側に判定委譲(None)
     if substeps is not None:
@@ -423,15 +551,13 @@ def step_cloth_object(
         sim.step_async(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
     else:
         sim.step(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
+        sim.get_positions(coords)
         if update_mesh:
-            sim.get_positions(coords)
             _apply_coords_to_mesh(obj, coords)
 
         # 中継点縫合の動的通過＆結合完了時ピン解放判定
         wp_mgr = _waypoint_managers.get(obj.name)
         if wp_mgr and wp_mgr.has_active_seams:
-            if not update_mesh:
-                sim.get_positions(coords)
             wp_mgr.update(coords, sim=sim)
 
     return sim, coords
@@ -439,10 +565,11 @@ def step_cloth_object(
 
 def step_cloth_scene(
     scene,
+    *,
     dt: float = 1.0 / 60.0,
-    anim_frame: int = None,
+    anim_frame: Optional[int] = None,
     depsgraph=None,
-    target_objs: list = None,
+    target_objs: Optional[list] = None,
     update_mesh: bool = True,
     steps_per_frame: int = 1,
 ) -> dict:
@@ -460,9 +587,13 @@ def step_cloth_scene(
     Returns:
         dict[str, tuple]: {obj.name: (sim, coords)} の辞書
     """
+    # Contextオブジェクトが渡された場合の防御的解決
+    if hasattr(scene, "scene") and scene.scene is not None:
+        scene = scene.scene
+
     # 1. コライダーのアニメーション駆動ステップ
     any_collider_deformed = False
-    current_frame = anim_frame if anim_frame is not None else scene.frame_current
+    current_frame = anim_frame if anim_frame is not None else getattr(scene, "frame_current", 1)
 
     for col_o in scene.objects:
         c_set = getattr(col_o, "taremin_cloth_collider", None)
@@ -472,7 +603,7 @@ def step_cloth_scene(
                 if deformed:
                     any_collider_deformed = True
             elif col_o.type == 'MESH' and (c_set.collider_type == 'MESH' or (c_set.collider_type == 'BONE_SDF' and getattr(c_set, "enable_joint_mesh", True))):
-                if col_o.find_armature() or (col_o.animation_data and col_o.animation_data.action):
+                if _has_collider_armature_moved(col_o):
                     any_collider_deformed = True
 
     # 2. 必要に応じてDepsgraphを再評価
@@ -512,7 +643,7 @@ def step_cloth_scene(
     return results
 
 
-def set_profiling_enabled_all(enable: bool = True) -> dict:
+def set_profiling_enabled_all(*, enable: bool = True) -> dict:
     """登録済み全シミュレータのGPU計測を切替える。{obj名: 可否} を返す。"""
     out = {}
     for name, (sim, _coords) in list(_simulators.items()):
@@ -559,7 +690,7 @@ def save_profile_traces(directory: str = "scratch") -> dict:
     return out
 
 
-def flush_async_simulation(obj, update_mesh: bool = True) -> bool:
+def flush_async_simulation(obj, *, update_mesh: bool = True) -> bool:
     """指定オブジェクトの未回収非同期シミュレーション結果を待機・回収してメッシュに反映する。"""
     if obj.name not in _simulators:
         return False
@@ -572,7 +703,7 @@ def flush_async_simulation(obj, update_mesh: bool = True) -> bool:
     return False
 
 
-def flush_all_async_simulations(update_mesh: bool = True) -> int:
+def flush_all_async_simulations(*, update_mesh: bool = True) -> int:
     """全登録シミュレータの未回収非同期シミュレーション結果をフラッシュする。回収数を返す。"""
     count = 0
     for name, (sim, coords) in list(_simulators.items()):
@@ -628,7 +759,7 @@ def cloth_frame_handler(scene):
                     restore_rest_positions(obj, clear_timeline=False)
 
 
-def bake_init_simulation(scene, start_frame=None, end_frame=None):
+def bake_init_simulation(scene, *, start_frame=None, end_frame=None):
     """ベイクの準備処理（初期化、シミュレータクリア、F1キャッシュ格納）を行い、コンテキスト辞書を返す"""
     if not scene:
         return None
@@ -764,7 +895,7 @@ def bake_finalize_simulation(bake_ctx):
     logger.info(f"[Bake] Completed simulation bake: {bake_ctx['baked_count']} frames cached.")
 
 
-def bake_cloth_simulation(scene, start_frame=None, end_frame=None, progress_callback=None, cancel_check=None):
+def bake_cloth_simulation(scene, *, start_frame=None, end_frame=None, progress_callback=None, cancel_check=None):
     """シーン内の全Clothシミュレーションを指定フレーム範囲で一括計算してキャッシュ（ベイク）する（同期実行）"""
     global _is_baking
     bake_ctx = bake_init_simulation(scene, start_frame=start_frame, end_frame=end_frame)

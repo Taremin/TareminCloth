@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use cloth_core::config::SimConfig;
 
 /// BlenderとTaremin Cloth GUI間で送受信するコマンドメッセージ (JSON)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,6 +364,125 @@ pub struct GuiParamsUpdate {
     #[serde(default)]
     pub areal_density: Option<f32>,
 }
+
+impl SceneInitData {
+    /// SceneInitData から正本 SimConfig を生成する（Headless / GUI 共通）
+    pub fn to_sim_config(&self) -> SimConfig {
+        let mut cfg = SimConfig::default();
+        cfg.gravity = self.gravity;
+        cfg.damping = self.air_damping;
+        cfg.tension_damping = self.tension_damping;
+        cfg.compression_damping = self.compression_damping;
+        cfg.shear_damping = self.shear_damping;
+        cfg.bending_damping = self.bending_damping;
+        cfg.tension_stiffness = self.stiffness;
+        cfg.compression_stiffness = self.compression_stiffness;
+        cfg.shear_stiffness = self.shear_stiffness;
+        cfg.bending_stiffness = self.bending_stiffness;
+        cfg.solver_iterations = self.solver_iterations;
+        cfg.solver_mode = self.solver_mode;
+        cfg.workgroup_size = self.workgroup_size;
+        cfg.sewing_stiffness = self.sewing_stiffness;
+        cfg.enable_sewing_lock = self.enable_sewing_lock;
+        cfg.sewing_lock_distance = self.sewing_lock_distance;
+        cfg.areal_density = self.areal_density;
+        cfg.sewing_priority_enabled = self.sewing_priority_enabled;
+        cfg.sewing_priority_threshold = self.sewing_priority_threshold;
+        cfg.sewing_priority_merge_dist = self.sewing_priority_merge_dist;
+        cfg.sewing_priority_ramp_frames = self.sewing_priority_ramp_frames;
+        cfg.sewing_priority_max_frames = self.sewing_priority_max_frames;
+        cfg.enable_adaptive_substep = self.enable_adaptive_substep;
+        cfg.min_substeps = self.min_substeps;
+        cfg.max_substeps = self.max_substeps;
+        cfg.auto_coupled_on_low_substeps = self.auto_coupled_on_low_substeps;
+        cfg.auto_compensate_iterations = self.auto_compensate_iterations;
+        cfg.enable_strain_adaptive = self.enable_strain_adaptive;
+        cfg.strain_tolerance = self.strain_tolerance;
+        if let Some(ref sc) = self.self_collision {
+            cfg.enable_self_collision = sc.enabled;
+            cfg.self_collision_algorithm = sc.self_collision_algorithm;
+            cfg.coupled_collider = sc.coupled_collider;
+            cfg.ee_substep_interval = sc.ee_substep_interval;
+            cfg.relief_factor = sc.relief_factor;
+            cfg.max_displacement_ratio = sc.max_displacement_ratio;
+            cfg.exclude_neighbors = sc.exclude_neighbors;
+            cfg.enable_normal_untangling = sc.enable_normal_untangling;
+            cfg.self_collision_max_iterations = sc.max_iterations;
+            cfg.coupled_mode = sc.coupled_mode;
+            cfg.post_relaxation_iters = sc.post_relaxation_iters;
+            cfg.substep_interval = sc.substep_interval;
+            cfg.enable_pair_cache = sc.enable_pair_cache;
+            cfg.pair_margin_mode = sc.pair_cache_margin_mode;
+            cfg.pair_safety_margin = sc.pair_cache_safety_margin;
+            cfg.pair_horizon_scale = sc.pair_cache_horizon_scale;
+            cfg.pair_max_horizon = sc.pair_cache_max_horizon;
+            cfg.pair_max_pairs = sc.pair_cache_max_pairs;
+            cfg.enable_pair_final_fallback = sc.enable_pair_cache_final_fallback;
+            cfg.enable_edge_collision = sc.enable_edge_collision;
+            cfg.edge_margin_scale = sc.edge_margin_scale;
+            cfg.edge_margin_offset = sc.edge_margin_offset;
+        }
+        cfg
+    }
+}
+
+impl GuiParamsUpdate {
+    /// 差分更新を既存の SimConfig にマージする（Headless / GUI 共通）
+    pub fn apply_to_sim_config(&self, cfg: &mut SimConfig) {
+        if let Some(g) = self.gravity { cfg.gravity = g; }
+        if let Some(v) = self.air_damping { cfg.damping = v; }
+        if let Some(v) = self.tension_damping { cfg.tension_damping = v; }
+        if let Some(v) = self.compression_damping { cfg.compression_damping = v; }
+        if let Some(v) = self.shear_damping { cfg.shear_damping = v; }
+        if let Some(v) = self.bending_damping { cfg.bending_damping = v; }
+        if let Some(v) = self.tension_stiffness.or(self.stiffness) { cfg.tension_stiffness = v; }
+        if let Some(v) = self.compression_stiffness { cfg.compression_stiffness = v; }
+        if let Some(v) = self.shear_stiffness { cfg.shear_stiffness = v; }
+        if let Some(v) = self.bending_stiffness { cfg.bending_stiffness = v; }
+        if let Some(v) = self.solver_iterations { cfg.solver_iterations = v; }
+        if let Some(v) = self.solver_mode { cfg.solver_mode = v; }
+        if let Some(v) = self.workgroup_size { cfg.workgroup_size = v; }
+        if let Some(v) = self.enable_adaptive_substep { cfg.enable_adaptive_substep = v; }
+        if let Some(v) = self.min_substeps { cfg.min_substeps = v; }
+        if let Some(v) = self.max_substeps { cfg.max_substeps = v; }
+        if let Some(v) = self.enable_self_collision { cfg.enable_self_collision = v; }
+        if let Some(v) = self.self_collision_algorithm { cfg.self_collision_algorithm = v; }
+        if let Some(v) = self.coupled_mode { cfg.coupled_mode = v; }
+        if let Some(v) = self.coupled_collider { cfg.coupled_collider = v; }
+        if let Some(v) = self.post_relaxation_iters { cfg.post_relaxation_iters = v; }
+        if let Some(v) = self.relief_factor { cfg.relief_factor = v; }
+        if let Some(v) = self.max_displacement_ratio { cfg.max_displacement_ratio = v; }
+        if let Some(v) = self.exclude_neighbors { cfg.exclude_neighbors = v; }
+        if let Some(v) = self.enable_normal_untangling { cfg.enable_normal_untangling = v; }
+        if let Some(v) = self.self_collision_max_iterations { cfg.self_collision_max_iterations = v; }
+        if let Some(v) = self.substep_interval { cfg.substep_interval = v; }
+        if let Some(v) = self.ee_substep_interval { cfg.ee_substep_interval = v; }
+        if let Some(v) = self.enable_edge_collision { cfg.enable_edge_collision = v; }
+        if let Some(v) = self.edge_margin_scale { cfg.edge_margin_scale = v; }
+        if let Some(v) = self.edge_margin_offset { cfg.edge_margin_offset = v; }
+        if let Some(v) = self.enable_pair_cache { cfg.enable_pair_cache = v; }
+        if let Some(v) = self.pair_margin_mode { cfg.pair_margin_mode = v; }
+        if let Some(v) = self.pair_safety_margin { cfg.pair_safety_margin = v; }
+        if let Some(v) = self.pair_horizon_scale { cfg.pair_horizon_scale = v; }
+        if let Some(v) = self.pair_max_horizon { cfg.pair_max_horizon = v; }
+        if let Some(v) = self.pair_max_pairs { cfg.pair_max_pairs = v; }
+        if let Some(v) = self.enable_pair_final_fallback { cfg.enable_pair_final_fallback = v; }
+        if let Some(v) = self.sewing_stiffness { cfg.sewing_stiffness = v; }
+        if let Some(v) = self.enable_sewing_lock { cfg.enable_sewing_lock = v; }
+        if let Some(v) = self.sewing_lock_distance { cfg.sewing_lock_distance = v; }
+        if let Some(v) = self.sewing_priority_enabled { cfg.sewing_priority_enabled = v; }
+        if let Some(v) = self.sewing_priority_threshold { cfg.sewing_priority_threshold = v; }
+        if let Some(v) = self.sewing_priority_merge_dist { cfg.sewing_priority_merge_dist = v; }
+        if let Some(v) = self.sewing_priority_ramp_frames { cfg.sewing_priority_ramp_frames = v; }
+        if let Some(v) = self.sewing_priority_max_frames { cfg.sewing_priority_max_frames = v; }
+        if let Some(v) = self.auto_coupled_on_low_substeps { cfg.auto_coupled_on_low_substeps = v; }
+        if let Some(v) = self.auto_compensate_iterations { cfg.auto_compensate_iterations = v; }
+        if let Some(v) = self.enable_strain_adaptive { cfg.enable_strain_adaptive = v; }
+        if let Some(v) = self.strain_tolerance { cfg.strain_tolerance = v; }
+        if let Some(v) = self.areal_density { cfg.areal_density = v; }
+    }
+}
+
 
 /// GUIからBlenderへ返送するレスポンスメッセージ (JSON)
 #[derive(Clone, Debug, Serialize, Deserialize)]

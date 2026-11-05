@@ -11,6 +11,7 @@ import math
 from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
+from ..utils.args_guard import allow_positional
 from .wrinkle_field import build_orthonormal_basis
 
 
@@ -52,6 +53,7 @@ class BoneChain:
     def from_bones(
         cls,
         bones_data: Sequence[Tuple[str, Sequence[float], Sequence[float], float]],
+        *,
         gap_threshold: float = 0.001,
     ) -> "BoneChain":
         """
@@ -175,6 +177,7 @@ class BoneChain:
     def blended_frame_at(
         self,
         s: float,
+        *,
         frames: Optional[List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """弧長 s における連続ブレンドフレーム (axis, normal, binormal) を返す。
@@ -214,6 +217,7 @@ class BoneChain:
             bn = np.cross(axis, normal)
             return axis, normal, bn / max(float(np.linalg.norm(bn)), 1e-9)
 
+        @allow_positional
         def _nlerp(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
             v = a * (1.0 - t) + b * t
             n = float(np.linalg.norm(v))
@@ -332,11 +336,13 @@ class BoneChain:
         )
 
 
+@allow_positional
 def slide_curves_along_chain(
     curve_points_list: Sequence[np.ndarray],
     chain: BoneChain,
     source_t: float,
     target_t: float,
+    *,
     scale_radius: float = 1.0,
     base_scale_radius: float = 1.0,
 ) -> List[np.ndarray]:
@@ -412,7 +418,7 @@ def slide_curves_along_chain(
         for k in range(n_pts):
             j = assign[k]
             s_p = float(s_all[k, j])
-            axis_p, n_p, b_p = chain.blended_frame_at(s_p, frames)
+            axis_p, n_p, b_p = chain.blended_frame_at(s_p, frames=frames)
             q = q_all[k, j]
             uc = float(uc_all[k, j])
             r_p = float(seg_rh[j] + (seg_rt[j] - seg_rh[j]) * uc)
@@ -436,7 +442,7 @@ def slide_curves_along_chain(
             un = 0.0 if denom < 1e-9 else max(0.0, min(1.0, (s_new - float(seg_cum[jn])) / denom))
             q_new = seg_heads[jn] + seg_vecs[jn] * un
             r_new = float(seg_rh[jn] + (seg_rt[jn] - seg_rh[jn]) * un)
-            axis_new, n_new, b_new = chain.blended_frame_at(s_new, frames)
+            axis_new, n_new, b_new = chain.blended_frame_at(s_new, frames=frames)
             kk = (r_new / max(r_p, 1e-4)) * user_scale
             new_pts[k] = (q_new
                           + (math.cos(theta) * n_new + math.sin(theta) * b_new) * (h * kk))

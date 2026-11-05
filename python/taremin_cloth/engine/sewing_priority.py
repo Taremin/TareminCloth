@@ -9,8 +9,10 @@
 """
 
 import numpy as np
+from ..utils.args_guard import allow_positional
 
 
+@allow_positional
 def closure_ratio(positions_2d, sewing_edges, merge_dist: float) -> float:
     """縫合ペアの結合率 (0.0〜1.0) を返す。縫合なし・空配列は 1.0。"""
     if sewing_edges is None or len(sewing_edges) == 0:
@@ -47,6 +49,7 @@ def sim_phase(sim):
     return (active, ratio, scale)
 
 
+@allow_positional
 def phase_text(active: bool, ratio: float, scale: float, trans) -> str:
     """フェーズ表示文を組み立てる (Nパネル・HUD共通書式)。trans: i18n.trans相当。"""
     if active:

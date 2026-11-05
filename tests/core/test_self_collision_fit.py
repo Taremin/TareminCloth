@@ -19,6 +19,10 @@ from taremin_cloth.utils.self_collision_fit import (
     calculate_mesh_edge_stats,
     compute_self_collision_params,
     fit_self_collision_for_object,
+    get_cached_mesh_edge_stats,
+    clear_edge_stats_cache,
+    get_thickness_warning_info,
+    draw_thickness_warning_ui,
 )
 
 
@@ -160,6 +164,17 @@ class TestSelfCollisionFit(unittest.TestCase):
         # 従来の0.0002 * 0.4 = 0.00008m (0.08mm) に潰れることなく、下限フロア 0.0015m (1.5mm) を死守
         self.assertAlmostEqual(params['thickness'], 0.0015, places=5)
 
+    def test_dense_sub_island_clamps_below_standard_floor(self):
+        """フード等の正当な高密度アイランド（例: 平均5.5mm、フード最小2.9mm）では3ホップ干渉防止のため1.16mmへ安全クランプされる"""
+        params = compute_self_collision_params(
+            avg_edge_len=0.0055,  # 平均 5.5mm
+            min_edge_len=0.0029,  # フード最小 2.9mm (>= avg * 0.20)
+            num_vertices=13000,
+            purpose='STANDARD',
+        )
+        # 1.5mm のフロアに張り付かず、2.9mm * 0.4 = 1.16mm にクランプされること
+        self.assertAlmostEqual(params['thickness'], 0.00116, places=5)
+
     def test_fit_self_collision_for_object(self):
         """オブジェクトの settings への一括適用を検証"""
         obj = MockClothObject(self.quad_vertices, self.quad_edges)
@@ -202,6 +217,115 @@ class TestSelfCollisionFit(unittest.TestCase):
         self.assertIsNone(fit_self_collision_for_object(None))
         empty_obj = SimpleNamespace(type='EMPTY')
         self.assertIsNone(fit_self_collision_for_object(empty_obj))
+
+    def test_cached_edge_stats(self):
+        """UI描画用キャッシュが正しく機能し、同一オブジェクトへの再問い合わせでキャッシュ結果を返す"""
+        clear_edge_stats_cache()
+        obj = MockClothObject(self.quad_vertices, self.quad_edges)
+        stats1 = get_cached_mesh_edge_stats(obj)
+        self.assertIsNotNone(stats1)
+
+        # 2回目はキャッシュから取得
+        stats2 = get_cached_mesh_edge_stats(obj)
+        self.assertEqual(stats1, stats2)
+
+        # キャッシュクリア後は再取得可能
+        clear_edge_stats_cache()
+        stats3 = get_cached_mesh_edge_stats(obj)
+        self.assertEqual(stats1, stats3)
+
+    def test_thickness_warning_danger_on_large_thickness(self):
+        """Tシャツ相当のメッシュ（エッジ長約5mm）で厚み5mmの場合にDANGER警告が発出される"""
+        # 1辺 0.005m (5mm) の正方形
+        small_verts = [
+            (0.0, 0.0, 0.0),
+            (0.005, 0.0, 0.0),
+            (0.005, 0.005, 0.0),
+            (0.0, 0.005, 0.0),
+        ]
+        obj = MockClothObject(small_verts, self.quad_edges)
+        obj.taremin_cloth.enable_self_collision = True
+        obj.taremin_cloth.thickness = 0.005  # 5mm (エッジ長 5mm に対して過大)
+
+        info = get_thickness_warning_info(obj)
+        self.assertIsNotNone(info)
+        self.assertTrue(info['has_warning'])
+        self.assertEqual(info['level'], 'DANGER')
+        # 推奨安全上限は 0.005 * 0.25 = 1.25mm 程度
+        self.assertLess(info['max_safe_thickness'], 0.002)
+
+    def test_thickness_warning_ok_on_fitted_thickness(self):
+        """エッジ長約5mmに対して厚み1.0mmの場合は安全（警告なし）と判定される"""
+        small_verts = [
+            (0.0, 0.0, 0.0),
+            (0.005, 0.0, 0.0),
+            (0.005, 0.005, 0.0),
+            (0.0, 0.005, 0.0),
+        ]
+        obj = MockClothObject(small_verts, self.quad_edges)
+        obj.taremin_cloth.enable_self_collision = True
+        obj.taremin_cloth.thickness = 0.001  # 1mm (安全範囲内)
+
+        info = get_thickness_warning_info(obj)
+        self.assertIsNotNone(info)
+        self.assertFalse(info['has_warning'])
+        self.assertEqual(info['level'], 'OK')
+
+    def test_thickness_warning_disabled_when_self_collision_off(self):
+        """自己衝突が無効な場合は厚みが大きくても自己衝突警告は発出されない"""
+        small_verts = [
+            (0.0, 0.0, 0.0),
+            (0.005, 0.0, 0.0),
+            (0.005, 0.005, 0.0),
+            (0.0, 0.005, 0.0),
+        ]
+        obj = MockClothObject(small_verts, self.quad_edges)
+        obj.taremin_cloth.enable_self_collision = False
+        obj.taremin_cloth.thickness = 0.050  # 50mm
+
+        info = get_thickness_warning_info(obj)
+        self.assertIsNone(info)
+
+    def test_draw_thickness_warning_ui_mock(self):
+        """モックUIレイアウトに対して警告UIが例外なく描画されること"""
+        class MockRow:
+            def label(self, text="", icon=""):
+                pass
+            def operator(self, op_id, text="", icon=""):
+                pass
+        class MockCol:
+            def label(self, text="", icon=""):
+                pass
+            def row(self, align=True):
+                return MockRow()
+        class MockBox:
+            def __init__(self):
+                self.alert = False
+            def column(self, align=True):
+                return MockCol()
+        class MockLayout:
+            def box(self):
+                return MockBox()
+
+        small_verts = [
+            (0.0, 0.0, 0.0),
+            (0.005, 0.0, 0.0),
+            (0.005, 0.005, 0.0),
+            (0.0, 0.005, 0.0),
+        ]
+        obj = MockClothObject(small_verts, self.quad_edges)
+        obj.taremin_cloth.enable_self_collision = True
+        obj.taremin_cloth.thickness = 0.005  # 過大
+
+        layout = MockLayout()
+        rendered = draw_thickness_warning_ui(layout, obj)
+        self.assertTrue(rendered)
+
+        # 安全な厚みに変更
+        obj.taremin_cloth.thickness = 0.001
+        rendered_safe = draw_thickness_warning_ui(layout, obj)
+        self.assertFalse(rendered_safe)
+
 
 
 if __name__ == '__main__':

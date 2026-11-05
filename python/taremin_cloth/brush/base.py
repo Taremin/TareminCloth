@@ -9,6 +9,7 @@ import mathutils
 import numpy as np
 from bpy_extras import view3d_utils
 
+from ..utils.args_guard import allow_positional
 from ..utils import drawing
 from .math import (
     BRUSH_RADIUS_MIN,
@@ -34,11 +35,75 @@ class BrushContext:
         self.brush = getattr(settings, "brush", None)
 
 
+@allow_positional
 def brush_opt(brush, name, default):
     """ブラシ設定値の防御的取得 (未登録ブレンド対策)"""
     if brush is None:
         return default
     return getattr(brush, name, default)
+
+
+class ActiveRegionManager:
+    """Active-Region Sculpt Mode: ブラシ影響半径外の遠隔頂点を一時ピン固定して高速化するマネージャー"""
+
+    def __init__(self):
+        self._temp_frozen_indices = []
+
+    @property
+    def is_active(self):
+        return len(self._temp_frozen_indices) > 0
+
+    @allow_positional
+    def freeze_inactive_region(self, sim, coords, center, radius, *, active_scale=2.5, exclude_pins=None):
+        """centerからの距離が radius * active_scale を超える頂点を現在位置でピン固定する"""
+        if sim is None or coords is None or len(coords) == 0:
+            return
+        if self._temp_frozen_indices:
+            self.release_temp_pins(sim)
+
+        coords_2d = coords.reshape((-1, 3))
+        center_vec = np.asarray(center, dtype=np.float32).reshape((1, 3))
+        diff = coords_2d - center_vec
+        d2 = np.sum(diff * diff, axis=1)
+        thresh2 = (float(radius) * float(active_scale)) ** 2
+
+        # 閾値より外側の頂点
+        outer_indices = np.where(d2 > thresh2)[0]
+        if exclude_pins:
+            exclude_set = set(exclude_pins)
+            outer_indices = [int(idx) for idx in outer_indices if int(idx) not in exclude_set]
+        else:
+            outer_indices = [int(idx) for idx in outer_indices]
+
+        if outer_indices:
+            targets = coords_2d[outer_indices]
+            weights = [1.0] * len(outer_indices)
+            if hasattr(sim, "set_pins_batch"):
+                sim.set_pins_batch(outer_indices, targets, weights)
+            else:
+                for idx, pos in zip(outer_indices, targets):
+                    sim.set_pin(idx, [float(pos[0]), float(pos[1]), float(pos[2])], 1.0)
+            self._temp_frozen_indices = outer_indices
+        else:
+            self._temp_frozen_indices = []
+
+    def release_temp_pins(self, sim):
+        """一時固定された全ピンを解放する"""
+        if sim is None or not self._temp_frozen_indices:
+            self._temp_frozen_indices = []
+            return
+        if hasattr(sim, "release_pins_batch"):
+            try:
+                sim.release_pins_batch(self._temp_frozen_indices)
+            except Exception:
+                pass
+        else:
+            for idx in self._temp_frozen_indices:
+                try:
+                    sim.release_pin(idx)
+                except Exception:
+                    pass
+        self._temp_frozen_indices = []
 
 
 class BaseBrushTool:
@@ -48,7 +113,11 @@ class BaseBrushTool:
     # HUD表示用ラベルキー（i18n.trans適用は呼出側で行う）
     label_key = 'Grab'
 
-    def hud_info(self, brush, radial=None):
+    def __init__(self):
+        self.active_region = ActiveRegionManager()
+        self.reset()
+
+    def hud_info(self, brush, *, radial=None):
         """HUD Guidance用の構造化情報を返す（docs/hud.md:5）。
 
         戻り値: {"tool", "label_key", "radius", "strength",
@@ -86,7 +155,7 @@ class BaseBrushTool:
     def on_activate(self, ctx):
         pass
 
-    def on_deactivate(self, ctx, pinned_verts=None):
+    def on_deactivate(self, ctx, pinned_verts=None):  # audit: allow-positional
         pass
 
     def abort(self, ctx):
@@ -96,6 +165,7 @@ class BaseBrushTool:
         pass
 
 
+@allow_positional
 def resolve_brush_center(context, obj, coords, mouse_pos):
     """ブラシ中心 (ワールド) とレイ情報の解決。レイ外れ時は最近傍頂点にフォールバックする"""
     region = context.region
@@ -144,6 +214,7 @@ def resolve_brush_center(context, obj, coords, mouse_pos):
     }
 
 
+@allow_positional
 def update_brush_circle(context, obj, center, radius, mouse_pos):
     """ブラシカーソル円を更新する"""
     region = context.region
@@ -176,7 +247,7 @@ def init_brush_circle_at(ctx, radius):
     return False
 
 
-def nudge_brush_radius(obj, factor, mouse_pos):
+def nudge_brush_radius(obj, factor, *, mouse_pos):
     """ブラシ半径を段階変更し、表示円も同率で即時更新する"""
     settings = getattr(obj, "taremin_cloth", None)
     brush = getattr(settings, "brush", None) if settings else None
@@ -210,7 +281,7 @@ class RadialController:
     def active(self):
         return self.mode is not None
 
-    def enter(self, mode, start_x, brush):
+    def enter(self, mode, start_x, *, brush):
         if mode == 'STRENGTH':
             self.attr = 'strength'
             default, lo, hi = 0.8, BRUSH_STRENGTH_MIN, BRUSH_STRENGTH_MAX

@@ -5,7 +5,7 @@
 1cm間隔（0.01m）の正方形方眼紙ベースのQuad格子から切り出した4パーツ構成（前後身頃・左右1枚袖）
 のTシャツ型紙と、弧長完全整合の縫合スプリング群を生成する。
 
-入力: tmp/SiroinoSotai.blend (CC0, 要クレジット)
+入力: tests/fixtures/bodies/siroino/SiroinoSotai.blend (CC0, 要クレジット)
 出力:
   tests/fixtures/bodies/siroino/SiroinoSotai_Mobile_collider.obj
   tests/fixtures/bodies/siroino/provenance.json
@@ -31,8 +31,8 @@ if str(PYTHON_PKG) not in sys.path:
 
 from tools.blender_manager import resolve_blender
 
-BLEND = REPO / "tmp" / "SiroinoSotai.blend"
 BODY_DIR = REPO / "tests" / "fixtures" / "bodies" / "siroino"
+BLEND = BODY_DIR / "SiroinoSotai.blend"
 TSHIRT_DIR = REPO / "tests" / "fixtures" / "garments" / "tshirt"
 
 CONVERT_SCRIPT = r"""
@@ -400,7 +400,8 @@ def main() -> None:
 
     prov = {
         "source": "https://booth.pm/ja/items/8268676",
-        "asset": "SiroinoSotai v1.0 / SiroinoSotai_Mobile (full body)",
+        "asset": "SiroinoSotai v1.0 (SiroinoSotai.blend / SiroinoSotai_Mobile collider OBJ)",
+        "blend_file": "SiroinoSotai.blend (Zstandard compressed, local paths sanitized, all 5 objects preserved)",
         "license": "CC0 1.0 Universal (FBX/blend/textures). Logo/VRChat SDK/lilToonは対象外のため同梱しない",
         "credit": "素体: しろいの (Siroino Works) 『SiroinoSotai』https://booth.pm/ja/items/8268676 / CC0 1.0",
         "extraction": "shape_keys=0, ARMATURE modifier removed (rest shape), matrix_world applied, loop_triangles",

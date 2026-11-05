@@ -223,19 +223,24 @@ pub struct GpuTriangle {
     pub layer_id: u32,
 }
 
-/// 面密度 (kg/m2) とピンウェイトから物理単位の逆質量配列を計算する。
-/// 各三角形の面積×面密度を3頂点へ等分配し、`inv = (1 - pin_w) / mass` とする。
-/// 面を持たない・面積ゼロの頂点は微小質量で支え、ゼロ除算を防ぐ。
+/// 面密度 (kg/m2) および線密度 (kg/m) とピンウェイトから物理単位の逆質量配列を計算する。
+/// 各三角形の面積×面密度を3頂点へ等分配し、
+/// さらに三角形に属さない1Dエッジ長×線密度を2頂点へ等分配する。
+/// 面も1Dエッジも持たない孤立頂点は微小質量 (MIN_MASS) で支え、ゼロ除算を防ぐ。
 /// ピンウェイト1.0の頂点は 0.0 (完全固定) となる。
-pub fn areal_inv_masses(
+pub fn compute_combined_inv_masses(
     positions: &[[f32; 3]],
     faces: Option<&[[u32; 3]]>,
+    strand_edges: Option<&[[u32; 2]]>,
     pin_weights: Option<&[f32]>,
     areal_density: f32,
+    linear_density: f32,
 ) -> Vec<f32> {
     const MIN_MASS: f32 = 1e-9;
     let n = positions.len();
     let mut masses = vec![0.0f32; n];
+
+    // 1. 面（2D布）の質量分配
     if areal_density > 0.0 {
         if let Some(tris) = faces {
             for &[a, b, c] in tris {
@@ -261,6 +266,28 @@ pub fn areal_inv_masses(
             }
         }
     }
+
+    // 2. 1Dストランド（紐）の質量分配
+    if linear_density > 0.0 {
+        if let Some(edges) = strand_edges {
+            for &[a, b] in edges {
+                let (ia, ib) = (a as usize, b as usize);
+                if ia >= n || ib >= n || a == b {
+                    continue;
+                }
+                let pa = positions[ia];
+                let pb = positions[ib];
+                let dx = pa[0] - pb[0];
+                let dy = pa[1] - pb[1];
+                let dz = pa[2] - pb[2];
+                let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                let share = len * linear_density / 2.0;
+                masses[ia] += share;
+                masses[ib] += share;
+            }
+        }
+    }
+
     masses
         .iter()
         .enumerate()
@@ -277,6 +304,33 @@ pub fn areal_inv_masses(
         })
         .collect()
 }
+
+/// 面密度 (kg/m2) とピンウェイトから物理単位の逆質量配列を計算する。
+/// 後方互換性用ラッパー。
+pub fn areal_inv_masses(
+    positions: &[[f32; 3]],
+    faces: Option<&[[u32; 3]]>,
+    pin_weights: Option<&[f32]>,
+    areal_density: f32,
+) -> Vec<f32> {
+    compute_combined_inv_masses(positions, faces, None, pin_weights, areal_density, 0.0)
+}
+
+fn expand_bits_10(mut v: u32) -> u32 {
+    v = (v.wrapping_mul(0x00010001)) & 0xFF0000FF;
+    v = (v.wrapping_mul(0x00000101)) & 0x0F00F00F;
+    v = (v.wrapping_mul(0x00000011)) & 0xC30C30C3;
+    v = (v.wrapping_mul(0x00000005)) & 0x49249249;
+    v
+}
+
+pub fn morton_code_3d(p: [f32; 3], bmin: [f32; 3], inv_extent: [f32; 3]) -> u32 {
+    let x = (((p[0] - bmin[0]) * inv_extent[0]).clamp(0.0, 1.0) * 1023.0) as u32;
+    let y = (((p[1] - bmin[1]) * inv_extent[1]).clamp(0.0, 1.0) * 1023.0) as u32;
+    let z = (((p[2] - bmin[2]) * inv_extent[2]).clamp(0.0, 1.0) * 1023.0) as u32;
+    (expand_bits_10(x) << 2) | (expand_bits_10(y) << 1) | expand_bits_10(z)
+}
+
 
 pub struct ClothMesh {
     pub vertices: Vec<GpuVertex>,
@@ -306,6 +360,7 @@ pub struct ClothMesh {
     pub star_indices: Vec<GpuStarPair>,
     pub triangles: Vec<GpuTriangle>,
     pub edges: Vec<GpuEdge>,
+    pub edge_boundary_bits: Vec<u32>,
     pub island_ids: Vec<u32>,
     pub mean_edge_length: f32,
     pub max_edge_length: f32,
@@ -454,7 +509,10 @@ impl ClothMesh {
                 .map(|&[a, b]| (a.min(b), a.max(b)))
                 .collect();
 
-            for opps in edge_to_opp.values() {
+            let mut shear_edge_keys: Vec<(u32, u32)> = edge_to_opp.keys().copied().collect();
+            shear_edge_keys.sort_unstable();
+            for key in shear_edge_keys {
+                let opps = &edge_to_opp[&key];
                 if opps.len() == 2 {
                     let v0 = opps[0].min(opps[1]);
                     let v1 = opps[0].max(opps[1]);
@@ -589,7 +647,11 @@ impl ClothMesh {
                 }
             }
 
-            for ((v0, v1), opps) in edge_to_opp_verts {
+            let mut edge_keys: Vec<(u32, u32)> = edge_to_opp_verts.keys().copied().collect();
+            edge_keys.sort_unstable();
+
+            for (v0, v1) in edge_keys {
+                let opps = &edge_to_opp_verts[&(v0, v1)];
                 if opps.len() == 2 {
                     let v2 = opps[0];
                     let v3 = opps[1];
@@ -610,6 +672,205 @@ impl ClothMesh {
                         compliance: bend_compliance,
                         _pad: [0.0; 2],
                     });
+                }
+            }
+
+            // 2b. 縫合シーム（sewing_springs）を跨ぐ隣接境界三角形間の曲げ拘束 (Seam-Gated Bending)
+            if let Some(sew_pairs) = sewing_springs {
+                let mut parent: Vec<usize> = (0..n_verts).collect();
+                let mut has_sew = vec![false; n_verts];
+                fn find_sew_root(p: &mut [usize], mut i: usize) -> usize {
+                    let mut root = i;
+                    while root != p[root] {
+                        root = p[root];
+                    }
+                    while i != root {
+                        let next = p[i];
+                        p[i] = root;
+                        i = next;
+                    }
+                    root
+                }
+                for &[u, v] in sew_pairs {
+                    let ui = u as usize;
+                    let vi = v as usize;
+                    if ui < n_verts && vi < n_verts && ui != vi {
+                        has_sew[ui] = true;
+                        has_sew[vi] = true;
+                        let ru = find_sew_root(&mut parent, ui);
+                        let rv = find_sew_root(&mut parent, vi);
+                        if ru != rv {
+                            let min_r = ru.min(rv);
+                            let max_r = ru.max(rv);
+                            parent[max_r] = min_r;
+                        }
+                    }
+                }
+                let sew_rep: Vec<u32> = (0..n_verts)
+                    .map(|i| find_sew_root(&mut parent, i) as u32)
+                    .collect();
+
+                let mut seam_edge_map: HashMap<(u32, u32), Vec<(u32, u32, u32)>> = HashMap::new();
+                for (&(ea, eb), opps) in &edge_to_opp_verts {
+                    if opps.len() != 1 {
+                        continue;
+                    }
+                    if (ea as usize) >= n_verts || (eb as usize) >= n_verts {
+                        continue;
+                    }
+                    // 縫合シーム辺は両端点とも縫合スプリングに接続されている必要がある
+                    if !has_sew[ea as usize] || !has_sew[eb as usize] {
+                        continue;
+                    }
+                    let ra = sew_rep[ea as usize];
+                    let rb = sew_rep[eb as usize];
+                    if ra == rb {
+                        continue;
+                    }
+                    let (canon_key, u_aligned, v_aligned) = if ra < rb {
+                        ((ra, rb), ea, eb)
+                    } else {
+                        ((rb, ra), eb, ea)
+                    };
+                    seam_edge_map
+                        .entry(canon_key)
+                        .or_default()
+                        .push((u_aligned, v_aligned, opps[0]));
+                }
+
+                let mut seam_keys: Vec<(u32, u32)> = seam_edge_map.keys().copied().collect();
+                seam_keys.sort_unstable();
+
+                for key in seam_keys {
+                    let entries = &seam_edge_map[&key];
+                    if entries.len() != 2 {
+                        continue;
+                    }
+                    let (a0, a1, v2) = entries[0];
+                    let (b0, b1, v3) = entries[1];
+                    // 端点を共有する開放断面エッジや、対向頂点が同一（または同一縫合グループ）の極薄チューブは除外
+                    if a0 == b0 || a1 == b1 || v2 == v3 || sew_rep[v2 as usize] == sew_rep[v3 as usize] {
+                        continue;
+                    }
+                    if (v2 as usize) >= n_verts || (v3 as usize) >= n_verts {
+                        continue;
+                    }
+
+                    let pa0 = positions[a0 as usize];
+                    let pa1 = positions[a1 as usize];
+                    let pv2 = positions[v2 as usize];
+                    let ea_vec = [pa1[0] - pa0[0], pa1[1] - pa0[1], pa1[2] - pa0[2]];
+                    let len_a = (ea_vec[0] * ea_vec[0] + ea_vec[1] * ea_vec[1] + ea_vec[2] * ea_vec[2]).sqrt();
+
+                    let pb0 = positions[b0 as usize];
+                    let pb1 = positions[b1 as usize];
+                    let pv3 = positions[v3 as usize];
+                    let eb_vec = [pb1[0] - pb0[0], pb1[1] - pb0[1], pb1[2] - pb0[2]];
+                    let len_b = (eb_vec[0] * eb_vec[0] + eb_vec[1] * eb_vec[1] + eb_vec[2] * eb_vec[2]).sqrt();
+
+                    if len_a <= 1e-6 || len_b <= 1e-6 {
+                        continue;
+                    }
+
+                    let ua = [ea_vec[0] / len_a, ea_vec[1] / len_a, ea_vec[2] / len_a];
+                    let da = [pv2[0] - pa0[0], pv2[1] - pa0[1], pv2[2] - pa0[2]];
+                    let sa = da[0] * ua[0] + da[1] * ua[1] + da[2] * ua[2];
+                    let perp_a = [da[0] - sa * ua[0], da[1] - sa * ua[1], da[2] - sa * ua[2]];
+                    let ha = (perp_a[0] * perp_a[0] + perp_a[1] * perp_a[1] + perp_a[2] * perp_a[2]).sqrt();
+
+                    let ub = [eb_vec[0] / len_b, eb_vec[1] / len_b, eb_vec[2] / len_b];
+                    let db = [pv3[0] - pb0[0], pv3[1] - pb0[1], pv3[2] - pb0[2]];
+                    let sb = db[0] * ub[0] + db[1] * ub[1] + db[2] * ub[2];
+                    let perp_b = [db[0] - sb * ub[0], db[1] - sb * ub[1], db[2] - sb * ub[2]];
+                    let hb = (perp_b[0] * perp_b[0] + perp_b[1] * perp_b[1] + perp_b[2] * perp_b[2]).sqrt();
+
+                    // シーム軸周りに2三角形を180度平坦展開した際の真の対向頂点間距離
+                    let ds = sa - sb;
+                    let dh = ha + hb;
+                    let flat_rest_len = (ds * ds + dh * dh).sqrt();
+                    if flat_rest_len <= 1e-5 {
+                        continue;
+                    }
+
+                    let gate_dist = (flat_rest_len * 0.5).max(0.01);
+                    let gate_v0 = if a0 != b0 { a0 } else { a1 };
+                    let gate_v1 = if a0 != b0 { b0 } else { b1 };
+
+                    bending_constraints.push(GpuBendingConstraint {
+                        v0: gate_v0,
+                        v1: gate_v1,
+                        v2,
+                        v3,
+                        rest_length: flat_rest_len,
+                        compliance: bend_compliance,
+                        _pad: [1.0, gate_dist],
+                    });
+                }
+            }
+        }
+
+        // 1Dストランド（紐）の曲げ拘束:
+        // 三角形に属さないエッジ列において、連続する頂点 a - u - b の 2ホップペア (a, b) に曲げ拘束を生成
+        {
+            let mut face_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+            if let Some(triangles) = faces {
+                for &[f0, f1, f2] in triangles {
+                    face_edges.insert((f0.min(f1), f0.max(f1)));
+                    face_edges.insert((f1.min(f2), f1.max(f2)));
+                    face_edges.insert((f2.min(f0), f2.max(f0)));
+                }
+            }
+
+            let mut strand_adj: HashMap<u32, Vec<u32>> = HashMap::new();
+            for &[v0, v1] in edges {
+                if (v0 as usize) < n_verts && (v1 as usize) < n_verts && v0 != v1 {
+                    let key = (v0.min(v1), v0.max(v1));
+                    if !face_edges.contains(&key) {
+                        strand_adj.entry(v0).or_default().push(v1);
+                        strand_adj.entry(v1).or_default().push(v0);
+                    }
+                }
+            }
+
+            let mut existing_bend_pairs: std::collections::HashSet<(u32, u32)> = bending_constraints
+                .iter()
+                .map(|bc| (bc.v2.min(bc.v3), bc.v2.max(bc.v3)))
+                .collect();
+
+            let mut strand_keys: Vec<u32> = strand_adj.keys().copied().collect();
+            strand_keys.sort_unstable();
+            for u in strand_keys {
+                let neighbors = &strand_adj[&u];
+                if neighbors.len() >= 2 {
+                    for i in 0..neighbors.len() {
+                        for j in (i + 1)..neighbors.len() {
+                            let a = neighbors[i];
+                            let b = neighbors[j];
+                            if a != b {
+                                let pair = (a.min(b), a.max(b));
+                                if existing_bend_pairs.insert(pair) {
+                                    let pa = positions[a as usize];
+                                    let pb = positions[b as usize];
+                                    let dx = pa[0] - pb[0];
+                                    let dy = pa[1] - pb[1];
+                                    let dz = pa[2] - pb[2];
+                                    let rest_length = (dx * dx + dy * dy + dz * dz).sqrt();
+
+                                    // 1Dストランドは引き絞り（距離拘束の動的短縮）を阻害しないよう適度に柔軟なコンプライアンスを持たせる
+                                    let strand_bend_compliance = (bend_compliance * 10.0).max(0.5);
+                                    bending_constraints.push(GpuBendingConstraint {
+                                        v0: u,
+                                        v1: u,
+                                        v2: a,
+                                        v3: b,
+                                        rest_length,
+                                        compliance: strand_bend_compliance,
+                                        _pad: [0.0; 2],
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -701,6 +962,8 @@ impl ClothMesh {
         // 縫合エッジ（sewing_springs）で結ばれた頂点ペアのトポロジー同一視（ホップ数0換算・完全縮約グラフ）
         // 縫合ペア (v0, v1) を同一結節点（縮約頂点）とみなし、完成形メッシュと同一の
         // 1ホップ・2ホップトポロジー隣接距離を自己衝突除外グラフ（adj_lists）に対称構築する。
+        let mut sew_rep: Vec<u32> = (0..n_verts as u32).collect();
+        let mut group_verts: Vec<Vec<u32>> = vec![Vec::new(); n_verts];
         if let Some(sewing_pairs) = sewing_springs {
             // 1. Union-Find で縫合ペアを同一グループに統合
             let mut parent: Vec<usize> = (0..n_verts).collect();
@@ -730,10 +993,10 @@ impl ClothMesh {
                 }
             }
 
-            // 2. 代表頂点ごとの実頂点グループを構築
-            let mut group_verts: Vec<Vec<u32>> = vec![Vec::new(); n_verts];
+            // 2. 代表頂点ごとの実頂点グループおよび代表元配列を構築
             for i in 0..n_verts {
                 let rep = find_root(&mut parent, i);
+                sew_rep[i] = rep as u32;
                 group_verts[rep].push(i as u32);
             }
 
@@ -770,9 +1033,11 @@ impl ClothMesh {
                     }
                 }
             }
+        } else {
+            for i in 0..n_verts {
+                group_verts[i].push(i as u32);
+            }
         }
-
-
 
         let mut local_edge_lengths = Vec::with_capacity(n_verts);
         for i in 0..n_verts {
@@ -796,6 +1061,35 @@ impl ClothMesh {
         adj_offsets.push(current_offset);
 
         // 4b. トポロジー2ホップ近傍リスト (Two-Hop Neighbor CSR for Self-Collision)
+        // 2D布の面頂点判定（1Dストランド関与ペアを除外するため）
+        let mut is_face_vert = vec![false; n_verts];
+        if let Some(triangles) = faces {
+            for &[f0, f1, f2] in triangles {
+                if (f0 as usize) < n_verts { is_face_vert[f0 as usize] = true; }
+                if (f1 as usize) < n_verts { is_face_vert[f1 as usize] = true; }
+                if (f2 as usize) < n_verts { is_face_vert[f2 as usize] = true; }
+            }
+        }
+
+        // 縮約1ホップ隣接集合（代表元インデックス空間）
+        let mut contracted_one_hop: Vec<Vec<u32>> = vec![Vec::new(); n_verts];
+        for &[v0, v1] in edges {
+            if (v0 as usize) < n_verts && (v1 as usize) < n_verts && v0 != v1 {
+                let ra = sew_rep[v0 as usize];
+                let rb = sew_rep[v1 as usize];
+                if ra != rb {
+                    contracted_one_hop[ra as usize].push(rb);
+                    contracted_one_hop[rb as usize].push(ra);
+                }
+            }
+        }
+        for list in &mut contracted_one_hop {
+            list.sort_unstable();
+            list.dedup();
+        }
+
+        let mut sew_two_hop_memo: HashMap<(u32, u32), f32> = HashMap::new();
+
         let mut two_hop_offsets = Vec::with_capacity(n_verts + 1);
         let mut two_hop_indices = Vec::new();
         let mut two_hop_rest_lengths = Vec::new();
@@ -835,11 +1129,22 @@ impl ClothMesh {
             two_hop_offsets.push(current_two_hop_offset);
             for &nbr in &neighbors {
                 two_hop_indices.push(nbr);
-                // 元のメッシュ内の2ホップ近傍であれば初期レスト距離を記録（Bridson動的折り畳み検出用）。
-                // 縫合トポロジーによって追加されたペアは、本来の目標レスト長が0.0（密着）であるため、
-                // 0.0 を設定して動的折り畳み検出（current_dist < l0 * 0.5）による自己衝突除外解除を防止する。
+                // 縮約グラフにおける真の2ホップ近傍（2D布面頂点同士であり、縮約0ホップでも縮約1ホップでもないペア）にのみ
+                // 初期レスト距離 L0 を記録（Bridson動的折り畳み検出・V-V反発用）。
+                // 自身（0ホップ）、縫合相手（縮約0ホップ）、直接接続エッジ（1ホップ・縮約1ホップ）、
+                // および1Dストランド関与ペアは 0.0 を設定して常時除外する。
+                let is_true_two_hop = nbr != i as u32
+                    && is_face_vert[i]
+                    && is_face_vert[nbr as usize]
+                    && sew_rep[i] != sew_rep[nbr as usize]
+                    && !orig_adj_lists[i].contains(&nbr)
+                    && !contracted_one_hop[sew_rep[i] as usize]
+                        .binary_search(&sew_rep[nbr as usize])
+                        .is_ok();
                 let is_orig = orig_neighbors.binary_search(&nbr).is_ok();
-                let dist = if is_orig {
+                let dist = if !is_true_two_hop {
+                    0.0
+                } else if is_orig {
                     let p_i = positions[i];
                     let p_nbr = positions[nbr as usize];
                     let dx = p_i[0] - p_nbr[0];
@@ -847,7 +1152,16 @@ impl ClothMesh {
                     let dz = p_i[2] - p_nbr[2];
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 } else {
-                    0.0
+                    let key = ((i as u32).min(nbr), (i as u32).max(nbr));
+                    *sew_two_hop_memo.entry(key).or_insert_with(|| {
+                        compute_seam_two_hop_rest_length(
+                            i,
+                            nbr as usize,
+                            positions,
+                            &orig_adj_lists,
+                            &sew_rep,
+                        )
+                    })
                 };
                 two_hop_rest_lengths.push(dist);
             }
@@ -923,6 +1237,83 @@ impl ClothMesh {
             }
         }
 
+        if !gpu_edges.is_empty() && !positions.is_empty() {
+            let mut bmin = [f32::MAX; 3];
+            let mut bmax = [f32::MIN; 3];
+            for p in positions {
+                for axis in 0..3 {
+                    bmin[axis] = bmin[axis].min(p[axis]);
+                    bmax[axis] = bmax[axis].max(p[axis]);
+                }
+            }
+            let inv_ext = [
+                1.0 / (bmax[0] - bmin[0]).max(1e-5),
+                1.0 / (bmax[1] - bmin[1]).max(1e-5),
+                1.0 / (bmax[2] - bmin[2]).max(1e-5),
+            ];
+            gpu_edges.sort_by_cached_key(|e| {
+                let p0 = positions[e.v0 as usize];
+                let p1 = positions[e.v1 as usize];
+                let mid = [(p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5, (p0[2] + p1[2]) * 0.5];
+                morton_code_3d(mid, bmin, inv_ext)
+            });
+        }
+
+        // 8. 開放境界エッジビットセット (edge_boundary_bits)
+        // ソート済みの gpu_edges と 1:1 に対応する開放境界エッジ（自由縁）フラグをビットパック生成
+        let num_edge_words = gpu_edges.len().div_ceil(32);
+        let mut edge_boundary_bits = vec![0u32; num_edge_words];
+        if let Some(tris) = faces {
+            let mut raw_edge_tri_count: HashMap<(u32, u32), u32> = HashMap::new();
+            let mut contracted_edge_tri_count: HashMap<(u32, u32), u32> = HashMap::new();
+
+            for &[f0, f1, f2] in tris {
+                let tri_edges = [
+                    (f0.min(f1), f0.max(f1)),
+                    (f1.min(f2), f1.max(f2)),
+                    (f2.min(f0), f2.max(f0)),
+                ];
+                for (ea, eb) in tri_edges {
+                    if (ea as usize) < n_verts && (eb as usize) < n_verts && ea != eb {
+                        *raw_edge_tri_count.entry((ea, eb)).or_default() += 1;
+                        let ra = sew_rep[ea as usize];
+                        let rb = sew_rep[eb as usize];
+                        if ra != rb {
+                            *contracted_edge_tri_count.entry((ra.min(rb), ra.max(rb))).or_default() += 1;
+                        }
+                    }
+                }
+            }
+
+            for (edge_idx, e) in gpu_edges.iter().enumerate() {
+                let key = (e.v0.min(e.v1), e.v0.max(e.v1));
+                let raw_count = raw_edge_tri_count.get(&key).copied().unwrap_or(0);
+                let ra = sew_rep[e.v0 as usize];
+                let rb = sew_rep[e.v1 as usize];
+                if ra == rb {
+                    continue;
+                }
+                if raw_count == 0 {
+                    // 三角形に属さない 1D ストランド（引き紐等）のエッジは常に開放自由縁として E-E CCD 対象とする
+                    edge_boundary_bits[edge_idx >> 5] |= 1u32 << (edge_idx & 31);
+                } else if raw_count == 1 {
+                    let c_key = (ra.min(rb), ra.max(rb));
+                    if contracted_edge_tri_count.get(&c_key).copied().unwrap_or(0) == 1 {
+                        edge_boundary_bits[edge_idx >> 5] |= 1u32 << (edge_idx & 31);
+                    }
+                }
+            }
+        } else {
+            // faces が None（純粋な 1D ストランド構成）の場合は全有効エッジを開放自由縁とする
+            for (edge_idx, e) in gpu_edges.iter().enumerate() {
+                let ra = sew_rep[e.v0 as usize];
+                let rb = sew_rep[e.v1 as usize];
+                if ra != rb {
+                    edge_boundary_bits[edge_idx >> 5] |= 1u32 << (edge_idx & 31);
+                }
+            }
+        }
+
         Self {
             vertices,
             distance_constraints: sorted_dist,
@@ -947,10 +1338,123 @@ impl ClothMesh {
             star_indices,
             triangles: triangles_vec,
             edges: gpu_edges,
+            edge_boundary_bits,
             island_ids,
             mean_edge_length,
             max_edge_length,
         }
+    }
+}
+
+/// 縮約グラフにおける縫合跨ぎ真の2ホップペアに対する展開レスト距離を計算する。
+/// 共有中継頂点、共有シーム辺平坦展開、または点縫合スリットの最小長を返す。
+fn compute_seam_two_hop_rest_length(
+    i: usize,
+    nbr: usize,
+    positions: &[[f32; 3]],
+    orig_adj_lists: &[Vec<u32>],
+    sew_rep: &[u32],
+) -> f32 {
+    let ri = sew_rep[i];
+    let r_nbr = sew_rep[nbr];
+    let mut min_l0 = f32::MAX;
+
+    // 実頂点 i の元隣接 m1 と、実頂点 nbr の元隣接 m2 を調べる
+    for &m1 in &orig_adj_lists[i] {
+        let m1_idx = m1 as usize;
+        let rm1 = sew_rep[m1_idx];
+        if rm1 == ri || rm1 == r_nbr {
+            continue;
+        }
+        for &m2 in &orig_adj_lists[nbr] {
+            let m2_idx = m2 as usize;
+            let rm2 = sew_rep[m2_idx];
+            if rm1 != rm2 {
+                continue;
+            }
+
+            // 中継グループ Rm = rm1 = rm2 が見つかった
+            if m1_idx == m2_idx {
+                // ケース5a: 同一パネル上の中継実頂点
+                let p1 = positions[i];
+                let p2 = positions[nbr];
+                let dx = p1[0] - p2[0];
+                let dy = p1[1] - p2[1];
+                let dz = p1[2] - p2[2];
+                let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                if d < min_l0 {
+                    min_l0 = d;
+                }
+            } else {
+                // ケース5b: m1 != m2 で共有シーム辺があるか調べる
+                let mut found_seam = false;
+                for &k1 in &orig_adj_lists[m1_idx] {
+                    let rk1 = sew_rep[k1 as usize];
+                    if rk1 == rm1 {
+                        continue;
+                    }
+                    for &k2 in &orig_adj_lists[m2_idx] {
+                        let rk2 = sew_rep[k2 as usize];
+                        if rk1 == rk2 {
+                            // 共有シーム代表元 Rk が見つかった
+                            let pm1 = positions[m1_idx];
+                            let pk1 = positions[k1 as usize];
+                            let pm2 = positions[m2_idx];
+                            let pk2 = positions[k2 as usize];
+
+                            let ea_vec = [pk1[0] - pm1[0], pk1[1] - pm1[1], pk1[2] - pm1[2]];
+                            let len_a = (ea_vec[0] * ea_vec[0] + ea_vec[1] * ea_vec[1] + ea_vec[2] * ea_vec[2]).sqrt();
+                            let eb_vec = [pk2[0] - pm2[0], pk2[1] - pm2[1], pk2[2] - pm2[2]];
+                            let len_b = (eb_vec[0] * eb_vec[0] + eb_vec[1] * eb_vec[1] + eb_vec[2] * eb_vec[2]).sqrt();
+
+                            if len_a > 1e-6 && len_b > 1e-6 {
+                                let ua = [ea_vec[0] / len_a, ea_vec[1] / len_a, ea_vec[2] / len_a];
+                                let pi = positions[i];
+                                let da = [pi[0] - pm1[0], pi[1] - pm1[1], pi[2] - pm1[2]];
+                                let sa = da[0] * ua[0] + da[1] * ua[1] + da[2] * ua[2];
+                                let perp_a = [da[0] - sa * ua[0], da[1] - sa * ua[1], da[2] - sa * ua[2]];
+                                let ha = (perp_a[0] * perp_a[0] + perp_a[1] * perp_a[1] + perp_a[2] * perp_a[2]).sqrt();
+
+                                let ub = [eb_vec[0] / len_b, eb_vec[1] / len_b, eb_vec[2] / len_b];
+                                let pnbr = positions[nbr];
+                                let db = [pnbr[0] - pm2[0], pnbr[1] - pm2[1], pnbr[2] - pm2[2]];
+                                let sb = db[0] * ub[0] + db[1] * ub[1] + db[2] * ub[2];
+                                let perp_b = [db[0] - sb * ub[0], db[1] - sb * ub[1], db[2] - sb * ub[2]];
+                                let hb = (perp_b[0] * perp_b[0] + perp_b[1] * perp_b[1] + perp_b[2] * perp_b[2]).sqrt();
+
+                                let ds = sa - sb;
+                                let dh = ha + hb;
+                                let flat_len = (ds * ds + dh * dh).sqrt();
+                                if flat_len < min_l0 {
+                                    min_l0 = flat_len;
+                                    found_seam = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !found_seam {
+                    // ケース5c: 共有シーム辺なし（点縫合・三叉スリットなど） -> 両辺長の和
+                    let pi = positions[i];
+                    let pm1 = positions[m1_idx];
+                    let d1 = ((pi[0] - pm1[0]).powi(2) + (pi[1] - pm1[1]).powi(2) + (pi[2] - pm1[2]).powi(2)).sqrt();
+                    let pnbr = positions[nbr];
+                    let pm2 = positions[m2_idx];
+                    let d2 = ((pnbr[0] - pm2[0]).powi(2) + (pnbr[1] - pm2[1]).powi(2) + (pnbr[2] - pm2[2]).powi(2)).sqrt();
+                    let slit_len = d1 + d2;
+                    if slit_len < min_l0 {
+                        min_l0 = slit_len;
+                    }
+                }
+            }
+        }
+    }
+
+    if min_l0 < f32::MAX && min_l0.is_finite() && min_l0 > 1e-5 {
+        min_l0
+    } else {
+        0.0
     }
 }
 
@@ -1311,26 +1815,319 @@ mod tests {
 
         // 頂点0の2ホップ:
         // - 0自身: レスト長 0.0
-        // - 1 (同一パネルの元のエッジ): レスト長 0.1
-        // - 2 (縫合によって追加されたトポロジー近傍): レスト長 0.0 (自己衝突除外解除防止)
+        // - 1 (1ホップ直接接続エッジ): レスト長 0.0 (常時除外)
+        // - 2 (縫合によって追加された縮約1ホップ近傍): レスト長 0.0 (自己衝突除外解除防止)
         let v0_pairs = get_two_hop(0);
         let nbr_1 = v0_pairs.iter().find(|(idx, _)| *idx == 1).unwrap();
-        assert!((nbr_1.1 - 0.1).abs() < 1e-5, "同一パネル内エッジは幾何長を保持: {}", nbr_1.1);
+        assert_eq!(nbr_1.1, 0.0, "1ホップ直接接続エッジは常時除外(0.0): {}", nbr_1.1);
 
         let nbr_2 = v0_pairs.iter().find(|(idx, _)| *idx == 2);
         if let Some(p) = nbr_2 {
-            assert_eq!(p.1, 0.0, "縫合トポロジーで追加されたペアはレスト長0.0: {}", p.1);
+            assert_eq!(p.1, 0.0, "縫合トポロジーで追加された1ホップペアはレスト長0.0: {}", p.1);
+        }
+
+        let nbr_3 = v0_pairs.iter().find(|(idx, _)| *idx == 3);
+        if let Some(p) = nbr_3 {
+            assert_eq!(p.1, 0.0, "1Dストランドの2ホップペアはレスト長0.0: {}", p.1);
         }
 
         // 頂点1の2ホップ:
-        // - 0 (元のエッジ): レスト長 0.1
+        // - 0 (1ホップ直接接続エッジ): レスト長 0.0
         // - 2 (縫合相手): レスト長 0.0
         let v1_pairs = get_two_hop(1);
         let nbr_0_from_1 = v1_pairs.iter().find(|(idx, _)| *idx == 0).unwrap();
-        assert!((nbr_0_from_1.1 - 0.1).abs() < 1e-5, "同一パネル内エッジは幾何長を保持: {}", nbr_0_from_1.1);
+        assert_eq!(nbr_0_from_1.1, 0.0, "1ホップ直接接続エッジは常時除外(0.0): {}", nbr_0_from_1.1);
 
         let nbr_2_from_1 = v1_pairs.iter().find(|(idx, _)| *idx == 2).unwrap();
         assert_eq!(nbr_2_from_1.1, 0.0, "縫合相手ペアはレスト長0.0: {}", nbr_2_from_1.1);
+    }
+
+    #[test]
+    fn test_combined_inv_masses_areal_and_linear() {
+        // 0-1-2 の直角三角形 (面積 0.5 m^2) + 2-3-4 の1Dストランド (各1m, 計2m)
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ];
+        let faces = [[0, 1, 2]];
+        let strand_edges = [[2, 3], [3, 4]];
+        let areal_density = 0.30; // 三角形質量 = 0.5 * 0.30 = 0.15 kg -> 各頂点 0.05 kg
+        let linear_density = 0.02; // 各エッジ質量 = 1.0 * 0.02 = 0.02 kg -> 端点 0.01 kg, 中間 0.02 kg
+
+        let inv = super::compute_combined_inv_masses(
+            &positions,
+            Some(&faces),
+            Some(&strand_edges),
+            None,
+            areal_density,
+            linear_density,
+        );
+        assert_eq!(inv.len(), 5);
+        // 頂点0, 1: 面のみ 0.05 kg -> inv = 20.0
+        assert!((inv[0] - 20.0).abs() < 1e-4);
+        assert!((inv[1] - 20.0).abs() < 1e-4);
+        // 頂点2: 面 0.05 kg + ストランド端 0.01 kg = 0.06 kg -> inv = 1 / 0.06 = 16.6667
+        assert!((inv[2] - (1.0 / 0.06)).abs() < 1e-3);
+        // 頂点3: ストランド中間 0.02 kg -> inv = 50.0
+        assert!((inv[3] - 50.0).abs() < 1e-4);
+        // 頂点4: ストランド端 0.01 kg -> inv = 100.0
+        assert!((inv[4] - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_strand_1d_bending_constraints() {
+        // 1Dストランド: 0 -- 1 -- 2 -- 3
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ];
+        let edges = [[0, 1], [1, 2], [2, 3]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            1000.0,
+            10.0,
+            1.0,
+            None,
+            None,
+        );
+
+        // 2ホップペア (0, 2) と (1, 3) の2件の曲げ拘束が生成されていること
+        assert_eq!(mesh.bending_constraints.len(), 2);
+        let pairs: Vec<(u32, u32)> = mesh
+            .bending_constraints
+            .iter()
+            .map(|bc| (bc.v2.min(bc.v3), bc.v2.max(bc.v3)))
+            .collect();
+        assert!(pairs.contains(&(0, 2)));
+        assert!(pairs.contains(&(1, 3)));
+        for bc in &mesh.bending_constraints {
+            assert!((bc.rest_length - 2.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_seam_gated_bending_constraints_across_sewn_panels() {
+        // 2枚の離れた直角二等辺三角形パネル:
+        // パネルA: 0=(0,0,0), 1=(0,1,0), 2=(-1,0.5,0) (シーム辺 0-1, 高さ 1.0, s_a = 0.5)
+        // パネルB: 3=(5,0,0), 4=(5,1,0), 5=( 6,0.5,2) (5m離れかつ傾いているが、シーム辺 3-4 長さ1.0, 高さ sqrt(1+4)=sqrt(5), s_b = 0.5)
+        // 縫合ペア: (0, 3), (1, 4)
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.5, 0.0],
+            [5.0, 0.0, 0.0],
+            [5.0, 1.0, 0.0],
+            [6.0, 0.5, 0.0],
+        ];
+        let edges = [
+            [0, 1], [1, 2], [2, 0],
+            [3, 4], [4, 5], [5, 3],
+        ];
+        let faces = [
+            [0, 1, 2],
+            [4, 3, 5],
+        ];
+        let sewing = [[0, 3], [1, 4]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            Some(&sewing),
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            1000.0,
+            10.0,
+            1.0,
+            Some(10000.0),
+            Some(true),
+        );
+
+        // 同一パネル内には共有エッジがないため、生成される曲げ拘束はシーム跨ぎの1件のみ
+        assert_eq!(mesh.bending_constraints.len(), 1);
+        let bc = &mesh.bending_constraints[0];
+        assert_eq!((bc.v2.min(bc.v3), bc.v2.max(bc.v3)), (2, 5));
+        // 初期3D距離は ||(-1,0.5,0) - (6,0.5,0)|| = 7.0 だが、平坦展開時の自然長は h_a(1.0) + h_b(1.0) = 2.0 であること
+        assert!(
+            (bc.rest_length - 2.0).abs() < 1e-5,
+            "シーム跨ぎ曲げ拘束の自然長は初期配置距離(7.0)ではなく平坦展開距離(2.0)であること: {}",
+            bc.rest_length
+        );
+        assert!(bc._pad[0] > 0.5, "シームゲートフラグが有効であること");
+        assert!((bc._pad[1] - 1.0).abs() < 1e-5, "ゲート距離が rest_length * 0.5 であること");
+    }
+
+    #[test]
+    fn test_seam_two_hop_unfolded_rest_lengths_and_boundary_bits() {
+        // パネルA (2枚の三角形からなるクアッド): 0=(0,1,0), 1=(0,0,0), 2=(-1,1,0), 3=(-1,0,0)
+        // パネルB (2枚の三角形からなるクアッド、X=10m離れて配置): 4=(10,1,0), 5=(10,0,0), 6=(11,1,0), 7=(11,0,0)
+        // 縫合シーム: [0, 4], [1, 5]
+        let positions = [
+            [0.0, 1.0, 0.0],  // 0
+            [0.0, 0.0, 0.0],  // 1
+            [-1.0, 1.0, 0.0], // 2
+            [-1.0, 0.0, 0.0], // 3
+            [10.0, 1.0, 0.0], // 4
+            [10.0, 0.0, 0.0], // 5
+            [11.0, 1.0, 0.0], // 6
+            [11.0, 0.0, 0.0], // 7
+        ];
+        let edges = [
+            [0, 1], [0, 2], [1, 2], [1, 3], [2, 3], // パネルA
+            [4, 5], [4, 6], [5, 6], [5, 7], [6, 7], // パネルB
+        ];
+        let faces = [
+            [0, 2, 1], [1, 2, 3], // パネルA
+            [4, 5, 6], [5, 7, 6], // パネルB
+        ];
+        let sewing = [[0, 4], [1, 5]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            Some(&sewing),
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            1000.0,
+            10.0,
+            1.0,
+            Some(10000.0),
+            Some(true),
+        );
+
+        // 2ホップレスト長の検証ヘルパー
+        let get_two_hop_dist = |v_from: usize, v_to: usize| -> Option<f32> {
+            let start = mesh.two_hop_offsets[v_from] as usize;
+            let end = mesh.two_hop_offsets[v_from + 1] as usize;
+            for k in start..end {
+                if mesh.two_hop_indices[k] as usize == v_to {
+                    return Some(mesh.two_hop_rest_lengths[k]);
+                }
+            }
+            None
+        };
+
+        // 1. 縮約0ホップ (縫合ペア自身: 0と4, 1と5) は 0.0 (常時除外)
+        assert_eq!(get_two_hop_dist(0, 4), Some(0.0));
+        assert_eq!(get_two_hop_dist(4, 0), Some(0.0));
+        assert_eq!(get_two_hop_dist(1, 5), Some(0.0));
+        assert_eq!(get_two_hop_dist(5, 1), Some(0.0));
+
+        // 2. 縮約1ホップ (縫合ペアで直接接続される頂点: 例 0と5, 4と1) も 0.0 (常時除外)
+        assert_eq!(get_two_hop_dist(0, 5), Some(0.0));
+        assert_eq!(get_two_hop_dist(4, 1), Some(0.0));
+
+        // 3. シーム直交真2ホップ (頂点2と頂点6):
+        // パネルAの幅1.0 + パネルBの幅1.0 = 展開レスト長 2.0 が対称に設定されること
+        let d_2_6 = get_two_hop_dist(2, 6).expect("2と6の間に2ホップが存在すること");
+        let d_6_2 = get_two_hop_dist(6, 2).expect("6と2の間に2ホップが存在すること");
+        assert!((d_2_6 - 2.0).abs() < 1e-4, "2と6の展開レスト長は2.0であること: {}", d_2_6);
+        assert!((d_6_2 - 2.0).abs() < 1e-4, "6と2の展開レスト長は2.0であること: {}", d_6_2);
+        assert_eq!(d_2_6, d_6_2, "2ホップレスト長が厳密に対称であること");
+
+        // 4. 開放境界エッジビットセット (edge_boundary_bits) の検証
+        // 縫合シーム辺 [0, 1] と [4, 5] は縫合によって会合するため内部辺扱い (bit 0)
+        // 内部対角辺 [1, 2] と [5, 6] も内部辺 (bit 0)
+        // 外周の開放境界辺 ([0, 2], [2, 3], [1, 3], [4, 6], [6, 7], [5, 7]) は境界辺 (bit 1)
+        for (edge_idx, e) in mesh.edges.iter().enumerate() {
+            let pair = (e.v0.min(e.v1), e.v0.max(e.v1));
+            let is_boundary = ((mesh.edge_boundary_bits[edge_idx >> 5] >> (edge_idx & 31)) & 1) != 0;
+            if pair == (0, 1) || pair == (4, 5) || pair == (1, 2) || pair == (5, 6) {
+                assert!(!is_boundary, "シーム辺および内部対角辺 {:?} は境界エッジでないこと", pair);
+            } else {
+                assert!(is_boundary, "外周開放辺 {:?} は境界エッジであること", pair);
+            }
+        }
+    }
+
+    #[test]
+    fn test_point_seam_slit_two_hop_rest_length() {
+        // 喉元の三叉合流スリットを模した点縫合テスト:
+        // アンカー0=(0,0,0) に左右パネルが点縫合 [0, 3] される
+        // 左パネル: 0=(0,0,0), 1=(0,1,0), 2=(-1,0,0) (面 0-1-2)
+        // 右パネル: 3=(5,0,0), 4=(5,1,0), 5=( 6,0,0) (面 3-4-5)
+        // 縫合: [0, 3] のみ
+        let positions = [
+            [0.0, 0.0, 0.0],  // 0
+            [0.0, 1.0, 0.0],  // 1 (自由縁 v=1)
+            [-1.0, 0.0, 0.0], // 2
+            [5.0, 0.0, 0.0],  // 3
+            [5.0, 1.0, 0.0],  // 4 (自由縁 v=1)
+            [6.0, 0.0, 0.0],  // 5
+        ];
+        let edges = [
+            [0, 1], [1, 2], [2, 0],
+            [3, 4], [4, 5], [5, 3],
+        ];
+        let faces = [
+            [0, 1, 2],
+            [3, 4, 5],
+        ];
+        let sewing = [[0, 3]];
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            Some(&sewing),
+            None,
+            None,
+            0,
+            0.005,
+            1000.0,
+            1000.0,
+            1000.0,
+            10.0,
+            1.0,
+            Some(10000.0),
+            Some(true),
+        );
+
+        let get_two_hop_dist = |v_from: usize, v_to: usize| -> Option<f32> {
+            let start = mesh.two_hop_offsets[v_from] as usize;
+            let end = mesh.two_hop_offsets[v_from + 1] as usize;
+            for k in start..end {
+                if mesh.two_hop_indices[k] as usize == v_to {
+                    return Some(mesh.two_hop_rest_lengths[k]);
+                }
+            }
+            None
+        };
+
+        // 頂点1と頂点4は点縫合結節点 (0-3) を挟んだ真2ホップスリット
+        // 両辺長の和: ||0 - 1||(1.0) + ||3 - 4||(1.0) = 2.0 が設定されること
+        let d_1_4 = get_two_hop_dist(1, 4).expect("1と4の間に2ホップが存在すること");
+        let d_4_1 = get_two_hop_dist(4, 1).expect("4と1の間に2ホップが存在すること");
+        assert!((d_1_4 - 2.0).abs() < 1e-4, "点縫合スリット展開長は2.0であること: {}", d_1_4);
+        assert_eq!(d_1_4, d_4_1, "点縫合スリット長が厳密に対称であること");
     }
 }
 

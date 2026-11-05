@@ -2,6 +2,7 @@ import bpy
 from . import i18n
 from .operators import is_interactive_running, get_interactive_cloth_object_name
 from .utils import topology
+from .utils.self_collision_fit import draw_thickness_warning_ui
 from .utils.validation import validate_cloth_mesh
 
 
@@ -46,6 +47,20 @@ class TAREMIN_CLOTH_UL_elastic_groups(bpy.types.UIList):
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             layout.label(text="", icon='EDGESEL')
+
+
+class TAREMIN_CLOTH_UL_string_parts(bpy.types.UIList):
+    """紐（Drawstring）パーツ一覧のUIList"""
+    bl_translation_context = i18n.CONTEXT
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            row.prop(item, "enabled", text="")
+            row.prop(item, "name", text="", emboss=False, icon='CURVE_DATA')
+            row.prop(item, "pull_length", text=i18n.trans("Cinch"), slider=True)
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='CURVE_DATA')
 
 
 def _draw_diagnostics_box(layout, context):
@@ -366,7 +381,9 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 row_start.scale_y = 1.3
                 row_start.operator("taremin_cloth.interactive", text=i18n.trans("Interactive Mode (Grab/Drag)"), icon='HAND', depress=False)
 
-                box_sim.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
+                row_ops = box_sim.row(align=True)
+                row_ops.operator("taremin_cloth.instant_drape", text=i18n.trans("Instant Drape"), icon='FORCE_DRAG')
+                row_ops.operator("taremin_cloth.reset_all", text=i18n.trans("Reset All"), icon='RECOVER_LAST')
             else:
                 box_sim.label(text=i18n.trans("No cloth objects in scene"), icon='INFO')
 
@@ -530,6 +547,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 row_sc.prop(settings, "self_collision_purpose", text=i18n.trans("Purpose"))
                 row_sc.operator("taremin_cloth.auto_fit_self_collision", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
                 col_sc.prop(settings, "thickness", text=i18n.trans("Thickness"))
+                draw_thickness_warning_ui(col_sc, obj, settings=settings)
 
             # 6. 重力 (Forces & Gravity)
             box_grav = layout_params.box()
@@ -659,6 +677,7 @@ class TAREMIN_CLOTH_PT_fabric(bpy.types.Panel):
         row_thick = layout.row(align=True)
         row_thick.prop(settings, "thickness", text=i18n.trans("Thickness"))
         row_thick.operator("taremin_cloth.auto_fit_thickness", text=i18n.trans("Auto Fit"), icon='FIXED_SIZE')
+        draw_thickness_warning_ui(layout, obj, settings=settings, compact=True)
         row_dens = layout.row(align=True)
         row_dens.prop(settings, "areal_density", text=i18n.trans("Areal Density"))
 
@@ -750,6 +769,7 @@ class TAREMIN_CLOTH_PT_collisions(bpy.types.Panel):
             op_rst_sc = row_p.operator("taremin_cloth.reset_cloth_settings", text="", icon='LOOP_BACK')
             if op_rst_sc:
                 op_rst_sc.scope = 'COLLISION'
+            draw_thickness_warning_ui(l_col, obj, settings=settings)
 
             self_sub = l_col.column(align=True)
             self_sub.prop(settings, "self_collision_algorithm", text=i18n.trans("Algorithm"))
@@ -1007,6 +1027,45 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
                 box_arr.operator("taremin_cloth.edit_arrangement_3d", text=i18n.trans("Edit in 3D (Proxy)"), icon='EMPTY_ARROWS')
                 box_arr.prop(pat, "arrangement_offset")
                 box_arr.prop(pat, "arrangement_euler")
+
+        # 紐パーツ (Drawstrings & Straps)
+        box_string = layout.box()
+        box_string.label(text=i18n.trans("Drawstrings & Straps (Curve)"), icon='CURVE_DATA')
+        row = box_string.row()
+        row.template_list(
+            "TAREMIN_CLOTH_UL_string_parts",
+            "",
+            settings,
+            "string_parts",
+            settings,
+            "active_string_part_index",
+            rows=2,
+        )
+        col_ops = row.column(align=True)
+        col_ops.operator("taremin_cloth.add_string_part", text="", icon='ADD')
+        col_ops.operator("taremin_cloth.remove_string_part", text="", icon='REMOVE')
+        col_ops.separator()
+        col_ops.operator("taremin_cloth.select_string_guide_verts", text="", icon='RESTRICT_SELECT_OFF')
+
+        if 0 <= settings.active_string_part_index < len(settings.string_parts):
+            active_str = settings.string_parts[settings.active_string_part_index]
+            col_str_details = box_string.column(align=True)
+            col_str_details.prop(active_str, "name", text=i18n.trans("Name"))
+            col_str_details.prop(active_str, "curve_object", text=i18n.trans("Curve Object"))
+
+            box_cinch = col_str_details.box()
+            box_cinch.label(text=i18n.trans("Cinch & Tighten Controls"), icon='ARROW_LEFTRIGHT')
+            box_cinch.prop(active_str, "pull_length", text=i18n.trans("Pull Length (Cinch)"), slider=True)
+            row_off = box_cinch.row(align=True)
+            row_off.prop(active_str, "pull_offset_left", text=i18n.trans("Left Offset"))
+            row_off.prop(active_str, "pull_offset_right", text=i18n.trans("Right Offset"))
+
+            col_str_details.prop(active_str, "eyelet_stride", text=i18n.trans("Eyelet Stride"))
+            col_str_details.prop(active_str, "radius", text=i18n.trans("String Radius"))
+            col_str_details.prop(active_str, "linear_density", text=i18n.trans("Linear Density"))
+
+            n_guides = len(active_str.get_guide_vert_indices())
+            col_str_details.label(text=f"{i18n.trans('Guide Border Verts:')} {n_guides}", icon='INFO')
 
 
 class TAREMIN_CLOTH_PT_pattern_piece(bpy.types.Panel):
@@ -1410,6 +1469,9 @@ class TAREMIN_CLOTH_PT_interactive_opts(bpy.types.Panel):
                 col.prop(brush, "radius", text=i18n.trans("Radius"))
                 col.prop(brush, "strength", text=i18n.trans("Strength"))
                 col.prop(brush, "falloff_shape", text=i18n.trans("Falloff"))
+                col.prop(brush, "use_active_region", text=i18n.trans("Active-Region Sculpt"))
+                if getattr(brush, "use_active_region", False):
+                    col.prop(brush, "active_region_scale", text=i18n.trans("Active Region Scale"))
         col.separator()
         col.operator("taremin_cloth.benchmark_fps", text=i18n.trans("Benchmark FPS (2 sec)"), icon='TIME')
 
@@ -1525,6 +1587,19 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
         if not col_settings.is_collider:
             return
 
+        if obj.type == 'MESH' and col_settings.collider_type in {'BONE_SDF', 'MESH_SDF', 'MESH'}:
+            from .utils.validation import validate_collider_mesh
+            ob_report = validate_collider_mesh(obj)
+            if ob_report and ob_report.has_open_boundaries:
+                box_ob = layout.box()
+                box_ob.alert = not getattr(col_settings, "close_open_boundaries", True)
+                icon_ob = 'INFO' if getattr(col_settings, "close_open_boundaries", True) else 'ERROR'
+                box_ob.label(
+                    text=f"{i18n.trans('Open Boundaries Detected:')} {ob_report.open_loop_count} ({ob_report.open_edge_count} {i18n.trans('edges')})",
+                    icon=icon_ob,
+                )
+                box_ob.prop(col_settings, "close_open_boundaries", text=i18n.trans("Close Open Boundaries"))
+
         ui_mode = getattr(scene, "taremin_cloth_ui_mode", "SIMPLE") if scene else "SIMPLE"
 
         if ui_mode == 'SIMPLE':
@@ -1591,6 +1666,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                 b_col.prop(col_settings, "radius")
             elif col_settings.collider_type == 'MESH':
                 b_col.prop(col_settings, "thickness")
+                b_col.prop(col_settings, "close_open_boundaries")
                 b_col.prop(col_settings, "single_sided")
                 if col_settings.single_sided:
                     sub_rec = b_col.column(align=True)
@@ -1654,6 +1730,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                     col_h.prop(col_settings, "joint_rotation_threshold", text=i18n.trans("Activation Angle (°)"))
                     col_h.label(text=i18n.trans("Dynamically mesh only bent joints for speedup"), icon='INFO')
 
+                b_col.prop(col_settings, "close_open_boundaries")
                 b_col.prop(col_settings, "sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)
@@ -1692,6 +1769,7 @@ class TAREMIN_CLOTH_PT_collider_panel(bpy.types.Panel):
                     else:
                         box_mem.label(text=f"{i18n.trans('Resolution:')} {w_est}x{h_est}x{d_est} ({i18n.trans('Approx.')}{vram_est:.1f}MB)", icon='INFO')
 
+                b_col.prop(col_settings, "close_open_boundaries")
                 b_col.prop(col_settings, "mesh_sdf_cache_enabled")
 
                 row_cache = b_col.row(align=True)
@@ -1775,6 +1853,7 @@ def draw_view3d_wrinkle_menu(self, context):
 
 classes = (
     TAREMIN_CLOTH_UL_elastic_groups,
+    TAREMIN_CLOTH_UL_string_parts,
     TAREMIN_CLOTH_PT_main_panel,
     TAREMIN_CLOTH_PT_quality,
     TAREMIN_CLOTH_PT_fabric,

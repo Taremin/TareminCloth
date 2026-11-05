@@ -1,4 +1,4 @@
-use crate::mesh::{GpuVertex, SimParams};
+use crate::mesh::{GpuCollider, GpuPinConstraint, GpuVertex, SelfCollisionParams, SimParams};
 use super::types::CollisionParams;
 use super::GpuClothSimulator;
 
@@ -367,14 +367,17 @@ impl GpuClothSimulator {
             self.prev_step_positions.resize(n_verts, [0.0; 3]);
         }
 
-        // 引張歪み率 (Strain) の集計:
-        // 極小エッジによる特異点発散を防ぐため、特性長 (0.5 * mesh_avg_edge_len) を分母下限として保護。
-        // また、外れ値1本（コライダー押し出し等）に引きずられないよう、P95 (95パーセンタイル) を代表値とする。
+        // 引張歪み率 (Strain) の高速ストライドサンプリング集計:
+        // 全拘束(数万〜十数万本)を毎フレームCPUでsqrt+ソートする代わりに、最大2048本を等間隔サンプリングしてP95を算出する。
         let mut rep_strain = 0.0f32;
         if !self.distance_constraints.is_empty() {
             let min_ref = (0.5 * self.mesh_avg_edge_len).max(0.002);
-            let mut positive_strains = Vec::with_capacity(self.distance_constraints.len());
-            for (dc, &l0) in self.distance_constraints.iter().zip(&self.initial_distance_rest_lengths) {
+            let total_dc = self.distance_constraints.len();
+            let stride = (total_dc / 2048).max(1);
+            let mut positive_strains = Vec::with_capacity((total_dc / stride) + 1);
+            for idx in (0..total_dc).step_by(stride) {
+                let dc = &self.distance_constraints[idx];
+                let l0 = self.initial_distance_rest_lengths[idx];
                 if l0 <= 1e-6 {
                     continue;
                 }
@@ -386,10 +389,14 @@ impl GpuClothSimulator {
                 let dx = floats[v0] - floats[v1];
                 let dy = floats[v0 + 1] - floats[v1 + 1];
                 let dz = floats[v0 + 2] - floats[v1 + 2];
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                let strain = (dist - l0) / l0.max(min_ref);
-                if strain > 0.0 {
-                    positive_strains.push(strain);
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                // 伸びているエッジ (dist_sq > l0 * l0) のみ sqrt を計算する (約50%以上のsqrtをスキップ)
+                if dist_sq > l0 * l0 {
+                    let dist = dist_sq.sqrt();
+                    let strain = (dist - l0) / l0.max(min_ref);
+                    if strain > 0.0 {
+                        positive_strains.push(strain);
+                    }
                 }
             }
             if !positive_strains.is_empty() {
@@ -674,6 +681,42 @@ impl GpuClothSimulator {
         self.encode_simulation_steps(&mut encoder, dt_sub, 1);
         self.context.queue.submit(Some(encoder.finish()));
         self.context.device.poll(wgpu::Maintain::Wait);
+    }
+
+    /// 準静的一瞬ドレープ (Quasi-Static Instant Drape)
+    /// 高減衰かつ一括サブステップ実行により、数ミリ秒で重力・衝突下の静止釣り合い位置へ収束させる
+    pub fn instant_drape(&mut self, total_substeps: u32, drape_damping: f32) -> u32 {
+        if self.num_vertices == 0 || total_substeps == 0 {
+            return 0;
+        }
+
+        let old_air_damping = self.air_damping;
+        let effective_damping = drape_damping.max(0.5);
+        self.set_damping(effective_damping);
+
+        let dt_per_substep = 0.001666667; // 1/600秒 (約1.67ms) の安定小タイムステップ
+        let chunk_size = 20u32;
+        let mut executed = 0u32;
+
+        while executed < total_substeps {
+            let current_chunk = chunk_size.min(total_substeps - executed);
+            let dt = dt_per_substep * current_chunk as f32;
+
+            let mut encoder = self.context.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor {
+                    label: Some("Instant Drape Chunk Encoder"),
+                },
+            );
+
+            self.dispatch_dynamic_bone_sdf_update(&mut encoder);
+            self.encode_simulation_steps(&mut encoder, dt, current_chunk);
+            self.context.queue.submit(Some(encoder.finish()));
+            executed += current_chunk;
+        }
+
+        self.context.device.poll(wgpu::Maintain::Wait);
+        self.set_damping(old_air_damping);
+        executed
     }
 
     /// 頂点座標抽出パスをエンコード (GpuVertex から連続 f32 座標配列へ抽出)
@@ -1081,6 +1124,82 @@ impl GpuClothSimulator {
         drop(data);
         staging.unmap();
         out
+    }
+
+    /// GPUの SimParams バッファ内容を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_sim_params_buffer(&self) -> Option<SimParams> {
+        let size = std::mem::size_of::<SimParams>() as u64;
+        let bytes = self.read_storage_buffer(&self.params_buffer, size);
+        if bytes.len() >= size as usize {
+            Some(*bytemuck::from_bytes::<SimParams>(&bytes[..size as usize]))
+        } else {
+            None
+        }
+    }
+
+    /// GPUの CollisionParams バッファ内容を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_collision_params_buffer(&self) -> Option<CollisionParams> {
+        let size = std::mem::size_of::<CollisionParams>() as u64;
+        let bytes = self.read_storage_buffer(&self.collider_params_buffer, size);
+        if bytes.len() >= size as usize {
+            Some(*bytemuck::from_bytes::<CollisionParams>(&bytes[..size as usize]))
+        } else {
+            None
+        }
+    }
+
+    /// GPUの SelfCollisionParams バッファ内容を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_self_collision_params_buffer(&self) -> Option<SelfCollisionParams> {
+        let size = std::mem::size_of::<SelfCollisionParams>() as u64;
+        let bytes = self.read_storage_buffer(&self.self_collision_params_buffer, size);
+        if bytes.len() >= size as usize {
+            Some(*bytemuck::from_bytes::<SelfCollisionParams>(&bytes[..size as usize]))
+        } else {
+            None
+        }
+    }
+
+    /// GPUの Vertex バッファから先頭 count 件の頂点を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_gpu_vertices_buffer(&self, count: usize) -> Vec<GpuVertex> {
+        let count = count.min(self.num_vertices as usize);
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = (count * std::mem::size_of::<GpuVertex>()) as u64;
+        let bytes = self.read_storage_buffer(&self.vertex_buffer, size);
+        bytemuck::cast_slice::<u8, GpuVertex>(&bytes).to_vec()
+    }
+
+    /// 現在登録されているコライダー数を取得
+    pub fn num_colliders(&self) -> usize {
+        self.colliders.len()
+    }
+
+    /// 現在登録されている動的ピン数を取得
+    pub fn num_dynamic_pins(&self) -> usize {
+        self.dynamic_pins.len()
+    }
+
+    /// GPUの Collider バッファから先頭 count 件 (None時は全件) のコライダーを読戻す (デバッグ・プロトコル検証用)
+    pub fn read_gpu_colliders_buffer(&self, count: Option<usize>) -> Vec<GpuCollider> {
+        let count = count.unwrap_or(self.colliders.len()).min(self.colliders.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = (count * std::mem::size_of::<GpuCollider>()) as u64;
+        let bytes = self.read_storage_buffer(&self.collider_buffer, size);
+        bytemuck::cast_slice::<u8, GpuCollider>(&bytes).to_vec()
+    }
+
+    /// GPUの Pin バッファから先頭 count 件 (None時は全件) の動的ピン拘束を読戻す (デバッグ・プロトコル検証用)
+    pub fn read_gpu_pin_constraints_buffer(&self, count: Option<usize>) -> Vec<GpuPinConstraint> {
+        let count = count.unwrap_or(self.dynamic_pins.len()).min(self.dynamic_pins.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        let size = (count * std::mem::size_of::<GpuPinConstraint>()) as u64;
+        let bytes = self.read_storage_buffer(&self.pin_buffer, size);
+        bytemuck::cast_slice::<u8, GpuPinConstraint>(&bytes).to_vec()
     }
 
     /// 収集中のアクティブペア一覧を読戻す (vt_count, ee_count, vt_pairs, ee_pairs)。

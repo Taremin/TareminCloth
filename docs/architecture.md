@@ -127,6 +127,30 @@ GPUシミュレーション実行中におけるCPU同期待ち（リードバ�
 - **計測 API**:
   `ClothSimulator.get_build_timings()` (生成時内訳) および `shared_pipeline_cache_info()` (キャッシュ診断) で起動時間を検証可能。Blender を起動せず `python -m taremin_cloth.log_tools` / `tests/core/test_pipeline_cache.py` で回帰計測する。
 
+### 1.7 高性能最適化機構と特化プレビューモード (Performance Optimizations & Specialized Modes)
+
+Blender インタラクティブ操作における実行フレームレートを 20 FPS 台から 60〜120+ FPS へ引き上げるため、ホスト・GPUシェーダー・ビューポート描画にわたる多層最適化および特化モードが導入されています。
+
+#### 1.7.1 GPUシェーダー＆パイプライン最適化
+1. **ボーンSDF外接球プリフィルタ (`collision.wgsl`, `simulation/mod.rs`)**:
+   - `GpuBoneInfo` の既存アライメントパディング（`aabb_min.w`, `aabb_max.w`, `uvw_scale.w`, `uvw_offset.w`）を活用し、ボーンのワールド外接球中心・半径を格納。
+   - `solve_bone_sdf_collision` の先頭で頂点と外接球の二乗距離判定を行い、遠隔ボーンに対する 4×4 逆行列積を 90% 以上バイパス。構造体サイズ・アライメント・テスト（`test_shader_alignment.rs`）を一切壊さずに GPU 負荷を大幅削減。
+2. **コライダー三角形・エッジの Morton Code 空間ソート (`simulation/mod.rs`, `mesh.rs`)**:
+   - `upload_colliders` においてコライダー三角形を重心 Morton Code 順に空間ソート。16面クラスタの階層境界球（Bounding Sphere）が空間的に極小化・タイト化され、GPU側のクラスタカリング効率が劇的に向上。
+   - メッシュ初期化時にも `gpu_edges` を Morton Code 順にソートし、コンピュートシェーダー実行時の GPU L1/L2 キャッシュ局所性を最大化。
+3. **E-E 自己衝突の最短距離二乗先行判定と二分探索遅延評価 (`self_collision_ee_direct.wgsl`)**:
+   - 2線分の最短距離の二乗（`dist_sq`）を先に求め、接触閾値（`target_dist_sq`）を超えている安全ペアに対してはトポロジー2ホップ近傍判定（CSR二分探索）を完全にスキップ。実際に侵入・接触しているペアのみに限定して遅延評価。
+4. **ハードウェアDMAゼロクリア (`spatial_hash.rs`)**:
+   - 空間ハッシュテーブルのカウンタバッファクリアにおいて、コンピュートシェーダー起動を廃止し、`encoder.clear_buffer` による GPU コピーエンジン（DMA）直接ゼロクリアを採用。
+
+#### 1.7.2 特化プレビューモード
+1. **Active-Region Sculpt Mode (部分アクティブ・スカルプト)**:
+   - スカルプトブラシ操作時、ブラシ影響半径外（`radius * active_scale`）の遠隔頂点をその瞬間の位置で一時ピン固定（`sim.set_pin`）。
+   - ブラシ解放時に自動解除。数万頂点規模の大規模衣装でもブラシ周辺の局所領域のみが物理シミュレーションされるため、超高FPSでの滑らかなスカルプト操作を実現。
+2. **Quasi-Static Instant Drape Mode (準静的一瞬ドレープ)**:
+   - タイムライン再生を行わずに、ワンクリックで重力・衝突・拘束の静止釣り合い形状へ即座に収束させるオペレーター（`taremin_cloth.instant_drape`）。
+   - 高減衰（Damping=0.85）かつ小刻みタイムステップで 40 サブステップを一括エンコード実行し、数ミリ秒〜数十ミリ秒で安定ドレープ状態を生成。
+
 ---
 
 ## 2. 物理シミュレーション仕様 (XPBD)
@@ -197,17 +221,18 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
    - **デュアル空間ハッシュパイプライン (Counting Sort 6相)**:
      - **頂点空間ハッシュ (`GpuSpatialHash`)**: 頂点座標 $`p_i`$ をキーとしてセルIDを算出し、V-T（頂点対面）およびマルチレイヤー接触候補を並列抽出。
      - **エッジ空間ハッシュ (`GpuEdgeSpatialHash`)**: エッジ中点 $`p_{\text{mid}} = (p_{u0} + p_{u1}) / 2`$ をキーとしてエッジインデックスを直接セルへソート（`spatial_grid_sort_edges.wgsl`）。E-E（エッジ対エッジ）接触解決専用の独立グリッド。
+     - **2階層 Blelloch Scan 上限保証とテーブルサイズ統一**: GPU Counting Sort（`spatial_grid_sort.wgsl` / `spatial_grid_sort_edges.wgsl`）の2階層ワークグループ排他 Prefix Sum（`scan_top`: 最大256ブロック × 256要素）の上限に合わせ、頂点・エッジ双方のハッシュテーブルサイズを `table_size = (hash_capacity * 4).next_power_of_two().clamp(1024, 65536)` に統一・クランプし、ブロック超過によるバケット先頭番地への潰れ（要素消失）および頂点・エッジ間の `SimParams.table_size` 不一致を防止。
 
 3. **拘束解消ループ (Constraint Projection Loop)**:
    - **距離拘束 (Distance Constraints)**: グラフ彩色（Welsh-Powell法）により色グループごとにGPU完全並列で伸縮補正。拘束毎ラムダを反復跨ぎで蓄積する正規XPBD（サブステップ先頭で零化）のため、剛性は反復数に非依存。頂点質量は三角形面積から算出（kg）、剛性はバネ定数（N/m）。
    - **長距離拘束 (Long-Range Constraints, オプション `enable_coarse_constraints`)**: 2ホップ先頂点間の距離拘束（`constraint_type=2`、頂点あたり最大4件）を細層と同一ループで解く2階層法の粗層。反復1回あたりの伝播距離を約2倍にし、長尺布の残留伸びを低減する。
-   - **曲げ拘束 (Bending Constraints)**: 隣接2三角形の二面角（Dihedral Angle）に基づく曲率補正。
+   - **曲げ拘束 (Bending Constraints)**: 共有エッジを持つ隣接2三角形の対向頂点間距離拘束、1Dストランド（引き紐）の連続2ホップ頂点間曲げ拘束、および**縫合シーム（`sewing_springs`）を跨ぐ境界三角形間のシームゲート付き曲げ拘束（Seam-Gated Bending Constraint）**。シーム跨ぎ曲げ拘束では、Union-Find縮約後の共有シーム辺を軸として2三角形を180度平坦展開した真の2D対向頂点間距離 $`L_0 = \sqrt{(s_a - s_b)^2 + (h_a + h_b)^2}`$ を自然長として算出し、縫合ペアが閉じており（$`\|p_{v0} - p_{v1}\| \le \max(0.5 L_0, 0.01)`$）かつ平坦距離より折れ曲がっている場合（$`d < L_0`$）にのみ復元力を適用することで、初期配置で離れた型紙パネルの引き寄せを阻害せず縫合境界での鋭角な折れ曲がり・裏返りを防止。また、シーム跨ぎ曲げ拘束（`_pad[0] > 0.5`）はシェーダー内でシーム端点 `v0, v1` の座標を読み取るため、グラフ彩色（`color_bending_constraints`）では `v2, v3` に加えて `v0, v1` も競合頂点として登録し、同一色グループ内での Read-Write データ競合（非決定性）を排除。
    - **固定・追従ピン拘束 (Pin & Attachment Constraints)**: 頂点グループウェイトおよびターゲット位置・ボーン追従。
    - **縫合拘束 (Sewing Constraints)**: 型紙エッジ間を時間経過に伴い収縮（スプリング）させて衣服を仕立てる。自然長短縮はサブステップ毎1回の独立パス（`sewing_shrink.wgsl`）で時間進行し、反復数・自己衝突モードに非依存。縫合エッジペアはトポロジー近接判定においてUnion-Find完全縮約トポロジーグラフ（ホップ数0換算・結節点隣接の相互対称登録）として扱われ、自己衝突（2ホップ除外）との誤爆拮抗を物理的に排除する。また、収縮完了時および指定近接距離（`sewing_lock_distance`、既定20mm）以内到達時に自然長待ち時間をスキップして即座に目標長0.0へラッチ・吸着し、完全非伸縮とする**密着剛体ロック・マグネット吸着オプション**（`enable_sewing_lock`）をサポート。衣装組立工程向けに、指定割合の縫合が結合するまで重力を抑制する**縫合優先モード**（Rustコアのラッチ・ランプ状態機械＋ホスト側測定、WGSL変更なし）をオプション提供する。さらに、袖や股下など円筒コライダーを跨ぐ二つ折り型紙（「く」の字型）において、直線スプリングによるコライダー貫通挟み込みを防止するため、**中継点誘導縫合（Waypoint-guided Sewing）** をサポート。面を持たない細分化エッジ列（$`A - W_1 - \dots - W_k - B`$）をグラフ探索により自動検出し、中継点 $`W`$ をコライダー外周の固定アンカー／ガイドパスとして機能させることで、腕や脚の輪郭を安全に迂回して最深部で距離0.0mm完全合流・結合させる。縫合進行中は中継点を静止固定（`inv_mass = 0.0`）としてコライダー貫通を防ぎ、複数中継点の場合は布端点の接近通過（距離 $`\le d_{\text{pass}}`$）に伴い中間中継点を順次解放して次のターゲットへシフトする。そして両端点 $`A, B`$ が最終合流（距離 $`\le d_{\text{merge}}`$）した時点で、**結合完了時ピン解放（Dynamic Pin Release: `set_vertex_inv_masses`）**により全中継点ピンを布端点の通常質量へ動的復帰させることで、布が中継点の空間座標に串刺し固定されることなく、コライダー表面に沿って自然に滑り落ちて自由にドレープする。縫合エッジ群の連結成分はグラフ理論的に検証され、枝分かれ（次数 $`\ge 3`$）、閉ループ、宙ぶらりん等の不正トポロジーを自動排除して**単一経路（Single-Path Guarantee）**を保証する。また、初期面積0の縮退面（Degenerate Faces）を自動検知して物理計算用面から除外・警告することで、メッシュの異常伸長や破綻を未然に防止する。
    - **ドレープガイド拘束 (Wrinkle Field / Drape Guide Constraints, `wrinkle_field.wgsl`) [実験的機能]**:
      スタイライズド表現で多用される「山・谷の折り目」を布メッシュに自発的に座屈させるための外力加速度フィールド。ボーン直交基底および円柱座標系（$`\theta, z, r`$）に射影されたスプライン幾何カーブ群から生成される**円柱UV展開2D-SDFテクスチャ（RGBA8Unorm, $`128\times 128`$。本番経路固定。物理検証テストでは $`512\times 256`$ を使用）**および`texture_2d<f32>`サンプラー（$`U`$軸`AddressMode::Repeat`による全周シームレス補間）に基づき、位置直接ワープを完全撤廃。各カーブは**個別強度（`strength`）**と**個別影響半径（`influence_radius`）**を保持可能で、テクスチャベイク時に各カーブのフォールオフが個別合成され、GPUシェーダー側で全体強度（`stiffness`）と乗算適用される。さらに**縫合優先モード（`sewing_priority`）**と完全連動し、縫合未完了フェーズ中はディスパッチ自体がスキップ（外力ゼロ）され、縫合完了後にランプアップ復帰することで縫合工程を一切阻害しない。サブステップ先頭（`predict`直後）の外力パスとしてディスパッチされ、山領域への外向き風加速度（$`+r`$ 方向）と谷領域への内向き風加速度（$`-r`$ 方向）を速度 $`\vec{v}`$ および予測位置 $`\vec{p}_{\text{prev}}`$ に滑らかに積分。反復ループ内の距離拘束・曲げ拘束との競合・ノイズ（ぐちゃぐちゃ）を原理的に排除し、布自身の張力と風圧が釣り合った極めて自然なドレープとくびれを形成。同角度$`\theta`$における多重シワや"Y"字分岐シワも2D平面上の独立座標として潰れずに完全両立。ビューポートには角度・長さ帯と目標前後厚（谷は目標〜+Valley Depth、山は目標−Crest Depth〜目標。既定1.5cm/2.0cm、設定で変更可）を示す**影響範囲表示**（動径方向にdist_factor比例の3分割フェード付き）と骨半径代理円柱を描画する（ドーナツ管表示は廃止）。骨代理半径は明示値（`wrinkle_bone_radius`）を優先し、未設定時は先尾平均、最終手段として骨長フォールバックで解決する。テクスチャベイクはCPU側splat反転（画素→全点の総当たりを廃止。各参照点の影響BOX内画素のみ更新し、U周期はmod距離で厳密化）により128px・谷山各1本で約23ms。同期層（`engine/params.py::sync_wrinkle_field`）は骨ローカル記述子（`describe_wrinkle_curves`）の許容値照合により剛体追従時はテクスチャ再送なし（uniformのみ更新・約0.6ms）、純粋スライド（dz・rアフィン）および一様強度変化はz_range/r_range/stiffnessのuniform更新のみで厳密等価（`match_slide_transform`）、形状実変時のみフルベイクする。同一寸法の再送時はGPUテクスチャ・BindGroup再生成をスキップする高速パス（`set_wrinkle_field_texture_2d`）により編集中のhitchを除去する。
    - **衝突拘束 (Collisions)**:
-     - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。
+     - **動的SDFコライダー**: GPUコンピュートシェーダーによるボーン・メッシュSDF高速ベイクと侵入位置押し出し。首や手足の切り口などの開放境界ループ（Open Boundary Loops）を自動検出して扇状キャップ三角形で閉鎖するオプション（`close_open_boundaries`、既定ON）および `bake_sdf.wgsl` における Pseudonormal Tie-Breaking・開放境界外側負符号防止により、ヘッドレス素体等での開口部上空のSDF符号反転（偽の内部生成）を防止。
      - **メッシュコライダー**: クラスタカリング付き三角パッチ衝突判定。
      - **コライダー協調解決オプション (`coupled_collider_mode`, `auto_coupled_on_low_substeps`)**:
        - **Decoupled モード (既定OFF / 高速・標準推奨)**: 反復ループ外で1回だけコライダー衝突を解決。物理質量化後の高い基底剛性を背景に、めり込みゼロを保ちながら反復内ディスパッチ削減により約15%高速化（+70 FPS）を達成。
@@ -215,12 +240,14 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
        - **低ステップ時自動協調モード (`auto_coupled_on_low_substeps`, 既定ON)**: 適応サブステップ等でサブステップ数が低くなった場合（$`\le 8`$）、Decoupledモードのままだと反復内の距離拘束収縮力に押し出しが負けて素体コライダーを貫通・滑落する現象を防ぐため、実効的にCoupled解決を自動強制するフェイルセーフオプション。
      - **自己衝突 (Self-Collision)**:
         - **Solve パス (V-T / V-V 特化: `self_collision.wgsl`)**: 頂点スレッド駆動による頂点空間ハッシュ近傍探索および V-T（頂点対面）/ V-V（頂点対頂点）幾何接触解決。重厚なエッジ直積二重ループを新 E-E パスへ完全分離したことでレジスタ使用量と分岐待ち合わせが大幅削減され、従来の 78.4 ms から 15.7 ms 〜 22.7 ms（約 4〜5 倍高速）へ劇的に軽量化。
+          - **動的三角形との相対 V-T CCD**: 終点時刻 $\tau=1$ の相手三角形を静止基準とし、重心移動量 $\Delta T$ を考慮した相対始点 $\mathbf{p}_{\text{rel\_old}, i} = x_{\text{old}, i} + \Delta T$（符号整合性保証）から相対ベクトル $\mathbf{v}_{\text{rel}} = p_i - \mathbf{p}_{\text{rel\_old}, i}$ に対する Möller–Trumbore 交差判定を実施。衝突時刻 {\text{hit}}$ 手前の安全位置 $\mathbf{p}_{\text{safe}}$ への補正量を、自頂点だけでなく相手三角形3頂点へ重心座標重みと逆質量比に応じた 100% ハード CCD 変位としてアトミック分配（完全な運動量保存）。
         - **Solve EE パス (Edge-Centric E-E 特化: `self_collision_ee_direct.wgsl`)**: エッジ自身（メッシュの全エッジ $`N_e`$ 本）をスレッドとしてディスパッチする新アーキテクチャ。
           - **専用エッジ空間ハッシュによる多段アクセスの完全排除**: エッジ中点をキーとする `GpuEdgeSpatialHash` を直接走査することで、従来の「頂点セル $`\to`$ 頂点 $`\to`$ 隣接エッジリスト $`\to`$ 相手エッジ」という3段階の不規則メモリアクセスを撤廃し、「エッジセル $`\to`$ 相手エッジ」の1段階直接アクセスに単純化。E-E計算時間を 44.95 ms から 27.73 ms へ約 38.3% 高速化。
           - **エッジ中点 27 セル固定走査**: エッジ中点 $`p_{\text{mid}} = (p_{u0} + p_{u1}) / 2`$ の空間セルを中心とする定数 27 近傍（$`3 \times 3 \times 3`$）のみを均一走査。布メッシュのエッジ半長は自動算出セルサイズに幾何学的に収まるため、100% の幾何学的カバレッジを維持したままスレッド間のループ回数ばらつき（SIMT ダイバージェンス）を完全に排除。
           - **エッジ辞書順序制約 (Global Canonical Ordering)**: 各相手エッジ $`e_B = (j, v_j)`$ に対し $`(u_0 < j) \lor (u_0 = j \land u_1 < v_j)`$ を満たす場合のみ評価。これにより、全エッジペアの判定が GPU 全体で厳密に 1 回のみ行われ、重複計算が完全にゼロ化。
           - **AABB 先行枝切り (Topology Skip)**: 線分 AABB 重なり判定を CSR トポロジー二分探索（`is_topologically_near_folded` $`\times`$ 4回）の前に配置。空間的に離れた 99% 以上のペアに対する無駄なグローバルメモリアクセスを即座にバイパス。
-          - **動的折り畳み検出（Bridson 2002方式: レスト長比率による除外解除）**: 初期レスト長バッファ（`two_hop_rest_lengths: array<f32>`）を参照し、現在の端点間距離が初期距離の 50% 未満（$`d < 0.5 L_0`$）に圧縮された場合、鋭角なΩ型シワ・折り畳みと判定して2ホップ除外を自動解除。深い座屈時のすり抜けを遮断（※縫合トポロジー接続ペアは初期レスト長を 0.0 とすることで解除条件 $`d < 0.5 L_0`$ を常に不成立とし、自己衝突反発による縫合膠着を防止）。
+          - **動的折り畳み検出（Bridson 2002方式: レスト長比率による除外解除）と縫合跨ぎ真2ホップ展開レスト距離**: 初期レスト長バッファ（`two_hop_rest_lengths: array<f32>`）を参照し、現在の端点間距離が初期距離の 50% 未満（$`d < 0.5 L_0`$）に圧縮された場合、鋭角なΩ型シワ・折り畳みと判定して2ホップ除外を自動解除。深い座屈時のすり抜けを遮断。同一パネル内の直接接続エッジ（1ホップ）および縫合直近の縮約0〜1ホップペアは初期レスト長 $`L_0 = 0.0`$ を維持して1ホップ隣接クアッド同士の自爆反発・縫合膠着を完全防止しつつ、縮約グラフにおける真の2ホップ（`!orig_adj_lists[i].contains(&nbr)` を満たす2D布頂点同士）に対しては初期3D距離またはシーム共有辺の180度平坦展開長 $`L_0 = \sqrt{(s_a - s_b)^2 + (h_a + h_b)^2}`$・同一中継頂点まわりの初期2D距離を展開レスト距離として事前計算し設定。フード顔開口リムや裾スリットのように対向する開放境界エッジが正面から合掌した際、$d < 0.5 L_0$ を満たしてトポロジー除外が適切に解除され、E-E CCD / E-E 反発が正常に捕捉される。
+          - **開放境界・ストランドエッジ限定連続衝突判定（Boundary & Strand E-E CCD）**: メッシュ初期化時（mesh.rs）に、所属三角形1枚の真の開放境界エッジおよび所属三角形0枚の1Dストランド線分（引き紐等）をビットパック（edge_boundary_bits: array<u32>）としてGPUに供給。自エッジ A の AABB を開始位置を含む掃引 AABB に拡張し、**少なくとも片方が開放境界またはストランドエッジであるペア（is_boundary_a || is_boundary_b）**に対して軌道最接近探索（粗サンプル9点＋三分探索6回）を実施。開始時の分離法線 $\mathbf{n}_0$ を保持し、終了時射影高さ {\text{end}} \le 0$ や離散法線反転によるクロスオーバーを検知した瞬間に、減衰なしの100%ハードCCD変位（dd_ccd_atomic）を4端点へ運動量保存を満たす逆質量比で分配して表側に確実に押し留め、自由縁のすれ違いや引き紐の布面貫通を遮断。
           - **対称アトミック分配 (Coupled XPBD)**: 線分間最短距離が衝突閾値未満の場合、4 端点 $`(u_0, u_1, j, v_j)`$ へ質量比に応じた厳密な作用・反作用変位をアトミック加算。物理保存則（運動量保存・対称性）を 100% 保持。
         - **エッジ衝突間隔制御 (`self_collision_ee_substep_interval`, 既定 `1`)**: E-E（エッジ対エッジ）接触解決の実行頻度を制御（`0`: 完全無効 [速度最優先、約26.6 FPS]、`1`: 毎サブステップ実行 [完全精度・貫通防止、リアルタイム域達成]、`N >= 2`: Nサブステップ毎 [例: N=2 で 17.9 FPS]）。サブステップディスパッチ時に `solve_ee` パスの実行有無を直接分岐するためオーバーヘッドゼロ。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
@@ -252,8 +279,8 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
           - コアの `coupled_mode` 値と動作: `0`=外側のみ、`1`=外側+仕上げ緩和、`2`=反復内のみ、`3`=反復内+仕上げ緩和。Blenderの列挙の保存値（`OFF=0 / RELAXATION=1 / FULL_COUPLED=2 / PER_ITERATION=3`）とは体系が異なり、`coupled_mode_from_settings` が変換する。
          - **レイヤー衝突階層と Face Attribute (Layer Hierarchy & Untangling)**:
            - **階層番号 (`layer_id: u32`)**: 頂点ごとに保持され、重ね着やレイヤードスカートの内外関係（0=最内層、1, 2...=外層）を決定。
-           - **自律的脱出 (Untangling)**: 自己衝突シェーダー内で $`v_i.\text{layer-id} > v_j.\text{layer-id}`$ を検知した場合、内側層の表側法線ベクトル方向へ外側層を優先的に押し戻し、複雑な挟み込みや交差からの自律的脱出を実現。
-           - **Face Attribute (`cloth_layer`)**: ボーンウェイト用頂点グループを汚染しないよう、Blender 3.0+ 標準の Mesh Attribute（Faceドメイン、Int型 `cloth_layer`）による面単位のレイヤー指定に対応。
+           - **自律的脱出 (Untangling)**: 自己衝突シェーダー内で $`v_i.\text{layer-id} > v_j.\text{layer-id}`$ を検知した場合、内側層の表側法線ベクトル方向へ外側層を押し戻し、挟み込みや交差からの自律的脱出を実現。面を持たない1Dストランド・中継ウェイポイント頂点は法線ゼロベクトル（`vec4(0.0)`）として法線脱出対象から除外し、動的頂点間では接線距離減衰・深さ連続ランプ（$`h_j = 0`$ 境界でのチャタリング防止）および質量比に応じた作用・反作用の対称ペナルティ分配（`add_disp_atomic`）を適用して運動量保存則を維持する。
+           - **Face Attribute (`cloth_layer`)**: ボーンウェイト用頂点グループを汚染しないよう、Blender 3.0+ 標準の Mesh Attribute（Faceドメイン、Int型 `cloth_layer`）による面単位のレイヤー指定に対応。また、紐（Curve）パーツは接続先ガイド布頂点（`guide_cloth_verts`）のレイヤーIDを自動継承し、フード開口部等のアイレット結合部における異レイヤー誤反発を防止する。
            - **共有頂点の最大値 (Max) 則**: 内層と外層のウエスト結合部頂点など、複数レイヤーの面で共有される頂点は $`\max_{F_k \ni v} L_k`$ により自動的に上位レイヤー（外層）と整合し、接合部の引き裂かれやすり抜けを防止。属性未設定時はオブジェクト全体の `default_layer_id` へ安全にフォールバック。
             - **単一レイヤー自動省略**: 全頂点の layer_id が同一の場合、Untangling 条件は成立し得ないため、実効フラグをOFFにして法線計算パス（sc_normals）とシェーダー内分岐を省略する。法線バッファの読み手は Untangling 分岐のみのため結果は同一。ユーザー設定・記録値はONのまま保持され、多層メッシュでは従来通り動作する。
 
@@ -1054,7 +1081,71 @@ python run_tests.py --ci -t test_feature_coverage.py
 
 ---
 
-## 11. 2D型紙CAD製図 & プロダクションQuadリメッシュアーキテクチャ (2D Pattern CAD & Production Quad Remesh)
+## 11. アーキテクチャ防護・プロトコル検証体制 (Protocol & Integrity Verification)
+
+Python（Blender UI / スクリプト）、Rust（物理コア / PyO3）、および wgpu / WGSL（GPUバッファ / コンピュートシェーダー）の3層間におけるデータの受け渡し不整合やパラメータ欠落を恒久的に防止するため、**静的4層監査**と**動的E2E GPUリードバック検証**の2重防護体制を配備しています。
+
+```mermaid
+flowchart TD
+    subgraph Layer1["1. Blender UI / Python"]
+        Prop["properties.py (UI定義)"]
+        Collect["simconfig.py (収集辞書)"]
+        FfiCall["ClothSimulator (PyO3呼び出し)"]
+    end
+
+    subgraph Layer2["2. Rust Core (PyO3)"]
+        PyBinding["cloth_py / lib.rs"]
+        RustSim["GpuClothSimulator"]
+        Config["SimConfig / config_impl.rs"]
+    end
+
+    subgraph Layer3["3. wgpu / WGSL"]
+        GpuBuf["params_buffer (Uniform) / Storage Buffer"]
+        Shaders["predict.wgsl, collision.wgsl, etc."]
+    end
+
+    subgraph Defense["防護・検証システム"]
+        Audit["tools/audit_protocol.py<br>(静的4層突合チェッカー)"]
+        InspectApi["sim.inspect_*_params()<br>(GPU実値リードバックAPI)"]
+        IntegrityTest["tests/core/test_protocol_integrity.py<br>(動的E2Eテスト)"]
+    end
+
+    Prop --> Collect --> FfiCall --> PyBinding --> RustSim --> GpuBuf --> Shaders
+    Audit -.->|AST静的検査| Prop
+    Audit -.->|辞書キー照合| Collect
+    Audit -.->|構造体定義照合| Config
+    Audit -.->|WGSL構造体照合| Shaders
+
+    FfiCall -.->|ランタイム投入| IntegrityTest
+    GpuBuf -.->|リードバック| InspectApi -.->|実値アサーション| IntegrityTest
+```
+
+### 11.1 静的プロトコル監査チェッカー (`tools/audit_protocol.py`)
+Blender非依存でPython AST、Rustソースコード、およびWGSLシェーダー定義を静的解析し、以下の4層間の整合性を監査します：
+1. **Blender Property ↔ Python SimConfig**: UIプロパティとして定義されているのに SimConfig にマッピングされていない「孤立プロパティ」の検知。
+2. **Python SimConfig ↔ Rust SimConfig**: `LIVE_KEYS` と `SimConfig` 構造体フィールドの1対1完全一致検証。
+3. **Rust SimConfig ↔ WGSL Struct**: シェーダーUniform構造体（`SimParams`, `CollisionParams`, `SelfCollisionParams` 等）への反映漏れ検知。
+
+```bash
+# プロトコル整合性監査の実行
+python tools/audit_protocol.py
+# CI用（不整合検知時に非ゼロコードで終了）
+python tools/audit_protocol.py --check
+# log_tools 経由
+python -m taremin_cloth.log_tools check-protocol
+```
+
+### 11.2 動的E2Eプロトコル検証テスト (`tests/core/test_protocol_integrity.py`)
+Rustの `GpuClothSimulator` にデバッグ・検証専用のGPUバッファ読戻しAPI（`inspect_sim_params()`, `inspect_collision_params()`, `inspect_self_collision_params()`, `inspect_gpu_vertex()`, `inspect_gpu_colliders()`, `inspect_gpu_pins()`）を配備。Pythonから一意なパラメータや幾何データを投入し、**GPU上のUniform/Storageバッファ内の実際のメモリバイト列と完全一致すること**を実機検証します。
+
+```bash
+# 動的プロトコル検証テストの実行
+python run_tests.py --ci -t test_protocol_integrity.py
+```
+
+---
+
+## 13. 2D型紙CAD製図 & プロダクションQuadリメッシュアーキテクチャ (2D Pattern CAD & Production Quad Remesh)
 
 Taremin Cloth は、Marvelous Designer や CLO3D のような 2D CAD 型紙製図と 3D 衣服シミュレーションのシームレスな統合パイプラインを提供します。
 
@@ -1066,7 +1157,7 @@ graph LR
     SimGarment -->|重心逆写像 & 境界ベルト| QuadMesh[本番用Quadトポロジー<br>remesh_cloth_to_quad_3d]
 ```
 
-### 11.1 主要コンポーネント
+### 13.1 主要コンポーネント
 
 1. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
    - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。
@@ -1095,3 +1186,25 @@ graph LR
 
 
 
+
+---
+
+## 12. 紐（Curve）パーツ統合アーキテクチャ (Drawstring & 1D Strand Integration)
+
+「紐付きフード（パーカー）」や巾着・水着の肩紐など、2Dの布型紙メッシュと1Dの紐（`bpy.types.Curve` オブジェクト）を組み合わせて一体シミュレーションするためのアーキテクチャです。
+
+### 12.1 統一XPBDソルバーへのマージ構造
+- **別オブジェクト維持とGPUバッファ結合 (`utils/curve_extract.py`, `utils/mesh_extract.py`)**:
+  - Blender上では布（`Mesh`）と紐（`Curve`）を別オブジェクトとして保持し、マテリアルやベベル太さ（`bevel_depth`）を独立して管理します。
+  - シミュレータ初期化時（`extract_cloth_mesh_data`）に、有効な `TareminClothStringPart` に登録された `Curve` オブジェクトから制御点座標・連続ラインエッジ・半径を抽出し、布の頂点配列 `[0 .. N_cloth)` の末尾 `[N_cloth .. N_cloth + N_curve)` に連結します。
+- **1D線密度質量と2ホップ曲げ拘束 (`crates/cloth_core/src/mesh.rs`)**:
+  - `compute_combined_inv_masses` により、三角形面積 $`\times`$ 面密度（$`\text{kg/m}^2`$）と1Dストランドエッジ長 $`\times`$ 線密度（$`\text{kg/m}`$）から各頂点の物理質量を算出し、布が紐の重さで引きずり落ちる現象を防止します。
+  - 三角形に属さない1Dストランドエッジ列上の連続する2ホップ頂点ペア $`(v_{i-1}, v_{i+1})`$ に対して1D曲げ拘束を自動生成し、引き絞り（距離拘束の短縮）を阻害しない適度なコンプライアンス（$`\alpha_{\text{strand}} = \max(10\alpha_{\text{bend}}, 0.5)`$）で紐のコシを表現します。
+
+### 12.2 アイレット間引き結合と分割型紙ギャップ跨ぎ
+- **アイレット（ハトメ）間引き結合 (`eyelet_stride`)**:
+  - フード縁のガイド頂点列に対し、`eyelet_stride`（デフォルト3頂点おき）の間隔で紐のトンネル区間頂点と縫合拘束（目標距離 $`0.0\,\text{m}`$、密着後ロック）を生成します。
+  - アイレット間の布頂点は紐に直接拘束されない自由頂点として残るため、紐だけを引き絞った際に「布のエッジ自然長（面積）はそのまま維持され、余った布地が面外へ座屈してリアルなギャザー（寄せジワ）を形成する」挙動が実現されます。
+- **分割型紙の縫合ギャップ跨ぎ (`build_ordered_path_across_seams`)**:
+  - 左右2枚に分かれたフード型紙の縁エッジから1本の紐を生成する際、`seam_cluster_map` を参照して縫合ペア間を自動ジャンプし、単一の連続パスを構築します。
+  - 型紙間の初期ギャップを跨ぐ紐エッジは通常の距離拘束（`normal_edges`）から除外して `sewing_edges`（縫合拘束）へ変換されるため、初期の離れた型紙間距離が紐の自然長や質量に混入せず、フードの縫合と完全同期して頭頂部で1本に繋がります。

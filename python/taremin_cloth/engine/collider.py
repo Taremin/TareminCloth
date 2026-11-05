@@ -7,7 +7,9 @@ Blenderシーン内のコライダーオブジェクト（Sphere, Plane, Capsule
 import math
 import bpy
 import numpy as np
+from ..utils.args_guard import allow_positional
 from ..utils.logger import logger
+from ..utils.validation import close_open_boundary_loops_numpy
 from .sdf_baker import (
     get_or_bake_bone_sdf_for_object,
     get_or_bake_mesh_sdf_for_object,
@@ -82,8 +84,14 @@ def clear_collider_cache():
     _bone_pose_signatures.clear()
     _bone_sdf_signatures.clear()
     _last_sync_info.clear()
+    try:
+        from .runner import clear_collider_armature_cache
+        clear_collider_armature_cache()
+    except Exception:
+        pass
 
 
+@allow_positional
 def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_indices=None):
     """
     メッシュおよびコライダー設定からワールド座標系三角形配列、属性ブロック、および辞書リストを抽出する。
@@ -119,8 +127,10 @@ def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_in
         tri_coords = v_world[tri_indices_2d[valid_idx]]
         selected_count = len(valid_idx)
     else:
+        if bool(getattr(col_settings, "close_open_boundaries", True)):
+            v_world, tri_indices_2d, _ = close_open_boundary_loops_numpy(v_world, tri_indices_2d)
         tri_coords = v_world[tri_indices_2d]
-        selected_count = n_tris
+        selected_count = len(tri_indices_2d)
 
     cur_friction = float(col_settings.friction)
     cur_thickness = float(col_settings.thickness)
@@ -152,7 +162,7 @@ def _extract_mesh_collider_triangles(mesh, target_obj, col_settings, triangle_in
     return tri_coords, attr_block, dict_list
 
 
-def extract_all_scene_colliders(scene=None, depsgraph=None):
+def extract_all_scene_colliders(*, scene=None, depsgraph=None):
     """
     シーン内のすべてのコライダー（球、平面、カプセル、一般メッシュ、および BONE_SDF の関節メッシュ）を抽出する。
     Blender In-process (sync_colliders) および Taremin Cloth GUI (gui_client) の両方で使用され、完全な挙動一致を保証する。
@@ -315,7 +325,7 @@ def extract_all_scene_colliders(scene=None, depsgraph=None):
     }
 
 
-def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
+def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
     """
     Blender シーン内のすべてのコライダーオブジェクトの最新位置・姿勢を
     GpuClothSimulator コアに同期する。
@@ -398,6 +408,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                 round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
                 int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                 bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
+                bool(getattr(col_settings, "close_open_boundaries", True)),
             ))
 
     sim_id = id(sim)
@@ -413,10 +424,11 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
         use_cached_mesh = cached_mesh_data is not None
         if use_cached_mesh:
             all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin = cached_mesh_data
-        all_mesh_triangles = []
-        all_mesh_attributes = []
-        has_cluster_culling = False
-        max_sweep_margin = 0.05
+        else:
+            all_mesh_triangles = []
+            all_mesh_attributes = []
+            has_cluster_culling = False
+            max_sweep_margin = 0.05
         sdf_sources = []
 
         for obj, col_settings in collider_objs:
@@ -480,10 +492,12 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                             tri_indices = np.empty(n_tris * 3, dtype=np.int32)
                             mesh.loop_triangles.foreach_get("vertices", tri_indices)
                             tri_indices_2d = tri_indices.reshape((n_tris, 3))
+                            if bool(getattr(col_settings, "close_open_boundaries", True)):
+                                v_world, tri_indices_2d, _ = close_open_boundary_loops_numpy(v_world, tri_indices_2d)
                             all_mesh_triangles.append(v_world[tri_indices_2d])
 
                             attr_row = np.array([cur_friction, cur_thickness, cur_restitution, cur_flags], dtype=np.float32)
-                            attr_block = np.tile(attr_row, (n_tris, 1))
+                            attr_block = np.tile(attr_row, (len(tri_indices_2d), 1))
                             all_mesh_attributes.append(attr_block)
                 finally:
                     cleanup_collider_eval_mesh(eval_obj, disabled_mods)
@@ -507,6 +521,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     round(float(getattr(col_settings, "blend_k", 0.05)), 4),
                     bool(getattr(col_settings, "enable_joint_mesh", True)),
                     round(float(getattr(col_settings, "joint_weight_threshold", 0.85)), 2),
+                    bool(getattr(col_settings, "close_open_boundaries", True)),
                 )
 
                 needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_bone_sig)
@@ -579,6 +594,7 @@ def sync_colliders(sim, scene, depsgraph=None, force=False, cloth_obj=None):
                     round(float(getattr(col_settings, "restitution", 0.0)), 3),
                     int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                     bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
+                bool(getattr(col_settings, "close_open_boundaries", True)),
                 )
                 needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_mesh_sig)
                 if needs_rebake:

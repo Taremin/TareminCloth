@@ -9,6 +9,7 @@ import bpy
 import bmesh
 import numpy as np
 from .logger import logger
+from .args_guard import allow_positional
 
 
 def is_cross_subdivided(obj) -> bool:
@@ -106,6 +107,7 @@ def clear_pre_subdivision_backup(obj):
         del obj["_taremin_cloth_cross_subdiv_map"]
 
 
+@allow_positional
 def evaluate_optimal_diagonal(p0, p1, p2, p3, pc):
     """
     4頂点と中心点の3D座標から、(v0, v2) と (v1, v3) のどちらの対角線が
@@ -121,6 +123,7 @@ def evaluate_optimal_diagonal(p0, p1, p2, p3, pc):
     return d02 <= d13
 
 
+@allow_positional
 def evaluate_quad_diagonal_by_strain(p0_rest, p1_rest, p2_rest, p3_rest, p0_curr, p1_curr, p2_curr, p3_curr):
     """
     四角面の初期（レスト）座標と現在座標から、対角線の歪み（伸び縮み率: Strain）を計算し、
@@ -153,7 +156,7 @@ def evaluate_quad_diagonal_by_strain(p0_rest, p1_rest, p2_rest, p3_rest, p0_curr
     return eps02 >= eps13
 
 
-def evaluate_quad_flatness(face_normals, threshold_deg=5.0):
+def evaluate_quad_flatness(face_normals, *, threshold_deg=5.0):
     """
     Quadを構成する小三角形の法線群から、平坦（シワがない）かどうかを判定する。
     
@@ -180,7 +183,8 @@ def evaluate_quad_flatness(face_normals, threshold_deg=5.0):
     return True
 
 
-def is_dome_deformation(p0, p1, p2, p3, pc, threshold_ratio=0.05):
+@allow_positional
+def is_dome_deformation(p0, p1, p2, p3, pc, *, threshold_ratio=0.05):
     """
     中心点がどちらの対角線からも大きく浮き上がっている（ドーム状・テント状の変形）かを判定する。
     どちらの対角線でも形状を近似できない場合、中心頂点を残して十字分割（4個の三角形）を維持する。
@@ -269,7 +273,7 @@ def apply_cross_subdivision(obj) -> bool:
     return True
 
 
-def apply_post_process(obj, mode='OPTIMAL_TRI', flatness_threshold=5.0) -> bool:
+def apply_post_process(obj, *, mode='OPTIMAL_TRI', flatness_threshold=5.0) -> bool:
     """
     シミュレーション後のメッシュに対してトポロジー後処理を実行する。
     
@@ -331,7 +335,7 @@ def apply_post_process(obj, mode='OPTIMAL_TRI', flatness_threshold=5.0) -> bool:
         is_dome = False
         if mode == 'ADAPTIVE':
             face_normals = [np.array(f.normal, dtype=np.float32) for f in vc.link_faces]
-            is_flat = evaluate_quad_flatness(face_normals, flatness_threshold)
+            is_flat = evaluate_quad_flatness(face_normals, threshold_deg=flatness_threshold)
             if not is_flat:
                 is_dome = is_dome_deformation(p0, p1, p2, p3, pc, threshold_ratio=0.05)
 
@@ -422,7 +426,13 @@ def restore_original_quads(obj) -> bool:
         return restore_pre_subdivision_mesh(obj)
 
 
-def apply_dynamic_diagonal_triangulation(obj, rest_positions=None, preserve_flat=False, flatness_threshold=5.0) -> bool:
+def apply_dynamic_diagonal_triangulation(
+    obj,
+    *,
+    rest_positions=None,
+    preserve_flat: bool = False,
+    flatness_threshold: float = 5.0,
+) -> bool:
     """
     シミュレーション後の四角面メッシュに対して、歪み（Strain）に基づく動的対角線分割を実行する。
     

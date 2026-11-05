@@ -40,6 +40,8 @@ class ClothMeshData(NamedTuple):
     layer_ids: Optional[np.ndarray] = None  # shape [N], uint32 (存在しない場合は None)
     waypoint_seams: Optional[list] = None   # list[WaypointSeam] (存在しない場合は None)
     seam_cluster_map: Optional[dict[int, list[int]]] = None  # 頂点インデックス -> 同一縫合クラスタの他頂点リスト (存在しない場合は None)
+    thicknesses: Optional[np.ndarray] = None  # shape [N], float32 (存在しない場合は None)
+    curve_parts: Optional[list] = None  # list[CurvePartRuntimeData] (存在しない場合は None)
 
 
 def extract_mesh_vertices_and_triangles(mesh) -> Tuple[np.ndarray, Optional[np.ndarray]]:
@@ -72,7 +74,7 @@ def extract_mesh_vertices_and_triangles(mesh) -> Tuple[np.ndarray, Optional[np.n
     return positions, faces
 
 
-def get_pin_inv_masses(obj, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
+def get_pin_inv_masses(obj, *, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
     """
     布オブジェクトのピン留め頂点グループからインバースマス配列を計算する。
     ウェイト 1.0 -> 質量無限（inv_mass = 0.0, 完全固定）
@@ -103,38 +105,59 @@ def get_pin_inv_masses(obj, settings=None, n_verts: Optional[int] = None) -> np.
     return inv_masses
 
 
-def compute_areal_inv_masses(
+def compute_combined_inv_masses(
     positions: np.ndarray,
     faces: Optional[np.ndarray],
+    *,
+    strand_edges: Optional[np.ndarray] = None,
     pin_weights: Optional[np.ndarray] = None,
     areal_density: float = 0.15,
+    linear_density: float = 0.0,
     min_mass: float = 1e-9,
 ) -> np.ndarray:
-    """面積に応じて分配した物理単位のインバースマス配列を計算する。
+    """面密度および線密度に応じて分配した物理単位のインバースマス配列を計算する。
 
     各三角形の面積に面密度 (kg/m2) を掛けた質量を3頂点へ等分配し、
+    三角形に属さない1Dエッジ長に線密度 (kg/m) を掛けた質量を2頂点へ等分配する。
     ピンウェイト (1.0=完全固定) との積で逆質量を求める。
-    面を持たない孤立頂点は微小質量として扱い、ゼロ除算を防ぐ。
-    Rust核 (`taremin_cloth_core.compute_areal_inv_masses`) を正本とし、
+    Rust核 (`taremin_cloth_core.compute_combined_inv_masses`) を正本とし、
     利用可能な場合はそちらを優先する。NumPy実装はフォールバック。
     """
-    if _RUST_AREAL:
+    if _core is not None and hasattr(_core, "compute_combined_inv_masses"):
         try:
             pos_c = np.ascontiguousarray(positions, dtype=np.float32)
-            faces_c = None
-            if faces is not None and len(faces) > 0:
-                faces_c = np.ascontiguousarray(faces, dtype=np.uint32)
-            pin_c = None
-            if pin_weights is not None and len(pin_weights) == len(positions):
-                pin_c = np.ascontiguousarray(pin_weights, dtype=np.float32)
+            faces_c = (
+                np.ascontiguousarray(faces, dtype=np.uint32)
+                if faces is not None and len(faces) > 0
+                else None
+            )
+            strands_c = (
+                np.ascontiguousarray(strand_edges, dtype=np.uint32)
+                if strand_edges is not None and len(strand_edges) > 0
+                else None
+            )
+            pin_c = (
+                np.ascontiguousarray(pin_weights, dtype=np.float32)
+                if pin_weights is not None and len(pin_weights) == len(positions)
+                else None
+            )
             return np.asarray(
-                _core.compute_areal_inv_masses(pos_c, faces_c, pin_c, float(areal_density)),
+                _core.compute_combined_inv_masses(
+                    pos_c,
+                    faces_c,
+                    strands_c,
+                    pin_c,
+                    float(areal_density),
+                    float(linear_density),
+                ),
                 dtype=np.float32,
             )
         except Exception:
             pass
+
     n_verts = len(positions)
     masses = np.zeros(n_verts, dtype=np.float64)
+    # 面の質量加算
     if faces is not None and len(faces) > 0 and areal_density > 0.0:
         tris = np.asarray(faces, dtype=np.int64)
         valid = (
@@ -154,6 +177,24 @@ def compute_areal_inv_masses(
             np.add.at(masses, tris[:, 0], tri_mass)
             np.add.at(masses, tris[:, 1], tri_mass)
             np.add.at(masses, tris[:, 2], tri_mass)
+
+    # 1Dストランド（紐）の質量加算
+    if strand_edges is not None and len(strand_edges) > 0 and linear_density > 0.0:
+        edges = np.asarray(strand_edges, dtype=np.int64)
+        valid = (
+            (edges[:, 0] != edges[:, 1])
+            & (edges.max() < n_verts)
+            & (edges.min() >= 0)
+        )
+        edges = edges[valid]
+        if len(edges) > 0:
+            pa = positions[edges[:, 0]].astype(np.float64)
+            pb = positions[edges[:, 1]].astype(np.float64)
+            lens = np.linalg.norm(pa - pb, axis=1)
+            edge_mass = lens * float(linear_density) / 2.0
+            np.add.at(masses, edges[:, 0], edge_mass)
+            np.add.at(masses, edges[:, 1], edge_mass)
+
     masses = np.maximum(masses, min_mass)
     inv_masses = (1.0 / masses).astype(np.float32)
     if pin_weights is not None:
@@ -163,7 +204,29 @@ def compute_areal_inv_masses(
     return inv_masses
 
 
-def get_pin_weights(obj, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
+def compute_areal_inv_masses(
+    positions: np.ndarray,
+    faces: Optional[np.ndarray],
+    *,
+    strand_edges: Optional[np.ndarray] = None,
+    pin_weights: Optional[np.ndarray] = None,
+    areal_density: float = 0.15,
+    linear_density: float = 0.0,
+    min_mass: float = 1e-9,
+) -> np.ndarray:
+    """面積に応じて分配した物理単位のインバースマス配列を計算する（後方互換ラッパー）。"""
+    return compute_combined_inv_masses(
+        positions,
+        faces,
+        strand_edges=strand_edges,
+        pin_weights=pin_weights,
+        areal_density=areal_density,
+        linear_density=linear_density,
+        min_mass=min_mass,
+    )
+
+
+def get_pin_weights(obj, *, settings=None, n_verts: Optional[int] = None) -> np.ndarray:
     """ピン頂点グループのウェイト配列 (0.0〜1.0) を取得する。"""
     if n_verts is None:
         n_verts = len(obj.data.vertices)
@@ -187,6 +250,7 @@ def get_pin_weights(obj, settings=None, n_verts: Optional[int] = None) -> np.nda
 
 def extract_cloth_mesh_data(
     obj,
+    *,
     settings=None,
     enable_sewing: Optional[bool] = None,
     apply_world_matrix: bool = True,
@@ -269,7 +333,7 @@ def extract_cloth_mesh_data(
     edges_2d = np.array(normal_edges, dtype=np.uint32) if normal_edges else np.empty((0, 2), dtype=np.uint32)
 
     # 縫合エッジ（Loose Edges）から直線エッジとウェイポイント縫合パスを分類
-    simple_sewing, waypoint_seams = extract_sewing_topology(sewing_edges, faces_2d, pos_2d)
+    simple_sewing, waypoint_seams = extract_sewing_topology(sewing_edges, faces_2d=faces_2d, positions=pos_2d)
 
     # 直線縫合と中継点パスの各セグメントを展開・統合
     all_sewing = list(simple_sewing)
@@ -283,14 +347,14 @@ def extract_cloth_mesh_data(
     sew_2d = np.array(all_sewing, dtype=np.uint32) if all_sewing else None
 
 
-    inv_masses = get_pin_inv_masses(obj, settings, n_verts)
+    inv_masses = get_pin_inv_masses(obj, settings=settings, n_verts=n_verts)
     try:
         density = float(getattr(settings, "areal_density", 0.0) or 0.0)
     except (TypeError, ValueError):
         density = 0.0
     if density > 0.0 and faces_2d is not None and len(faces_2d) > 0:
-        pin_weights = get_pin_weights(obj, settings, n_verts)
-        inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights, density)
+        pin_weights = get_pin_weights(obj, settings=settings, n_verts=n_verts)
+        inv_masses = compute_areal_inv_masses(pos_2d, faces_2d, pin_weights=pin_weights, areal_density=density)
 
     # 中継点頂点（面を持たないガイディング頂点）は静止ガイドとして inv_mass = 0.0 に固定
     if waypoint_seams:
@@ -299,8 +363,207 @@ def extract_cloth_mesh_data(
                 if wp_idx < len(inv_masses):
                     inv_masses[wp_idx] = 0.0
 
-    layer_ids = get_cloth_layer_ids(obj, settings, n_verts, faces_2d)
+    layer_ids = get_cloth_layer_ids(obj, settings=settings, n_verts=n_verts, faces_2d=faces_2d)
     seam_cluster_map = build_seam_cluster_map(simple_sewing, waypoint_seams) if (simple_sewing or waypoint_seams) else None
+
+    # 紐（Curve）パーツのマージ処理
+    curve_parts_runtime = []
+    string_parts = getattr(settings, "string_parts", None)
+    if string_parts:
+        from .curve_extract import extract_curve_polyline, CurvePartRuntimeData
+
+        cloth_thickness = float(getattr(settings, "thickness", 0.005) or 0.005)
+        all_thicknesses = [np.full(n_verts, cloth_thickness, dtype=np.float32)]
+        all_positions = [pos_2d]
+        all_normal_edges = [edges_2d]
+        all_inv_masses = [inv_masses]
+        all_layer_ids = [layer_ids] if layer_ids is not None else [np.zeros(n_verts, dtype=np.uint32)]
+
+        curr_vert_offset = n_verts
+        curr_edge_offset = len(edges_2d)
+        additional_sewing_edges = []
+
+        for sp in string_parts:
+            if not getattr(sp, "enabled", True):
+                continue
+            curve_obj = getattr(sp, "curve_object", None)
+            if not curve_obj:
+                continue
+
+            c_coords, c_edges, c_radii = extract_curve_polyline(
+                curve_obj,
+                apply_world_matrix=apply_world_matrix,
+                default_radius=float(getattr(sp, "radius", 0.003) or 0.003),
+            )
+            n_curve_verts = len(c_coords)
+            if n_curve_verts == 0:
+                continue
+
+            # ガイド頂点列とアイレット結合・縫合ギャップ跨ぎの解決
+            guide_str = getattr(sp, "guide_vert_indices_str", "")
+            guide_cloth_verts = [int(v.strip()) for v in guide_str.split(",") if v.strip().isdigit()]
+
+            seam_bridge_str = getattr(sp, "seam_bridge_pairs_str", "")
+            seam_bridges = set()
+            if seam_bridge_str:
+                for pair_item in seam_bridge_str.split(";"):
+                    parts = [int(x.strip()) for x in pair_item.split(",") if x.strip().isdigit()]
+                    if len(parts) == 2:
+                        seam_bridges.add((min(parts[0], parts[1]), max(parts[0], parts[1])))
+
+            tail_left = int(getattr(sp, "tail_vert_count_left", 8) or 0)
+            tail_right = int(getattr(sp, "tail_vert_count_right", 8) or 0)
+            stride = max(1, int(getattr(sp, "eyelet_stride", 3) or 3))
+
+            channel_start_v = min(tail_left, n_curve_verts)
+            channel_end_v = max(channel_start_v, n_curve_verts - tail_right)
+            n_channel_verts = channel_end_v - channel_start_v
+
+            # 分割型紙の縫合ギャップを跨ぐローカル紐エッジを特定し、通常エッジから除外して縫合エッジ化する
+            bridge_local_edge_set = set()
+            if seam_bridges and len(guide_cloth_verts) >= 2 and n_channel_verts >= 2:
+                n_guides = len(guide_cloth_verts)
+                for g_idx in range(n_guides - 1):
+                    u_c = guide_cloth_verts[g_idx]
+                    v_c = guide_cloth_verts[g_idx + 1]
+                    pair_key = (min(u_c, v_c), max(u_c, v_c))
+                    if pair_key in seam_bridges:
+                        t0 = float(g_idx) / max(1, n_guides - 1)
+                        t1 = float(g_idx + 1) / max(1, n_guides - 1)
+                        v_rel0 = int(round(channel_start_v + t0 * (n_channel_verts - 1)))
+                        v_rel1 = int(round(channel_start_v + t1 * (n_channel_verts - 1)))
+                        for e_local in range(min(v_rel0, v_rel1), min(max(v_rel0, v_rel1), len(c_edges))):
+                            bridge_local_edge_set.add(e_local)
+
+            valid_local_edges_list = []
+            for e_local_idx in range(len(c_edges)):
+                v0 = int(c_edges[e_local_idx, 0])
+                v1 = int(c_edges[e_local_idx, 1])
+                if e_local_idx in bridge_local_edge_set:
+                    additional_sewing_edges.append((curr_vert_offset + v0, curr_vert_offset + v1))
+                else:
+                    valid_local_edges_list.append([v0, v1])
+
+            if valid_local_edges_list:
+                c_edges_local = np.array(valid_local_edges_list, dtype=np.uint32)
+            else:
+                c_edges_local = np.empty((0, 2), dtype=np.uint32)
+            c_edges_merged = c_edges_local + curr_vert_offset
+
+            # 紐のインバースマス計算 (1D線密度: 縫合ギャップエッジを除いた実エッジ長のみから算出)
+            lin_density = float(getattr(sp, "linear_density", 0.015) or 0.015)
+            c_inv_masses = compute_combined_inv_masses(
+                c_coords,
+                faces=None,
+                strand_edges=c_edges_local,
+                linear_density=lin_density,
+            )
+
+            left_tail_e = []
+            channel_e = []
+            right_tail_e = []
+            seam_bridge_e = []
+
+            for i in range(len(c_edges_local)):
+                abs_e_idx = curr_edge_offset + i
+                v0 = int(c_edges_local[i, 0])
+                v1 = int(c_edges_local[i, 1])
+                if v1 <= channel_start_v:
+                    left_tail_e.append(abs_e_idx)
+                elif v0 >= channel_end_v - 1:
+                    right_tail_e.append(abs_e_idx)
+                else:
+                    channel_e.append(abs_e_idx)
+
+            def _calc_edge_length(e_indices: list[int]) -> float:
+                l_sum = 0.0
+                for e_idx in e_indices:
+                    rel_idx = e_idx - curr_edge_offset
+                    v0 = c_edges_local[rel_idx, 0]
+                    v1 = c_edges_local[rel_idx, 1]
+                    p0 = c_coords[v0]
+                    p1 = c_coords[v1]
+                    l_sum += float(np.linalg.norm(p1 - p0))
+                return l_sum
+
+            init_left_len = _calc_edge_length(left_tail_e)
+            init_channel_len = _calc_edge_length(channel_e)
+            init_right_len = _calc_edge_length(right_tail_e)
+
+            eyelet_pairs = []
+            if guide_cloth_verts and n_channel_verts > 0:
+                n_guides = len(guide_cloth_verts)
+                sampled_guide_indices = list(range(0, n_guides, stride))
+                if (n_guides - 1) not in sampled_guide_indices:
+                    sampled_guide_indices.append(n_guides - 1)
+                # 縫合ギャップの両端もアイレット結合に含めてフード縁との一体性を確保
+                for g_idx in range(n_guides - 1):
+                    u_c = guide_cloth_verts[g_idx]
+                    v_c = guide_cloth_verts[g_idx + 1]
+                    if (min(u_c, v_c), max(u_c, v_c)) in seam_bridges:
+                        if g_idx not in sampled_guide_indices:
+                            sampled_guide_indices.append(g_idx)
+                        if (g_idx + 1) not in sampled_guide_indices:
+                            sampled_guide_indices.append(g_idx + 1)
+                sampled_guide_indices.sort()
+
+                for g_idx in sampled_guide_indices:
+                    cloth_v = guide_cloth_verts[g_idx]
+                    t = float(g_idx) / max(1, n_guides - 1)
+                    curve_v_rel = int(round(channel_start_v + t * max(0, n_channel_verts - 1)))
+                    curve_v_abs = curr_vert_offset + min(curve_v_rel, n_curve_verts - 1)
+                    eyelet_pairs.append((cloth_v, curve_v_abs))
+                    additional_sewing_edges.append((cloth_v, curve_v_abs))
+
+            runtime_data = CurvePartRuntimeData(
+                curve_obj_name=getattr(curve_obj, "name", "String"),
+                vertex_offset=curr_vert_offset,
+                vertex_count=n_curve_verts,
+                edge_offset=curr_edge_offset,
+                left_tail_edge_indices=left_tail_e,
+                channel_edge_indices=channel_e,
+                right_tail_edge_indices=right_tail_e,
+                seam_bridge_edge_indices=seam_bridge_e,
+                initial_left_len=init_left_len,
+                initial_channel_len=init_channel_len,
+                initial_right_len=init_right_len,
+                guide_cloth_verts=guide_cloth_verts,
+                eyelet_pairs=eyelet_pairs,
+            )
+            curve_parts_runtime.append(runtime_data)
+
+            all_positions.append(c_coords)
+            all_normal_edges.append(c_edges_merged)
+            all_thicknesses.append(c_radii)
+            all_inv_masses.append(c_inv_masses)
+            c_layer_id = getattr(settings, "layer_id", 0) or 0
+            if layer_ids is not None and guide_cloth_verts:
+                valid_g = [g for g in guide_cloth_verts if 0 <= g < len(layer_ids)]
+                if valid_g:
+                    c_layer_id = int(np.max(layer_ids[valid_g]))
+            all_layer_ids.append(np.full(n_curve_verts, c_layer_id, dtype=np.uint32))
+
+            curr_vert_offset += n_curve_verts
+            curr_edge_offset += len(c_edges_local)
+
+        if curve_parts_runtime:
+            pos_2d = np.vstack(all_positions)
+            edges_2d = np.vstack(all_normal_edges) if all_normal_edges else np.empty((0, 2), dtype=np.uint32)
+            inv_masses = np.concatenate(all_inv_masses)
+            layer_ids = np.concatenate(all_layer_ids)
+            thicknesses = np.concatenate(all_thicknesses)
+
+            if additional_sewing_edges:
+                if sew_2d is not None and len(sew_2d) > 0:
+                    sew_2d = np.vstack([sew_2d, np.array(additional_sewing_edges, dtype=np.uint32)])
+                else:
+                    sew_2d = np.array(additional_sewing_edges, dtype=np.uint32)
+        else:
+            cloth_thickness = float(getattr(settings, "thickness", 0.005) or 0.005)
+            thicknesses = np.full(n_verts, cloth_thickness, dtype=np.float32)
+    else:
+        cloth_thickness = float(getattr(settings, "thickness", 0.005) or 0.005) if settings else 0.005
+        thicknesses = np.full(n_verts, cloth_thickness, dtype=np.float32)
 
     return ClothMeshData(
         positions=pos_2d,
@@ -311,6 +574,8 @@ def extract_cloth_mesh_data(
         layer_ids=layer_ids,
         waypoint_seams=waypoint_seams if waypoint_seams else None,
         seam_cluster_map=seam_cluster_map,
+        thicknesses=thicknesses,
+        curve_parts=curve_parts_runtime if curve_parts_runtime else None,
     )
 
 
@@ -352,6 +617,7 @@ def build_seam_cluster_map(
 
 def extract_sewing_topology(
     loose_edges: list,
+    *,
     faces_2d: Optional[np.ndarray],
     positions: np.ndarray,
 ) -> tuple[list[tuple[int, int]], list[WaypointSeam]]:
@@ -415,9 +681,13 @@ def extract_sewing_topology(
         endpoints = [x for x in comp if x in face_vertex_set]
         internal = [x for x in comp if x not in face_vertex_set]
 
-        # ケース 1: 単一エッジで両端が面頂点（通常の直接縫合）
-        if len(comp) == 2 and len(endpoints) == 2 and len(internal) == 0:
-            simple_edges.append((endpoints[0], endpoints[1]))
+        # ケース 1: 内部頂点なし (純粋な直接縫合ネットワーク)
+        # 布頂点同士を直接結ぶエッジは、脇下十字点などで頂点を共有していても正常な物理拘束として解かれる
+        if len(internal) == 0:
+            for cu in comp:
+                for cv in adj[cu]:
+                    if cu < cv:
+                        simple_edges.append((cu, cv))
             continue
 
         # ケース 2: 両端が面頂点、中間が面を持たない頂点の単純パス（A - W1 - ... - Wk - B）
@@ -465,6 +735,7 @@ def extract_sewing_topology(
 
 def get_cloth_layer_ids(
     obj,
+    *,
     settings=None,
     n_verts: Optional[int] = None,
     faces_2d: Optional[np.ndarray] = None,

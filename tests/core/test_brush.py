@@ -267,7 +267,7 @@ class TestBrushHudInfo(unittest.TestCase):
         required = {"tool", "label_key", "radius", "strength",
                     "falloff", "show_falloff", "adjusting"}
         for name, cls in brush_pkg.TOOLS.items():
-            info = cls().hud_info(None, None)
+            info = cls().hud_info(None, radial=None)
             self.assertTrue(required.issubset(info.keys()), name)
             self.assertEqual(info["tool"], name)
 
@@ -277,7 +277,7 @@ class TestBrushHudInfo(unittest.TestCase):
         class FakeGrab:
             tool_mode = 'GRAB'
 
-        info = get_brush_hud_info(FakeGrab(), None)
+        info = get_brush_hud_info(FakeGrab(), radial=None)
         self.assertEqual(info["tool"], 'GRAB')
         self.assertIsNone(info["radius"])
         self.assertIsNone(info["strength"])
@@ -292,7 +292,7 @@ class TestBrushHudInfo(unittest.TestCase):
             strength = 0.8
             falloff_shape = 'SPHERE'
 
-        info = get_brush_hud_info(FakeBrush(), None)
+        info = get_brush_hud_info(FakeBrush(), radial=None)
         self.assertAlmostEqual(info["radius"], 0.05)
         self.assertAlmostEqual(info["strength"], 0.8)
         self.assertFalse(info["show_falloff"])
@@ -303,7 +303,7 @@ class TestBrushHudInfo(unittest.TestCase):
             strength = 0.5
             falloff_shape = 'SHARP'
 
-        info = get_brush_hud_info(FakeSharp(), None)
+        info = get_brush_hud_info(FakeSharp(), radial=None)
         self.assertTrue(info["show_falloff"])
         self.assertEqual(info["falloff"], 'SHARP')
 
@@ -318,10 +318,10 @@ class TestBrushHudInfo(unittest.TestCase):
             falloff_shape = 'SPHERE'
 
         brush = FakeBrush()
-        self.assertIsNone(get_brush_hud_info(brush, None)["adjusting"])
+        self.assertIsNone(get_brush_hud_info(brush, radial=None)["adjusting"])
         radial = RadialController()
-        radial.enter('STRENGTH', 100.0, brush)
-        self.assertEqual(get_brush_hud_info(brush, radial)["adjusting"], 'STRENGTH')
+        radial.enter('STRENGTH', 100.0, brush=brush)
+        self.assertEqual(get_brush_hud_info(brush, radial=radial)["adjusting"], 'STRENGTH')
 
     def test_unknown_tool_falls_back_to_grab(self):
         from taremin_cloth.brush import get_brush_hud_info
@@ -329,7 +329,7 @@ class TestBrushHudInfo(unittest.TestCase):
         class FakeUnknown:
             tool_mode = 'NO_SUCH_BRUSH'
 
-        info = get_brush_hud_info(FakeUnknown(), None)
+        info = get_brush_hud_info(FakeUnknown(), radial=None)
         self.assertEqual(info["tool"], 'GRAB')
 
 
@@ -374,6 +374,65 @@ class TestBrushOverlayState(unittest.TestCase):
         self.assertEqual(drawing.get_interactive_fps_info()["tool_text"], "Tool: Range Grab")
         drawing.set_interactive_fps_info(60.0, 16.6)
         self.assertIsNone(drawing.get_interactive_fps_info()["tool_text"])
+
+
+class TestActiveRegionManager(unittest.TestCase):
+    def test_freeze_and_release_batch(self):
+        from taremin_cloth.brush.base import ActiveRegionManager
+
+        class MockBatchSim:
+            def __init__(self):
+                self.batch_pins = []
+                self.released_batches = []
+
+            def set_pins_batch(self, indices, targets, weights):
+                self.batch_pins.append((indices, targets, weights))
+
+            def release_pins_batch(self, indices):
+                self.released_batches.append(indices)
+
+        mgr = ActiveRegionManager()
+        sim = MockBatchSim()
+        # 4頂点: (0,0,0)は中心近傍, (10,0,0), (0,10,0), (10,10,0)は半径外
+        coords = np.array([[0, 0, 0], [10, 0, 0], [0, 10, 0], [10, 10, 0]], dtype=np.float32)
+        mgr.freeze_inactive_region(sim, coords, [0, 0, 0], radius=2.0, active_scale=1.0, exclude_pins=[2])
+
+        # 頂点1と3が一時固定されるべき（0は範囲内、2は除外）
+        self.assertEqual(len(sim.batch_pins), 1)
+        indices, targets, weights = sim.batch_pins[0]
+        self.assertEqual(indices, [1, 3])
+        self.assertEqual(weights, [1.0, 1.0])
+
+        # 解放テスト
+        mgr.release_temp_pins(sim)
+        self.assertEqual(sim.released_batches, [[1, 3]])
+        self.assertEqual(mgr._temp_frozen_indices, [])
+
+    def test_freeze_and_release_legacy_fallback(self):
+        from taremin_cloth.brush.base import ActiveRegionManager
+
+        class MockLegacySim:
+            def __init__(self):
+                self.pins = []
+                self.released = []
+
+            def set_pin(self, idx, pos, weight=1.0):
+                self.pins.append((idx, pos, weight))
+
+            def release_pin(self, idx):
+                self.released.append(idx)
+
+        mgr = ActiveRegionManager()
+        sim = MockLegacySim()
+        coords = np.array([[0, 0, 0], [10, 0, 0]], dtype=np.float32)
+        mgr.freeze_inactive_region(sim, coords, [0, 0, 0], radius=2.0, active_scale=1.0)
+
+        self.assertEqual(len(sim.pins), 1)
+        self.assertEqual(sim.pins[0][0], 1)
+
+        mgr.release_temp_pins(sim)
+        self.assertEqual(sim.released, [1])
+        self.assertEqual(mgr._temp_frozen_indices, [])
 
 
 if __name__ == "__main__":

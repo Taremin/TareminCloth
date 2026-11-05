@@ -19,6 +19,7 @@ from .basic import (
     TAREMIN_CLOTH_OT_save_as_shape_key,
     TAREMIN_CLOTH_OT_create_pin_group,
     TAREMIN_CLOTH_OT_toggle_weight_paint,
+    TAREMIN_CLOTH_OT_instant_drape,
 )
 from .interactive import (
     FPSCounter,
@@ -51,6 +52,9 @@ from .tools import (
     TAREMIN_CLOTH_OT_assign_face_layer,
     TAREMIN_CLOTH_OT_select_face_layer,
     TAREMIN_CLOTH_OT_clear_face_layers,
+    TAREMIN_CLOTH_OT_add_string_part,
+    TAREMIN_CLOTH_OT_remove_string_part,
+    TAREMIN_CLOTH_OT_select_string_guide_verts,
 )
 from .pose import (
     TAREMIN_CLOTH_OT_record_pose,
@@ -118,6 +122,7 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_save_as_shape_key,
     TAREMIN_CLOTH_OT_create_pin_group,
     TAREMIN_CLOTH_OT_toggle_weight_paint,
+    TAREMIN_CLOTH_OT_instant_drape,
     TAREMIN_CLOTH_OT_launch_gui,
     TAREMIN_CLOTH_OT_connect_gui,
     TAREMIN_CLOTH_OT_gui_preview,
@@ -127,6 +132,9 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_assign_face_layer,
     TAREMIN_CLOTH_OT_select_face_layer,
     TAREMIN_CLOTH_OT_clear_face_layers,
+    TAREMIN_CLOTH_OT_add_string_part,
+    TAREMIN_CLOTH_OT_remove_string_part,
+    TAREMIN_CLOTH_OT_select_string_guide_verts,
     TAREMIN_CLOTH_OT_add_wrinkle_preset,
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
@@ -172,6 +180,9 @@ __all__ = [
     "TAREMIN_CLOTH_OT_assign_face_layer",
     "TAREMIN_CLOTH_OT_select_face_layer",
     "TAREMIN_CLOTH_OT_clear_face_layers",
+    "TAREMIN_CLOTH_OT_add_string_part",
+    "TAREMIN_CLOTH_OT_remove_string_part",
+    "TAREMIN_CLOTH_OT_select_string_guide_verts",
     "TAREMIN_CLOTH_OT_clear_bone_sdf_cache",
     "TAREMIN_CLOTH_OT_rebake_bone_sdf",
     "TAREMIN_CLOTH_OT_auto_detect_collider",

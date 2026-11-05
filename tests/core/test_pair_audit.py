@@ -18,42 +18,8 @@ python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
 
-# bpyモック登録 (test_sparse_recording.py と同一preamble)
-try:
-    import tests  # noqa: F401
-except Exception:
-    from unittest.mock import MagicMock
-
-    class _DummyTypesModule:
-        def __init__(self):
-            self._types = {
-                name: type(name, (object,), {})
-                for name in ("Operator", "Panel", "PropertyGroup", "UIList",
-                             "AddonPreferences", "Menu", "Header", "Gizmo",
-                             "GizmoGroup", "Node", "NodeTree", "NodeSocket", "UILayout")
-            }
-
-        def __getattr__(self, name):
-            if name.startswith("__"):
-                raise AttributeError(name)
-            if name not in self._types:
-                self._types[name] = type(name, (object,), {})
-            return self._types[name]
-
-    if "bpy.types" not in sys.modules:
-        sys.modules["bpy.types"] = _DummyTypesModule()
-    for _mod_name in ("bpy", "bpy.props", "bpy.ops", "bpy.utils", "bpy.context",
-                      "bpy.path", "bpy.app", "bpy_extras", "bpy_extras.view3d_utils",
-                      "gpu", "blf", "bmesh", "mathutils"):
-        if _mod_name not in sys.modules:
-            try:
-                __import__(_mod_name)
-            except Exception:
-                _m = MagicMock()
-                _m.__name__ = _mod_name
-                if _mod_name == "bpy":
-                    _m.types = sys.modules.get("bpy.types")
-                sys.modules[_mod_name] = _m
+# bpyモック登録 (tests/__init__.py で一元管理)
+import tests  # noqa: F401
 
 
 def make_two_layers(nx=3, ny=3, dx=0.05, gap=0.003):
