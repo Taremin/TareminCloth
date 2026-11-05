@@ -148,7 +148,7 @@ class TAREMIN_OT_apply_quick_arrangement(Operator):
         if not obj or not hasattr(obj, "taremin_pattern"):
             return {'CANCELLED'}
 
-        offset, euler = get_quick_placement_transform(self.preset, context.scene)
+        offset, euler = get_quick_placement_transform(self.preset, scene=context.scene)
         pat = obj.taremin_pattern
         pat.arrangement_offset = offset
         pat.arrangement_euler = euler
@@ -222,7 +222,7 @@ class TAREMIN_OT_sync_arrangement_proxy(Operator):
             return {'CANCELLED'}
 
         if "taremin_pattern_source" in obj:
-            sync_proxy_to_pattern(obj, context.scene)
+            sync_proxy_to_pattern(obj, scene=context.scene)
             self.report({'INFO'}, i18n.trans("Synced 3D proxy transform to pattern properties"))
         else:
             sync_pattern_to_proxy(obj)
@@ -269,7 +269,7 @@ class TAREMIN_OT_build_garment(Operator):
             proxy_name = f"{p.name}_Proxy3D"
             proxy_obj = bpy.data.objects.get(proxy_name)
             if proxy_obj:
-                sync_proxy_to_pattern(proxy_obj, context.scene)
+                sync_proxy_to_pattern(proxy_obj, scene=context.scene)
 
         try:
             garment_obj = build_garment_from_patterns(

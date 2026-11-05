@@ -221,7 +221,7 @@ class TestPatternIRAndWaypointSync(unittest.TestCase):
         )
 
         # 既存の物理コア前処理 extract_sewing_topology にそのまま投入して検証
-        simple_edges, waypoint_seams = extract_sewing_topology(loose_edges, faces, all_positions)
+        simple_edges, waypoint_seams = extract_sewing_topology(loose_edges, faces_2d=faces, positions=all_positions)
         expected_chains = len(map_f["SleeveF_right"])
 
         self.assertEqual(len(simple_edges), 0, "すべて中継点付きパスとして分類されること")

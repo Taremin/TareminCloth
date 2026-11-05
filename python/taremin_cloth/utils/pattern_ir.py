@@ -204,6 +204,7 @@ def sample_pattern_boundary_loop(
 def build_sewing_loose_edges(
     base_positions: np.ndarray,
     segment_vertex_map: dict[str, dict[str, list[int]]],
+    *,
     seams: list[SeamPairIR],
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """統合メッシュの頂点配列と縫合定義から直線縫合および中継ガイド付き Loose Edge 列を生成する."""

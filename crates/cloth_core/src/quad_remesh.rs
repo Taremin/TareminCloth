@@ -393,10 +393,7 @@ fn generate_structured_quad_grid(
         out_uvs_2d.push(*p);
     }
 
-    let mut boundary_vertex_indices: Vec<u32> = (0..b_len as u32).collect();
-    if smoothing_iterations <= 8 {
-        boundary_vertex_indices.push(0);
-    }
+    let boundary_vertex_indices: Vec<u32> = (0..b_len as u32).collect();
 
     // グリッド点 (i, j) と頂点インデックスの対応マップ
     let mut grid_idx = vec![vec![0_u32; nv + 1]; nu + 1];

@@ -183,6 +183,7 @@ def _euler_to_rotation_matrix(euler: tuple[float, float, float]) -> np.ndarray:
 def build_garment_from_patterns(
     scene: bpy.types.Scene,
     pattern_objects: list[bpy.types.Object],
+    *,
     target_name: str = "Garment_Cloth",
     seams: Optional[list[SeamPairIR]] = None,
 ) -> bpy.types.Object:

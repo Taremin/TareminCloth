@@ -101,7 +101,7 @@ def estimate_body_reference(scene: bpy.types.Scene) -> dict[str, float]:
     }
 
 
-def get_quick_placement_transform(preset_name: str, scene: bpy.types.Scene = None) -> tuple[Vector, Euler]:
+def get_quick_placement_transform(preset_name: str, *, scene: bpy.types.Scene = None) -> tuple[Vector, Euler]:
     """プリセット名に応じたオフセットベクトルとオイラー角を返す."""
     ref = estimate_body_reference(scene)
     cz = ref["chest_z"]
@@ -188,7 +188,7 @@ def get_or_create_arrangement_proxy(context: bpy.types.Context, pattern_obj: bpy
     return proxy_obj
 
 
-def sync_proxy_to_pattern(proxy_obj: bpy.types.Object, scene: bpy.types.Scene = None) -> None:
+def sync_proxy_to_pattern(proxy_obj: bpy.types.Object, *, scene: bpy.types.Scene = None) -> None:
     """3Dプロキシの移動・回転を型紙のarrangement_offset / arrangement_euler に反映する."""
     if not proxy_obj or "taremin_pattern_source" not in proxy_obj:
         return

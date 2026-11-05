@@ -33,6 +33,7 @@ def get_pattern_objects(scene: bpy.types.Scene) -> list[bpy.types.Object]:
 
 def enter_pattern_local_view(
     context: bpy.types.Context,
+    *,
     target_objects: list[bpy.types.Object] | None = None,
 ) -> None:
     """型紙オブジェクトを対象にローカルビュー（Local View）に入り、素体等を非表示化する.
@@ -119,6 +120,7 @@ def exit_pattern_local_view(context: bpy.types.Context) -> None:
 
 def setup_2d_pattern_viewport(
     context: bpy.types.Context,
+    *,
     target_objects: list[bpy.types.Object] | None = None,
 ) -> None:
     """3Dビューポートを2D型紙製図用（ローカルビュー・Top直交・回転ロック・グリッド最適化）に切り替える."""
