@@ -1148,31 +1148,47 @@ python run_tests.py --ci -t test_protocol_integrity.py
 ## 13. 2D型紙CAD製図 & プロダクションQuadリメッシュアーキテクチャ (2D Pattern CAD & Production Quad Remesh)
 
 Taremin Cloth は、Marvelous Designer や CLO3D のような 2D CAD 型紙製図と 3D 衣服シミュレーションのシームレスな統合パイプラインを提供します。
+Blender非依存の純粋Pythonドメインモデル（`Document`）を Single Source of Truth とし、UI描画（`renderer.py` / `canvas.py`）、メッシュ構築（`build.py`）、Undo/Redo履歴管理（`history.py`）を分離した疎結合設計を採用しています。
 
 ```mermaid
-graph LR
-    CAD[2D CAD型紙<br>Curve / Mesh] -->|サンプリング & 縫合同期| IR[中間表現<br>PatternContour2D]
-    IR -->|CDT & Botsch-Kobbelt等方性| TriMesh[2D等方性三角メッシュ<br>remesh_pattern_2d]
-    TriMesh -->|3Dオイラー配置 & 縫合LooseEdge| SimGarment[3D布シミュレーション<br>Taremin Cloth GPU XPBD]
-    SimGarment -->|重心逆写像 & 境界ベルト| QuadMesh[本番用Quadトポロジー<br>remesh_cloth_to_quad_3d]
+graph TD
+    DOC[Document<br>Single Source of Truth<br>Piece / Path / Node / Seam] -->|描画コマンド生成| RENDER[DrawCommand 列<br>LINE / POLY / TEXT]
+    RENDER -->|POST_PIXEL GPU描画| CANVAS[2Dキャンバスビュー<br>canvas.py]
+    DOC -->|非破壊In-Placeビルド| BUILD[build_types.py / build.py]
+    BUILD -->|CDT & Botsch-Kobbelt等方性| RUST_CDT[2D等方性三角メッシュ<br>remesh_pattern_2d]
+    RUST_CDT -->|3D配置 & 縫合LooseEdge| MESH[Garment_Cloth<br>clear_geometry & from_pydata]
+    MESH -->|XPBDシミュレーション| SIM[Taremin Cloth GPU XPBD]
+    SIM -->|重心逆写像 & 境界ベルト| QUAD[本番用Quadトポロジー<br>remesh_cloth_to_quad_3d]
 ```
 
 ### 13.1 主要コンポーネント
 
-1. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
+1. **型紙コア文書データモデル (`python/taremin_cloth/pattern/document.py`, `history.py`)**:
+   - `Document`: ピース（`Piece`）、パス（`Path`）、制御点ノード（`Node`）、縫合（`Seam`）、ノッチ（`Notch`）、アンカー（`Anchor`）、3D配置（`Placement`）を保持。
+   - `HistoryManager`: 操作前後の JSON スナップショット記録による最大50件の Undo/Redo スタック。
+   - Blender 完全非依存であり、CLI やスタンドアロンテストで全操作をミリ秒で検証可能。
+2. **2D幾何演算 & 弧長サンプリング (`python/taremin_cloth/pattern/geometry/`)**:
+   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、3次ベジェ曲線分割、累積弧長テーブル構築、最近点探索。
+   - `polygon.py`: Shoelace 符号付き面積、反時計回り (CCW) 正規化、Winding Number 内外判定、自己交差検査。
+   - `transform.py`: 2D アフィン変換（平行移動・回転・拡大縮小）、軸平行バウンディングボックス。
+3. **対話ツール体系 & ヒットテスト (`python/taremin_cloth/pattern/tools/`, `selection.py`, `editor.py`)**:
+   - `hit_test`: 要素優先順位（ハンドル > ノード > ノッチ > 辺 > 内部線 > ピース内部）による選択判定。同率ピクセル半径内の誤認・競合を防止。
+   - `SelectTool`: 要素選択およびドラッグ移動（ピース移動、ノード移動）。
+   - `RectangleTool` / `PolygonTool`: 矩形対角ドラッグおよび多角形連続クリック作図。
+   - `SewTool`: 2つの辺をクリック選択して縫合（`Seam`）を定義。
+4. **イミュータブル描画コマンド生成 & GPU描画 (`renderer.py`, `canvas.py`)**:
+   - `build_render_commands`: ドキュメントとセッション状態から `DrawCommand`（`LINE`, `POLYLINE`, `POLYGON`, `CIRCLE`, `RECT`, `TEXT`）のリストを純粋関数として生成。
+   - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。
+5. **非破壊3Dメッシュ統合ビルド (`build_types.py`, `build.py`)**:
+   - オブジェクトを削除・再生成せず、`clear_simulators()` 後に `mesh.clear_geometry()` と `mesh.from_pydata()` でジオメトリのみ In-Place 更新。
+   - 既存オブジェクトのマテリアル、モディファイア、物理設定を完全に保持。
+   - 縫合ペアの弧長サンプリング数を事前同期し、対応する頂点間に縫合 Loose Edge を生成。
+   - UV全体正規化（[0, 1] 範囲）、面属性（`pattern_piece_index`, `cloth_layer`）、頂点グループ（`Piece_<name>`, `Cloth_Pin`）を自動付与。
+6. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
    - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。
    - 境界頂点 `0..B` の完全不変保護（外周長・面積厳密保存）。
    - エッジ分割・縮約・Delaunay flip・ラプラシアン平滑化によるスリバー三角形の完全解消（最小角 $\ge 18^\circ$）。
-2. **中間表現 & 縫合・中継ガイド同期 (`python/taremin_cloth/utils/pattern_ir.py`)**:
-   - `PatternContour2D`: ベジェ曲線・ポリラインから境界セグメントとノッチ（合印）を抽出。
-   - `synchronize_seam_subdivisions`: 縫合ペア間の不等長弧長・ノッチ位置を分割同期。
-   - 中継ガイド付き単一パス Loose Edge 自動生成。
-3. **Blender データ構造 & 3D統合ビルダー (`python/taremin_cloth/utils/pattern_builder.py`)**:
-   - `Object.taremin_pattern`: 型紙プロパティ（配置オフセット・オイラー角・レイヤーID）。
-   - 各パーツを `UVMap_Pattern` に格納し、3D配置・頂点グループ・`cloth_layer` 属性を統合付与。
-4. **2D特化ビューポート (`python/taremin_cloth/utils/pattern_view.py`)**:
-   - Top直交ビュー、回転ロック（`lock_rotation = True`）、グリッド最適化によるCAD感覚の製図環境。
-5. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`)**:
+7. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`)**:
    - 外周 Boundary Quad Belt の構築による境界エッジ整列。
    - 構造化グリッド充填 / QuadDominant リメッシュ（Quad比率 $\ge 85\%$）。
    - 2D空間ハッシュによる高速 Point-In-Triangle 重心逆写像（ドレープ曲面へのZ誤差 $< 1.5\,\text{mm}$）。
