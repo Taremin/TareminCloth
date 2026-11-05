@@ -1043,5 +1043,16 @@
   "Right Arm": "右袖",
   "Collar": "襟",
   "Waist": "腰",
-  "Edit in 3D (Proxy)": "3Dで配置を調整 (プロキシ)"
+  "Edit in 3D (Proxy)": "3Dで配置を調整 (プロキシ)",
+  "Pattern Document": "型紙ドキュメント",
+  "Pattern Editor Active": "型紙エディタ実行中",
+  "Open Pattern Editor": "型紙エディタを開く",
+  "Close Pattern Editor": "型紙エディタを閉じる",
+  "Open the 2D garment pattern drafting and seam editing canvas": "2D型紙製図・縫合編集キャンバスを開きます",
+  "Serialized 2D pattern editor document JSON data": "シリアライズされた2D型紙エディタ文書のJSONデータ",
+  "Whether the 2D pattern editor modal session is currently active": "2D型紙エディタのモーダルセッションが現在アクティブかどうか",
+  "Pattern editor is already active": "型紙エディタはすでに起動しています",
+  "Opened Pattern Editor (Press Esc to close)": "型紙エディタを開きました (Escキーで終了)",
+  "Closed Pattern Editor": "型紙エディタを閉じました",
+  "2D Pattern Drafting": "2D型紙製図"
 }

@@ -5,17 +5,26 @@ import bpy
 from bpy.types import Operator
 
 from .. import i18n
+from ..pattern.bridge import load_document_from_scene, save_document_to_scene
+from ..pattern.build import build_garment_mesh_in_place
+from ..pattern.canvas import PatternCanvasRenderer
+from ..pattern.editor import EditorController, EditorEvent
 from ..properties import FloatProperty, StringProperty, EnumProperty
-from ..utils.pattern_view import setup_2d_pattern_viewport, restore_3d_viewport, is_pattern_view_active
-from ..utils.pattern_builder import build_garment_from_patterns
 from ..utils.drawing import is_interactive_active
+from ..utils.pattern_builder import build_garment_from_patterns
 from ..utils.pattern_proxy import (
     QUICK_PLACEMENT_PRESETS,
-    get_quick_placement_transform,
     get_or_create_arrangement_proxy,
-    sync_proxy_to_pattern,
+    get_quick_placement_transform,
     sync_pattern_to_proxy,
+    sync_proxy_to_pattern,
 )
+from ..utils.pattern_view import (
+    is_pattern_view_active,
+    restore_3d_viewport,
+    setup_2d_pattern_viewport,
+)
+from ..utils.view3d import tag_redraw_view3d
 
 
 class TAREMIN_OT_create_pattern_piece(Operator):
@@ -230,6 +239,137 @@ class TAREMIN_OT_sync_arrangement_proxy(Operator):
         return {'FINISHED'}
 
 
+class TAREMIN_OT_pattern_editor(Operator):
+    """2D型紙・縫合エディタを開くモーダルオペレーター"""
+    bl_idname = "taremin_cloth.pattern_editor"
+    bl_label = "Open Pattern Editor"
+    bl_description = "Open the 2D garment pattern drafting and seam editing canvas"
+    bl_translation_context = i18n.CONTEXT
+
+    def invoke(self, context, event):
+        if getattr(context.scene, "taremin_pattern_editor_active", False):
+            self.report({'WARNING'}, i18n.trans("Pattern editor is already active"))
+            return {'CANCELLED'}
+
+        doc = load_document_from_scene(context.scene)
+        self.controller = EditorController(doc=doc)
+        self.canvas = PatternCanvasRenderer(self.controller)
+        self.canvas.register_handler()
+
+        self._pan_dragging = False
+        self._last_mouse = (float(event.mouse_region_x), float(event.mouse_region_y))
+
+        context.scene.taremin_pattern_editor_active = True
+        context.window_manager.modal_handler_add(self)
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Opened Pattern Editor (Press Esc to close)"))
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        mx = float(event.mouse_region_x)
+        my = float(event.mouse_region_y)
+        dx = mx - self._last_mouse[0]
+        dy = my - self._last_mouse[1]
+        self._last_mouse = (mx, my)
+
+        # 中ボタンドラッグによる Pan 移動
+        if event.type == 'MIDDLEMOUSE':
+            if event.value == 'PRESS':
+                self._pan_dragging = True
+                return {'RUNNING_MODAL'}
+            elif event.value == 'RELEASE':
+                self._pan_dragging = False
+                return {'RUNNING_MODAL'}
+
+        if self._pan_dragging and event.type == 'MOUSEMOVE':
+            self.controller.view.pan_x += dx
+            self.controller.view.pan_y += dy
+            tag_redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+        # マウスホイールによるズーム
+        if event.type == 'WHEELINMOUSE':
+            self.controller.view.zoom_at((mx, my), 1.15)
+            tag_redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        elif event.type == 'WHEELOUTMOUSE':
+            self.controller.view.zoom_at((mx, my), 0.85)
+            tag_redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+        # ツール切替キー
+        if event.value == 'PRESS' and not event.ctrl and not event.alt:
+            if event.type in ('ONE', 'Q'):
+                self.controller.set_active_tool("SELECT")
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            elif event.type in ('TWO', 'R'):
+                self.controller.set_active_tool("RECTANGLE")
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            elif event.type in ('THREE', 'P'):
+                self.controller.set_active_tool("POLYGON")
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            elif event.type in ('FOUR', 'S'):
+                self.controller.set_active_tool("SEW")
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+
+        # 終了キー (ESC)
+        if event.type == 'ESC' and event.value == 'PRESS':
+            if self.controller.preview_points or self.controller.preview_seam_candidates:
+                tool = self.controller.active_tool
+                if tool:
+                    tool.cancel(self.controller)
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            return self._finish(context)
+
+        # イベント配送
+        is_press = (event.value == 'PRESS')
+        is_release = (event.value == 'RELEASE')
+        is_move = (event.type == 'MOUSEMOVE')
+        button = "LEFT" if event.type in ('LEFTMOUSE', 'SELECTMOUSE') else "RIGHT" if event.type in ('RIGHTMOUSE', 'ACTIONMOUSE') else ""
+
+        ed_event = EditorEvent(
+            screen_pos=(mx, my),
+            is_press=is_press,
+            is_release=is_release,
+            is_move=is_move,
+            button=button,
+            shift=event.shift,
+            ctrl=event.ctrl,
+            alt=event.alt,
+            key=event.type if event.value == 'PRESS' else "",
+        )
+
+        consumed = self.controller.handle_event(ed_event)
+        if self.controller.is_dirty:
+            tag_redraw_view3d(context)
+            self.controller.is_dirty = False
+
+        if consumed:
+            return {'RUNNING_MODAL'}
+
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            return self._finish(context)
+
+        return {'PASS_THROUGH'}
+
+    def _finish(self, context):
+        self.canvas.unregister_handler()
+        context.scene.taremin_pattern_editor_active = False
+        save_document_to_scene(self.controller.doc, scene=context.scene)
+        try:
+            build_garment_mesh_in_place(self.controller.doc, scene=context.scene)
+        except Exception as e:
+            print(f"[Taremin Cloth] Auto build on editor close error: {e}")
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Closed Pattern Editor"))
+        return {'FINISHED'}
+
+
 class TAREMIN_OT_build_garment(Operator):
     """型紙パーツ群から単一3D衣装メッシュを統合生成するオペレーター"""
     bl_idname = "taremin_cloth.build_garment"
@@ -249,13 +389,40 @@ class TAREMIN_OT_build_garment(Operator):
         # シミュレーション実行中はトポロジー変更をロック
         if is_interactive_active():
             return False
-        # シーン内に型紙パーツが1つ以上存在すること
+        # Document JSON が存在するか、従来の型紙パーツが存在するか
+        raw_doc = getattr(context.scene, "taremin_pattern_document", "")
+        if raw_doc and raw_doc.strip():
+            return True
         for obj in context.scene.objects:
             if hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece:
                 return True
         return False
 
     def execute(self, context):
+        # 1. Document ベースのビルド
+        raw_doc = getattr(context.scene, "taremin_pattern_document", "")
+        if raw_doc and raw_doc.strip():
+            doc = load_document_from_scene(context.scene)
+            if doc.pieces:
+                try:
+                    obj = build_garment_mesh_in_place(
+                        doc,
+                        target_object_name=self.target_name,
+                        scene=context.scene,
+                    )
+                    if obj:
+                        for o in context.selected_objects:
+                            o.select_set(False)
+                        obj.select_set(True)
+                        context.view_layer.objects.active = obj
+                        tag_redraw_view3d(context)
+                        self.report({'INFO'}, i18n.trans("Successfully built garment mesh: %s") % obj.name)
+                        return {'FINISHED'}
+                except Exception as e:
+                    self.report({'ERROR'}, i18n.trans("Failed to build garment: %s") % str(e))
+                    return {'CANCELLED'}
+
+        # 2. 従来の型紙パーツからのフォールバックビルド
         pattern_objects = [
             obj for obj in context.scene.objects
             if hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece
@@ -278,17 +445,14 @@ class TAREMIN_OT_build_garment(Operator):
                 target_name=self.target_name,
             )
 
-            # 2D パターンビュー中なら自動的に 3D ビュー（通常表示）へ復帰
             if is_pattern_view_active(context):
                 restore_3d_viewport(context)
 
-            # ビルドされた衣装を選択・アクティブ化
             for o in context.selected_objects:
                 o.select_set(False)
             garment_obj.select_set(True)
             context.view_layer.objects.active = garment_obj
 
-            # 3Dビューで完成した衣装にフォーカス
             try:
                 bpy.ops.view3d.view_selected()
             except Exception:
@@ -441,6 +605,7 @@ class TAREMIN_OT_remesh_to_quad(Operator):
 
 
 classes = (
+    TAREMIN_OT_pattern_editor,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
     TAREMIN_OT_apply_quick_arrangement,

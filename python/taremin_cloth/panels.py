@@ -1080,17 +1080,28 @@ class TAREMIN_CLOTH_PT_pattern_piece(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        if not obj:
-            return False
-        if hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece:
-            return True
-        return obj.type == 'CURVE'
+        return True
 
     def draw(self, context):
         layout = self.layout
         obj = context.active_object
-        pat = getattr(obj, "taremin_pattern", None)
+        pat = getattr(obj, "taremin_pattern", None) if obj else None
+
+        # 2D 型紙エディタ起動ブロック
+        box_editor = layout.box()
+        box_editor.label(text=i18n.trans("2D Pattern Drafting"), icon='IMAGE_PLANE')
+        row_ed = box_editor.row(align=True)
+        is_active = getattr(context.scene, "taremin_pattern_editor_active", False)
+        row_ed.operator(
+            "taremin_cloth.pattern_editor",
+            text=i18n.trans("Close Pattern Editor") if is_active else i18n.trans("Open Pattern Editor"),
+            icon='CANCEL' if is_active else 'EDITMODE_HLT',
+            depress=is_active,
+        )
+        row_ed.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
+
+        if not obj:
+            return
 
         box = layout.box()
         box.label(text=f"{i18n.trans('Pattern:')} {obj.name}", icon='CURVE_DATA' if obj.type == 'CURVE' else 'MESH_PLANE')

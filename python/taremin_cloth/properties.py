@@ -1603,9 +1603,23 @@ def register():
         ],
         default='SIMPLE',
     )
+    bpy.types.Scene.taremin_pattern_document = StringProperty(
+        name="Pattern Document",
+        description="Serialized 2D pattern editor document JSON data",
+        default="",
+    )
+    bpy.types.Scene.taremin_pattern_editor_active = BoolProperty(
+        name="Pattern Editor Active",
+        description="Whether the 2D pattern editor modal session is currently active",
+        default=False,
+    )
 
 
 def unregister():
+    if hasattr(bpy.types.Scene, "taremin_pattern_editor_active"):
+        del bpy.types.Scene.taremin_pattern_editor_active
+    if hasattr(bpy.types.Scene, "taremin_pattern_document"):
+        del bpy.types.Scene.taremin_pattern_document
     if hasattr(bpy.types.Scene, "taremin_cloth_ui_mode"):
         del bpy.types.Scene.taremin_cloth_ui_mode
     if hasattr(bpy.types.Scene, "taremin_cloth_active_config_preset"):

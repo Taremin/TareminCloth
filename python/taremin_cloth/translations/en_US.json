@@ -1043,5 +1043,16 @@
   "Right Arm": "Right Arm",
   "Collar": "Collar",
   "Waist": "Waist",
-  "Edit in 3D (Proxy)": "Edit in 3D (Proxy)"
+  "Edit in 3D (Proxy)": "Edit in 3D (Proxy)",
+  "Pattern Document": "Pattern Document",
+  "Pattern Editor Active": "Pattern Editor Active",
+  "Open Pattern Editor": "Open Pattern Editor",
+  "Close Pattern Editor": "Close Pattern Editor",
+  "Open the 2D garment pattern drafting and seam editing canvas": "Open the 2D garment pattern drafting and seam editing canvas",
+  "Serialized 2D pattern editor document JSON data": "Serialized 2D pattern editor document JSON data",
+  "Whether the 2D pattern editor modal session is currently active": "Whether the 2D pattern editor modal session is currently active",
+  "Pattern editor is already active": "Pattern editor is already active",
+  "Opened Pattern Editor (Press Esc to close)": "Opened Pattern Editor (Press Esc to close)",
+  "Closed Pattern Editor": "Closed Pattern Editor",
+  "2D Pattern Drafting": "2D Pattern Drafting"
 }
