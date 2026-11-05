@@ -16,6 +16,23 @@ from pathlib import Path
 # サブパッケージおよびモジュール定義
 subpackages = [
     (
+        "pattern",
+        [
+            "ids",
+            "units",
+            "document",
+            "history",
+            "selection",
+            "session",
+            "renderer",
+            "canvas",
+            "bridge",
+            "build_types",
+            "build",
+            "editor",
+        ],
+    ),
+    (
         "utils",
         [
             "logger",

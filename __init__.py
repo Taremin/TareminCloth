@@ -34,6 +34,23 @@ if hasattr(sys.modules[__name__], "__path__"):
 # サブパッケージおよびモジュール定義
 subpackages = [
     (
+        "pattern",
+        [
+            "ids",
+            "units",
+            "document",
+            "history",
+            "selection",
+            "session",
+            "renderer",
+            "canvas",
+            "bridge",
+            "build_types",
+            "build",
+            "editor",
+        ],
+    ),
+    (
         "utils",
         [
             "logger",
@@ -41,6 +58,12 @@ subpackages = [
             "view3d",
             "drawing",
             "topology",
+            "collider_detect",
+            "self_collision_fit",
+            "pattern_ir",
+            "pattern_builder",
+            "pattern_view",
+            "pattern_proxy",
         ],
     ),
     (

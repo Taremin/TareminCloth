@@ -80,6 +80,7 @@ from .wrinkle import (
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
 )
 from .pattern import (
+    TAREMIN_OT_pattern_editor,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
     TAREMIN_OT_apply_quick_arrangement,
@@ -138,6 +139,7 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_add_wrinkle_preset,
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
+    TAREMIN_OT_pattern_editor,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
     TAREMIN_OT_apply_quick_arrangement,
@@ -149,6 +151,7 @@ OPERATOR_CLASSES = (
 
 __all__ = [
     "OPERATOR_CLASSES",
+    "TAREMIN_OT_pattern_editor",
     "TAREMIN_CLOTH_OT_toggle_cloth",
     "TAREMIN_CLOTH_OT_reset_selected",
     "TAREMIN_CLOTH_OT_reset_all",

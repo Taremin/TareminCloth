@@ -387,6 +387,19 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
             else:
                 box_sim.label(text=i18n.trans("No cloth objects in scene"), icon='INFO')
 
+        # --- 2D型紙製図エディタ（常時アクセス可能） ---
+        box_pattern_main = layout.box()
+        box_pattern_main.label(text=i18n.trans("2D Pattern Drafting"), icon='IMAGE_PLANE')
+        row_pat_main = box_pattern_main.row(align=True)
+        is_pat_active = getattr(scene, "taremin_pattern_editor_active", False)
+        row_pat_main.operator(
+            "taremin_cloth.pattern_editor",
+            text=i18n.trans("Close Pattern Editor") if is_pat_active else i18n.trans("Open Pattern Editor"),
+            icon='CANCEL' if is_pat_active else 'EDITMODE_HLT',
+            depress=is_pat_active,
+        )
+        row_pat_main.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
+
         # --- オブジェクト未選択またはメッシュ以外 ---
         if not obj or obj.type != 'MESH':
             box_info = layout.box()
@@ -1070,7 +1083,7 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
 
 class TAREMIN_CLOTH_PT_pattern_piece(bpy.types.Panel):
     """型紙オブジェクト選択時の専用プロパティパネル"""
-    bl_label = "2D Pattern Piece"
+    bl_label = "2D Pattern Drafting"
     bl_idname = "TAREMIN_CLOTH_PT_pattern_piece"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
