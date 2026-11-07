@@ -1,16 +1,29 @@
 # -*- coding: utf-8 -*-
 """Milestone 4: 2D型紙オペレーター (pattern.py)."""
 
+import math
 import bpy
 from bpy.types import Operator
+from mathutils import Euler, Quaternion
+try:
+    from bpy_extras.io_utils import ExportHelper, ImportHelper
+except Exception:
+    class ExportHelper:
+        filepath: str = ""
+    class ImportHelper:
+        filepath: str = ""
 
 from .. import i18n
+from .wrinkle import _find_target_armature, find_nearest_bone_to_mouse
 from ..pattern.bridge import load_document_from_scene, save_document_to_scene
 from ..pattern.build import build_garment_mesh_in_place
 from ..pattern.canvas import PatternCanvasRenderer
+from ..pattern.document import Document
 from ..pattern.editor import EditorController, EditorEvent
+from ..pattern.keymap import resolve_tool_hotkey
 from ..properties import FloatProperty, StringProperty, EnumProperty
 from ..utils.drawing import is_interactive_active
+from ..utils.logger import logger
 from ..utils.pattern_builder import build_garment_from_patterns
 from ..utils.pattern_proxy import (
     QUICK_PLACEMENT_PRESETS,
@@ -24,7 +37,15 @@ from ..utils.pattern_view import (
     restore_3d_viewport,
     setup_2d_pattern_viewport,
 )
-from ..utils.view3d import tag_redraw_view3d
+from ..utils.view3d import (
+    extract_armature_bones_for_canvas,
+    get_viewport_overlay_offsets,
+    pan_region_3d_by_pixels,
+    stop_animation,
+    sync_view2d_from_region_3d,
+    tag_redraw_view3d,
+    zoom_region_3d,
+)
 
 
 class TAREMIN_OT_create_pattern_piece(Operator):
@@ -251,8 +272,57 @@ class TAREMIN_OT_pattern_editor(Operator):
             self.report({'WARNING'}, i18n.trans("Pattern editor is already active"))
             return {'CANCELLED'}
 
+        if is_interactive_active():
+            self.report({'WARNING'}, i18n.trans("Cannot open pattern editor during interactive simulation"))
+            return {'CANCELLED'}
+
+        # タイムラインアニメーション再生中の場合は停止
+        stop_animation(context)
+
+        # 既存のSpaceView3D設定をバックアップし、被り防止のためTパネル（Toolbar）およびツールヘッダーを非表示化
+        space = getattr(context, "space_data", None)
+        if space and getattr(space, "type", "") == 'VIEW_3D':
+            self._orig_show_toolbar = getattr(space, "show_region_toolbar", False)
+            space.show_region_toolbar = False
+            self._orig_show_tool_header = getattr(space, "show_region_tool_header", False)
+            space.show_region_tool_header = False
+
         doc = load_document_from_scene(context.scene)
         self.controller = EditorController(doc=doc)
+        region = getattr(context, "region", None)
+        rv3d = getattr(context, "region_data", None)
+        if region:
+            self.controller.screen_size = (region.width, region.height)
+
+        # 3Dビューポートカメラのバックアップと正面正投影 (Front Ortho) 設定
+        if rv3d:
+            try:
+                self._orig_view_perspective = rv3d.view_perspective
+                self._orig_view_rotation = rv3d.view_rotation.copy()
+                self._orig_view_location = rv3d.view_location.copy()
+                self._orig_view_distance = rv3d.view_distance
+                rv3d.view_perspective = 'ORTHO'
+                # 正面 (-Y から +Y を見る)
+                rv3d.view_rotation = Quaternion((0.7071068, 0.7071068, 0.0, 0.0))
+            except Exception:
+                pass
+
+        # シーン内アーマチュアからボーン情報を単一ソース (BoneInfo3D) として抽出
+        self.armature_obj = _find_target_armature(context)
+        self.controller.bones = extract_armature_bones_for_canvas(context.scene)
+        self.all_bones_data = [b.to_overlay_tuple() for b in self.controller.bones.values()]
+
+        # 3Dビューポートの投影スケールを2Dキャンバスへ1:1実寸同期
+        if region and rv3d:
+            sync_view2d_from_region_3d(region, rv3d, view_2d=self.controller.view)
+
+        # 初期オフセットの算出
+        lo, ro, to, bo = get_viewport_overlay_offsets(area=getattr(context, "area", None))
+        self.controller.left_offset = lo
+        self.controller.right_offset = ro
+        self.controller.top_offset = to
+        self.controller.bottom_offset = bo
+
         self.canvas = PatternCanvasRenderer(self.controller)
         self.canvas.register_handler()
 
@@ -266,13 +336,25 @@ class TAREMIN_OT_pattern_editor(Operator):
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
+        region = getattr(context, "region", None)
+        rv3d = getattr(context, "region_data", None)
+        if region:
+            self.controller.screen_size = (region.width, region.height)
+
+        # 各パネル（ヘッダー・ツールヘッダー・T/Nパネル）のオーバーレイ幅・高さを同期してHUDオフセット設定
+        lo, ro, to, bo = get_viewport_overlay_offsets(area=getattr(context, "area", None))
+        self.controller.left_offset = lo
+        self.controller.right_offset = ro
+        self.controller.top_offset = to
+        self.controller.bottom_offset = bo
+
         mx = float(event.mouse_region_x)
         my = float(event.mouse_region_y)
         dx = mx - self._last_mouse[0]
         dy = my - self._last_mouse[1]
         self._last_mouse = (mx, my)
 
-        # 中ボタンドラッグによる Pan 移動
+        # 中ボタンドラッグによる Pan 移動 (3Dビューポートと1:1連動)
         if event.type == 'MIDDLEMOUSE':
             if event.value == 'PRESS':
                 self._pan_dragging = True
@@ -282,42 +364,85 @@ class TAREMIN_OT_pattern_editor(Operator):
                 return {'RUNNING_MODAL'}
 
         if self._pan_dragging and event.type == 'MOUSEMOVE':
-            self.controller.view.pan_x += dx
-            self.controller.view.pan_y += dy
+            if rv3d and region:
+                pan_region_3d_by_pixels(rv3d, dx_px=dx, dy_px=dy, zoom_px_per_m=self.controller.view.zoom)
+                sync_view2d_from_region_3d(region, rv3d, view_2d=self.controller.view)
+            else:
+                self.controller.view.pan_x += dx
+                self.controller.view.pan_y += dy
             tag_redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-        # マウスホイールによるズーム
-        if event.type == 'WHEELINMOUSE':
-            self.controller.view.zoom_at((mx, my), 1.15)
-            tag_redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        elif event.type == 'WHEELOUTMOUSE':
-            self.controller.view.zoom_at((mx, my), 0.85)
+        # マウスホイールによるズーム (3Dビューポートと1:1連動)
+        if event.type in ('WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'WHEELINMOUSE', 'WHEELOUTMOUSE'):
+            factor = 1.15 if event.type in ('WHEELUPMOUSE', 'WHEELINMOUSE') else 0.85
+            if rv3d and region:
+                zoom_region_3d(rv3d, factor=factor)
+                if not sync_view2d_from_region_3d(region, rv3d, view_2d=self.controller.view):
+                    self.controller.view.zoom_at((mx, my), factor)
+            else:
+                self.controller.view.zoom_at((mx, my), factor)
             tag_redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-        # ツール切替キー
+        # Pick Bone モード中のマウス移動によるホバーボーン検出（確定・解除・キャンセルは controller.handle_event へ委譲）
+        if self.controller.picking_bone and event.type == 'MOUSEMOVE':
+            b_name = find_nearest_bone_to_mouse(
+                context,
+                self.armature_obj,
+                (float(event.mouse_x), float(event.mouse_y)),
+                all_bones_data=self.all_bones_data,
+            )
+            if (b_name or "") != self.controller.hovered_bone:
+                self.controller.hovered_bone = b_name or ""
+                tag_redraw_view3d(context)
+
+        # テンキー視点切り替え (正面: NUMPAD_1, 側面: NUMPAD_3, 上面: NUMPAD_7)
+        if self.controller.editing_field is None and event.value == 'PRESS' and rv3d:
+            if event.type == 'NUMPAD_1':
+                e = Euler((math.radians(90.0), 0.0, math.radians(180.0) if event.ctrl else 0.0))
+                rv3d.view_rotation = e.to_quaternion()
+                if not event.ctrl and region:
+                    sync_view2d_from_region_3d(region, rv3d, view_2d=self.controller.view)
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            elif event.type == 'NUMPAD_3':
+                e = Euler((math.radians(90.0), 0.0, math.radians(-90.0) if event.ctrl else math.radians(90.0)))
+                rv3d.view_rotation = e.to_quaternion()
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            elif event.type == 'NUMPAD_7':
+                e = Euler((math.radians(180.0) if event.ctrl else 0.0, 0.0, 0.0))
+                rv3d.view_rotation = e.to_quaternion()
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+
+        # ツール切替キーおよび寸法線トグル (keymap.resolve_tool_hotkey 委譲)
         if event.value == 'PRESS' and not event.ctrl and not event.alt:
-            if event.type in ('ONE', 'Q'):
-                self.controller.set_active_tool("SELECT")
-                tag_redraw_view3d(context)
-                return {'RUNNING_MODAL'}
-            elif event.type in ('TWO', 'R'):
-                self.controller.set_active_tool("RECTANGLE")
-                tag_redraw_view3d(context)
-                return {'RUNNING_MODAL'}
-            elif event.type in ('THREE', 'P'):
-                self.controller.set_active_tool("POLYGON")
-                tag_redraw_view3d(context)
-                return {'RUNNING_MODAL'}
-            elif event.type in ('FOUR', 'S'):
-                self.controller.set_active_tool("SEW")
-                tag_redraw_view3d(context)
-                return {'RUNNING_MODAL'}
+            if self.controller.editing_field is None and not self.controller.picking_bone:
+                # 縫合反転ショートカット (R / F): 縫合選択中またはSEWツール中はツール切替(RECTANGLE)より反転を優先
+                is_flip_key = event.type in ('R', 'F')
+                has_seam_context = bool(self.controller.selection.seam_ids) or (self.controller.active_tool_name == "SEW")
+                if is_flip_key and has_seam_context:
+                    pass  # ツール切替を行わず、後続の controller.handle_event に流す
+                else:
+                    tool_name = resolve_tool_hotkey(event.type)
+                    if tool_name and tool_name in self.controller.tools:
+                        self.controller.set_active_tool(tool_name)
+                        tag_redraw_view3d(context)
+                        return {'RUNNING_MODAL'}
+                    if event.type == 'L':
+                        self.controller.show_lengths = not self.controller.show_lengths
+                        tag_redraw_view3d(context)
+                        return {'RUNNING_MODAL'}
 
         # 終了キー (ESC)
-        if event.type == 'ESC' and event.value == 'PRESS':
+        if event.type == 'ESC' and event.value == 'PRESS' and not self.controller.picking_bone:
+            if self.controller.editing_field is not None:
+                self.controller.editing_field = None
+                self.controller.editing_buffer = ""
+                tag_redraw_view3d(context)
+                return {'RUNNING_MODAL'}
             if self.controller.preview_points or self.controller.preview_seam_candidates:
                 tool = self.controller.active_tool
                 if tool:
@@ -327,10 +452,13 @@ class TAREMIN_OT_pattern_editor(Operator):
             return self._finish(context)
 
         # イベント配送
-        is_press = (event.value == 'PRESS')
-        is_release = (event.value == 'RELEASE')
+        is_mouse_button = event.type in ('LEFTMOUSE', 'SELECTMOUSE', 'RIGHTMOUSE', 'ACTIONMOUSE', 'MIDDLEMOUSE')
+        is_press = (event.value == 'PRESS' and is_mouse_button)
+        is_release = (event.value == 'RELEASE' and is_mouse_button)
         is_move = (event.type == 'MOUSEMOVE')
-        button = "LEFT" if event.type in ('LEFTMOUSE', 'SELECTMOUSE') else "RIGHT" if event.type in ('RIGHTMOUSE', 'ACTIONMOUSE') else ""
+        button = "LEFT" if event.type in ('LEFTMOUSE', 'SELECTMOUSE') else "RIGHT" if event.type in ('RIGHTMOUSE', 'ACTIONMOUSE') else "MIDDLE" if event.type == 'MIDDLEMOUSE' else ""
+        key = event.type if (event.value == 'PRESS' and not is_mouse_button) else ""
+        unicode_char = getattr(event, "unicode", "") or ""
 
         ed_event = EditorEvent(
             screen_pos=(mx, my),
@@ -341,10 +469,38 @@ class TAREMIN_OT_pattern_editor(Operator):
             shift=event.shift,
             ctrl=event.ctrl,
             alt=event.alt,
-            key=event.type if event.value == 'PRESS' else "",
+            key=key,
+            unicode=unicode_char,
         )
 
         consumed = self.controller.handle_event(ed_event)
+
+        # Pick Bone モード開始直後の初期ホバーボーン設定
+        if self.controller.picking_bone and not self.controller.hovered_bone:
+            b_name = find_nearest_bone_to_mouse(
+                context,
+                self.armature_obj,
+                (float(event.mouse_x), float(event.mouse_y)),
+                all_bones_data=self.all_bones_data,
+            )
+            self.controller.hovered_bone = b_name or ""
+
+        # HUDからのビルド要求または終了要求の即時処理
+        if self.controller.request_build:
+            self.controller.request_build = False
+            save_document_to_scene(self.controller.doc, scene=context.scene)
+            try:
+                build_garment_mesh_in_place(self.controller.doc, scene=context.scene)
+                self.report({'INFO'}, i18n.trans("Built 3D garment mesh"))
+            except Exception as e:
+                self.report({'ERROR'}, f"Build failed: {e}")
+            tag_redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+        if self.controller.request_close:
+            self.controller.request_close = False
+            return self._finish(context)
+
         if self.controller.is_dirty:
             tag_redraw_view3d(context)
             self.controller.is_dirty = False
@@ -355,16 +511,40 @@ class TAREMIN_OT_pattern_editor(Operator):
         if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
             return self._finish(context)
 
+        # 型紙エディタ起動中は、Blender 本体のショートカット（Cのサークル選択、Iのキーフレーム挿入等）の
+        # 誤爆を防ぐため、単独キー押下イベントはすべて捕捉してパススルーしない
+        if event.value == 'PRESS' and not event.ctrl and not event.alt:
+            return {'RUNNING_MODAL'}
+
         return {'PASS_THROUGH'}
 
     def _finish(self, context):
+        # ツールバー（Tパネル）およびツールヘッダーの表示状態を元に戻す
+        space = getattr(context, "space_data", None)
+        if space and getattr(space, "type", "") == 'VIEW_3D':
+            if hasattr(self, "_orig_show_toolbar"):
+                space.show_region_toolbar = self._orig_show_toolbar
+            if hasattr(self, "_orig_show_tool_header"):
+                space.show_region_tool_header = self._orig_show_tool_header
+
+        # 3Dビューポートカメラの復元
+        rv3d = getattr(context, "region_data", None)
+        if rv3d and hasattr(self, "_orig_view_perspective"):
+            try:
+                rv3d.view_perspective = self._orig_view_perspective
+                rv3d.view_rotation = self._orig_view_rotation
+                rv3d.view_location = self._orig_view_location
+                rv3d.view_distance = self._orig_view_distance
+            except Exception:
+                pass
+
         self.canvas.unregister_handler()
         context.scene.taremin_pattern_editor_active = False
         save_document_to_scene(self.controller.doc, scene=context.scene)
         try:
             build_garment_mesh_in_place(self.controller.doc, scene=context.scene)
         except Exception as e:
-            print(f"[Taremin Cloth] Auto build on editor close error: {e}")
+            logger.warning(f"[Pattern] Auto build on editor close error: {e}")
         tag_redraw_view3d(context)
         self.report({'INFO'}, i18n.trans("Closed Pattern Editor"))
         return {'FINISHED'}
@@ -604,8 +784,123 @@ class TAREMIN_OT_remesh_to_quad(Operator):
         return {'FINISHED'}
 
 
+class TAREMIN_OT_export_pattern_json(Operator, ExportHelper):
+    """型紙データを外部JSONファイルにエクスポートする"""
+    bl_idname = "taremin_cloth.export_pattern_json"
+    bl_label = "Export Pattern JSON"
+    bl_description = "Save current 2D pattern drafting document to an external JSON file"
+    bl_translation_context = i18n.CONTEXT
+
+    filename_ext = ".json"
+    filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        doc = load_document_from_scene(context.scene)
+        try:
+            doc.save_to_file(self.filepath)
+            self.report({'INFO'}, i18n.trans("Exported pattern to: %s") % self.filepath)
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, i18n.trans("Failed to export pattern: %s") % str(e))
+            return {'CANCELLED'}
+
+
+class TAREMIN_OT_import_pattern_json(Operator, ImportHelper):
+    """外部JSONファイルから型紙データをインポートする"""
+    bl_idname = "taremin_cloth.import_pattern_json"
+    bl_label = "Import Pattern JSON"
+    bl_description = "Load a 2D pattern drafting document from an external JSON file"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filename_ext = ".json"
+    filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        try:
+            from ..pattern.document import Document
+            doc = Document.load_from_file(self.filepath)
+            save_document_to_scene(doc, scene=context.scene)
+            build_garment_mesh_in_place(doc, scene=context.scene)
+            tag_redraw_view3d(context)
+            self.report({'INFO'}, i18n.trans("Imported pattern from: %s") % self.filepath)
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, i18n.trans("Failed to import pattern: %s") % str(e))
+            return {'CANCELLED'}
+
+
+class TAREMIN_OT_set_reference_image(Operator, ImportHelper):
+    """キャンバス背景に下絵画像（参考画像）を設定する"""
+    bl_idname = "taremin_cloth.set_reference_image"
+    bl_label = "Set Reference Image"
+    bl_description = "Load a background reference image for 2D drafting canvas"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filename_ext = ".png"
+    filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.bmp", options={'HIDDEN'})
+
+    def execute(self, context):
+        doc = load_document_from_scene(context.scene)
+        import bpy
+        aspect = 1.0
+        try:
+            img = bpy.data.images.load(self.filepath, check_existing=True)
+            if img.size[0] > 0 and img.size[1] > 0:
+                aspect = float(img.size[1]) / float(img.size[0])
+        except Exception:
+            pass
+        from ..pattern.document import ReferenceImage
+        doc.reference_image = ReferenceImage(
+            image_path=self.filepath,
+            width=1.0,
+            opacity=0.5,
+            visible=True,
+            aspect_ratio=aspect,
+        )
+        save_document_to_scene(doc, scene=context.scene)
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Loaded reference image: %s") % self.filepath)
+        return {'FINISHED'}
+
+
+class TAREMIN_OT_migrate_curves_to_pattern(Operator):
+    """シーン内の既存 2D Curve 型紙オブジェクトを Document に変換統合する"""
+    bl_idname = "taremin_cloth.migrate_curves_to_pattern"
+    bl_label = "Migrate 2D Curves to Pattern Document"
+    bl_description = "Convert legacy 2D Curve pattern objects in the scene to the unified Pattern Document"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from ..pattern.migration import migrate_curve_objects_to_document
+        curve_objs = [
+            obj for obj in context.scene.objects
+            if obj.type == 'CURVE' and hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece
+        ]
+        if not curve_objs:
+            curve_objs = [obj for obj in context.selected_objects if obj.type == 'CURVE']
+
+        if not curve_objs:
+            self.report({'WARNING'}, i18n.trans("No 2D Curve pattern objects found to migrate"))
+            return {'CANCELLED'}
+
+        doc = load_document_from_scene(context.scene)
+        doc = migrate_curve_objects_to_document(curve_objs, target_doc=doc)
+        save_document_to_scene(doc, scene=context.scene)
+        build_garment_mesh_in_place(doc, scene=context.scene)
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Migrated %d curve object(s) to pattern document") % len(curve_objs))
+        return {'FINISHED'}
+
+
 classes = (
     TAREMIN_OT_pattern_editor,
+    TAREMIN_OT_export_pattern_json,
+    TAREMIN_OT_import_pattern_json,
+    TAREMIN_OT_set_reference_image,
+    TAREMIN_OT_migrate_curves_to_pattern,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
     TAREMIN_OT_apply_quick_arrangement,

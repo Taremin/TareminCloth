@@ -121,6 +121,55 @@ class TestPatternHistory(unittest.TestCase):
         self.assertFalse(hm.can_undo)
         self.assertFalse(hm.can_redo)
 
+    def test_transaction_commit_and_cancel(self):
+        """begin_transaction / commit_transaction / cancel_transaction の動作検証."""
+        hm = HistoryManager()
+        doc = Document.new(name="TransTest")
+
+        # 1. 変更なしコミット -> スタックに積まれない
+        hm.begin_transaction(doc, label="No Change")
+        committed = hm.commit_transaction(doc)
+        self.assertFalse(committed)
+        self.assertFalse(hm.can_undo)
+
+        # 2. 変更ありコミット -> スタックに積まれる
+        hm.begin_transaction(doc, label="Add Piece")
+        doc.add_rectangle_piece((0.0, 0.0), (0.1, 0.1), name="PieceA")
+        committed = hm.commit_transaction(doc)
+        self.assertTrue(committed)
+        self.assertTrue(hm.can_undo)
+        self.assertEqual(hm.undo_stack[-1].description, "Add Piece")
+
+        # 3. キャンセル -> 直前のトランザクション開始状態へ巻き戻る
+        hm.begin_transaction(doc, label="To be cancelled")
+        doc.add_rectangle_piece((0.2, 0.0), (0.3, 0.1), name="PieceB")
+        self.assertEqual(len(doc.pieces), 2)
+        hm.cancel_transaction(doc)
+        self.assertEqual(len(doc.pieces), 1)  # PieceB が破棄され1個に戻る
+        self.assertNotIn("PieceB", [p.name for p in doc.pieces.values()])
+
+    def test_undo_redo_in_place(self):
+        """undo_in_place / redo_in_place の動作検証."""
+        hm = HistoryManager()
+        doc = Document.new(name="InPlaceTest")
+
+        # 操作1: ピース追加
+        before = Document.from_json(doc.to_json())
+        doc.add_rectangle_piece((0.0, 0.0), (0.1, 0.1), name="P1")
+        hm.record_change(description="Add P1", before_doc=before, after_doc=doc)
+
+        self.assertEqual(len(doc.pieces), 1)
+
+        # インプレース Undo
+        success = hm.undo_in_place(doc)
+        self.assertTrue(success)
+        self.assertEqual(len(doc.pieces), 0)
+
+        # インプレース Redo
+        success = hm.redo_in_place(doc)
+        self.assertTrue(success)
+        self.assertEqual(len(doc.pieces), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,11 +14,9 @@ if python_dir not in sys.path:
 
 from taremin_cloth.pattern.geometry import (
     make_segment_controls,
-    compute_auto_handles,
     evaluate_cubic,
     subdivide_cubic,
     build_arc_table,
-    point_at_arc_length,
     closest_point_on_table,
     compute_seam_subdivision_count,
     sample_edge_range_by_count,
@@ -26,8 +24,9 @@ from taremin_cloth.pattern.geometry import (
     ensure_ccw,
     point_in_polygon,
     has_self_intersection,
+    triangulate_polygon_2d,
+    split_cubic_bezier,
     Affine2D,
-    compute_bounding_box,
 )
 
 
@@ -182,6 +181,53 @@ class TestPatternGeometry(unittest.TestCase):
         p1_t = aff.apply(arr[1])
         np.testing.assert_allclose(arr_t[0], p0_t, atol=1e-5)
         np.testing.assert_allclose(arr_t[1], p1_t, atol=1e-5)
+
+    def test_split_cubic_bezier(self):
+        """3次ベジェ曲線の厳密2分割と元曲線との幾何一致."""
+        c0 = (0.0, 0.0)
+        c1 = (1.0, 2.0)
+        c2 = (3.0, 2.0)
+        c3 = (4.0, 0.0)
+
+        t_split = 0.35
+        left, right = split_cubic_bezier(c0, c1, c2, c3, t_split)
+
+        # 前半曲線のサンプリング点検証
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            pt_left = evaluate_cubic(left[0], left[1], left[2], left[3], u)
+            pt_orig = evaluate_cubic(c0, c1, c2, c3, u * t_split)
+            self.assertAlmostEqual(pt_left[0], pt_orig[0], places=5)
+            self.assertAlmostEqual(pt_left[1], pt_orig[1], places=5)
+
+        # 後半曲線のサンプリング点検証
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0]:
+            pt_right = evaluate_cubic(right[0], right[1], right[2], right[3], u)
+            pt_orig = evaluate_cubic(c0, c1, c2, c3, t_split + u * (1.0 - t_split))
+            self.assertAlmostEqual(pt_right[0], pt_orig[0], places=5)
+            self.assertAlmostEqual(pt_right[1], pt_orig[1], places=5)
+
+    def test_triangulate_polygon_2d_concave(self):
+        """耳刈り法による凹多角形（L字型）の三角形分割と面積一致."""
+        # L字型多角形（面積: 2*2 - 1*1 = 3.0）
+        l_shape = [
+            (0.0, 0.0), (2.0, 0.0), (2.0, 1.0),
+            (1.0, 1.0), (1.0, 2.0), (0.0, 2.0),
+        ]
+        expected_area = 3.0
+        self.assertAlmostEqual(abs(signed_area(l_shape)), expected_area)
+
+        tris = triangulate_polygon_2d(l_shape)
+        # 6角形なら4つの三角形に分割されるはず
+        self.assertEqual(len(tris), 4)
+
+        total_tri_area = 0.0
+        for i0, i1, i2 in tris:
+            tri_pts = [l_shape[i0], l_shape[i1], l_shape[i2]]
+            tri_a = signed_area(tri_pts)
+            self.assertGreater(tri_a, 0.0, "各三角形はCCWで正の面積を持つこと")
+            total_tri_area += tri_a
+
+        self.assertAlmostEqual(total_tri_area, expected_area, places=5)
 
 
 if __name__ == "__main__":

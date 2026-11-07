@@ -35,7 +35,7 @@ class TestPatternRenderer(unittest.TestCase):
         text_cmds = [c for c in cmds if c.kind == DrawCommandKind.TEXT]
         texts = [c.text for c in text_cmds]
         self.assertTrue(any("Render Test Doc" in t for t in texts))
-        self.assertTrue(any("未選択" in t for t in texts))
+        self.assertTrue(any("No Selection" in t or "未選択" in t for t in texts))
 
     def test_piece_render_commands(self):
         piece = self.doc.add_rectangle_piece((0.0, 0.0), (0.2, 0.3), name="PieceA")
@@ -76,8 +76,9 @@ class TestPatternRenderer(unittest.TestCase):
         self.doc.seams[seam.id] = seam
 
         cmds = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        # 両端を結ぶ2本の主縫合線が生成されること
         seam_lines = [c for c in cmds if c.kind == DrawCommandKind.LINE and c.color in (DEFAULT_THEME.seam_line, DEFAULT_THEME.seam_mismatch)]
-        self.assertEqual(len(seam_lines), 1)
+        self.assertEqual(len(seam_lines), 2)
 
     def test_preview_render_commands(self):
         self.ctrl.active_tool_name = "RECTANGLE"

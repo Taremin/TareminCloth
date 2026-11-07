@@ -1164,31 +1164,58 @@ graph TD
 ### 13.1 主要コンポーネント
 
 1. **型紙コア文書データモデル (`python/taremin_cloth/pattern/document.py`, `history.py`)**:
-   - `Document`: ピース（`Piece`）、パス（`Path`）、制御点ノード（`Node`）、縫合（`Seam`）、ノッチ（`Notch`）、アンカー（`Anchor`）、3D配置（`Placement`）を保持。
-   - `HistoryManager`: 操作前後の JSON スナップショット記録による最大50件の Undo/Redo スタック。
+   - `Document`: ピース（`Piece`）、パス（`Path`）、制御点ノード（`Node`）、縫合（`Seam`）、ノッチ（`Notch`）、アンカー（`Anchor`）、3D配置（`Placement`）、下絵画像（`ReferenceImage`）を保持。
+   - `HistoryManager`: SHA-256 ハッシュ指紋計算による重複排除、インタラクティブ操作用トランザクション（`begin_transaction`, `commit_transaction`, `cancel_transaction`）、およびインプレース更新（`undo_in_place`, `redo_in_place`）を備えた最大50件の Undo/Redo スタック。
+   - `Document.save_to_file` / `Document.load_from_file`: 外部 `.json` ファイルとの完全な可逆シリアライズ。
    - Blender 完全非依存であり、CLI やスタンドアロンテストで全操作をミリ秒で検証可能。
 2. **2D幾何演算 & 弧長サンプリング (`python/taremin_cloth/pattern/geometry/`)**:
-   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、3次ベジェ曲線分割、累積弧長テーブル構築、最近点探索。
-   - `polygon.py`: Shoelace 符号付き面積、反時計回り (CCW) 正規化、Winding Number 内外判定、自己交差検査。
+   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、de Casteljau アルゴリズムによる厳密 3次ベジェ曲線2分割（`split_cubic_bezier`）、累積弧長テーブル構築、最近点探索。
+   - `polygon.py`: Shoelace 符号付き面積、反時計回り (CCW) 正規化、耳刈り法（Ear-Clipping）による凹凸対応三角形化（`triangulate_polygon_2d`）、Winding Number 内外判定、自己交差検査、2線分交差（`segment_intersection`）。
    - `transform.py`: 2D アフィン変換（平行移動・回転・拡大縮小）、軸平行バウンディングボックス。
-3. **対話ツール体系 & ヒットテスト (`python/taremin_cloth/pattern/tools/`, `selection.py`, `editor.py`)**:
-   - `hit_test`: 要素優先順位（ハンドル > ノード > ノッチ > 辺 > 内部線 > ピース内部）による選択判定。同率ピクセル半径内の誤認・競合を防止。
-   - `SelectTool`: 要素選択およびドラッグ移動（ピース移動、ノード移動）。
-   - `RectangleTool` / `PolygonTool`: 矩形対角ドラッグおよび多角形連続クリック作図。
-   - `SewTool`: 2つの辺をクリック選択して縫合（`Seam`）を定義。
-4. **イミュータブル描画コマンド生成 & GPU描画 (`renderer.py`, `canvas.py`)**:
-   - `build_render_commands`: ドキュメントとセッション状態から `DrawCommand`（`LINE`, `POLYLINE`, `POLYGON`, `CIRCLE`, `RECT`, `TEXT`）のリストを純粋関数として生成。
+3. **対話ツール体系 & ヒットテスト (`python/taremin_cloth/pattern/tools/`, `selection.py`, `editor.py`, `keymap.py`)**:
+   - `hit_test`: 要素優先順位（ハンドル > ノード > ノッチ > 辺 > 内部線 > ピース内部）による選択判定。画面ピクセル換算（12px）の動的許容半径によるズーム倍率非依存の高精度ヒット。
+   - `SelectTool`: 要素選択・ドラッグ移動（ワールドスナップ後ローカル逆変換 `inverse_apply` による厳密変換）、複数ノード・複数ピースの一括移動、Ctrl+クリックによる曲線形状保持ノード挿入、ボックス選択（矩形ドラッグ）。Uキーによる対称展開（最小X辺を対称軸とした $2n-2$ 頂点の単一反時計回り閉ループ鏡像反射）、Shift+Uキーによる対称複製と中心辺自動縫合。
+   - `RectangleTool` / `PolygonTool` / `EllipseTool`: 矩形、多角形、楕円（Ramanujan近似と4点ベジェ）作図。
+   - `InternalLineTool`: ピース内部への折れ線・曲線描画（Rust CDT内部拘束線に自動連携）。
+   - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。
+   - `CutTool`: 弧長サンプリング交差判定と `split_cubic_bezier` による曲線対応ピース2分割、および元の縫合・ノッチ（$t$ 比率再計算）・アンカー（内外判定振り分け）の自動引き継ぎ。
+   - `DartTool`: 曲線弧長位置サンプリング（`point_at_arc_length`）による正確な開口部2点算出と、三角スリット切り込み・自動縫合。
+   - `SewTool`: 2辺クリックによる基本縫合、およびShift+クリック・Enter確定による鎖縫合（1対多、多対多）。
+   - `keymap.py`: ツール切替ショートカット（数字キーおよびアルファベット）の解決ロジックを分離。
+4. **イミュータブル描画コマンド生成 & GPU描画 (`renderer.py`, `canvas.py`, `layout.py`)**:
+   - `build_render_commands`: ドキュメントとセッション状態から `DrawCommand`（`LINE`, `POLYLINE`, `POLYGON`, `CIRCLE`, `RECT`, `TEXT`, `IMAGE`）のリストを純粋関数として生成。
+   - 5領域HUDレイアウト（ヘッダーバー、左ツールレール、下部アクションバー、右上情報カード、数値入力カード）。
+   - ツールレールのクリックによるツール切替、下部「Build 3D」「Close」ボタンクリック、および情報カード内数値（解像度・レイヤーID等）のインライン編集・cm単位解釈（`parse_length_input`）。
+   - 寸法線表示（Lキートグル）、ノッチ描画、内部線描画、下絵画像（参考画像）の `gpu.texture` / `IMAGE_COLOR` による実画像アルファブレンド描画に対応。
    - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。
 5. **非破壊3Dメッシュ統合ビルド (`build_types.py`, `build.py`)**:
    - オブジェクトを削除・再生成せず、`clear_simulators()` 後に `mesh.clear_geometry()` と `mesh.from_pydata()` でジオメトリのみ In-Place 更新。
    - 既存オブジェクトのマテリアル、モディファイア、物理設定を完全に保持。
-   - 縫合ペアの弧長サンプリング数を事前同期し、対応する頂点間に縫合 Loose Edge を生成。
-   - UV全体正規化（[0, 1] 範囲）、面属性（`pattern_piece_index`, `cloth_layer`）、頂点グループ（`Piece_<name>`, `Cloth_Pin`）を自動付与。
-6. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
+   - 部分縫合（`t0, t1`）境界位置へのメッシュ頂点自動注入、および鎖縫合・部分縫合を含む全縫合ペアの両側合計ステップ数完全同期（`_synchronize_document_seams`）。
+   - **ノッチ（合印）による辺分割と部分縫合の頂点同期**:
+     - 外周辺上のノッチ位置および部分縫合（`EdgeRange` の `t0, t1`）境界において、実寸弧長近接統合（`merge_breakpoints_by_arc_length`、最小間隔1mm）を適用した上で、セグメントをサブセグメント `BoundarySegmentIR`（`@sub{j}`、`base_segment_id`, `t_start`, `t_end`）へ自動分割。
+     - 各サブセグメントが独立した目標分割数を保持することで、同一辺を複数の相手ピースと部分縫合する際の上書き競合を完全に解消。
+     - 対向する合印ノッチ同士が縫合される場合、合印位置のメッシュ頂点同士が 1対1 で完全に一致・整列するよう、ノッチ間区間ごとに分割数を独立同期。
+     - 外周CCWと逆順に指定された `EdgeRange`（`end_node_id -> start_node_id`）において、サブセグメント列および各サブセグメント頂点列を幾何学的進行方向へ反転（`is_backward` 反転結合）し、3D縫合エッジのX字ねじれを完全に解消。
+     - 辺上ノード挿入（`insert_node_on_segment`）時に、分割点を跨ぐ `Seam` を `SeamMode.CHAIN`（鎖縫合）へ自動昇格・分割して縫合の連続性を維持。
+     - ノッチのドラッグ移動（1cm刻み・中点スナップ対応）およびHUDカードでのインライン実寸（cm）・比率指定編集。重複ノッチ生成抑止（1mm未満近接抑止）。
+   - 共有端点を持つ中継点付き縫合における直接縫合エッジへのフォールバック（G1ギャップ解消・分岐エラー防止）。
+   - UVレイアウト展開へのピース配置アフィン変換（`piece.transform`）適用と周囲 2% 余白パディング（`[0.02, 0.98]`）。
+   - 閉じた内部穴パス（`role == PathRole.HOLE`）の Winding Number 三角形除去による穴あきメッシュ構築。
+   - 面属性（`pattern_piece_index`, `cloth_layer`）、頂点グループ（`Piece_<name>`, `Cloth_Pin`）を自動付与。
+6. **3D配置プロキシ統合・ボーン追従配置 & 特許回避アーキテクチャ (`placement.py`, `migration.py`, `build_types.py`)**:
+   - `Document.placements` と 3D ビューポート内プロキシオブジェクト（`Proxy_<name>`）の双方向トランスフォーム同期。
+   - **3Dビューポート1:1実寸連動 (`sync_view2d_from_region_3d`)**: エディタ起動時に3Dビューカメラを正面正投影（Front Ortho）化し、カメラの投影スケール・原点と2Dキャンバスをピクセル単位で完全一致させ、中ボタンドラッグやホイールズームを双方向同期。
+   - **ボーン追従平面配置 (`compute_bone_aligned_frame`)**: アーマチュアボーンの `head`-`tail` 軸に対し、位置比率 `bone_t`、軸周りロール角度 `bone_angle_deg`、オフセット `surface_offset` に基づき接線 $\mathbf{e}_x$・法線 $\mathbf{n}$・縦軸 $\mathbf{e}_z$ を算出。下向きボーン（腕・脚等）でもワールド $+Z$ との内積判定により型紙の上下逆転を自動防止。
+   - **特許回避構造（筒モード迂回中継点縫合）**: Marvelous Designer等の円筒バウンディングボリューム（Bounding Volumes）による「2Dメッシュ曲面プリベンド」（CLO社特許構成要件）を完全に回避するため、**型紙メッシュ自体は完全な平面のまま配置**し、袖や脚などの「筒（Tubular）」モード縫合エッジのみがボーン裏側（$\pm 120^\circ$）の2つの中継点（Waypoints）を経由する構造（$\mathbf{v}_a \to \mathbf{w}_1 \to \mathbf{w}_2 \to \mathbf{v}_b$）を自動生成。シミュレーション開始時の糸張力（Loose Edge拘束）によって布が自然にボーンを包み込み、破綻なく円筒状に巻き付く。
+   - **HUD 角度コンパスウィジェット**: 情報カード下部に円形コンパスを配備。ボーン断面円、法線針、型紙平面バー、筒モード迂回アークを描画し、ドラッグ操作（Shiftで15度スナップ）でリアルタイムに角度を調整可能。
+   - **対称複製時のボーン自動反転 (`flip_bone_name_left_right`)**: `Shift+U`（対称複製）実行時、`.L` $\leftrightarrow$ `.R`、`_L` $\leftrightarrow$ `_R`、`Left` $\leftrightarrow$ `Right` のボーン名を自動反転し、ロール角度を正負反転（$-\theta$）して即座にミラー配置。
+   - シーン内の既存 2D Curve 型紙オブジェクト（Bezier / Poly）を解析し、`Document` の Piece・Path・Node・Placement へ一括自動変換。
+7. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
    - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。
-   - 境界頂点 `0..B` の完全不変保護（外周長・面積厳密保存）。
+   - 境界頂点 `0..B` の完全不変保護（外周長・面積厳密保存）および内部拘束線（`internal_constraints`）の強制維持。
    - エッジ分割・縮約・Delaunay flip・ラプラシアン平滑化によるスリバー三角形の完全解消（最小角 $\ge 18^\circ$）。
-7. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`)**:
+8. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`)**:
    - 外周 Boundary Quad Belt の構築による境界エッジ整列。
    - 構造化グリッド充填 / QuadDominant リメッシュ（Quad比率 $\ge 85\%$）。
    - 2D空間ハッシュによる高速 Point-In-Triangle 重心逆写像（ドレープ曲面へのZ誤差 $< 1.5\,\text{mm}$）。

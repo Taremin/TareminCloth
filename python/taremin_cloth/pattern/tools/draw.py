@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from ..document import Document
-from ..session import SnapKind, compute_snap
+from ..session import compute_snap
 from .base import BaseTool
 
 if TYPE_CHECKING:
@@ -73,7 +72,7 @@ class RectangleTool(BaseTool):
         if dx < 0.005 or dy < 0.005:
             return True
 
-        before_doc = Document.from_json(controller.doc.to_json())
+        before_doc = controller.doc.clone()
         piece = controller.doc.add_rectangle_piece(self.start_pos, end_pos)
         controller.selection.select_piece(piece.id)
 
@@ -125,6 +124,14 @@ class PolygonTool(BaseTool):
                 self._finish_polygon(controller)
                 return True
 
+        # 直前頂点と同一点の連続クリック（グリッド吸着重複・ダブルクリック確定）の処理
+        if self.points:
+            last_pt = self.points[-1]
+            if math.hypot(cur_pt[0] - last_pt[0], cur_pt[1] - last_pt[1]) < 1e-5:
+                if len(self.points) >= 3:
+                    self._finish_polygon(controller)
+                return True
+
         self.points.append(cur_pt)
         controller.preview_points = list(self.points)
         return True
@@ -147,11 +154,12 @@ class PolygonTool(BaseTool):
         return bool(self.points)
 
     def on_key_press(self, controller: EditorController, event: EditorEvent) -> bool:
-        if event.key == "ENTER":
+        k = event.key.upper()
+        if k in ("ENTER", "RET", "RETURN", "NUMPAD_ENTER", "SPACE"):
             if len(self.points) >= 3:
                 self._finish_polygon(controller)
                 return True
-        elif event.key == "ESCAPE":
+        elif k == "ESCAPE":
             self.cancel(controller)
             return True
         return False
@@ -161,7 +169,7 @@ class PolygonTool(BaseTool):
             self.cancel(controller)
             return
 
-        before_doc = Document.from_json(controller.doc.to_json())
+        before_doc = controller.doc.clone()
         try:
             piece = controller.doc.add_polygon_piece(self.points)
             controller.selection.select_piece(piece.id)
@@ -179,3 +187,98 @@ class PolygonTool(BaseTool):
     def cancel(self, controller: EditorController) -> None:
         self.points.clear()
         controller.preview_points.clear()
+
+
+class EllipseTool(BaseTool):
+    """対角ドラッグにより4頂点ベジェ曲線の楕円ピースを作成するツール."""
+
+    name: str = "ELLIPSE"
+
+    def __init__(self) -> None:
+        self.is_drawing: bool = False
+        self.start_pos: tuple[float, float] = (0.0, 0.0)
+
+    def on_mouse_down(self, controller: EditorController, event: EditorEvent) -> bool:
+        if event.button != "LEFT":
+            return False
+
+        snap = compute_snap(
+            event.world_pos,
+            controller.doc,
+            view=controller.view,
+            settings=controller.snap_settings,
+        )
+        self.start_pos = snap.world_pos
+        self.is_drawing = True
+        controller.preview_points = [self.start_pos, self.start_pos]
+        return True
+
+    def on_mouse_move(self, controller: EditorController, event: EditorEvent) -> bool:
+        if not self.is_drawing:
+            return False
+
+        snap = compute_snap(
+            event.world_pos,
+            controller.doc,
+            view=controller.view,
+            settings=controller.snap_settings,
+        )
+        end_pos = snap.world_pos
+
+        cx = (self.start_pos[0] + end_pos[0]) * 0.5
+        cy = (self.start_pos[1] + end_pos[1]) * 0.5
+        rx = abs(end_pos[0] - self.start_pos[0]) * 0.5
+        ry = abs(end_pos[1] - self.start_pos[1]) * 0.5
+
+        pts = []
+        for i in range(25):
+            theta = 2.0 * math.pi * i / 24
+            pts.append((cx + rx * math.cos(theta), cy + ry * math.sin(theta)))
+
+        controller.preview_points = pts
+        return True
+
+    def on_mouse_up(self, controller: EditorController, event: EditorEvent) -> bool:
+        if not self.is_drawing:
+            return False
+
+        self.is_drawing = False
+        controller.preview_points.clear()
+
+        snap = compute_snap(
+            event.world_pos,
+            controller.doc,
+            view=controller.view,
+            settings=controller.snap_settings,
+        )
+        end_pos = snap.world_pos
+
+        cx = (self.start_pos[0] + end_pos[0]) * 0.5
+        cy = (self.start_pos[1] + end_pos[1]) * 0.5
+        rx = abs(end_pos[0] - self.start_pos[0]) * 0.5
+        ry = abs(end_pos[1] - self.start_pos[1]) * 0.5
+
+        if rx < 0.005 or ry < 0.005:
+            return True
+
+        before_doc = controller.doc.clone()
+        piece = controller.doc.add_ellipse_piece((cx, cy), (rx, ry))
+        controller.selection.select_piece(piece.id)
+
+        controller.history.record_change(
+            description="Add Ellipse Piece",
+            before_doc=before_doc,
+            after_doc=controller.doc,
+        )
+        return True
+
+    def on_key_press(self, controller: EditorController, event: EditorEvent) -> bool:
+        if event.key == "ESCAPE":
+            self.cancel(controller)
+            return True
+        return False
+
+    def cancel(self, controller: EditorController) -> None:
+        self.is_drawing = False
+        controller.preview_points.clear()
+

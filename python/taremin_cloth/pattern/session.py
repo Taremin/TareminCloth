@@ -6,10 +6,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Sequence
+from typing import Optional
 
-from .document import Document, EdgeRange, Piece
-from .geometry import Vec2
+from .document import Document, EdgeRange
 
 
 @dataclass
@@ -58,6 +57,19 @@ class ViewTransform2D:
         self.pan_y = cy - wy * self.zoom
 
 
+@dataclass(frozen=True)
+class BoneInfo3D:
+    """アーマチュアの単一ボーンの3Dワールド座標情報 (Blender非依存)."""
+    name: str
+    head_3d: tuple[float, float, float]
+    tail_3d: tuple[float, float, float]
+    radius: float = 0.05
+
+    def to_overlay_tuple(self) -> tuple[str, list[float], list[float], float]:
+        """3Dボーンオーバーレイ描画およびマウス近傍ボーン判定用のタプル形式を返す."""
+        return (self.name, list(self.head_3d), list(self.tail_3d), self.radius)
+
+
 class SnapKind(str, Enum):
     """スナップ種別."""
     NONE = "NONE"
@@ -88,6 +100,8 @@ class SelectionState:
     """現在の選択状態コンテナ."""
     piece_ids: set[str] = field(default_factory=set)
     node_ids: set[str] = field(default_factory=set)
+    notch_ids: set[str] = field(default_factory=set)
+    seam_ids: set[str] = field(default_factory=set)
     edge_ranges: list[EdgeRange] = field(default_factory=list)
     active_piece_id: Optional[str] = None
 
@@ -95,6 +109,8 @@ class SelectionState:
         """全選択をクリアする."""
         self.piece_ids.clear()
         self.node_ids.clear()
+        self.notch_ids.clear()
+        self.seam_ids.clear()
         self.edge_ranges.clear()
         self.active_piece_id = None
 
@@ -109,9 +125,21 @@ class SelectionState:
         """ノードを選択する."""
         if not add:
             self.clear()
-        self.piece_ids.add(piece_id)
         self.node_ids.add(node_id)
         self.active_piece_id = piece_id
+
+    def select_notch(self, piece_id: str, notch_id: str, *, add: bool = False) -> None:
+        """ノッチを選択する."""
+        if not add:
+            self.clear()
+        self.notch_ids.add(notch_id)
+        self.active_piece_id = piece_id
+
+    def select_seam(self, seam_id: str, *, add: bool = False) -> None:
+        """縫合を選択する."""
+        if not add:
+            self.clear()
+        self.seam_ids.add(seam_id)
 
     def is_piece_selected(self, piece_id: str) -> bool:
         """ピースが選択されているかどうか."""
@@ -120,6 +148,10 @@ class SelectionState:
     def is_node_selected(self, node_id: str) -> bool:
         """ノードが選択されているかどうか."""
         return node_id in self.node_ids
+
+    def is_notch_selected(self, notch_id: str) -> bool:
+        """ノッチが選択されているかどうか."""
+        return notch_id in self.notch_ids
 
 
 def compute_snap(
@@ -167,17 +199,13 @@ def compute_snap(
                 snapped_node_id=best_node_id,
             )
 
-    # 2. グリッド吸着
+    # 2. グリッド吸着 (ワールド原点基準の共通グリッドへ常時量子化し、パーツ間の基準ずれを防ぐ)
     if opts.snap_grid and opts.grid_size > 1e-6:
         gx = round(world_pos[0] / opts.grid_size) * opts.grid_size
         gy = round(world_pos[1] / opts.grid_size) * opts.grid_size
-        dx = gx - world_pos[0]
-        dy = gy - world_pos[1]
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist <= threshold_dist:
-            return SnapResult(
-                world_pos=(gx, gy),
-                kind=SnapKind.GRID,
-            )
+        return SnapResult(
+            world_pos=(gx, gy),
+            kind=SnapKind.GRID,
+        )
 
     return SnapResult(world_pos=world_pos, kind=SnapKind.NONE)

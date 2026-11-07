@@ -6,7 +6,9 @@ import bpy
 
 try:
     from mathutils import Vector, Euler
-    if hasattr(Vector, "_mock_name"):
+    # Windows PyPI mathutils のバグ (プロパティが None を返す) を検知してフォールバック
+    test_v = Vector((1.0, 2.0, 3.0))
+    if test_v.x is None or hasattr(Vector, "_mock_name"):
         raise ImportError
 except Exception:
     class Vector(tuple):

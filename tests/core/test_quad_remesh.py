@@ -119,8 +119,8 @@ class TestQuadRemesh3D(unittest.TestCase):
         qb_uv = np.asarray(out_b["uvs_2d"], dtype=np.float32)
 
         # Island A の右辺 (インデックス 10..20) と Island B の左辺 (逆順) を縫合スナップ
-        seam_idx_a = np.asarray(out_a["boundary_vertex_indices"], dtype=np.uint32)[10:21]
-        seam_idx_b = np.asarray(out_b["boundary_vertex_indices"], dtype=np.uint32)[30:41][::-1]
+        seam_idx_a = np.asarray(out_a["boundary_vertex_indices"], dtype=np.uint32)[10:20]
+        seam_idx_b = np.asarray(out_b["boundary_vertex_indices"], dtype=np.uint32)[30:40][::-1]
         self.assertEqual(len(seam_idx_a), len(seam_idx_b))
 
         # 3D中点スナップを実行

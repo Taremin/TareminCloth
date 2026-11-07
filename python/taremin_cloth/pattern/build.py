@@ -7,7 +7,7 @@ from typing import Optional
 import bpy
 
 from ..engine import clear_simulators
-from .build_types import GarmentMeshGeometry, build_garment_mesh_geometry
+from .build_types import build_garment_mesh_geometry
 from .document import Document
 
 
@@ -24,13 +24,26 @@ def build_garment_mesh_in_place(
     """
     sc = scene or bpy.context.scene
 
+    bones = None
+    if sc is not None:
+        try:
+            from ..utils.view3d import extract_armature_bones_for_canvas
+            bones = extract_armature_bones_for_canvas(sc)
+        except Exception:
+            pass
+
     # 1. 幾何データの構築 (Blender非依存コア)
-    geom = build_garment_mesh_geometry(doc)
+    geom = build_garment_mesh_geometry(doc, bones=bones)
     if not geom.vertices_3d or not geom.faces:
         return None
 
-    # シミュレーターキャッシュのクリア（トポロジー変更対応）
+    # シミュレーターキャッシュおよび縫合描画キャッシュのクリア（トポロジー変更対応）
     clear_simulators()
+    try:
+        from ..utils.drawing import clear_sewing_cache
+        clear_sewing_cache()
+    except Exception:
+        pass
 
     # 2. オブジェクトおよびメッシュの取得または作成
     obj = sc.objects.get(target_object_name)
@@ -96,5 +109,7 @@ def build_garment_mesh_in_place(
     # 7. アドオンの布シミュレーション設定を有効化
     if hasattr(obj, "taremin_cloth"):
         obj.taremin_cloth.is_cloth = True
+        if geom.sewing_edges:
+            obj.taremin_cloth.enable_sewing = True
 
     return obj

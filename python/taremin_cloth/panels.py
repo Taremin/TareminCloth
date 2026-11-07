@@ -400,6 +400,14 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
         )
         row_pat_main.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
 
+        row_io = box_pattern_main.row(align=True)
+        row_io.operator("taremin_cloth.import_pattern_json", text=i18n.trans("Import JSON"), icon='IMPORT')
+        row_io.operator("taremin_cloth.export_pattern_json", text=i18n.trans("Export JSON"), icon='EXPORT')
+
+        row_extra = box_pattern_main.row(align=True)
+        row_extra.operator("taremin_cloth.set_reference_image", text=i18n.trans("Reference Image"), icon='IMAGE_DATA')
+        row_extra.operator("taremin_cloth.migrate_curves_to_pattern", text=i18n.trans("Migrate Curves"), icon='CURVE_DATA')
+
         # --- オブジェクト未選択またはメッシュ以外 ---
         if not obj or obj.type != 'MESH':
             box_info = layout.box()
@@ -1112,6 +1120,14 @@ class TAREMIN_CLOTH_PT_pattern_piece(bpy.types.Panel):
             depress=is_active,
         )
         row_ed.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
+
+        row_ed_io = box_editor.row(align=True)
+        row_ed_io.operator("taremin_cloth.import_pattern_json", text=i18n.trans("Import JSON"), icon='IMPORT')
+        row_ed_io.operator("taremin_cloth.export_pattern_json", text=i18n.trans("Export JSON"), icon='EXPORT')
+
+        row_ed_extra = box_editor.row(align=True)
+        row_ed_extra.operator("taremin_cloth.set_reference_image", text=i18n.trans("Reference Image"), icon='IMAGE_DATA')
+        row_ed_extra.operator("taremin_cloth.migrate_curves_to_pattern", text=i18n.trans("Migrate Curves"), icon='CURVE_DATA')
 
         if not obj:
             return

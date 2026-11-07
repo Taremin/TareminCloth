@@ -17,11 +17,18 @@ from .document import (
     PathRole,
     Piece,
     Placement,
+    ReferenceImage,
     Seam,
     SeamMode,
     Waypoint,
 )
 from .history import HistoryManager, HistoryEntry
+from .placement import (
+    QUICK_PLACEMENT_PRESETS,
+    estimate_body_reference_pure,
+    get_quick_placement_transform,
+)
+from .migration import migrate_curve_objects_to_document
 
 __all__ = [
     "new_id",
@@ -43,9 +50,14 @@ __all__ = [
     "PathRole",
     "Piece",
     "Placement",
+    "ReferenceImage",
     "Seam",
     "SeamMode",
     "Waypoint",
     "HistoryManager",
     "HistoryEntry",
+    "QUICK_PLACEMENT_PRESETS",
+    "estimate_body_reference_pure",
+    "get_quick_placement_transform",
+    "migrate_curve_objects_to_document",
 ]

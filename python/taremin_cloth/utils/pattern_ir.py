@@ -26,6 +26,10 @@ class BoundarySegmentIR:
     polyline_2d: np.ndarray  # 区間を構成する点列 shape [M, 2], float32
     arc_length: float  # 区間の実寸弧長 (m)
     target_subdivisions: Optional[int] = None  # 縫合ペア同期で決定された分割数 N (頂点数は N+1)
+    notch_ratios: list[float] = field(default_factory=list)  # 区間内の合印比率 [0.0, 1.0]
+    base_segment_id: str = ""
+    t_start: float = 0.0
+    t_end: float = 1.0
 
 
 @dataclass
@@ -40,6 +44,11 @@ class PatternContour2D:
     arrangement_matrix: np.ndarray = field(
         default_factory=lambda: np.eye(4, dtype=np.float32)
     )
+    piece_id: str = ""
+
+    @property
+    def uid(self) -> str:
+        return self.piece_id if self.piece_id else self.piece_name
 
 
 @dataclass
@@ -102,8 +111,16 @@ def synchronize_seam_subdivisions(
                 seg.target_subdivisions = n_free
 
 
-def _resample_polyline_2d(pts: np.ndarray, num_subdivisions: int) -> np.ndarray:
-    """2D折れ線を累積弧長等間隔で num_subdivisions 等分 (頂点数 num_subdivisions + 1) にリサンプリングする."""
+def _resample_polyline_2d(
+    pts: np.ndarray,
+    num_subdivisions: int,
+    *,
+    notch_ratios: Optional[list[float]] = None,
+) -> np.ndarray:
+    """2D折れ線を累積弧長等間隔で num_subdivisions 等分 (頂点数 num_subdivisions + 1) にリサンプリングする.
+    
+    notch_ratios が指定された場合、各ノッチ比率位置に必ずサンプリング頂点が配置されるように区間分割する.
+    """
     n_pts = len(pts)
     if n_pts == 0:
         return np.empty((0, 2), dtype=np.float32)
@@ -118,10 +135,42 @@ def _resample_polyline_2d(pts: np.ndarray, num_subdivisions: int) -> np.ndarray:
     if total_len < 1e-9:
         return np.tile(pts[0], (num_subdivisions + 1, 1)).astype(np.float32)
 
-    target_dists = np.linspace(0.0, total_len, num_subdivisions + 1)
-    rx = np.interp(target_dists, cum_dist, pts[:, 0])
-    ry = np.interp(target_dists, cum_dist, pts[:, 1])
-    return np.column_stack([rx, ry]).astype(np.float32)
+    # ノッチ比率による区間分割
+    valid_notches = sorted(list({float(r) for r in (notch_ratios or []) if 0.001 < r < 0.999}))
+    if not valid_notches:
+        target_dists = np.linspace(0.0, total_len, num_subdivisions + 1)
+        rx = np.interp(target_dists, cum_dist, pts[:, 0])
+        ry = np.interp(target_dists, cum_dist, pts[:, 1])
+        return np.column_stack([rx, ry]).astype(np.float32)
+
+    breakpoints = [0.0] + valid_notches + [1.0]
+    sub_counts: list[int] = []
+    for i in range(len(breakpoints) - 1):
+        span = breakpoints[i + 1] - breakpoints[i]
+        c = max(1, int(round(num_subdivisions * span)))
+        sub_counts.append(c)
+
+    # 合計分割数の微調整（num_subdivisions と一致させる）
+    diff = sum(sub_counts) - num_subdivisions
+    if diff != 0:
+        # 最大の区間で調整
+        max_idx = int(np.argmax(sub_counts))
+        sub_counts[max_idx] = max(1, sub_counts[max_idx] - diff)
+
+    result_points: list[np.ndarray] = []
+    for i, c in enumerate(sub_counts):
+        d0 = breakpoints[i] * total_len
+        d1 = breakpoints[i + 1] * total_len
+        d_vals = np.linspace(d0, d1, c + 1)
+        x_vals = np.interp(d_vals, cum_dist, pts[:, 0])
+        y_vals = np.interp(d_vals, cum_dist, pts[:, 1])
+        seg_res = np.column_stack([x_vals, y_vals]).astype(np.float32)
+        if i == 0:
+            result_points.append(seg_res)
+        else:
+            result_points.append(seg_res[1:])
+
+    return np.concatenate(result_points, axis=0)
 
 
 def _resample_polyline_3d(pts: np.ndarray, num_points: int) -> np.ndarray:
@@ -165,7 +214,11 @@ def sample_pattern_boundary_loop(
         if n_sub is None:
             n_sub = max(1, int(round(seg.arc_length / max(1e-6, contour.target_edge_length))))
 
-        sampled_pts = _resample_polyline_2d(seg.polyline_2d, n_sub)
+        sampled_pts = _resample_polyline_2d(
+            seg.polyline_2d,
+            n_sub,
+            notch_ratios=seg.notch_ratios,
+        )
         seg_indices: list[int] = []
 
         if k == 0:
@@ -211,6 +264,10 @@ def build_sewing_loose_edges(
     all_positions = [base_positions[i].copy() for i in range(len(base_positions))]
     loose_edges: list[tuple[int, int]] = []
 
+    # Pass 1: 各縫合ペアの対応頂点を解決し、布頂点の縫合次数 (接続回数) を集計
+    resolved_seams: list[tuple[SeamPairIR, list[int], list[int]]] = []
+    cloth_degree: dict[int, int] = {}
+
     for seam in seams:
         map_a = segment_vertex_map.get(seam.piece_a, {})
         map_b = segment_vertex_map.get(seam.piece_b, {})
@@ -220,19 +277,31 @@ def build_sewing_loose_edges(
         if not idx_a or not idx_b:
             continue
 
-        if seam.reverse_b:
-            idx_b = list(reversed(idx_b))
-
-        m = min(len(idx_a), len(idx_b))
+        idx_b_eff = list(reversed(idx_b)) if seam.reverse_b else list(idx_b)
+        m = min(len(idx_a), len(idx_b_eff))
         if m == 0:
             continue
 
+        resolved_seams.append((seam, idx_a[:m], idx_b_eff[:m]))
+        for i in range(m):
+            va = idx_a[i]
+            vb = idx_b_eff[i]
+            cloth_degree[va] = cloth_degree.get(va, 0) + 1
+            cloth_degree[vb] = cloth_degree.get(vb, 0) + 1
+
+    # Pass 2: Loose Edge 生成 (中継点付きで共有端点を持つ場合は直接縫合にフォールバック)
+    seen_direct: set[tuple[int, int]] = set()
+
+    for seam, list_a, list_b in resolved_seams:
+        m = len(list_a)
         if not seam.waypoint_guides:
             # 直線縫合エッジ
             for i in range(m):
-                loose_edges.append((idx_a[i], idx_b[i]))
+                pair = (min(list_a[i], list_b[i]), max(list_a[i], list_b[i]))
+                if pair not in seen_direct:
+                    seen_direct.add(pair)
+                    loose_edges.append((list_a[i], list_b[i]))
         else:
-            # 中継ガイド付きチェーン: 各頂点ペアごとにガイド曲線をサンプリングしてチェーン構築
             num_guides = len(seam.waypoint_guides)
             sampled_guides = [
                 _resample_polyline_3d(g.polyline_3d, m)
@@ -240,13 +309,24 @@ def build_sewing_loose_edges(
             ]
 
             for i in range(m):
-                chain_nodes = [idx_a[i]]
+                va = list_a[i]
+                vb = list_b[i]
+
+                # 共有端点（他の縫合線と端点を共有）の場合は直接縫合エッジにフォールバックして分岐を防止
+                if cloth_degree.get(va, 1) > 1 or cloth_degree.get(vb, 1) > 1:
+                    pair = (min(va, vb), max(va, vb))
+                    if pair not in seen_direct:
+                        seen_direct.add(pair)
+                        loose_edges.append((va, vb))
+                    continue
+
+                chain_nodes = [va]
                 for g_idx in range(num_guides):
                     wp_pos = sampled_guides[g_idx][i]
                     node_idx = len(all_positions)
                     all_positions.append(wp_pos)
                     chain_nodes.append(node_idx)
-                chain_nodes.append(idx_b[i])
+                chain_nodes.append(vb)
 
                 for k in range(len(chain_nodes) - 1):
                     loose_edges.append((chain_nodes[k], chain_nodes[k + 1]))

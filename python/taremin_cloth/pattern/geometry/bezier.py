@@ -4,7 +4,7 @@
 import functools
 import math
 from dataclasses import dataclass
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 from taremin_cloth.utils.args_guard import allow_positional
 
@@ -110,6 +110,18 @@ def subdivide_cubic(
     return (left, right)
 
 
+@allow_positional
+def split_cubic_bezier(
+    p0: Vec2,
+    c1: Vec2,
+    c2: Vec2,
+    p3: Vec2,
+    t: float,
+) -> tuple[tuple[Vec2, Vec2, Vec2, Vec2], tuple[Vec2, Vec2, Vec2, Vec2]]:
+    """ド・カステリョのアルゴリズムにより3次ベジェ曲線をパラメータ t (0..1) で2つに厳密分割する."""
+    return subdivide_cubic(p0, c1, c2, p3, t)
+
+
 @dataclass(frozen=True)
 class ArcLengthTable:
     """ベジェ曲線の高精度累積弧長サンプリングテーブル."""
@@ -191,8 +203,27 @@ def build_arc_table(
     c3: Vec2,
     *,
     tolerance: float = 0.00005,
+    steps: Optional[int] = None,
 ) -> ArcLengthTable:
-    """制御点を丸めてLRUキャッシュを通し、高精度弧長テーブルを返す."""
+    """制御点を丸めてLRUキャッシュを通し、高精度弧長テーブルを返す.
+    steps が指定された場合は指定分割数の等間隔テーブルを返す.
+    """
+    if steps is not None and steps > 0:
+        t_vals = [i / steps for i in range(steps + 1)]
+        pts = [evaluate_cubic(c0, c1, c2, c3, t) for t in t_vals]
+        arcs = [0.0]
+        tot = 0.0
+        for i in range(len(pts) - 1):
+            tot += _dist(pts[i], pts[i + 1])
+            arcs.append(tot)
+        return ArcLengthTable(
+            controls=(c0, c1, c2, c3),
+            t_values=tuple(t_vals),
+            arc_lengths=tuple(arcs),
+            points=tuple(pts),
+            total_length=tot,
+        )
+
     rc0 = _round_vec2(c0)
     rc1 = _round_vec2(c1)
     rc2 = _round_vec2(c2)
@@ -241,6 +272,59 @@ def point_at_arc_length(
     return ((x, y), t_val)
 
 
+@allow_positional
+def arc_length_at_t(
+    table: ArcLengthTable,
+    t: float,
+) -> float:
+    """パラメータ t in [0.0, 1.0] に対応する累積弧長 (メートル) を二分探索で返す."""
+    if t <= 0.0 or table.total_length < 1e-9:
+        return 0.0
+    if t >= 1.0:
+        return float(table.total_length)
+
+    t_vals = table.t_values
+    low = 0
+    high = len(t_vals) - 1
+
+    while low < high:
+        mid = (low + high) // 2
+        if t_vals[mid] <= t:
+            low = mid + 1
+        else:
+            high = mid
+
+    idx = low
+    t0 = t_vals[idx - 1]
+    t1 = t_vals[idx]
+    dt = max(1e-12, t1 - t0)
+    alpha = (t - t0) / dt
+
+    s0 = table.arc_lengths[idx - 1]
+    s1 = table.arc_lengths[idx]
+    return float(s0 + alpha * (s1 - s0))
+
+
+@allow_positional
+def sample_sub_segment_points(
+    c0: Vec2,
+    c1: Vec2,
+    c2: Vec2,
+    c3: Vec2,
+    *,
+    t0: float = 0.0,
+    t1: float = 1.0,
+    steps: int = 16,
+) -> list[Vec2]:
+    """3次ベジェ曲線の部分区間 [t0, t1] をサンプリングした点列を返す."""
+    step_count = max(1, steps)
+    pts: list[Vec2] = []
+    for i in range(step_count + 1):
+        t = t0 + (t1 - t0) * (i / step_count)
+        pts.append(evaluate_cubic(c0, c1, c2, c3, t))
+    return pts
+
+
 def closest_point_on_table(
     table: ArcLengthTable,
     query: Vec2,
@@ -276,3 +360,27 @@ def closest_point_on_table(
             best_t = t_vals[i] + alpha * (t_vals[i + 1] - t_vals[i])
 
     return (best_pt, best_t, math.sqrt(best_dist_sq))
+
+
+def merge_breakpoints_by_arc_length(
+    table: ArcLengthTable,
+    raw_ts: Sequence[float],
+    *,
+    min_arc_gap: float = 0.001,
+) -> list[float]:
+    """候補パラメータ列 raw_ts を昇順走査し、実寸弧長で min_arc_gap (既定1mm) 以上離れた分割点リスト [0.0, ..., 1.0] を返す."""
+    tot_len = table.total_length
+    if tot_len <= min_arc_gap * 2.0:
+        return [0.0, 1.0]
+
+    candidates = sorted({float(t) for t in raw_ts if 0.0 < float(t) < 1.0})
+    result: list[float] = [0.0]
+    last_s = 0.0
+    for t in candidates:
+        s = arc_length_at_t(table, t)
+        if (s - last_s) >= min_arc_gap and (tot_len - s) >= min_arc_gap:
+            result.append(t)
+            last_s = s
+    result.append(1.0)
+    return result
+

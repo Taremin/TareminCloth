@@ -44,6 +44,17 @@ class ThemeColors:
     preview_line: ColorRGBA = (0.4, 0.8, 1.0, 0.9)
     preview_fill: ColorRGBA = (0.4, 0.8, 1.0, 0.2)
 
+    # 内部線
+    internal_line: ColorRGBA = (0.28, 0.78, 0.72, 0.9)
+    internal_line_selected: ColorRGBA = (0.45, 0.95, 0.88, 1.0)
+
+    # ノッチ（合印）
+    notch: ColorRGBA = (1.0, 0.85, 0.2, 0.95)
+    notch_selected: ColorRGBA = (1.0, 0.95, 0.4, 1.0)
+
+    # 寸法線テキスト
+    dimension_text: ColorRGBA = (0.75, 0.78, 0.84, 0.85)
+
     # HUD・UI
     hud_bg: ColorRGBA = (0.1, 0.1, 0.12, 0.85)
     hud_border: ColorRGBA = (0.3, 0.3, 0.35, 0.8)

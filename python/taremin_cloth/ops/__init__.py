@@ -81,6 +81,10 @@ from .wrinkle import (
 )
 from .pattern import (
     TAREMIN_OT_pattern_editor,
+    TAREMIN_OT_export_pattern_json,
+    TAREMIN_OT_import_pattern_json,
+    TAREMIN_OT_set_reference_image,
+    TAREMIN_OT_migrate_curves_to_pattern,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
     TAREMIN_OT_apply_quick_arrangement,
@@ -140,6 +144,10 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
     TAREMIN_OT_pattern_editor,
+    TAREMIN_OT_export_pattern_json,
+    TAREMIN_OT_import_pattern_json,
+    TAREMIN_OT_set_reference_image,
+    TAREMIN_OT_migrate_curves_to_pattern,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
     TAREMIN_OT_apply_quick_arrangement,

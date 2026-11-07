@@ -122,10 +122,24 @@ class TestPatternSelectionAndSession(unittest.TestCase):
         self.assertAlmostEqual(snap2.world_pos[0], 0.1, places=4)
         self.assertAlmostEqual(snap2.world_pos[1], 0.1, places=4)
 
-        # 閾値より遠い場合 -> 吸着なし
-        settings_strict = SnapSettings(enabled=True, snap_threshold_pixels=1.0)  # 1px = 0.001m
+        # 閾値より遠くても常に共通グリッドへ量子化される (パーツ間の基準ずれ防止)
+        settings_strict = SnapSettings(enabled=True, snap_threshold_pixels=1.0)
         snap3 = compute_snap((0.055, 0.055), self.doc, view=view, settings=settings_strict)
-        self.assertEqual(snap3.kind, SnapKind.NONE)
+        self.assertEqual(snap3.kind, SnapKind.GRID)
+        self.assertAlmostEqual(snap3.world_pos[0], 0.06, places=4)
+
+        # スナップ無効時は生座標を返す
+        snap4 = compute_snap((0.055, 0.055), self.doc, view=view, settings=SnapSettings(enabled=False))
+        self.assertEqual(snap4.kind, SnapKind.NONE)
+        self.assertEqual(snap4.world_pos, (0.055, 0.055))
+
+    def test_point_in_polygon_degenerate_zero_length_segment(self):
+        """多角形頂点列に同一点の重複（長さ0の縮退辺）が含まれていても外側点が誤って内部判定されないこと."""
+        from taremin_cloth.pattern.geometry import point_in_polygon
+        poly_with_dup = [(0.5, 0.5), (0.7, 0.5), (0.6, 0.7), (0.6, 0.7)]
+        self.assertTrue(point_in_polygon((0.6, 0.55), poly_with_dup))
+        self.assertFalse(point_in_polygon((0.1, 0.1), poly_with_dup))
+        self.assertFalse(point_in_polygon((-1.0, -1.0), poly_with_dup))
 
 
 if __name__ == "__main__":

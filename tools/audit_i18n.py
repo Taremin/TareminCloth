@@ -16,7 +16,7 @@ import ast
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Any
+from typing import Dict, List, Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ADDON_DIR = REPO_ROOT / "python" / "taremin_cloth"
@@ -129,28 +129,31 @@ def extract_terms_from_ast(addon_dir: Path = ADDON_DIR) -> Dict[str, List[Dict[s
                                                 })
 
                 # UI呼び出し (layout.label, layout.prop text, i18n.trans)
-                if isinstance(node.func, ast.Attribute):
-                    if node.func.attr in ("trans", "pgettext", "pgettext_iface"):
-                        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                            t_val = node.args[0].value.strip()
+                if (
+                    isinstance(node.func, ast.Name) and node.func.id in ("trans", "pgettext", "pgettext_iface")
+                ) or (
+                    isinstance(node.func, ast.Attribute) and node.func.attr in ("trans", "pgettext", "pgettext_iface")
+                ):
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        t_val = node.args[0].value.strip()
+                        if t_val:
+                            results["ui_texts"].append({
+                                "file": str(rel),
+                                "line": node.lineno,
+                                "text": t_val,
+                                "source": "trans",
+                            })
+                elif isinstance(node.func, ast.Attribute) and node.func.attr in ("label", "prop", "operator", "menu"):
+                    for kw in node.keywords:
+                        if kw.arg == "text" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                            t_val = kw.value.value.strip()
                             if t_val:
                                 results["ui_texts"].append({
                                     "file": str(rel),
                                     "line": node.lineno,
                                     "text": t_val,
-                                    "source": "trans",
+                                    "source": f"layout.{node.func.attr}",
                                 })
-                    elif node.func.attr in ("label", "prop", "operator", "menu"):
-                        for kw in node.keywords:
-                            if kw.arg == "text" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                                t_val = kw.value.value.strip()
-                                if t_val:
-                                    results["ui_texts"].append({
-                                        "file": str(rel),
-                                        "line": node.lineno,
-                                        "text": t_val,
-                                        "source": f"layout.{node.func.attr}",
-                                    })
 
             # 2. クラス定義 (Panel, Operator, Menu) の属性 (bl_label, bl_description)
             if isinstance(node, ast.ClassDef):

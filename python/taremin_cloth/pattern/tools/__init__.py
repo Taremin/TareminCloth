@@ -3,7 +3,11 @@
 
 from .base import BaseTool
 from .select import SelectTool
-from .draw import RectangleTool, PolygonTool
+from .draw import RectangleTool, PolygonTool, EllipseTool
+from .internal import InternalLineTool
+from .notch import NotchTool
+from .cut import CutTool
+from .dart import DartTool
 from .sew import SewTool
 
 __all__ = [
@@ -11,5 +15,11 @@ __all__ = [
     "SelectTool",
     "RectangleTool",
     "PolygonTool",
+    "EllipseTool",
+    "InternalLineTool",
+    "NotchTool",
+    "CutTool",
+    "DartTool",
     "SewTool",
 ]
+
