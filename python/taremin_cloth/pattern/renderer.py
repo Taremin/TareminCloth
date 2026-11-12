@@ -171,6 +171,7 @@ def build_render_commands(
             num_segs = n_nodes if path.closed else n_nodes - 1
             for i in range(num_segs):
                 n0 = path.nodes[i]
+                n1 = path.nodes[(i + 1) % n_nodes]
                 ctrls = path.get_segment_controls(i)
                 table = build_arc_table(*ctrls)
 
@@ -179,11 +180,17 @@ def build_render_commands(
                     w_pt = piece.transform.transform_point(pt)
                     s_seg_pts.append(view.world_to_screen(w_pt))
 
+                is_edge_sel = controller.selection.is_edge_selected(
+                    piece.id, path.id, start_node_id=n0.id, end_node_id=n1.id
+                )
+                seg_col = th.edge_selected if is_edge_sel else line_col
+                seg_w = 3.5 if is_edge_sel else line_w
+
                 commands.append(DrawCommand(
                     kind=DrawCommandKind.POLYLINE,
-                    color=line_col,
+                    color=seg_col,
                     points=s_seg_pts,
-                    width=line_w,
+                    width=seg_w,
                 ))
 
                 # 寸法線テキスト（Lキーでトグル、5mm以上のセグメント/部分区間に表示）
@@ -250,7 +257,9 @@ def build_render_commands(
                 ))
 
                 # 選択中ノードのハンドル描画
-                if is_node_sel and nd.kind != NodeKind.CORNER:
+                if is_node_sel and (
+                    nd.kind != NodeKind.CORNER or nd.in_handle is not None or nd.out_handle is not None
+                ):
                     if nd.in_handle is not None:
                         h_pos = (nd.position[0] + nd.in_handle[0], nd.position[1] + nd.in_handle[1])
                         w_h = piece.transform.transform_point(h_pos)
@@ -537,15 +546,21 @@ def build_render_commands(
         points=[(layout.footer_bar.x, layout.footer_bar.y), (layout.footer_bar.right, layout.footer_bar.top)],
         filled=True,
     ))
-    if controller.picking_bone:
+    if getattr(controller, "status_message", ""):
+        guide_text = controller.status_message
+        text_color = getattr(th, "hud_accent", th.hud_text)
+    elif controller.picking_bone:
         guide_text = trans("Pick Bone Mode: Click bone in 3D View [RMB/Esc: Cancel, X: Clear]")
+        text_color = th.hud_text_dim
     elif controller.sliding_field is not None:
         guide_text = trans("Slider Drag: Move mouse left/right [Shift: Fine tuning]")
+        text_color = th.hud_text_dim
     else:
         guide_text = get_tool_guide(controller.active_tool_name)
+        text_color = th.hud_text_dim
     commands.append(DrawCommand(
         kind=DrawCommandKind.TEXT,
-        color=th.hud_text_dim,
+        color=text_color,
         points=[(layout.footer_bar.x + 12.0, layout.footer_bar.y + 8.0)],
         text=guide_text,
         font_size=12,
@@ -596,7 +611,19 @@ def build_render_commands(
     ))
 
     # 選択情報カード
-    card_lines = format_selection_card_lines(doc, controller.selection)
+    clip_dict = getattr(controller, "edge_clipboard", None)
+    card_lines = format_selection_card_lines(
+        doc,
+        controller.selection,
+        shape_match_mode=getattr(controller, "shape_match_mode", "SIMILAR"),
+        shape_match_reverse=getattr(controller, "shape_match_reverse", True),
+        shape_match_flip_curvature=getattr(controller, "shape_match_flip_curvature", False),
+        shape_match_apply_endpoint_offset=getattr(controller, "shape_match_apply_endpoint_offset", False),
+        shape_match_ease_value=getattr(controller, "shape_match_ease_value", 0.0),
+        shape_match_ease_is_ratio=getattr(controller, "shape_match_ease_is_ratio", False),
+        has_edge_clipboard=bool(clip_dict),
+        clipboard_length=clip_dict["length"] if clip_dict else 0.0,
+    )
     if card_lines:
         commands.append(DrawCommand(
             kind=DrawCommandKind.RECT,
@@ -609,6 +636,7 @@ def build_render_commands(
         if (
             not controller.selection.notch_ids
             and not controller.selection.seam_ids
+            and not controller.selection.edge_ranges
             and len(controller.selection.piece_ids) == 1
         ):
             sel_pid = next(iter(controller.selection.piece_ids))
@@ -656,6 +684,7 @@ def build_render_commands(
         if (
             not controller.selection.notch_ids
             and not controller.selection.seam_ids
+            and not controller.selection.edge_ranges
             and len(controller.selection.piece_ids) == 1
         ):
             sel_pid = next(iter(controller.selection.piece_ids))
@@ -781,6 +810,8 @@ def build_render_commands(
                 "is_tubular": trans("Tubular"),
                 "notch_from_start": trans("From Start"),
                 "notch_ratio": trans("Ratio"),
+                "shape_match_ease": trans("Ease"),
+                "seam_match_ease": trans("Ease"),
             }
             label = label_map.get(controller.editing_field, controller.editing_field)
             commands.append(DrawCommand(

@@ -15,6 +15,9 @@ from .bezier import (
     sample_sub_segment_points,
     closest_point_on_table,
     merge_breakpoints_by_arc_length,
+    extract_sub_cubic,
+    match_segment_shape,
+    adjust_segment_arc_length,
 )
 from .sampling import (
     compute_seam_subdivision_count,
@@ -47,6 +50,9 @@ __all__ = [
     "sample_sub_segment_points",
     "closest_point_on_table",
     "merge_breakpoints_by_arc_length",
+    "extract_sub_cubic",
+    "match_segment_shape",
+    "adjust_segment_arc_length",
     "compute_seam_subdivision_count",
     "sample_edge_range_by_count",
     "signed_area",

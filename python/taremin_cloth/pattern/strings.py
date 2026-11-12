@@ -18,7 +18,7 @@ TOOL_NAMES: dict[str, str] = {
 
 # ツール別操作ガイド (英語マスターキー)
 TOOL_GUIDES: dict[str, str] = {
-    "SELECT": "Click: Select / Drag: Move / R: Flip seam / C: Curve / U: Unfold / X: Delete",
+    "SELECT": "Click: Select / DblClick or W: Split / Shift+D: Dup / M: Flip / U: Unfold / X: Delete",
     "RECTANGLE": "Drag opposite corners / Esc: Cancel",
     "POLYGON": "Click points / Click start or Enter to close / Esc: Cancel",
     "ELLIPSE": "Drag opposite corners / Esc: Cancel",

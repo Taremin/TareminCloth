@@ -418,7 +418,7 @@ class TAREMIN_OT_pattern_editor(Operator):
                 return {'RUNNING_MODAL'}
 
         # ツール切替キーおよび寸法線トグル (keymap.resolve_tool_hotkey 委譲)
-        if event.value == 'PRESS' and not event.ctrl and not event.alt:
+        if event.value == 'PRESS' and not event.ctrl and not event.alt and not event.shift:
             if self.controller.editing_field is None and not self.controller.picking_bone:
                 # 縫合反転ショートカット (R / F): 縫合選択中またはSEWツール中はツール切替(RECTANGLE)より反転を優先
                 is_flip_key = event.type in ('R', 'F')
@@ -453,7 +453,8 @@ class TAREMIN_OT_pattern_editor(Operator):
 
         # イベント配送
         is_mouse_button = event.type in ('LEFTMOUSE', 'SELECTMOUSE', 'RIGHTMOUSE', 'ACTIONMOUSE', 'MIDDLEMOUSE')
-        is_press = (event.value == 'PRESS' and is_mouse_button)
+        is_double_click = (event.value == 'DOUBLE_CLICK' and is_mouse_button)
+        is_press = (event.value in ('PRESS', 'DOUBLE_CLICK') and is_mouse_button)
         is_release = (event.value == 'RELEASE' and is_mouse_button)
         is_move = (event.type == 'MOUSEMOVE')
         button = "LEFT" if event.type in ('LEFTMOUSE', 'SELECTMOUSE') else "RIGHT" if event.type in ('RIGHTMOUSE', 'ACTIONMOUSE') else "MIDDLE" if event.type == 'MIDDLEMOUSE' else ""
@@ -465,6 +466,7 @@ class TAREMIN_OT_pattern_editor(Operator):
             is_press=is_press,
             is_release=is_release,
             is_move=is_move,
+            is_double_click=is_double_click,
             button=button,
             shift=event.shift,
             ctrl=event.ctrl,
@@ -473,7 +475,12 @@ class TAREMIN_OT_pattern_editor(Operator):
             unicode=unicode_char,
         )
 
+        if key:
+            logger.debug(f"[Pattern] Modal Key: key='{key}', ctrl={event.ctrl}, shift={event.shift}, alt={event.alt}")
+
         consumed = self.controller.handle_event(ed_event)
+        if key:
+            logger.debug(f"[Pattern] Modal handle_event returned: consumed={consumed}")
 
         # Pick Bone モード開始直後の初期ホバーボーン設定
         if self.controller.picking_bone and not self.controller.hovered_bone:

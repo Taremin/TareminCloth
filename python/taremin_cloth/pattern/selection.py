@@ -126,7 +126,9 @@ def hit_test(
                             )
 
                     # 選択中ノードのハンドルのヒット判定
-                    if check_handles and node.id in sel_nodes and node.kind != NodeKind.CORNER:
+                    if check_handles and node.id in sel_nodes and (
+                        node.kind != NodeKind.CORNER or node.in_handle is not None or node.out_handle is not None
+                    ):
                         if node.in_handle is not None:
                             in_pos = (node.position[0] + node.in_handle[0], node.position[1] + node.in_handle[1])
                             w_in_pos = piece.transform.transform_point(in_pos)

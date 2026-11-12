@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import TYPE_CHECKING, Optional
 
 from ..document import (
@@ -25,6 +26,7 @@ from ..geometry import (
 from ..ids import new_id
 from ..selection import HitResult, HitTargetKind, hit_test
 from ..session import compute_snap
+from ...utils.logger import logger
 from .base import BaseTool
 
 if TYPE_CHECKING:
@@ -42,6 +44,9 @@ class SelectTool(BaseTool):
         self.drag_start_world: tuple[float, float] = (0.0, 0.0)
         self.drag_target: Optional[HitResult] = None
         self.before_drag_doc: Optional[Document] = None
+        self._last_edge_click_time: float = 0.0
+        self._last_edge_click_screen: tuple[float, float] = (0.0, 0.0)
+        self._last_edge_click_seg: Optional[tuple[str, str, str]] = None
 
     def on_mouse_down(self, controller: EditorController, event: EditorEvent) -> bool:
         if event.button != "LEFT":
@@ -63,6 +68,12 @@ class SelectTool(BaseTool):
             selected_node_ids=controller.selection.node_ids,
             allowed_kinds=allowed,
         )
+
+
+        if hit:
+            logger.debug(f"[Pattern] MouseDown Hit: kind={hit.kind}, piece={hit.piece_id}, start_node={hit.segment_start_node_id}, end_node={hit.segment_end_node_id}, node={hit.node_id}, t={hit.edge_t:.3f}")
+        else:
+            logger.debug(f"[Pattern] MouseDown Hit: NONE (pos={event.world_pos})")
 
         self.before_drag_doc = controller.doc.clone()
         self.drag_start_world = event.world_pos
@@ -102,6 +113,40 @@ class SelectTool(BaseTool):
 
         self.is_dragging = True
 
+        # 辺・内部線上でのダブルクリック（ノード挿入）
+        if hit.kind in (HitTargetKind.EDGE, HitTargetKind.INTERNAL_PATH) and not event.ctrl and not event.shift:
+            now = time.monotonic()
+            dt = now - self._last_edge_click_time
+            sx, sy = event.screen_pos
+            lx, ly = self._last_edge_click_screen
+            screen_dist = math.hypot(sx - lx, sy - ly)
+            same_seg = (self._last_edge_click_seg == (hit.piece_id, hit.path_id, hit.segment_start_node_id))
+            is_dbl = getattr(event, "is_double_click", False) or (same_seg and dt <= 0.35 and screen_dist <= 6.0)
+            if is_dbl:
+                before_doc = controller.doc.clone()
+                t_val = max(0.01, min(0.99, float(hit.edge_t)))
+                p = controller.doc.pieces.get(hit.piece_id)
+                pth = p.paths.get(hit.path_id) if p else None
+                seg_i = next((i for i, nd in enumerate(pth.nodes) if nd.id == hit.segment_start_node_id), None) if pth else None
+                new_node = controller.doc.insert_node_on_segment(
+                    hit.piece_id,
+                    hit.path_id,
+                    seg_idx=seg_i if seg_i is not None else 0,
+                    t=t_val,
+                ) if seg_i is not None else None
+                if new_node:
+                    controller.selection.clear()
+                    controller.selection.select_node(hit.piece_id, new_node.id)
+                    controller.history.record_change(
+                        description="Insert Node on Edge",
+                        before_doc=before_doc,
+                        after_doc=controller.doc,
+                    )
+                    self._last_edge_click_time = 0.0
+                    self._last_edge_click_seg = None
+                    controller.is_dirty = True
+                    return True
+
         if hit.kind == HitTargetKind.NODE and hit.node_id:
             controller.selection.select_node(hit.piece_id, hit.node_id, add=event.shift)
         elif hit.kind == HitTargetKind.NOTCH and hit.notch_id:
@@ -111,8 +156,23 @@ class SelectTool(BaseTool):
         elif hit.kind == HitTargetKind.HANDLE and hit.node_id:
             # ハンドル選択（ノード選択状態は維持）
             pass
-        elif hit.kind in (HitTargetKind.PIECE_BODY, HitTargetKind.EDGE, HitTargetKind.INTERNAL_PATH):
+        elif hit.kind == HitTargetKind.EDGE and hit.segment_start_node_id and hit.segment_end_node_id:
+            er = EdgeRange(
+                piece_id=hit.piece_id,
+                path_id=hit.path_id,
+                start_node_id=hit.segment_start_node_id,
+                end_node_id=hit.segment_end_node_id,
+            )
+            controller.selection.select_edge(er, add=event.shift)
+            self._last_edge_click_time = time.monotonic()
+            self._last_edge_click_screen = event.screen_pos
+            self._last_edge_click_seg = (hit.piece_id, hit.path_id, hit.segment_start_node_id)
+            logger.debug(f"[Pattern] Select Edge: {er}")
+        elif hit.kind in (HitTargetKind.PIECE_BODY, HitTargetKind.INTERNAL_PATH):
             controller.selection.select_piece(hit.piece_id, add=event.shift)
+            logger.debug(f"[Pattern] Select Piece Body/Internal: {hit.piece_id}")
+
+        logger.debug(f"[Pattern] SelectionState after click: pieces={controller.selection.piece_ids}, edges={len(controller.selection.edge_ranges)}, nodes={len(controller.selection.node_ids)}")
 
         return True
 
@@ -389,303 +449,17 @@ class SelectTool(BaseTool):
                 controller.is_dirty = True
             return True
 
+        if event.key.upper() == "W":
+            return controller.subdivide_selected_edge()
+
+        if event.key.upper() == "D" and event.shift:
+            return controller.duplicate_selected_pieces()
+
+        if event.key.upper() == "M":
+            return controller.flip_selected_pieces(direction="VERTICAL" if event.shift else "HORIZONTAL")
+
         if event.key.upper() == "U":
-            # 選択中のピースを取得
-            target_piece_id = controller.selection.active_piece_id
-            if not target_piece_id and controller.selection.piece_ids:
-                target_piece_id = next(iter(controller.selection.piece_ids))
-            if not target_piece_id and len(controller.doc.pieces) == 1:
-                target_piece_id = next(iter(controller.doc.pieces.keys()))
-
-            if not target_piece_id or target_piece_id not in controller.doc.pieces:
-                return True
-
-            piece = controller.doc.pieces[target_piece_id]
-            outer = piece.paths.get(piece.outer_path_id)
-            if not outer or len(outer.nodes) < 3:
-                return True
-
-            before_doc = controller.doc.clone()
-
-            if event.shift:
-                # 【Shift+U】: 縫合付き対称複製 (Symmetric Duplicate with Seam)
-                nodes = outer.nodes
-                xs = [n.position[0] for n in nodes]
-                min_x, max_x = min(xs), max(xs)
-                w = max_x - min_x
-
-                sym_nodes: list[Node] = []
-                for n in reversed(nodes):
-                    in_h = (-n.out_handle[0], n.out_handle[1]) if n.out_handle else None
-                    out_h = (-n.in_handle[0], n.in_handle[1]) if n.in_handle else None
-                    sym_nodes.append(Node(
-                        id=new_id(),
-                        position=(-n.position[0], n.position[1]),
-                        kind=n.kind,
-                        in_handle=in_h,
-                        out_handle=out_h,
-                    ))
-
-                sym_piece_id = new_id()
-                sym_path_id = new_id()
-                new_transform = piece.transform.__class__(
-                    tx=piece.transform.tx + w + 0.05,
-                    ty=piece.transform.ty,
-                    rotation_rad=piece.transform.rotation_rad,
-                    sx=piece.transform.sx,
-                    sy=piece.transform.sy,
-                )
-                if piece.name.endswith("_L"):
-                    sym_name = f"{piece.name[:-2]}_R"
-                elif piece.name.endswith(".L"):
-                    sym_name = f"{piece.name[:-2]}.R"
-                elif piece.name.endswith("_Left"):
-                    sym_name = f"{piece.name[:-5]}_Right"
-                else:
-                    sym_name = f"{piece.name}_Sym"
-
-                sym_piece = Piece(
-                    id=sym_piece_id,
-                    name=sym_name,
-                    paths={sym_path_id: Path(id=sym_path_id, role=PathRole.OUTER, nodes=sym_nodes, closed=True)},
-                    outer_path_id=sym_path_id,
-                    transform=new_transform,
-                    target_edge_length=piece.target_edge_length,
-                    layer_id=piece.layer_id,
-                )
-                controller.doc.pieces[sym_piece_id] = sym_piece
-
-                orig_pl = controller.doc.placements.get(piece.id)
-                if orig_pl:
-                    from ..placement import flip_bone_name_left_right
-                    sym_bone = flip_bone_name_left_right(orig_pl.target_bone)
-                    sym_angle = -orig_pl.bone_angle_deg
-                    controller.doc.placements[sym_piece_id] = Placement(
-                        piece_id=sym_piece_id,
-                        offset_3d=(-orig_pl.offset_3d[0], orig_pl.offset_3d[1], orig_pl.offset_3d[2]),
-                        euler_3d=(orig_pl.euler_3d[0], -orig_pl.euler_3d[1], -orig_pl.euler_3d[2]),
-                        target_bone=sym_bone,
-                        bone_t=orig_pl.bone_t,
-                        bone_angle_deg=sym_angle,
-                        surface_offset=orig_pl.surface_offset,
-                        is_tubular=orig_pl.is_tubular,
-                    )
-
-                best_i = 0
-                best_sum_x = float("inf")
-                for i in range(len(nodes)):
-                    sx = nodes[i].position[0] + nodes[(i + 1) % len(nodes)].position[0]
-                    if sx < best_sum_x:
-                        best_sum_x = sx
-                        best_i = i
-
-                n0 = nodes[best_i]
-                n1 = nodes[(best_i + 1) % len(nodes)]
-                sym_n1 = sym_nodes[len(nodes) - 1 - ((best_i + 1) % len(nodes))]
-                sym_n0 = sym_nodes[len(nodes) - 1 - best_i]
-
-                seam_id = new_id()
-                controller.doc.seams[seam_id] = Seam(
-                    id=seam_id,
-                    a=EdgeRange(piece_id=piece.id, path_id=piece.outer_path_id, start_node_id=n0.id, end_node_id=n1.id),
-                    b=EdgeRange(piece_id=sym_piece_id, path_id=sym_path_id, start_node_id=sym_n1.id, end_node_id=sym_n0.id),
-                )
-
-                # ノッチの対称複製
-                for notch in list(controller.doc.notches.values()):
-                    if notch.piece_id == piece.id and notch.path_id == piece.outer_path_id:
-                        seg_i = next((i for i, n in enumerate(nodes) if n.id == notch.segment_start_id), None)
-                        if seg_i is not None:
-                            sym_start_id = sym_nodes[len(nodes) - 1 - ((seg_i + 1) % len(nodes))].id
-                            sym_notch_id = new_id()
-                            controller.doc.notches[sym_notch_id] = Notch(
-                                id=sym_notch_id,
-                                piece_id=sym_piece_id,
-                                path_id=sym_path_id,
-                                segment_start_id=sym_start_id,
-                                t=max(0.001, min(0.999, 1.0 - notch.t)),
-                                kind=notch.kind,
-                                depth=notch.depth,
-                                width=notch.width,
-                            )
-
-                controller.selection.clear()
-                controller.selection.select_piece(sym_piece_id)
-                controller.history.record_change(
-                    description="Symmetric Duplicate Piece",
-                    before_doc=before_doc,
-                    after_doc=controller.doc,
-                )
-                controller.is_dirty = True
-                return True
-
-            else:
-                # 【U】: 単一ピースの対称展開 (Unfold Piece - 自己交差のない2n-2頂点閉ループ)
-                nodes = outer.nodes
-                n_orig = len(nodes)
-                if n_orig < 3:
-                    return True
-
-                # 中点のX座標が最小となる辺を対称軸として特定
-                best_i = 0
-                best_mid_x = float("inf")
-                for i in range(n_orig):
-                    p0 = nodes[i].position
-                    p1 = nodes[(i + 1) % n_orig].position
-                    mx = 0.5 * (p0[0] + p1[0])
-                    if mx < best_mid_x:
-                        best_mid_x = mx
-                        best_i = i
-
-                i0 = best_i
-                i1 = (best_i + 1) % n_orig
-                p_a = nodes[i1].position
-                p_b = nodes[i0].position
-
-                # 直線 A -> B に対する鏡像反射ヘルパー
-                vx = p_b[0] - p_a[0]
-                vy = p_b[1] - p_a[1]
-                v_len = math.hypot(vx, vy)
-                if v_len > 1e-9:
-                    nx = -vy / v_len
-                    ny = vx / v_len
-                else:
-                    nx, ny = 1.0, 0.0
-
-                def reflect_point(p: tuple[float, float]) -> tuple[float, float]:
-                    wx = p[0] - p_a[0]
-                    wy = p[1] - p_a[1]
-                    d = wx * nx + wy * ny
-                    return (p[0] - 2.0 * d * nx, p[1] - 2.0 * d * ny)
-
-                def reflect_vec(v: tuple[float, float]) -> tuple[float, float]:
-                    d = v[0] * nx + v[1] * ny
-                    return (v[0] - 2.0 * d * nx, v[1] - 2.0 * d * ny)
-
-                # ループ構築: i1 から時計回りに i0 まで進み、折り返しとして (i0-1 down to i1+1) の鏡像を追加
-                unfolded_nodes: list[Node] = []
-                orig_idx_to_new_id: dict[int, str] = {}
-                mirror_idx_to_new_id: dict[int, str] = {}
-
-                # 前半: 元のノード i1 -> i0
-                curr = i1
-                while True:
-                    orig_n = nodes[curr]
-                    nid = new_id()
-                    orig_idx_to_new_id[curr] = nid
-                    unfolded_nodes.append(Node(
-                        id=nid,
-                        position=orig_n.position,
-                        kind=orig_n.kind,
-                        in_handle=orig_n.in_handle,
-                        out_handle=orig_n.out_handle,
-                    ))
-                    if curr == i0:
-                        break
-                    curr = (curr + 1) % n_orig
-
-                # 対称軸両端は不動点
-                mirror_idx_to_new_id[i0] = orig_idx_to_new_id[i0]
-                mirror_idx_to_new_id[i1] = orig_idx_to_new_id[i1]
-
-                # 後半: 内側ノードの鏡像 (i0 - 1 down to i1 + 1)
-                curr = (i0 - 1 + n_orig) % n_orig
-                while curr != i1:
-                    orig_n = nodes[curr]
-                    mir_pos = reflect_point(orig_n.position)
-                    mir_in = reflect_vec(orig_n.out_handle) if orig_n.out_handle else None
-                    mir_out = reflect_vec(orig_n.in_handle) if orig_n.in_handle else None
-                    nid = new_id()
-                    mirror_idx_to_new_id[curr] = nid
-                    unfolded_nodes.append(Node(
-                        id=nid,
-                        position=mir_pos,
-                        kind=orig_n.kind,
-                        in_handle=mir_in,
-                        out_handle=mir_out,
-                    ))
-                    curr = (curr - 1 + n_orig) % n_orig
-
-                outer.nodes = unfolded_nodes
-
-                # ノッチの再配置および整理
-                old_notches = [
-                    n for n in list(controller.doc.notches.values())
-                    if n.piece_id == piece.id and n.path_id == outer.id
-                ]
-                for n in old_notches:
-                    del controller.doc.notches[n.id]
-
-                for n in old_notches:
-                    seg_i = next((i for i, nd in enumerate(nodes) if nd.id == n.segment_start_id), None)
-                    if seg_i is not None and seg_i != best_i:
-                        # 前半辺用ノッチ
-                        nid_fwd = new_id()
-                        controller.doc.notches[nid_fwd] = Notch(
-                            id=nid_fwd,
-                            piece_id=piece.id,
-                            path_id=outer.id,
-                            segment_start_id=orig_idx_to_new_id[seg_i],
-                            t=n.t,
-                            kind=n.kind,
-                            depth=n.depth,
-                            width=n.width,
-                        )
-                        # 後半鏡像辺用ノッチ
-                        next_i = (seg_i + 1) % n_orig
-                        mir_start_id = mirror_idx_to_new_id[next_i]
-                        nid_rev = new_id()
-                        controller.doc.notches[nid_rev] = Notch(
-                            id=nid_rev,
-                            piece_id=piece.id,
-                            path_id=outer.id,
-                            segment_start_id=mir_start_id,
-                            t=max(0.001, min(0.999, 1.0 - n.t)),
-                            kind=n.kind,
-                            depth=n.depth,
-                            width=n.width,
-                        )
-
-                # Seam の再マッピングと対称軸上の Seam 除去
-                axis_node_ids = {nodes[i0].id, nodes[i1].id}
-                dead_seams: list[str] = []
-                for sid, seam in controller.doc.seams.items():
-                    seam_ers = seam.iter_unique_edge_ranges()
-                    affects_this_piece = any(er.piece_id == piece.id and er.path_id == outer.id for er in seam_ers)
-                    if not affects_this_piece:
-                        continue
-
-                    # 対称軸辺を参照していた場合は削除
-                    has_axis = False
-                    for er in seam_ers:
-                        if er.piece_id == piece.id and er.path_id == outer.id:
-                            if er.start_node_id in axis_node_ids and er.end_node_id in axis_node_ids:
-                                has_axis = True
-                                break
-                    if has_axis:
-                        dead_seams.append(sid)
-                        continue
-
-                    # 前半ノードIDへの付け替え
-                    for er in seam_ers:
-                        if er.piece_id == piece.id and er.path_id == outer.id:
-                            orig_start_idx = next((i for i, nd in enumerate(nodes) if nd.id == er.start_node_id), None)
-                            orig_end_idx = next((i for i, nd in enumerate(nodes) if nd.id == er.end_node_id), None)
-                            if orig_start_idx is not None and orig_start_idx in orig_idx_to_new_id:
-                                er.start_node_id = orig_idx_to_new_id[orig_start_idx]
-                            if orig_end_idx is not None and orig_end_idx in orig_idx_to_new_id:
-                                er.end_node_id = orig_idx_to_new_id[orig_end_idx]
-
-                for sid in dead_seams:
-                    if sid in controller.doc.seams:
-                        del controller.doc.seams[sid]
-                controller.history.record_change(
-                    description="Unfold Piece",
-                    before_doc=before_doc,
-                    after_doc=controller.doc,
-                )
-                controller.is_dirty = True
-                return True
+            return controller.mirror_duplicate_selected() if event.shift else controller.unfold_selected()
 
         return False
 

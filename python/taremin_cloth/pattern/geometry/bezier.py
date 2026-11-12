@@ -384,3 +384,178 @@ def merge_breakpoints_by_arc_length(
     result.append(1.0)
     return result
 
+
+@allow_positional
+def extract_sub_cubic(
+    c0: Vec2,
+    c1: Vec2,
+    c2: Vec2,
+    c3: Vec2,
+    *,
+    t0: float = 0.0,
+    t1: float = 1.0,
+) -> tuple[Vec2, Vec2, Vec2, Vec2]:
+    """3次ベジェ曲線の部分区間 [t0, t1] を単一の3次ベジェ4制御点として厳密抽出する."""
+    a = max(0.0, min(1.0, float(t0)))
+    b = max(0.0, min(1.0, float(t1)))
+    is_rev = a > b
+    if is_rev:
+        a, b = b, a
+    if b - a < 1e-9:
+        pt = evaluate_cubic(c0, c1, c2, c3, a)
+        return (pt, pt, pt, pt)
+
+    cur = (c0, c1, c2, c3)
+    if b < 1.0 - 1e-9:
+        cur, _ = subdivide_cubic(cur[0], cur[1], cur[2], cur[3], b)
+    if a > 1e-9:
+        rel_a = max(0.0, min(1.0, a / max(1e-9, b)))
+        _, cur = subdivide_cubic(cur[0], cur[1], cur[2], cur[3], rel_a)
+
+    if is_rev:
+        return (cur[3], cur[2], cur[1], cur[0])
+    return cur
+
+
+@allow_positional
+def match_segment_shape(
+    source_ctrls: tuple[Vec2, Vec2, Vec2, Vec2],
+    target_p0: Vec2,
+    target_p1: Vec2,
+    *,
+    reverse: bool = False,
+    flip_curvature: bool = False,
+) -> tuple[Vec2, Vec2]:
+    """参照元3次ベジェ制御点列の相対ハンドル無次元比率を、対象弦 target_p0 -> target_p1 上へ相似射影し中間制御点 (c1, c2) を返す."""
+    s0, s1, s2, s3 = source_ctrls
+    if reverse:
+        s0, s1, s2, s3 = s3, s2, s1, s0
+
+    t0 = (float(target_p0[0]), float(target_p0[1]))
+    t3 = (float(target_p1[0]), float(target_p1[1]))
+
+    t_vx = t3[0] - t0[0]
+    t_vy = t3[1] - t0[1]
+    t_len = math.hypot(t_vx, t_vy)
+
+    s_vx = s3[0] - s0[0]
+    s_vy = s3[1] - s0[1]
+    s_len = math.hypot(s_vx, s_vy)
+
+    if t_len < 1e-9 or s_len < 1e-9:
+        c1_lin = (t0[0] + t_vx / 3.0, t0[1] + t_vy / 3.0)
+        c2_lin = (t0[0] + 2.0 * t_vx / 3.0, t0[1] + 2.0 * t_vy / 3.0)
+        return (c1_lin, c2_lin)
+
+    s_ux, s_uy = s_vx / s_len, s_vy / s_len
+    s_nx, s_ny = -s_uy, s_ux
+
+    h_out_x, h_out_y = s1[0] - s0[0], s1[1] - s0[1]
+    h_in_x, h_in_y = s2[0] - s3[0], s2[1] - s3[1]
+
+    alpha_out = (h_out_x * s_ux + h_out_y * s_uy) / s_len
+    beta_out = (h_out_x * s_nx + h_out_y * s_ny) / s_len
+    alpha_in = (h_in_x * s_ux + h_in_y * s_uy) / s_len
+    beta_in = (h_in_x * s_nx + h_in_y * s_ny) / s_len
+
+    if flip_curvature:
+        beta_out = -beta_out
+        beta_in = -beta_in
+
+    t_ux, t_uy = t_vx / t_len, t_vy / t_len
+    t_nx, t_ny = -t_uy, t_ux
+
+    c1 = (
+        t0[0] + t_len * (alpha_out * t_ux + beta_out * t_nx),
+        t0[1] + t_len * (alpha_out * t_uy + beta_out * t_ny),
+    )
+    c2 = (
+        t3[0] + t_len * (alpha_in * t_ux + beta_in * t_nx),
+        t3[1] + t_len * (alpha_in * t_uy + beta_in * t_ny),
+    )
+    return (c1, c2)
+
+
+@allow_positional
+def adjust_segment_arc_length(
+    c0: Vec2,
+    c1: Vec2,
+    c2: Vec2,
+    c3: Vec2,
+    *,
+    target_length: float,
+    mode: str = "LENGTH_ADJUST_BULGE",
+    flip_curvature: bool = False,
+) -> tuple[Vec2, Vec2, Vec2, Vec2]:
+    """3次ベジェ曲線の弧長が target_length に一致するよう制御点を調整して返す.
+
+    mode:
+      - "SIMILAR": 変更せずそのまま返す。
+      - "LENGTH_MOVE_END": 始点 c0 を固定し、相似拡大縮小で終点 c3 と制御点を伸縮させる。
+      - "LENGTH_ADJUST_BULGE": 両端点 c0, c3 を固定し、弦からの偏差を二分探索（32回）でスケールする。
+        なお target_length が弦長以下の場合は幾何学的下限である直線制御点を返す。
+    """
+    goal = max(0.001, float(target_length))
+    if mode == "SIMILAR":
+        return (c0, c1, c2, c3)
+
+    if mode == "LENGTH_MOVE_END":
+        cur_len = build_arc_table(c0, c1, c2, c3).total_length
+        if cur_len < 1e-9:
+            return (c0, c1, c2, c3)
+        scale = goal / cur_len
+        nc1 = (c0[0] + (c1[0] - c0[0]) * scale, c0[1] + (c1[1] - c0[1]) * scale)
+        nc2 = (c0[0] + (c2[0] - c0[0]) * scale, c0[1] + (c2[1] - c0[1]) * scale)
+        nc3 = (c0[0] + (c3[0] - c0[0]) * scale, c0[1] + (c3[1] - c0[1]) * scale)
+        return (c0, nc1, nc2, nc3)
+
+    if mode == "LENGTH_ADJUST_BULGE":
+        vx = c3[0] - c0[0]
+        vy = c3[1] - c0[1]
+        chord = math.hypot(vx, vy)
+        if chord < 1e-9:
+            return (c0, c1, c2, c3)
+
+        b1 = (c0[0] + vx / 3.0, c0[1] + vy / 3.0)
+        b2 = (c0[0] + 2.0 * vx / 3.0, c0[1] + 2.0 * vy / 3.0)
+        if goal <= chord + 1e-6:
+            return (c0, b1, b2, c3)
+
+        d1x, d1y = c1[0] - b1[0], c1[1] - b1[1]
+        d2x, d2y = c2[0] - b2[0], c2[1] - b2[1]
+        if math.hypot(d1x, d1y) + math.hypot(d2x, d2y) < 1e-7:
+            nx, ny = -vy / chord, vx / chord
+            if flip_curvature:
+                nx, ny = -nx, -ny
+            bulge = 0.25 * chord
+            d1x, d1y = bulge * nx, bulge * ny
+            d2x, d2y = bulge * nx, bulge * ny
+
+        def eval_len(s: float) -> float:
+            tc1 = (b1[0] + s * d1x, b1[1] + s * d1y)
+            tc2 = (b2[0] + s * d2x, b2[1] + s * d2y)
+            return build_arc_table(c0, tc1, tc2, c3).total_length
+
+        lo = 0.0
+        hi = 1.0
+        while eval_len(hi) < goal and hi < 64.0:
+            hi *= 2.0
+
+        for _ in range(32):
+            mid = 0.5 * (lo + hi)
+            if eval_len(mid) < goal:
+                lo = mid
+            else:
+                hi = mid
+
+        s_final = 0.5 * (lo + hi)
+        return (
+            c0,
+            (b1[0] + s_final * d1x, b1[1] + s_final * d1y),
+            (b2[0] + s_final * d2x, b2[1] + s_final * d2y),
+            c3,
+        )
+
+    raise ValueError(f"Unsupported arc length adjustment mode: '{mode}'")
+
+

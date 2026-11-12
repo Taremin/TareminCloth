@@ -23,6 +23,7 @@ class ThemeColors:
     piece_fill_selected: ColorRGBA = (0.32, 0.38, 0.48, 0.6)
     piece_outline: ColorRGBA = (0.85, 0.88, 0.92, 1.0)
     piece_outline_selected: ColorRGBA = (0.35, 0.70, 1.0, 1.0)
+    edge_selected: ColorRGBA = (1.0, 0.70, 0.20, 1.0)
 
     # ノード
     node_corner: ColorRGBA = (0.9, 0.9, 0.9, 1.0)
@@ -60,6 +61,7 @@ class ThemeColors:
     hud_border: ColorRGBA = (0.3, 0.3, 0.35, 0.8)
     hud_text: ColorRGBA = (0.95, 0.95, 0.95, 1.0)
     hud_text_dim: ColorRGBA = (0.65, 0.65, 0.7, 1.0)
+    hud_accent: ColorRGBA = (0.35, 0.75, 1.0, 1.0)
 
 
 DEFAULT_THEME: ThemeColors = ThemeColors()

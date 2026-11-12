@@ -153,6 +153,41 @@ class SelectionState:
         """ノッチが選択されているかどうか."""
         return notch_id in self.notch_ids
 
+    def select_edge(self, edge_range: EdgeRange, *, add: bool = False) -> None:
+        """辺を選択する（後方互換およびドラッグ移動連携のため所属ピースも piece_ids に登録）."""
+        if not add:
+            self.clear()
+        if not self.is_edge_selected(
+            edge_range.piece_id,
+            edge_range.path_id,
+            start_node_id=edge_range.start_node_id,
+            end_node_id=edge_range.end_node_id,
+        ):
+            self.edge_ranges.append(edge_range)
+        self.piece_ids.add(edge_range.piece_id)
+        self.active_piece_id = edge_range.piece_id
+
+    def is_edge_selected(
+        self,
+        piece_id: str,
+        path_id: str,
+        *,
+        start_node_id: str,
+        end_node_id: str,
+    ) -> bool:
+        """指定セグメントが選択中かどうかを返す（順方向・逆方向とも一致扱い）."""
+        target_pair = {start_node_id, end_node_id}
+        return any(
+            er.piece_id == piece_id
+            and er.path_id == path_id
+            and {er.start_node_id, er.end_node_id} == target_pair
+            for er in self.edge_ranges
+        )
+
+    def get_active_edge_range(self) -> Optional[EdgeRange]:
+        """最後に選択されたアクティブな EdgeRange を返す."""
+        return self.edge_ranges[-1] if self.edge_ranges else None
+
 
 def compute_snap(
     world_pos: tuple[float, float],

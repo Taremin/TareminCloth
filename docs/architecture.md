@@ -1169,12 +1169,21 @@ graph TD
    - `Document.save_to_file` / `Document.load_from_file`: 外部 `.json` ファイルとの完全な可逆シリアライズ。
    - Blender 完全非依存であり、CLI やスタンドアロンテストで全操作をミリ秒で検証可能。
 2. **2D幾何演算 & 弧長サンプリング (`python/taremin_cloth/pattern/geometry/`)**:
-   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、de Casteljau アルゴリズムによる厳密 3次ベジェ曲線2分割（`split_cubic_bezier`）、累積弧長テーブル構築、最近点探索。
+   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、de Casteljau アルゴリズムによる厳密 3次ベジェ曲線2分割（`split_cubic_bezier`）、部分区間 $[t_0, t_1]$ 抽出（`extract_sub_cubic`）、弦ベクトル基準の形状転写（`match_segment_shape`）、ニュートン・ラフソン法による端点固定膨らみ・終点移動弧長微調整（`adjust_segment_arc_length`）、累積弧長テーブル構築、最近点探索。
    - `polygon.py`: Shoelace 符号付き面積、反時計回り (CCW) 正規化、耳刈り法（Ear-Clipping）による凹凸対応三角形化（`triangulate_polygon_2d`）、Winding Number 内外判定、自己交差検査、2線分交差（`segment_intersection`）。
    - `transform.py`: 2D アフィン変換（平行移動・回転・拡大縮小）、軸平行バウンディングボックス。
 3. **対話ツール体系 & ヒットテスト (`python/taremin_cloth/pattern/tools/`, `selection.py`, `editor.py`, `keymap.py`)**:
    - `hit_test`: 要素優先順位（ハンドル > ノード > ノッチ > 辺 > 内部線 > ピース内部）による選択判定。画面ピクセル換算（12px）の動的許容半径によるズーム倍率非依存の高精度ヒット。
-   - `SelectTool`: 要素選択・ドラッグ移動（ワールドスナップ後ローカル逆変換 `inverse_apply` による厳密変換）、複数ノード・複数ピースの一括移動、Ctrl+クリックによる曲線形状保持ノード挿入、ボックス選択（矩形ドラッグ）。Uキーによる対称展開（最小X辺を対称軸とした $2n-2$ 頂点の単一反時計回り閉ループ鏡像反射）、Shift+Uキーによる対称複製と中心辺自動縫合。
+   - `SelectTool`: 要素選択・ドラッグ移動（ワールドスナップ後ローカル逆変換 `inverse_apply` による厳密変換）、複数ノード・複数ピースの一括移動、ボックス選択（矩形ドラッグ）。
+   - **辺操作・対称化・反転・複製体系**:
+     - **ノッチではない辺の分割（Subdivide Edge）**: 辺選択中に `W` キー押下で実寸弧長50%分割。外周辺ダブルクリックまたは `Ctrl+クリック` による任意位置ノード挿入（ベジェ形状・周辺縫合完全維持）。
+     - **選択辺基準の対称展開（Unfold）**: 選択辺を対称軸として $2n-2$ 頂点の単一反時計回り（CCW）閉ループに対称展開（わ展開、`U` キー）。未選択時は中点X座標最小辺を自動判定。
+     - **選択辺基準の対称複製（Mirror Duplicate）**: 選択辺の法線外側 5cm 離間位置に対称ピースを生成し、対称軸同士を平行縫合（`reverse=True`）で自動接続（`Shift+U` キー）。
+     - **ピースの複製と反転**: ピース単体複製（`Ctrl+D` / `Shift+D` / `Ctrl+C` & `Ctrl+V`）、左右反転複製（`Ctrl+Shift+D`、`Front_L` $\to$ `Front_R` 自動命名）、単体左右反転（`M` キー）、単体上下反転（`Shift+M` キー）。閉パスの反時計回り（CCW）向きを維持するためノード順を自動反転。
+     - **縫合用の形状・長さコピー（Match Edge Shape & Seam Length）**:
+       - *アプローチA（クリップボード）*: 辺選択中に Ctrl+C（または Ctrl+Shift+C）で形状・弧長コピー、対象辺を選択して Ctrl+V（または Ctrl+Shift+V）でペースト。ピース選択時はピース単位コピー＆ペーストに自動連動。
+       - *アプローチB（Seam同期）*: 辺選択中または Seam 選択中に Ctrl+M で瞬時に形状・弧長を同期（辺選択時は接続された Seam を自動特定して同期相手へ反映）。Seam 選択時は Ctrl+Shift+M で逆方向同期（B $	o$ A）。
+       - *合わせ方モード*: `SIMILAR`（相似拡大）、`LENGTH_ADJUST_BULGE`（端点固定・膨らみ調整）、`LENGTH_MOVE_END`（終点ノード移動伸張）。進行方向反転（`reverse`）、膨らみ反転（`flip_curvature`）、イセコミ量（`+0.5cm` / `+5mm` / `+5%` 等）のインライン編集に対応。
    - `RectangleTool` / `PolygonTool` / `EllipseTool`: 矩形、多角形、楕円（Ramanujan近似と4点ベジェ）作図。
    - `InternalLineTool`: ピース内部への折れ線・曲線描画（Rust CDT内部拘束線に自動連携）。
    - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。
@@ -1185,6 +1194,8 @@ graph TD
 4. **イミュータブル描画コマンド生成 & GPU描画 (`renderer.py`, `canvas.py`, `layout.py`)**:
    - `build_render_commands`: ドキュメントとセッション状態から `DrawCommand`（`LINE`, `POLYLINE`, `POLYGON`, `CIRCLE`, `RECT`, `TEXT`, `IMAGE`）のリストを純粋関数として生成。
    - 5領域HUDレイアウト（ヘッダーバー、左ツールレール、下部アクションバー、右上情報カード、数値入力カード）。
+   - 選択辺のハイライト表示（`POLYLINE` 総数を不変に保ちつつ選択セグメントのみ専用色・太線描画）。
+   - 辺情報カード（Subdivide, Unfold, Mirror, Copy/Paste Shape, Mode, Ease）、縫合情報カード（Match A->B, Match B->A, Mode, Flip Curvature, Ease, Mismatch常時表示）。
    - ツールレールのクリックによるツール切替、下部「Build 3D」「Close」ボタンクリック、および情報カード内数値（解像度・レイヤーID等）のインライン編集・cm単位解釈（`parse_length_input`）。
    - 寸法線表示（Lキートグル）、ノッチ描画、内部線描画、下絵画像（参考画像）の `gpu.texture` / `IMAGE_COLOR` による実画像アルファブレンド描画に対応。
    - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。

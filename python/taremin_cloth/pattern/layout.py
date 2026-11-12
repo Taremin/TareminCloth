@@ -177,6 +177,25 @@ def compute_hud_layout(
             w=card_w - 12.0,
             h=field_h,
         ),
+        # 辺選択カード用フィールド (行2〜行10)
+        "edge_subdivide": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 56.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "edge_unfold": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 74.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "edge_mirror_dup": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 92.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "edge_copy_shape": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 110.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "edge_paste_shape": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 128.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "shape_match_mode": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 146.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "shape_match_apply_endpoint_offset": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 164.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "shape_match_reverse": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 182.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "shape_match_flip_curvature": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 200.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "shape_match_ease": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 218.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "edge_match_seam": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
+        # 縫合選択カード用フィールド (行6〜行11)
+        "seam_match_a_to_b": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 128.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "seam_match_b_to_a": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 146.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "seam_match_mode": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 164.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "seam_match_apply_endpoint_offset": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 182.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "seam_match_flip_curvature": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 200.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "seam_match_ease": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 218.0) - 5.0, w=card_w - 12.0, h=field_h),
     }
 
     compass_rect = Rect2D(

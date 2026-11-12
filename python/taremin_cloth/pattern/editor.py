@@ -9,8 +9,11 @@ from typing import Optional
 
 from .document import Document, EdgeRange, PathRole
 from .history import HistoryManager
+from .ids import new_id
 from .session import SelectionState, SnapSettings, ViewTransform2D
 from .tools.base import BaseTool
+from ..i18n import trans
+from ..utils.logger import logger
 
 
 @dataclass
@@ -21,6 +24,7 @@ class EditorEvent:
     is_press: bool = False
     is_release: bool = False
     is_move: bool = False
+    is_double_click: bool = False
     button: str = "LEFT"  # "LEFT", "RIGHT", "MIDDLE"
     shift: bool = False
     ctrl: bool = False
@@ -55,6 +59,8 @@ KEY_CHAR_MAP: dict[str, str] = {
     "COMMA": ".",
     "MINUS": "-",
     "NUMPAD_MINUS": "-",
+    "PLUS": "+",
+    "NUMPAD_PLUS": "+",
 }
 
 NOTCH_CARD_FIELDS: tuple[str, ...] = ("notch_from_start", "notch_ratio")
@@ -123,6 +129,17 @@ class EditorController:
         self.request_close: bool = False
         self.editing_field: Optional[str] = None
         self.editing_buffer: str = ""
+
+        # クリップボードおよび形状・弧長転写設定
+        self.edge_clipboard: Optional[dict[str, Any]] = None
+        self.piece_clipboard: list[dict[str, Any]] = []
+        self.shape_match_mode: str = "LENGTH_ADJUST_BULGE"
+        self.shape_match_reverse: bool = True
+        self.shape_match_flip_curvature: bool = False
+        self.shape_match_apply_endpoint_offset: bool = False
+        self.shape_match_ease_value: float = 0.0
+        self.shape_match_ease_is_ratio: bool = False
+        self.status_message: str = ""
 
         # プレビュー用一時幾何（描画系が参照）
         self.preview_points: list[tuple[float, float]] = []
@@ -202,11 +219,11 @@ class EditorController:
                 self.is_dirty = True
                 return True
             char = None
-            if event.unicode and (event.unicode.isalnum() or event.unicode in ".-"):
+            if event.unicode and (event.unicode.isalnum() or event.unicode in ".-+%"):
                 char = event.unicode
             elif k in KEY_CHAR_MAP:
                 char = KEY_CHAR_MAP[k]
-            elif len(event.key) == 1 and (event.key.isalnum() or event.key in ".-"):
+            elif len(event.key) == 1 and (event.key.isalnum() or event.key in ".-+%"):
                 char = event.key
             elif k.startswith("NUMPAD_") and len(k) == 8 and k[7].isdigit():
                 char = k[7]
@@ -374,6 +391,7 @@ class EditorController:
 
         # マウスクリック時のHUD 5領域（ボタン・レール・カード入力）ヒットテスト
         if event.is_press and event.button == "LEFT":
+            self.status_message = ""
             from .layout import compute_hud_layout
             layout = compute_hud_layout(
                 *self.screen_size,
@@ -403,6 +421,7 @@ class EditorController:
             is_piece_card_mode = (
                 not self.selection.notch_ids
                 and not self.selection.seam_ids
+                and not self.selection.edge_ranges
                 and len(self.selection.piece_ids) == 1
             )
 
@@ -503,6 +522,92 @@ class EditorController:
                         self.is_dirty = True
                         return True
 
+            elif self.selection.seam_ids and layout.info_card.contains(px, py):
+                for f_name in (
+                    "seam_match_a_to_b",
+                    "seam_match_b_to_a",
+                    "seam_match_mode",
+                    "seam_match_apply_endpoint_offset",
+                    "seam_match_flip_curvature",
+                    "seam_match_ease",
+                ):
+                    f_rect = layout.card_fields.get(f_name)
+                    if f_rect and f_rect.contains(px, py):
+                        if f_name == "seam_match_a_to_b":
+                            self.match_selected_seam(source_side="A")
+                        elif f_name == "seam_match_b_to_a":
+                            self.match_selected_seam(source_side="B")
+                        elif f_name == "seam_match_mode":
+                            modes = ["SIMILAR", "LENGTH_ADJUST_BULGE", "LENGTH_MOVE_END"]
+                            cur_idx = modes.index(self.shape_match_mode) if self.shape_match_mode in modes else 0
+                            self.shape_match_mode = modes[(cur_idx + 1) % len(modes)]
+                            self.is_dirty = True
+                        elif f_name == "seam_match_apply_endpoint_offset":
+                            self.shape_match_apply_endpoint_offset = not self.shape_match_apply_endpoint_offset
+                            self.is_dirty = True
+                        elif f_name == "seam_match_flip_curvature":
+                            self.shape_match_flip_curvature = not self.shape_match_flip_curvature
+                            self.is_dirty = True
+                        elif f_name == "seam_match_ease":
+                            self.editing_field = "seam_match_ease"
+                            if self.shape_match_ease_is_ratio:
+                                self.editing_buffer = f"{self.shape_match_ease_value * 100.0:+.1f}%"
+                            else:
+                                self.editing_buffer = f"{self.shape_match_ease_value * 100.0:+.2f}"
+                            self.is_dirty = True
+                        return True
+
+            elif self.selection.edge_ranges and layout.info_card.contains(px, py):
+                for f_name in (
+                    "edge_subdivide",
+                    "edge_unfold",
+                    "edge_mirror_dup",
+                    "edge_copy_shape",
+                    "edge_paste_shape",
+                    "shape_match_mode",
+                    "shape_match_apply_endpoint_offset",
+                    "shape_match_reverse",
+                    "shape_match_flip_curvature",
+                    "shape_match_ease",
+                    "edge_match_seam",
+                ):
+                    f_rect = layout.card_fields.get(f_name)
+                    if f_rect and f_rect.contains(px, py):
+                        if f_name == "edge_subdivide":
+                            self.subdivide_selected_edge()
+                        elif f_name == "edge_unfold":
+                            self.unfold_selected()
+                        elif f_name == "edge_mirror_dup":
+                            self.mirror_duplicate_selected()
+                        elif f_name == "edge_copy_shape":
+                            self.copy_selected_edge_shape()
+                        elif f_name == "edge_paste_shape":
+                            self.paste_edge_shape()
+                        elif f_name == "edge_match_seam":
+                            self.match_selected_seam(source_side="A")
+                        elif f_name == "shape_match_mode":
+                            modes = ["SIMILAR", "LENGTH_ADJUST_BULGE", "LENGTH_MOVE_END"]
+                            cur_idx = modes.index(self.shape_match_mode) if self.shape_match_mode in modes else 0
+                            self.shape_match_mode = modes[(cur_idx + 1) % len(modes)]
+                            self.is_dirty = True
+                        elif f_name == "shape_match_apply_endpoint_offset":
+                            self.shape_match_apply_endpoint_offset = not self.shape_match_apply_endpoint_offset
+                            self.is_dirty = True
+                        elif f_name == "shape_match_reverse":
+                            self.shape_match_reverse = not self.shape_match_reverse
+                            self.is_dirty = True
+                        elif f_name == "shape_match_flip_curvature":
+                            self.shape_match_flip_curvature = not self.shape_match_flip_curvature
+                            self.is_dirty = True
+                        elif f_name == "shape_match_ease":
+                            self.editing_field = "shape_match_ease"
+                            if self.shape_match_ease_is_ratio:
+                                self.editing_buffer = f"{self.shape_match_ease_value * 100.0:+.1f}%"
+                            else:
+                                self.editing_buffer = f"{self.shape_match_ease_value * 100.0:+.2f}"
+                            self.is_dirty = True
+                        return True
+
             # HUD矩形領域内の誤作図防止ガード
             if (
                 layout.header_bar.contains(px, py)
@@ -533,6 +638,80 @@ class EditorController:
             self.redo()
             return True
 
+        # クリップボード・形状転写・複製ショートカット
+        if event.ctrl:
+            k = event.key.upper()
+            if event.shift:
+                if k == "C":
+                    if self.copy_selected_edge_shape():
+                        return True
+                    self.status_message = trans("Please select an edge first")
+                    self.is_dirty = True
+                    return True
+                elif k == "V":
+                    if self.paste_edge_shape():
+                        return True
+                    if not self.edge_clipboard:
+                        self.status_message = trans("Clipboard is empty (Copy edge shape first)")
+                    else:
+                        self.status_message = trans("Please select an edge first")
+                    self.is_dirty = True
+                    return True
+                elif k == "D":
+                    if self.duplicate_selected_pieces(mirror_horizontal=True):
+                        return True
+                    self.status_message = trans("Please select a piece first")
+                    self.is_dirty = True
+                    return True
+                elif k == "M":
+                    if self.match_selected_seam(source_side="B"):
+                        return True
+                    self.status_message = trans("Please select a seam first")
+                    self.is_dirty = True
+                    return True
+            else:
+                if k == "D":
+                    if self.duplicate_selected_pieces():
+                        return True
+                    self.status_message = trans("Please select a piece first")
+                    self.is_dirty = True
+                    return True
+                elif k == "C":
+                    # 辺が選択されている場合は辺形状をコピー、そうでなければピースをコピー
+                    if self.selection.edge_ranges:
+                        if self.copy_selected_edge_shape():
+                            return True
+                    elif self.copy_selected_pieces():
+                        return True
+                    self.status_message = trans("Please select an edge or piece first")
+                    self.is_dirty = True
+                    return True
+                elif k == "V":
+                    # 辺が選択されている場合は辺形状をペースト、そうでなければピースをペースト
+                    if self.selection.edge_ranges:
+                        if self.paste_edge_shape():
+                            return True
+                        if not self.edge_clipboard:
+                            self.status_message = trans("Clipboard is empty (Copy edge shape first)")
+                        else:
+                            self.status_message = trans("Please select an edge first")
+                        self.is_dirty = True
+                        return True
+                    elif self.paste_copied_pieces():
+                        return True
+                    if self.edge_clipboard:
+                        self.status_message = trans("Please select a target edge to paste shape")
+                    else:
+                        self.status_message = trans("Clipboard is empty (Copy piece or edge shape first)")
+                    self.is_dirty = True
+                    return True
+                elif k == "M":
+                    if self.match_selected_seam(source_side="A"):
+                        return True
+                    self.status_message = trans("Please select a seam first")
+                    self.is_dirty = True
+                    return True
+
         # グローバルショートカット: 選択削除 (X または Delete)
         if event.key.upper() in ("X", "DELETE"):
             if self.delete_selected():
@@ -553,6 +732,20 @@ class EditorController:
         if not event.ctrl and not event.alt and event.key.upper() == "B":
             if self.selection.piece_ids:
                 self.picking_bone = not self.picking_bone
+                self.is_dirty = True
+                return True
+
+        # グローバルショートカット: 形状合わせ方モード切替 (O / Shift+O)
+        if not event.ctrl and not event.alt and event.key.upper() == "O":
+            if self.selection.edge_ranges or self.selection.seam_ids:
+                if event.shift:
+                    self.shape_match_apply_endpoint_offset = not self.shape_match_apply_endpoint_offset
+                    self.status_message = f"{trans('Apply End Offset')}: {trans('ON') if self.shape_match_apply_endpoint_offset else trans('OFF')}"
+                else:
+                    modes = ["SIMILAR", "LENGTH_ADJUST_BULGE", "LENGTH_MOVE_END"]
+                    cur_idx = modes.index(self.shape_match_mode) if self.shape_match_mode in modes else 0
+                    self.shape_match_mode = modes[(cur_idx + 1) % len(modes)]
+                    self.status_message = f"{trans('Match Mode')}: {self.shape_match_mode}"
                 self.is_dirty = True
                 return True
 
@@ -577,6 +770,27 @@ class EditorController:
     def _commit_inline_edit(self) -> None:
         """インライン入力バッファの内容を選択中ピースまたはノッチへ適用する."""
         if not self.editing_field or not self.editing_buffer:
+            return
+
+        if self.editing_field in ("shape_match_ease", "seam_match_ease"):
+            buf = self.editing_buffer.strip()
+            if buf.endswith("%"):
+                try:
+                    pct = float(buf[:-1])
+                    self.shape_match_ease_value = pct / 100.0
+                    self.shape_match_ease_is_ratio = True
+                    self.is_dirty = True
+                except ValueError:
+                    pass
+            else:
+                from .units import parse_length_input
+                try:
+                    val_m = parse_length_input(buf, default_unit="cm")
+                    self.shape_match_ease_value = val_m
+                    self.shape_match_ease_is_ratio = False
+                    self.is_dirty = True
+                except ValueError:
+                    pass
             return
 
         if self.selection.notch_ids and self.editing_field in ("notch_from_start", "notch_ratio"):
@@ -870,4 +1084,440 @@ class EditorController:
             self.selection.clear()
             self.is_dirty = True
             return True
+        return False
+
+    def subdivide_selected_edge(self, *, ratio: float = 0.5) -> bool:
+        """選択中のアクティブな辺を実寸比率 ratio で分割し、新ノードを選択状態にする."""
+        er = self.selection.get_active_edge_range()
+        if not er:
+            return False
+        before_doc = self.doc.clone()
+        new_node = self.doc.subdivide_edge(er, ratio=ratio)
+        if not new_node:
+            return False
+        self.selection.clear()
+        self.selection.select_node(er.piece_id, new_node.id)
+        self.history.record_change(
+            description="Subdivide Edge",
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self.is_dirty = True
+        return True
+
+    def _resolve_selected_or_min_x_edge(self) -> Optional[tuple[str, EdgeRange]]:
+        """現在選択中の辺、または選択ピースの外周で中点X座標が最小の辺 (piece_id, EdgeRange) を返す."""
+        er = self.selection.get_active_edge_range()
+        pid = er.piece_id if er else (next(iter(self.selection.piece_ids)) if self.selection.piece_ids else None)
+        if not pid:
+            return None
+        piece = self.doc.pieces.get(pid)
+        if not piece:
+            return None
+        outer = piece.get_outer_path()
+        if not outer:
+            return None
+        if not er:
+            nodes = outer.nodes
+            n_orig = len(nodes)
+            if n_orig < 2:
+                return None
+            best_i = min(
+                range(n_orig),
+                key=lambda i: 0.5 * (nodes[(i + 1) % n_orig].position[0] + nodes[i].position[0]),
+            )
+            er = EdgeRange(
+                piece_id=pid,
+                path_id=outer.id,
+                start_node_id=nodes[best_i].id,
+                end_node_id=nodes[(best_i + 1) % n_orig].id,
+            )
+        return (pid, er)
+
+    def unfold_selected(self) -> bool:
+        """選択中の辺（未選択時は中点X最小辺）を軸に対称展開（わ展開）する."""
+        resolved = self._resolve_selected_or_min_x_edge()
+        if not resolved:
+            return False
+        pid, er = resolved
+        before_doc = self.doc.clone()
+        if self.doc.unfold_piece_along_edge(er):
+            self.selection.clear()
+            self.selection.select_piece(pid)
+            self.history.record_change(
+                description="Unfold Piece",
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            return True
+        return False
+
+    def mirror_duplicate_selected(self) -> bool:
+        """選択中の辺（未選択時は中点X最小辺）を軸に対称な別ピースを生成・自動縫合する."""
+        resolved = self._resolve_selected_or_min_x_edge()
+        if not resolved:
+            return False
+        _, er = resolved
+        before_doc = self.doc.clone()
+        new_piece = self.doc.mirror_duplicate_across_edge(er, create_seam=True)
+        if new_piece:
+            self.selection.clear()
+            self.selection.select_piece(new_piece.id)
+            self.history.record_change(
+                description="Symmetric Duplicate Piece",
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            return True
+        return False
+
+    def duplicate_selected_pieces(self, *, mirror_horizontal: bool = False) -> bool:
+        """選択中の全ピースを複製（mirror_horizontal=Trueで左右反転複製）する."""
+        if not self.selection.piece_ids:
+            return False
+        before_doc = self.doc.clone()
+        new_pids: list[str] = []
+        for pid in list(self.selection.piece_ids):
+            orig_piece = self.doc.pieces.get(pid)
+            orig_name = orig_piece.name if orig_piece else ""
+            new_p = self.doc.duplicate_piece(pid)
+            if new_p:
+                if mirror_horizontal:
+                    self.doc.flip_piece(new_p.id, direction="HORIZONTAL", flip_name=False)
+                    if orig_name:
+                        new_p.name = self.doc._symmetric_name(orig_name)
+                new_pids.append(new_p.id)
+        if new_pids:
+            self.selection.clear()
+            for npid in new_pids:
+                self.selection.select_piece(npid, add=True)
+            desc = "Duplicate Mirrored Piece" if mirror_horizontal else "Duplicate Piece"
+            self.history.record_change(
+                description=desc,
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            return True
+        return False
+
+    def copy_selected_pieces(self) -> bool:
+        """選択中のピースをクリップボードにコピーする."""
+        if not self.selection.piece_ids:
+            return False
+        from dataclasses import asdict
+        self.piece_clipboard = []
+        for pid in self.selection.piece_ids:
+            piece = self.doc.pieces.get(pid)
+            if piece:
+                item = {
+                    "id": pid,
+                    "piece": piece.to_dict(),
+                    "notches": [asdict(n) for n in self.doc.notches.values() if n.piece_id == pid],
+                    "anchors": [asdict(a) for a in self.doc.anchors.values() if a.piece_id == pid],
+                    "placement": asdict(self.doc.placements[pid]) if pid in self.doc.placements else None,
+                }
+                self.piece_clipboard.append(item)
+        return bool(self.piece_clipboard)
+
+    def paste_copied_pieces(self) -> bool:
+        """クリップボードのスナップショットからピースを新規IDで復元ペーストする."""
+        if not self.piece_clipboard:
+            return False
+        from dataclasses import replace
+        from .document import Anchor, AnchorKind, Node, Notch, NotchKind, Path, Piece, Placement
+
+        before_doc = self.doc.clone()
+        new_pids: list[str] = []
+        for item in self.piece_clipboard:
+            if not isinstance(item, dict):
+                continue
+            pdata = item.get("piece", item)
+            snap_piece = Piece.from_dict(pdata)
+            new_pid = new_id()
+            path_map: dict[str, str] = {}
+            node_map: dict[str, str] = {}
+            new_paths: dict[str, Path] = {}
+
+            for old_path_id, p in snap_piece.paths.items():
+                new_path_id = new_id()
+                path_map[old_path_id] = new_path_id
+                new_nodes: list[Node] = []
+                for nd in p.nodes:
+                    new_nid = new_id()
+                    node_map[nd.id] = new_nid
+                    new_nodes.append(Node(
+                        id=new_nid,
+                        position=nd.position,
+                        kind=nd.kind,
+                        in_handle=nd.in_handle,
+                        out_handle=nd.out_handle,
+                    ))
+                new_paths[new_path_id] = Path(
+                    id=new_path_id,
+                    role=p.role,
+                    nodes=new_nodes,
+                    closed=p.closed,
+                )
+
+            new_name = self.doc._unique_piece_name(f"{snap_piece.name}_Copy")
+            new_transform = replace(snap_piece.transform, tx=snap_piece.transform.tx + 0.05)
+            new_outer_id = path_map.get(snap_piece.outer_path_id, "")
+            new_p = Piece(
+                id=new_pid,
+                name=new_name,
+                paths=new_paths,
+                outer_path_id=new_outer_id,
+                transform=new_transform,
+                target_edge_length=snap_piece.target_edge_length,
+                layer_id=snap_piece.layer_id,
+            )
+            self.doc.pieces[new_pid] = new_p
+
+            # ノッチ復元（新しい path_id / segment_start_id へマッピング）
+            for ndata in item.get("notches", []):
+                old_pid_path = ndata.get("path_id", "")
+                old_seg_start = ndata.get("segment_start_id", "")
+                if old_pid_path in path_map and old_seg_start in node_map:
+                    nid = new_id()
+                    raw_kind = ndata.get("kind", "V")
+                    n_kind = raw_kind if isinstance(raw_kind, NotchKind) else NotchKind(str(raw_kind))
+                    self.doc.notches[nid] = Notch(
+                        id=nid,
+                        piece_id=new_pid,
+                        path_id=path_map[old_pid_path],
+                        segment_start_id=node_map[old_seg_start],
+                        t=float(ndata.get("t", 0.5)),
+                        kind=n_kind,
+                        depth=float(ndata.get("depth", 0.005)),
+                        width=float(ndata.get("width", 0.002)),
+                    )
+
+            # アンカー復元
+            for adata in item.get("anchors", []):
+                aid = new_id()
+                raw_akind = adata.get("kind", "PIN")
+                a_kind = raw_akind if isinstance(raw_akind, AnchorKind) else AnchorKind(str(raw_akind))
+                pos = adata.get("position", (0.0, 0.0))
+                self.doc.anchors[aid] = Anchor(
+                    id=aid,
+                    piece_id=new_pid,
+                    position=(float(pos[0]), float(pos[1])),
+                    kind=a_kind,
+                    target_object=str(adata.get("target_object", "")),
+                    target_bone=str(adata.get("target_bone", "")),
+                    weight=float(adata.get("weight", 1.0)),
+                )
+
+            # 配置復元
+            if item.get("placement"):
+                pld = item["placement"]
+                off3d = pld.get("offset_3d", (0.0, 0.0, 0.0))
+                eul3d = pld.get("euler_3d", (0.0, 0.0, 0.0))
+                self.doc.placements[new_pid] = Placement(
+                    piece_id=new_pid,
+                    offset_3d=(float(off3d[0]), float(off3d[1]), float(off3d[2])),
+                    euler_3d=(float(eul3d[0]), float(eul3d[1]), float(eul3d[2])),
+                    preset=str(pld.get("preset", "CHEST_FRONT")),
+                    target_bone=str(pld.get("target_bone", "")),
+                    bone_t=float(pld.get("bone_t", 0.5)),
+                    bone_angle_deg=float(pld.get("bone_angle_deg", 0.0)),
+                    surface_offset=float(pld.get("surface_offset", 0.08)),
+                    is_tubular=bool(pld.get("is_tubular", False)),
+                )
+            new_pids.append(new_pid)
+
+        if new_pids:
+            self.selection.clear()
+            for npid in new_pids:
+                self.selection.select_piece(npid, add=True)
+            self.history.record_change(
+                description="Paste Piece",
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            return True
+        return False
+
+    def flip_selected_pieces(self, *, direction: str = "HORIZONTAL") -> bool:
+        """選択中の全ピースをバウンディングボックス中心基準で反転する."""
+        if not self.selection.piece_ids:
+            return False
+        before_doc = self.doc.clone()
+        modified = False
+        for pid in list(self.selection.piece_ids):
+            if self.doc.flip_piece(pid, direction=direction):
+                modified = True
+        if modified:
+            desc = "Flip Piece Horizontal" if direction == "HORIZONTAL" else "Flip Piece Vertical"
+            self.history.record_change(
+                description=desc,
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            return True
+        return False
+
+    def copy_selected_edge_shape(self) -> bool:
+        """選択中の単一または連続した複数辺の形状と弧長をエッジクリップボードに保存する."""
+        if not self.selection.edge_ranges:
+            logger.debug("[Pattern] copy_selected_edge_shape: no edges selected")
+            return False
+
+        first_er = self.selection.edge_ranges[0]
+        piece = self.doc.pieces.get(first_er.piece_id)
+        if not piece:
+            logger.debug(f"[Pattern] copy_selected_edge_shape: piece '{first_er.piece_id}' not found")
+            return False
+        path = piece.paths.get(first_er.path_id)
+        if not path:
+            logger.debug(f"[Pattern] copy_selected_edge_shape: path '{first_er.path_id}' not found")
+            return False
+
+        from .document import order_edge_chain, extract_edge_chain_data
+        ordered_chain = order_edge_chain(path, self.selection.edge_ranges)
+        if not ordered_chain:
+            logger.debug("[Pattern] copy_selected_edge_shape: selected edges do not form a continuous chain")
+            return False
+
+        chain_data = extract_edge_chain_data(piece, path, chain_ranges=ordered_chain)
+        if not chain_data:
+            logger.debug("[Pattern] copy_selected_edge_shape: failed to extract chain data")
+            return False
+
+        from .units import format_cm
+        chain_data["edge_range"] = ordered_chain[0]
+        chain_data["edge_ranges"] = ordered_chain
+        chain_data["length"] = chain_data["total_length"]
+        self.edge_clipboard = chain_data
+
+        k = chain_data["num_segments"]
+        if k > 1:
+            self.status_message = f"{trans('Edge chain copied')} ({k} {trans('edges')}): {format_cm(chain_data['total_length'])}"
+        else:
+            self.status_message = f"{trans('Edge shape copied')}: {format_cm(chain_data['total_length'])}"
+
+        logger.debug(f"[Pattern] copy_selected_edge_shape: SUCCESS (segments={k}, length={format_cm(chain_data['total_length'])})")
+        self.is_dirty = True
+        return True
+
+    def paste_edge_shape(self) -> bool:
+        """エッジクリップボードの形状・弧長を選択中の辺群へ適用する."""
+        if not self.edge_clipboard or not self.selection.edge_ranges:
+            logger.debug(f"[Pattern] paste_edge_shape: early return (has_clipboard={bool(self.edge_clipboard)}, edge_ranges={len(self.selection.edge_ranges)})")
+            return False
+
+        first_dst = self.selection.edge_ranges[0]
+        dst_piece = self.doc.pieces.get(first_dst.piece_id)
+        if not dst_piece:
+            return False
+        dst_path = dst_piece.paths.get(first_dst.path_id)
+        if not dst_path:
+            return False
+
+        from .document import order_edge_chain
+        ordered_dst = order_edge_chain(dst_path, self.selection.edge_ranges)
+        if not ordered_dst:
+            logger.debug("[Pattern] paste_edge_shape: target edges do not form a continuous chain")
+            return False
+
+        before_doc = self.doc.clone()
+        ease = (self.edge_clipboard["total_length"] * self.shape_match_ease_value) if self.shape_match_ease_is_ratio else self.shape_match_ease_value
+
+        ok = self.doc.match_edge_chain_shape(
+            ordered_dst,
+            self.edge_clipboard,
+            mode=self.shape_match_mode,
+            reverse=self.shape_match_reverse,
+            flip_curvature=self.shape_match_flip_curvature,
+            apply_endpoint_offset=self.shape_match_apply_endpoint_offset,
+            ease_offset=ease,
+        )
+
+        if ok:
+            mode_desc = f"{self.shape_match_mode}"
+            if self.shape_match_apply_endpoint_offset:
+                mode_desc += f", {trans('Offset')}"
+            self.status_message = f"{trans('Edge shape pasted')} ({mode_desc})"
+            self.history.record_change(
+                description="Paste Edge Shape",
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            logger.debug("[Pattern] paste_edge_shape: SUCCESS")
+            return True
+
+        logger.debug("[Pattern] paste_edge_shape: match_edge_chain_shape returned False")
+        return False
+
+    def match_selected_seam(self, *, source_side: str = "A") -> bool:
+        """選択中の Seam に対し、source_side の形状と弧長を反対側へ反映する.
+
+        縫合線が直接選択されていない場合でも、選択中の辺 (edge_ranges) に接続された
+        縫合線を自動特定して形状を反映する。
+        """
+        target_seams: list[tuple[str, str]] = []  # (seam_id, resolved_side)
+
+        if self.selection.seam_ids:
+            for sid in self.selection.seam_ids:
+                target_seams.append((sid, source_side))
+        elif self.selection.edge_ranges:
+            for er in self.selection.edge_ranges:
+                for sid, seam in self.doc.seams.items():
+                    # A側に一致するか判定
+                    is_in_a = any(
+                        s_er.piece_id == er.piece_id
+                        and s_er.path_id == er.path_id
+                        and {s_er.start_node_id, s_er.end_node_id} == {er.start_node_id, er.end_node_id}
+                        for s_er in seam.effective_a()
+                    )
+                    if is_in_a:
+                        target_seams.append((sid, "A"))
+                        break
+                    # B側に一致するか判定
+                    is_in_b = any(
+                        s_er.piece_id == er.piece_id
+                        and s_er.path_id == er.path_id
+                        and {s_er.start_node_id, s_er.end_node_id} == {er.start_node_id, er.end_node_id}
+                        for s_er in seam.effective_b()
+                    )
+                    if is_in_b:
+                        target_seams.append((sid, "B"))
+                        break
+
+        if not target_seams:
+            logger.debug(f"[Pattern] match_selected_seam: no seams or connected edges found (edges={len(self.selection.edge_ranges)}, seams={len(self.selection.seam_ids)})")
+            return False
+
+        before_doc = self.doc.clone()
+        modified = False
+        for sid, side in target_seams:
+            ok = self.doc.match_seam_shape_and_length(
+                sid,
+                source_side=side,
+                mode=self.shape_match_mode,
+                flip_curvature=self.shape_match_flip_curvature,
+                apply_endpoint_offset=self.shape_match_apply_endpoint_offset,
+                ease_value=self.shape_match_ease_value,
+                ease_is_ratio=self.shape_match_ease_is_ratio,
+            )
+            logger.debug(f"[Pattern] match_seam_shape_and_length: sid={sid}, side={side} -> ok={ok}")
+            if ok:
+                modified = True
+        if modified:
+            self.status_message = trans("Seam shape matched")
+            self.history.record_change(
+                description="Match Seam Shape",
+                before_doc=before_doc,
+                after_doc=self.doc,
+            )
+            self.is_dirty = True
+            logger.debug("[Pattern] match_selected_seam: SUCCESS")
+            return True
+        logger.debug("[Pattern] match_selected_seam: modified is False")
         return False

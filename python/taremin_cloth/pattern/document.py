@@ -21,10 +21,14 @@ from .geometry import (
     evaluate_cubic,
     split_cubic_bezier,
     merge_breakpoints_by_arc_length,
+    extract_sub_cubic,
+    match_segment_shape,
+    adjust_segment_arc_length,
     signed_area,
     ensure_ccw,
     has_self_intersection,
     Affine2D,
+    compute_bounding_box,
 )
 
 DOCUMENT_VERSION: int = 1
@@ -178,6 +182,62 @@ class Piece:
     target_edge_length: float = 0.015
     layer_id: int = 0
 
+    def get_outer_path(self) -> Optional[Path]:
+        """外周パス（OUTER）を取得する."""
+        if self.outer_path_id and self.outer_path_id in self.paths:
+            return self.paths[self.outer_path_id]
+        for p in self.paths.values():
+            if p.role == PathRole.OUTER:
+                return p
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        """辞書形式に変換する."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Piece:
+        """辞書データから Piece オブジェクトを復元する."""
+        paths = {}
+        for path_id, path_data in data.get("paths", {}).items():
+            nodes = []
+            for nd in path_data.get("nodes", []):
+                pos = tuple(nd["position"])
+                in_h = tuple(nd["in_handle"]) if nd.get("in_handle") else None
+                out_h = tuple(nd["out_handle"]) if nd.get("out_handle") else None
+                nodes.append(Node(
+                    id=nd["id"],
+                    position=pos,
+                    kind=NodeKind(nd.get("kind", "CORNER")),
+                    in_handle=in_h,
+                    out_handle=out_h,
+                ))
+            paths[path_id] = Path(
+                id=path_id,
+                role=PathRole(path_data.get("role", "OUTER")),
+                nodes=nodes,
+                closed=path_data.get("closed", True),
+            )
+
+        t_data = data.get("transform", {})
+        aff = Affine2D(
+            tx=t_data.get("tx", 0.0),
+            ty=t_data.get("ty", 0.0),
+            rotation_rad=t_data.get("rotation_rad", 0.0),
+            sx=t_data.get("sx", 1.0),
+            sy=t_data.get("sy", 1.0),
+        )
+
+        return cls(
+            id=data.get("id", ""),
+            name=data.get("name", "Piece"),
+            paths=paths,
+            outer_path_id=data.get("outer_path_id", ""),
+            transform=aff,
+            target_edge_length=data.get("target_edge_length", 0.015),
+            layer_id=data.get("layer_id", 0),
+        )
+
 
 @dataclass
 class EdgeRange:
@@ -289,6 +349,160 @@ class ReferenceImage:
     aspect_ratio: float = 1.0  # 幅に対する高さの比率 (height = width * aspect_ratio)
 
 
+
+def order_edge_chain(path: Path, edge_ranges: list[EdgeRange]) -> Optional[list[EdgeRange]]:
+    """指定されたEdgeRange群が同一パス上で1本の連続した一本道チェーンを形成しているか判定し、
+    始点から終点へ順序正しく並べたリストを返す.
+    
+    連続していない（飛び飛び）場合や枝分かれしている場合は None を返す。
+    """
+    if not edge_ranges:
+        return None
+    if len(edge_ranges) == 1:
+        res = path.resolve_edge_range(edge_ranges[0])
+        return list(edge_ranges) if res is not None else None
+
+    n_nodes = len(path.nodes)
+    num_segs = n_nodes if path.closed else n_nodes - 1
+
+    seg_to_er: dict[int, EdgeRange] = {}
+    for er in edge_ranges:
+        res = path.resolve_edge_range(er)
+        if not res:
+            return None
+        s_idx, _, _ = res
+        if s_idx in seg_to_er:
+            return None
+        seg_to_er[s_idx] = er
+
+    k = len(seg_to_er)
+    if k != len(edge_ranges):
+        return None
+
+    sorted_indices = sorted(seg_to_er.keys())
+    # 1. 通常の連続ケース (例: [2, 3, 4])
+    if sorted_indices[-1] - sorted_indices[0] == k - 1:
+        return [seg_to_er[i] for i in sorted_indices]
+
+    # 2. 閉ループの境界跨ぎケース (例: [0, 1, n_nodes-1])
+    if path.closed:
+        gaps = [i for i in range(k) if (sorted_indices[(i + 1) % k] - sorted_indices[i]) % num_segs != 1]
+        if len(gaps) == 1:
+            cut = (gaps[0] + 1) % k
+            ordered_indices = sorted_indices[cut:] + sorted_indices[:cut]
+            return [seg_to_er[i] for i in ordered_indices]
+
+    return None
+
+
+def extract_edge_chain_data(
+    piece: Piece,
+    path: Path,
+    *,
+    chain_ranges: list[EdgeRange],
+) -> Optional[dict]:
+    """連続したEdgeRangeチェーンから、正規化局所基底における各セグメントの制御点・ノード情報を抽出する."""
+    if not chain_ranges:
+        return None
+
+    all_seg_wctrls: list[tuple[Vec2, Vec2, Vec2, Vec2]] = []
+    seg_lengths: list[float] = []
+    seg_node_kinds: list[tuple[NodeKind, NodeKind]] = []
+
+    for er in chain_ranges:
+        res = path.resolve_edge_range(er)
+        if not res:
+            return None
+        seg_idx, t0, t1 = res
+        ctrls = path.get_segment_controls(seg_idx)
+        sub_c = extract_sub_cubic(ctrls[0], ctrls[1], ctrls[2], ctrls[3], t0=t0, t1=t1)
+        w_ctrls = tuple(piece.transform.apply(p) for p in sub_c)
+        table = build_arc_table(*w_ctrls)
+        all_seg_wctrls.append(w_ctrls)
+        seg_lengths.append(table.total_length)
+
+        n0 = path.nodes[seg_idx]
+        n1 = path.nodes[(seg_idx + 1) % len(path.nodes)]
+        seg_node_kinds.append((n0.kind, n1.kind))
+
+    total_len = sum(seg_lengths)
+
+    w_start = all_seg_wctrls[0][0]
+    w_end = all_seg_wctrls[-1][3]
+
+    dx = w_end[0] - w_start[0]
+    dy = w_end[1] - w_start[1]
+    chord_len = math.hypot(dx, dy)
+
+    if chord_len < 1e-9:
+        ux, uy = 1.0, 0.0
+        vx, vy = 0.0, 1.0
+    else:
+        ux = dx / chord_len
+        uy = dy / chord_len
+        vx = -uy
+        vy = ux
+
+    def to_norm(pt: tuple[float, float]) -> tuple[float, float]:
+        px = pt[0] - w_start[0]
+        py = pt[1] - w_start[1]
+        denom = max(1e-9, chord_len)
+        alpha = (px * ux + py * uy) / denom
+        beta = (px * vx + py * vy) / denom
+        return (alpha, beta)
+
+    segments_data = []
+    for i, w_ctrls in enumerate(all_seg_wctrls):
+        c_norm = tuple(to_norm(p) for p in w_ctrls)
+        segments_data.append({
+            "controls_norm": c_norm,
+            "length": seg_lengths[i],
+            "node_start_kind": seg_node_kinds[i][0],
+            "node_end_kind": seg_node_kinds[i][1],
+        })
+
+    return {
+        "num_segments": len(chain_ranges),
+        "total_length": total_len,
+        "chord_vector": (dx, dy),
+        "chord_length": chord_len,
+        "segments": segments_data,
+        "w_start": w_start,
+        "w_end": w_end,
+    }
+
+
+def replace_path_segment_chain(
+    path: Path,
+    start_node_id: str,
+    end_node_id: str,
+    *,
+    new_intermediate_nodes: list[Node],
+) -> bool:
+    """path上の start_node_id から end_node_id までの間にある中間ノード群を new_intermediate_nodes で置き換える.
+    
+    audit: allow-positional
+    """
+    n_nodes = len(path.nodes)
+    if n_nodes < 2:
+        return False
+
+    i_start = next((i for i, nd in enumerate(path.nodes) if nd.id == start_node_id), None)
+    i_end = next((i for i, nd in enumerate(path.nodes) if nd.id == end_node_id), None)
+    if i_start is None or i_end is None:
+        return False
+
+    if i_start == i_end:
+        return False
+
+    if i_start < i_end:
+        path.nodes = path.nodes[: i_start + 1] + new_intermediate_nodes + path.nodes[i_end :]
+    else:
+        path.nodes = path.nodes[i_end : i_start + 1] + new_intermediate_nodes
+
+    return True
+
+
 @dataclass
 class Document:
     """型紙エディタの全データを保持するルートドキュメント."""
@@ -315,6 +529,17 @@ class Document:
         while f"{base_name}_{idx}" in existing_names:
             idx += 1
         return f"{base_name}_{idx}"
+
+    def _symmetric_name(self, name: str, *, fallback_to_sym: bool = True) -> str:
+        """左右対称名（_L -> _R, .L -> .R 等）を導出する."""
+        for suf_l, suf_r in [("_L", "_R"), (".L", ".R"), ("_Left", "_Right"), ("-L", "-R")]:
+            if name.endswith(suf_l):
+                return self._unique_piece_name(name[:-len(suf_l)] + suf_r)
+            elif name.endswith(suf_r):
+                return self._unique_piece_name(name[:-len(suf_r)] + suf_l)
+        if fallback_to_sym:
+            return self._unique_piece_name(f"{name}_Sym")
+        return name
 
     def add_rectangle_piece(
         self,
@@ -943,6 +1168,1022 @@ class Document:
 
         return new_node
 
+    @staticmethod
+    def _materialize_auto_node(path: Path, node_idx: int) -> None:
+        """AUTOノードのハンドルを実体化し、CORNERノードに変換する."""
+        nodes = path.nodes
+        n_nodes = len(nodes)
+        if n_nodes < 2 or node_idx < 0 or node_idx >= n_nodes:
+            return
+        node = nodes[node_idx]
+        if node.kind != NodeKind.AUTO:
+            return
+        prev_idx = (node_idx - 1 + n_nodes) % n_nodes if path.closed else max(0, node_idx - 1)
+        next_idx = (node_idx + 1) % n_nodes if path.closed else min(n_nodes - 1, node_idx + 1)
+        in_h, out_h = compute_auto_handles(
+            nodes[prev_idx].position,
+            node.position,
+            nodes[next_idx].position,
+        )
+        node.in_handle = in_h
+        node.out_handle = out_h
+        node.kind = NodeKind.CORNER
+
+    def subdivide_edge(self, edge_range: EdgeRange, *, ratio: float = 0.5) -> Optional[Node]:
+        """指定された辺範囲を実寸弧長比率 ratio（既定0.5）で中点分割し、新ノードを返す."""
+        piece = self.pieces.get(edge_range.piece_id)
+        if not piece:
+            return None
+        path = piece.paths.get(edge_range.path_id)
+        if not path:
+            return None
+        res = path.resolve_edge_range(edge_range)
+        if not res:
+            return None
+        seg_idx, p_t0, p_t1 = res
+        ctrls = path.get_segment_controls(seg_idx)
+        table = build_arc_table(*ctrls)
+        if table.total_length < 0.002:
+            return None
+
+        s0 = arc_length_at_t(table, p_t0)
+        s1 = arc_length_at_t(table, p_t1)
+        clamped_r = max(0.05, min(0.95, float(ratio)))
+        s_mid = s0 + clamped_r * (s1 - s0)
+        _, split_t = point_at_arc_length(table, s_mid)
+        return self.insert_node_on_segment(piece.id, path.id, seg_idx=seg_idx, t=split_t)
+
+    def duplicate_piece(
+        self,
+        piece_id: str,
+        *,
+        offset: Optional[tuple[float, float]] = None,
+    ) -> Optional[Piece]:
+        """ピース単体を複製し、オフセット位置に配置して返す（ノッチ・内部パス・自己完結Seam・Placementも複製）."""
+        orig = self.pieces.get(piece_id)
+        if not orig:
+            return None
+        outer = orig.get_outer_path()
+        if not outer:
+            return None
+
+        if offset is None:
+            sample_pts = outer.sample_outline_points(steps_per_segment=16)
+            w_pts = [orig.transform.apply(p) for p in sample_pts]
+            min_pt, max_pt = compute_bounding_box(w_pts)
+            w = max_pt[0] - min_pt[0]
+            dx = max(0.05, w + 0.05)
+            dy = 0.0
+        else:
+            dx, dy = float(offset[0]), float(offset[1])
+
+        new_pid = new_id()
+        base_name = orig.name
+        new_name = self._unique_piece_name(f"{base_name}_Copy")
+
+        new_transform = Affine2D(
+            tx=orig.transform.tx + dx,
+            ty=orig.transform.ty + dy,
+            rotation_rad=orig.transform.rotation_rad,
+            sx=orig.transform.sx,
+            sy=orig.transform.sy,
+        )
+
+        new_paths: dict[str, Path] = {}
+        path_map: dict[str, str] = {}
+        node_map: dict[str, str] = {}
+        for p in orig.paths.values():
+            new_path_id = new_id()
+            path_map[p.id] = new_path_id
+            new_nodes: list[Node] = []
+            for nd in p.nodes:
+                new_nid = new_id()
+                node_map[nd.id] = new_nid
+                new_nodes.append(Node(
+                    id=new_nid,
+                    position=nd.position,
+                    kind=nd.kind,
+                    in_handle=nd.in_handle,
+                    out_handle=nd.out_handle,
+                ))
+            new_paths[new_path_id] = Path(
+                id=new_path_id,
+                role=p.role,
+                nodes=new_nodes,
+                closed=p.closed,
+            )
+
+        new_outer_path_id = path_map.get(orig.outer_path_id, "")
+        new_piece = Piece(
+            id=new_pid,
+            name=new_name,
+            paths=new_paths,
+            outer_path_id=new_outer_path_id,
+            transform=new_transform,
+            target_edge_length=orig.target_edge_length,
+            layer_id=orig.layer_id,
+        )
+        self.pieces[new_pid] = new_piece
+
+        # ノッチ複製
+        for notch in list(self.notches.values()):
+            if notch.piece_id == piece_id and notch.path_id in path_map:
+                new_nid = new_id()
+                self.notches[new_nid] = Notch(
+                    id=new_nid,
+                    piece_id=new_pid,
+                    path_id=path_map[notch.path_id],
+                    segment_start_id=node_map.get(notch.segment_start_id, notch.segment_start_id),
+                    t=notch.t,
+                    kind=notch.kind,
+                    depth=notch.depth,
+                    width=notch.width,
+                )
+
+        # アンカー複製
+        for anchor in list(self.anchors.values()):
+            if anchor.piece_id == piece_id:
+                new_aid = new_id()
+                self.anchors[new_aid] = Anchor(
+                    id=new_aid,
+                    piece_id=new_pid,
+                    position=anchor.position,
+                    kind=anchor.kind,
+                    target_object=anchor.target_object,
+                    target_bone=anchor.target_bone,
+                    weight=anchor.weight,
+                )
+
+        # ピース内自己完結 Seam 複製（ダーツ等）
+        for seam in list(self.seams.values()):
+            if all(er.piece_id == piece_id for er in seam.iter_unique_edge_ranges()):
+                def map_er(er: EdgeRange) -> EdgeRange:
+                    return EdgeRange(
+                        piece_id=new_pid,
+                        path_id=path_map.get(er.path_id, er.path_id),
+                        start_node_id=node_map.get(er.start_node_id, er.start_node_id),
+                        end_node_id=node_map.get(er.end_node_id, er.end_node_id),
+                        t0=er.t0,
+                        t1=er.t1,
+                    )
+                new_sid = new_id()
+                new_a = [map_er(er) for er in seam.chain_a] if seam.chain_a else map_er(seam.a)
+                new_b = [map_er(er) for er in seam.chain_b] if seam.chain_b else map_er(seam.b)
+                self.seams[new_sid] = Seam(
+                    id=new_sid,
+                    a=new_a if isinstance(new_a, EdgeRange) else new_a[0],
+                    b=new_b if isinstance(new_b, EdgeRange) else new_b[0],
+                    chain_a=new_a if isinstance(new_a, list) else [],
+                    chain_b=new_b if isinstance(new_b, list) else [],
+                    reverse=seam.reverse,
+                    mode=seam.mode,
+                    shrink=seam.shrink,
+                    waypoints=[Waypoint(id=new_id(), position_3d=wp.position_3d) for wp in seam.waypoints],
+                )
+
+        # Placement 複製
+        if piece_id in self.placements:
+            orig_pl = self.placements[piece_id]
+            self.placements[new_pid] = Placement(
+                piece_id=new_pid,
+                offset_3d=orig_pl.offset_3d,
+                euler_3d=orig_pl.euler_3d,
+                preset=orig_pl.preset,
+                target_bone=orig_pl.target_bone,
+                bone_t=orig_pl.bone_t,
+                bone_angle_deg=orig_pl.bone_angle_deg,
+                surface_offset=orig_pl.surface_offset,
+                is_tubular=orig_pl.is_tubular,
+            )
+
+        return new_piece
+
+    def flip_piece(
+        self,
+        piece_id: str,
+        *,
+        direction: str = "HORIZONTAL",
+        flip_name: bool = True,
+    ) -> bool:
+        """ピースをローカルバウンディングボックス中心基準で反転する（閉パスはCCW維持のためノード順逆転）."""
+        if direction not in ("HORIZONTAL", "VERTICAL"):
+            raise ValueError(f"Unsupported flip direction: '{direction}'")
+        piece = self.pieces.get(piece_id)
+        if not piece:
+            return False
+        outer = piece.get_outer_path()
+        if not outer:
+            return False
+
+        outer_pts = outer.sample_outline_points(steps_per_segment=16)
+        min_pt, max_pt = compute_bounding_box(outer_pts)
+        cx = 0.5 * (min_pt[0] + max_pt[0])
+        cy = 0.5 * (min_pt[1] + max_pt[1])
+
+        if direction == "HORIZONTAL":
+            def reflect_pos(p: tuple[float, float]) -> tuple[float, float]:
+                return (2.0 * cx - p[0], p[1])
+
+            def reflect_vec(v: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
+                return (-v[0], v[1]) if v is not None else None
+        else:
+            def reflect_pos(p: tuple[float, float]) -> tuple[float, float]:
+                return (p[0], 2.0 * cy - p[1])
+
+            def reflect_vec(v: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
+                return (v[0], -v[1]) if v is not None else None
+
+        for path in piece.paths.values():
+            if path.closed:
+                n = len(path.nodes)
+                next_id_map = {path.nodes[i].id: path.nodes[(i + 1) % n].id for i in range(n)}
+                rev_nodes: list[Node] = []
+                for orig_n in reversed(path.nodes):
+                    rev_nodes.append(Node(
+                        id=orig_n.id,
+                        position=reflect_pos(orig_n.position),
+                        kind=orig_n.kind,
+                        in_handle=reflect_vec(orig_n.out_handle),
+                        out_handle=reflect_vec(orig_n.in_handle),
+                    ))
+                path.nodes = rev_nodes
+                # ノッチ更新
+                for notch in self.notches.values():
+                    if notch.piece_id == piece_id and notch.path_id == path.id:
+                        if notch.segment_start_id in next_id_map:
+                            notch.segment_start_id = next_id_map[notch.segment_start_id]
+                            notch.t = max(0.001, min(0.999, 1.0 - float(notch.t)))
+            else:
+                for nd in path.nodes:
+                    nd.position = reflect_pos(nd.position)
+                    nd.in_handle = reflect_vec(nd.in_handle)
+                    nd.out_handle = reflect_vec(nd.out_handle)
+
+        for a in self.anchors.values():
+            if a.piece_id == piece_id:
+                a.position = reflect_pos(a.position)
+
+        if direction == "HORIZONTAL":
+            from .placement import flip_bone_name_left_right
+            if piece_id in self.placements:
+                pl = self.placements[piece_id]
+                pl.target_bone = flip_bone_name_left_right(pl.target_bone)
+                pl.bone_angle_deg = -pl.bone_angle_deg
+                pl.offset_3d = (-pl.offset_3d[0], pl.offset_3d[1], pl.offset_3d[2])
+                pl.euler_3d = (pl.euler_3d[0], -pl.euler_3d[1], -pl.euler_3d[2])
+                if pl.preset == "ARM_LEFT":
+                    pl.preset = "ARM_RIGHT"
+                elif pl.preset == "ARM_RIGHT":
+                    pl.preset = "ARM_LEFT"
+
+            if flip_name:
+                piece.name = self._symmetric_name(piece.name, fallback_to_sym=False)
+
+        return True
+
+    def unfold_piece_along_edge(self, edge_range: EdgeRange) -> bool:
+        """指定された外周辺を対称軸として単一ピースに対称展開（わ展開）する."""
+        piece = self.pieces.get(edge_range.piece_id)
+        if not piece:
+            return False
+        outer = piece.get_outer_path()
+        if not outer or edge_range.path_id != outer.id:
+            return False
+
+        nodes = outer.nodes
+        n_orig = len(nodes)
+        if n_orig < 3:
+            return False
+
+        res = outer.resolve_edge_range(edge_range)
+        if not res:
+            return False
+        seg_idx, _, _ = res
+        i0 = seg_idx
+        i1 = (seg_idx + 1) % n_orig
+
+        p_a = nodes[i1].position
+        p_b = nodes[i0].position
+        vx = p_b[0] - p_a[0]
+        vy = p_b[1] - p_a[1]
+        v_len = math.hypot(vx, vy)
+        if v_len < 0.001:
+            return False
+
+        nx = -vy / v_len
+        ny = vx / v_len
+
+        def reflect_point(p: tuple[float, float]) -> tuple[float, float]:
+            wx = p[0] - p_a[0]
+            wy = p[1] - p_a[1]
+            d = wx * nx + wy * ny
+            return (p[0] - 2.0 * d * nx, p[1] - 2.0 * d * ny)
+
+        def reflect_vec(v: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
+            if v is None:
+                return None
+            d = v[0] * nx + v[1] * ny
+            return (v[0] - 2.0 * d * nx, v[1] - 2.0 * d * ny)
+
+        self._materialize_auto_node(outer, i0)
+        self._materialize_auto_node(outer, i1)
+
+        unfolded_nodes: list[Node] = []
+        orig_idx_to_new_id: dict[int, str] = {}
+        mirror_idx_to_new_id: dict[int, str] = {}
+
+        curr = i1
+        while True:
+            orig_n = nodes[curr]
+            nid = new_id()
+            orig_idx_to_new_id[curr] = nid
+            in_h = orig_n.in_handle
+            out_h = orig_n.out_handle
+            kind = orig_n.kind
+            if curr == i1:
+                in_h = reflect_vec(orig_n.out_handle)
+                kind = NodeKind.CORNER
+            elif curr == i0:
+                out_h = reflect_vec(orig_n.in_handle)
+                kind = NodeKind.CORNER
+            unfolded_nodes.append(Node(
+                id=nid,
+                position=orig_n.position,
+                kind=kind,
+                in_handle=in_h,
+                out_handle=out_h,
+            ))
+            if curr == i0:
+                break
+            curr = (curr + 1) % n_orig
+
+        mirror_idx_to_new_id[i0] = orig_idx_to_new_id[i0]
+        mirror_idx_to_new_id[i1] = orig_idx_to_new_id[i1]
+
+        curr = (i0 - 1 + n_orig) % n_orig
+        while curr != i1:
+            orig_n = nodes[curr]
+            nid = new_id()
+            mirror_idx_to_new_id[curr] = nid
+            unfolded_nodes.append(Node(
+                id=nid,
+                position=reflect_point(orig_n.position),
+                kind=orig_n.kind,
+                in_handle=reflect_vec(orig_n.out_handle),
+                out_handle=reflect_vec(orig_n.in_handle),
+            ))
+            curr = (curr - 1 + n_orig) % n_orig
+
+        outer.nodes = unfolded_nodes
+
+        old_notches = [
+            n for n in list(self.notches.values())
+            if n.piece_id == piece.id and n.path_id == outer.id
+        ]
+        for n in old_notches:
+            del self.notches[n.id]
+
+        for n in old_notches:
+            seg_i = next((i for i, nd in enumerate(nodes) if nd.id == n.segment_start_id), None)
+            if seg_i is not None and seg_i != seg_idx:
+                nid_fwd = new_id()
+                self.notches[nid_fwd] = Notch(
+                    id=nid_fwd,
+                    piece_id=piece.id,
+                    path_id=outer.id,
+                    segment_start_id=orig_idx_to_new_id[seg_i],
+                    t=n.t,
+                    kind=n.kind,
+                    depth=n.depth,
+                    width=n.width,
+                )
+                nid_mir = new_id()
+                seg_end_i = (seg_i + 1) % n_orig
+                mir_start_id = mirror_idx_to_new_id[seg_end_i]
+                self.notches[nid_mir] = Notch(
+                    id=nid_mir,
+                    piece_id=piece.id,
+                    path_id=outer.id,
+                    segment_start_id=mir_start_id,
+                    t=1.0 - n.t,
+                    kind=n.kind,
+                    depth=n.depth,
+                    width=n.width,
+                )
+
+        # 対称軸を参照する Seam の削除およびノードID付け替え
+        for sid, s in list(self.seams.items()):
+            involved = False
+            for er in s.iter_unique_edge_ranges():
+                if er.piece_id == piece.id and er.path_id == outer.id:
+                    if (er.start_node_id == nodes[i0].id and er.end_node_id == nodes[i1].id) or (
+                        er.start_node_id == nodes[i1].id and er.end_node_id == nodes[i0].id
+                    ):
+                        del self.seams[sid]
+                        involved = True
+                        break
+            if not involved:
+                def remap_er(er: EdgeRange) -> EdgeRange:
+                    if er.piece_id == piece.id and er.path_id == outer.id:
+                        s_idx = next((i for i, nd in enumerate(nodes) if nd.id == er.start_node_id), None)
+                        e_idx = next((i for i, nd in enumerate(nodes) if nd.id == er.end_node_id), None)
+                        if s_idx is not None and e_idx is not None and s_idx in orig_idx_to_new_id and e_idx in orig_idx_to_new_id:
+                            return EdgeRange(
+                                piece_id=er.piece_id,
+                                path_id=er.path_id,
+                                start_node_id=orig_idx_to_new_id[s_idx],
+                                end_node_id=orig_idx_to_new_id[e_idx],
+                                t0=er.t0,
+                                t1=er.t1,
+                            )
+                    return er
+                if s.chain_a:
+                    s.chain_a = [remap_er(er) for er in s.chain_a]
+                s.a = remap_er(s.a)
+                if s.chain_b:
+                    s.chain_b = [remap_er(er) for er in s.chain_b]
+                s.b = remap_er(s.b)
+
+        # 内部パス・穴・アンカーの鏡像追加
+        def dist_to_axis(pt: tuple[float, float]) -> float:
+            wx = pt[0] - p_a[0]
+            wy = pt[1] - p_a[1]
+            return abs(wx * nx + wy * ny)
+
+        for p in list(piece.paths.values()):
+            if p.id == outer.id:
+                continue
+            avg_d = sum(dist_to_axis(nd.position) for nd in p.nodes) / max(1, len(p.nodes))
+            if avg_d > 0.001:
+                mir_pid = new_id()
+                mir_nodes: list[Node] = []
+                if p.closed:
+                    for nd in reversed(p.nodes):
+                        mir_nodes.append(Node(
+                            id=new_id(),
+                            position=reflect_point(nd.position),
+                            kind=nd.kind,
+                            in_handle=reflect_vec(nd.out_handle),
+                            out_handle=reflect_vec(nd.in_handle),
+                        ))
+                else:
+                    for nd in p.nodes:
+                        mir_nodes.append(Node(
+                            id=new_id(),
+                            position=reflect_point(nd.position),
+                            kind=nd.kind,
+                            in_handle=reflect_vec(nd.in_handle),
+                            out_handle=reflect_vec(nd.out_handle),
+                        ))
+                piece.paths[mir_pid] = Path(id=mir_pid, role=p.role, nodes=mir_nodes, closed=p.closed)
+
+        for a in list(self.anchors.values()):
+            if a.piece_id == piece.id and dist_to_axis(a.position) > 0.001:
+                mir_aid = new_id()
+                self.anchors[mir_aid] = Anchor(
+                    id=mir_aid,
+                    piece_id=piece.id,
+                    position=reflect_point(a.position),
+                    kind=a.kind,
+                    target_object=a.target_object,
+                    target_bone=a.target_bone,
+                    weight=a.weight,
+                )
+
+        return True
+
+    def mirror_duplicate_across_edge(
+        self,
+        edge_range: EdgeRange,
+        *,
+        create_seam: bool = True,
+    ) -> Optional[Piece]:
+        """指定された外周辺を軸に対称な別ピースを生成し、外側へ5cm離して配置する（create_seam=Trueで自動縫合）."""
+        piece = self.pieces.get(edge_range.piece_id)
+        if not piece:
+            return None
+        outer = piece.get_outer_path()
+        if not outer or edge_range.path_id != outer.id:
+            return None
+
+        nodes = outer.nodes
+        n_orig = len(nodes)
+        if n_orig < 2:
+            return None
+
+        res = outer.resolve_edge_range(edge_range)
+        if not res:
+            return None
+        seg_idx, _, _ = res
+        i0 = seg_idx
+        i1 = (seg_idx + 1) % n_orig
+        n0 = nodes[i0]
+        n1 = nodes[i1]
+        p0 = n0.position
+        p1 = n1.position
+        vx = p1[0] - p0[0]
+        vy = p1[1] - p0[1]
+        seg_len = math.hypot(vx, vy)
+        if seg_len < 0.001:
+            return None
+
+        nx = vy / seg_len
+        ny = -vx / seg_len
+
+        def reflect_point(p: tuple[float, float]) -> tuple[float, float]:
+            wx = p[0] - p0[0]
+            wy = p[1] - p0[1]
+            d = wx * nx + wy * ny
+            return (p[0] - 2.0 * d * nx, p[1] - 2.0 * d * ny)
+
+        def reflect_vec(v: Optional[tuple[float, float]]) -> Optional[tuple[float, float]]:
+            if v is None:
+                return None
+            d = v[0] * nx + v[1] * ny
+            return (v[0] - 2.0 * d * nx, v[1] - 2.0 * d * ny)
+
+        new_pid = new_id()
+        new_name = self._symmetric_name(piece.name)
+
+        path_map: dict[str, str] = {}
+        node_map: dict[str, str] = {}
+        new_paths: dict[str, Path] = {}
+        for p in piece.paths.values():
+            new_path_id = new_id()
+            path_map[p.id] = new_path_id
+            new_nodes: list[Node] = []
+            if p.closed:
+                n = len(p.nodes)
+                next_id_map = {p.nodes[i].id: p.nodes[(i + 1) % n].id for i in range(n)}
+                for orig_n in reversed(p.nodes):
+                    nid = new_id()
+                    node_map[orig_n.id] = nid
+                    new_nodes.append(Node(
+                        id=nid,
+                        position=reflect_point(orig_n.position),
+                        kind=orig_n.kind,
+                        in_handle=reflect_vec(orig_n.out_handle),
+                        out_handle=reflect_vec(orig_n.in_handle),
+                    ))
+                new_paths[new_path_id] = Path(id=new_path_id, role=p.role, nodes=new_nodes, closed=True)
+                for notch in list(self.notches.values()):
+                    if notch.piece_id == piece.id and notch.path_id == p.id:
+                        mapped_start = node_map.get(next_id_map.get(notch.segment_start_id, ""))
+                        if mapped_start:
+                            new_nid = new_id()
+                            self.notches[new_nid] = Notch(
+                                id=new_nid,
+                                piece_id=new_pid,
+                                path_id=new_path_id,
+                                segment_start_id=mapped_start,
+                                t=max(0.001, min(0.999, 1.0 - float(notch.t))),
+                                kind=notch.kind,
+                                depth=notch.depth,
+                                width=notch.width,
+                            )
+            else:
+                for orig_n in p.nodes:
+                    nid = new_id()
+                    node_map[orig_n.id] = nid
+                    new_nodes.append(Node(
+                        id=nid,
+                        position=reflect_point(orig_n.position),
+                        kind=orig_n.kind,
+                        in_handle=reflect_vec(orig_n.in_handle),
+                        out_handle=reflect_vec(orig_n.out_handle),
+                    ))
+                new_paths[new_path_id] = Path(id=new_path_id, role=p.role, nodes=new_nodes, closed=False)
+
+        from .placement import flip_bone_name_left_right
+        for a in list(self.anchors.values()):
+            if a.piece_id == piece.id:
+                new_aid = new_id()
+                self.anchors[new_aid] = Anchor(
+                    id=new_aid,
+                    piece_id=new_pid,
+                    position=reflect_point(a.position),
+                    kind=a.kind,
+                    target_object=a.target_object,
+                    target_bone=flip_bone_name_left_right(a.target_bone) if a.target_bone else "",
+                    weight=a.weight,
+                )
+
+        rot = piece.transform.rotation_rad
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        wnx = cos_r * nx - sin_r * ny
+        wny = sin_r * nx + cos_r * ny
+        new_transform = Affine2D(
+            tx=piece.transform.tx + wnx * 0.05,
+            ty=piece.transform.ty + wny * 0.05,
+            rotation_rad=piece.transform.rotation_rad,
+            sx=piece.transform.sx,
+            sy=piece.transform.sy,
+        )
+        new_outer_path_id = path_map.get(piece.outer_path_id, "")
+        new_piece = Piece(
+            id=new_pid,
+            name=new_name,
+            paths=new_paths,
+            outer_path_id=new_outer_path_id,
+            transform=new_transform,
+            target_edge_length=piece.target_edge_length,
+            layer_id=piece.layer_id,
+        )
+        self.pieces[new_pid] = new_piece
+
+        # ピース内自己完結 Seam（ダーツ等）の鏡像複製
+        for seam in list(self.seams.values()):
+            if all(er.piece_id == piece.id for er in seam.iter_unique_edge_ranges()):
+                def map_mirror_er(er: EdgeRange) -> EdgeRange:
+                    orig_p = piece.paths.get(er.path_id)
+                    new_path_id = path_map.get(er.path_id, er.path_id)
+                    if orig_p and orig_p.closed:
+                        return EdgeRange(
+                            piece_id=new_pid,
+                            path_id=new_path_id,
+                            start_node_id=node_map.get(er.end_node_id, er.end_node_id),
+                            end_node_id=node_map.get(er.start_node_id, er.start_node_id),
+                            t0=1.0 - er.t1,
+                            t1=1.0 - er.t0,
+                        )
+                    return EdgeRange(
+                        piece_id=new_pid,
+                        path_id=new_path_id,
+                        start_node_id=node_map.get(er.start_node_id, er.start_node_id),
+                        end_node_id=node_map.get(er.end_node_id, er.end_node_id),
+                        t0=er.t0,
+                        t1=er.t1,
+                    )
+
+                new_sid = new_id()
+                new_chain_a = [map_mirror_er(er) for er in seam.chain_a] if seam.chain_a else []
+                new_chain_b = [map_mirror_er(er) for er in seam.chain_b] if seam.chain_b else []
+                if len(new_chain_a) > 1:
+                    orig_pa = piece.paths.get(seam.a.path_id)
+                    if orig_pa and orig_pa.closed:
+                        new_chain_a.reverse()
+                if len(new_chain_b) > 1:
+                    orig_pb = piece.paths.get(seam.b.path_id)
+                    if orig_pb and orig_pb.closed:
+                        new_chain_b.reverse()
+                new_a = new_chain_a[0] if new_chain_a else map_mirror_er(seam.a)
+                new_b = new_chain_b[0] if new_chain_b else map_mirror_er(seam.b)
+                self.seams[new_sid] = Seam(
+                    id=new_sid,
+                    a=new_a,
+                    b=new_b,
+                    chain_a=new_chain_a,
+                    chain_b=new_chain_b,
+                    reverse=seam.reverse,
+                    mode=seam.mode,
+                    shrink=seam.shrink,
+                    waypoints=[Waypoint(id=new_id(), position_3d=wp.position_3d) for wp in seam.waypoints],
+                )
+
+        if piece.id in self.placements:
+            pl = self.placements[piece.id]
+            new_preset = pl.preset
+            if new_preset == "ARM_LEFT":
+                new_preset = "ARM_RIGHT"
+            elif new_preset == "ARM_RIGHT":
+                new_preset = "ARM_LEFT"
+            self.placements[new_pid] = Placement(
+                piece_id=new_pid,
+                offset_3d=(-pl.offset_3d[0], pl.offset_3d[1], pl.offset_3d[2]),
+                euler_3d=(pl.euler_3d[0], -pl.euler_3d[1], -pl.euler_3d[2]),
+                preset=new_preset,
+                target_bone=flip_bone_name_left_right(pl.target_bone),
+                bone_t=pl.bone_t,
+                bone_angle_deg=-pl.bone_angle_deg,
+                surface_offset=pl.surface_offset,
+                is_tubular=pl.is_tubular,
+            )
+
+        if create_seam:
+            sym_outer_id = path_map[outer.id]
+            er_a = EdgeRange(piece_id=piece.id, path_id=outer.id, start_node_id=n0.id, end_node_id=n1.id)
+            er_b = EdgeRange(piece_id=new_pid, path_id=sym_outer_id, start_node_id=node_map[n1.id], end_node_id=node_map[n0.id])
+            seam_id = new_id()
+            self.seams[seam_id] = Seam(
+                id=seam_id,
+                a=er_a,
+                b=er_b,
+                reverse=True,
+                mode=SeamMode.SEGMENT,
+                shrink=1.0,
+            )
+
+        return new_piece
+
+    def match_edge_shape(
+        self,
+        source_er: EdgeRange,
+        target_er: EdgeRange,
+        *,
+        mode: str = "SIMILAR",
+        reverse: bool = True,
+        flip_curvature: bool = False,
+        ease_offset: float = 0.0,
+        target_length_override: Optional[float] = None,
+    ) -> bool:
+        """参照元辺 source_er のベジェ形状・弧長を対象辺 target_er へ転写する."""
+        src_piece = self.pieces.get(source_er.piece_id)
+        if not src_piece:
+            return False
+        src_path = src_piece.paths.get(source_er.path_id)
+        if not src_path:
+            return False
+        chain_data = extract_edge_chain_data(src_piece, src_path, chain_ranges=[source_er])
+        if not chain_data:
+            return False
+        eff_ease = ease_offset
+        if target_length_override is not None:
+            eff_ease = (target_length_override - chain_data["total_length"]) + ease_offset
+        res = self.match_edge_chain_shape(
+            [target_er],
+            chain_data,
+            mode=mode,
+            reverse=reverse,
+            flip_curvature=flip_curvature,
+            apply_endpoint_offset=False,
+            ease_offset=eff_ease,
+        )
+        return bool(res)
+
+    def match_edge_chain_shape(
+        self,
+        dst_ranges: list[EdgeRange],
+        src_chain_data: dict,
+        *,
+        mode: str = "SIMILAR",
+        reverse: bool = False,
+        flip_curvature: bool = False,
+        apply_endpoint_offset: bool = False,
+        ease_offset: float = 0.0,
+    ) -> Optional[list[EdgeRange]]:
+        """クリップボードに保存されたエッジチェーン形状を、対象のdst_rangesチェーンへ反映する."""
+        if not dst_ranges or not src_chain_data:
+            return None
+
+        first_dst = dst_ranges[0]
+        dst_piece = self.pieces.get(first_dst.piece_id)
+        if not dst_piece:
+            return None
+        dst_path = dst_piece.paths.get(first_dst.path_id)
+        if not dst_path:
+            return None
+
+        ordered_dst = order_edge_chain(dst_path, dst_ranges)
+        if not ordered_dst:
+            return None
+
+        first_res = dst_path.resolve_edge_range(ordered_dst[0])
+        last_res = dst_path.resolve_edge_range(ordered_dst[-1])
+        if not first_res or not last_res:
+            return None
+
+        n_dst_nodes = len(dst_path.nodes)
+        start_seg_idx = first_res[0]
+        last_seg_idx = last_res[0]
+        end_node_idx = (last_seg_idx + 1) % n_dst_nodes
+
+        # 隣接する非対象セグメントの AUTO_SMOOTH ハンドルを事前に実体化して保護
+        self._materialize_auto_node(dst_path, start_seg_idx)
+        self._materialize_auto_node(dst_path, end_node_idx)
+
+        start_node = dst_path.nodes[start_seg_idx]
+        end_node = dst_path.nodes[end_node_idx]
+
+        # 始点・終点のワールド座標
+        w_start = dst_piece.transform.apply(start_node.position)
+
+        if apply_endpoint_offset:
+            src_vec = src_chain_data["chord_vector"]
+            eff_vec = (-src_vec[0], -src_vec[1]) if reverse else src_vec
+            w_end = (w_start[0] + eff_vec[0], w_start[1] + eff_vec[1])
+            end_node.position = dst_piece.transform.inverse_apply(w_end)
+        else:
+            w_end = dst_piece.transform.apply(end_node.position)
+            if mode == "LENGTH_MOVE_END":
+                src_total_len = max(1e-6, float(src_chain_data["total_length"]))
+                src_chord_len = float(src_chain_data["chord_length"])
+                goal_len = max(0.001, src_total_len + ease_offset)
+                cur_dx = w_end[0] - w_start[0]
+                cur_dy = w_end[1] - w_start[1]
+                cur_chord = math.hypot(cur_dx, cur_dy)
+                if cur_chord > 1e-9 and src_chord_len > 1e-9:
+                    target_chord = goal_len * (src_chord_len / src_total_len)
+                    scale = target_chord / cur_chord
+                    new_w_end = (w_start[0] + cur_dx * scale, w_start[1] + cur_dy * scale)
+                    end_node.position = dst_piece.transform.inverse_apply(new_w_end)
+                    w_end = new_w_end
+
+        # ペースト先局所基底
+        dx = w_end[0] - w_start[0]
+        dy = w_end[1] - w_start[1]
+        chord_len = math.hypot(dx, dy)
+        if chord_len < 1e-9:
+            ux, uy = 1.0, 0.0
+            vx, vy = 0.0, 1.0
+        else:
+            ux = dx / chord_len
+            uy = dy / chord_len
+            vx = -uy
+            vy = ux
+
+        src_segments = list(src_chain_data["segments"])
+        if reverse:
+            src_segments.reverse()
+
+        k = len(src_segments)
+        restored_w_ctrls: list[tuple[Vec2, Vec2, Vec2, Vec2]] = []
+
+        for seg in src_segments:
+            c_norm = list(seg["controls_norm"])
+            if reverse:
+                c_norm = [c_norm[3], c_norm[2], c_norm[1], c_norm[0]]
+                c_norm = [(1.0 - a, -b) for a, b in c_norm]
+            if flip_curvature:
+                c_norm = [(a, -b) for a, b in c_norm]
+
+            w_pts = []
+            for a, b in c_norm:
+                wx = w_start[0] + a * dx + b * chord_len * vx
+                wy = w_start[1] + a * dy + b * chord_len * vy
+                w_pts.append((wx, wy))
+            restored_w_ctrls.append((w_pts[0], w_pts[1], w_pts[2], w_pts[3]))
+
+        # 中間ノード群の生成
+        new_intermediate_nodes: list[Node] = []
+        for i in range(k - 1):
+            w_mid = restored_w_ctrls[i][3]
+            l_mid = dst_piece.transform.inverse_apply(w_mid)
+            orig_kind = src_segments[i]["node_end_kind"] if not reverse else src_segments[i]["node_start_kind"]
+            new_node = Node(
+                id=new_id(),
+                position=l_mid,
+                kind=orig_kind,
+            )
+            new_intermediate_nodes.append(new_node)
+
+        before_node_ids = {nd.id for nd in dst_path.nodes}
+
+        # パストポロジーを置換
+        if not replace_path_segment_chain(
+            dst_path,
+            start_node.id,
+            end_node.id,
+            new_intermediate_nodes=new_intermediate_nodes,
+        ):
+            return None
+
+        after_node_ids = {nd.id for nd in dst_path.nodes}
+        removed_node_ids = before_node_ids - after_node_ids
+        if removed_node_ids:
+            for nid, notch in list(self.notches.items()):
+                if notch.piece_id == dst_piece.id and notch.path_id == dst_path.id:
+                    if notch.segment_start_id in removed_node_ids:
+                        del self.notches[nid]
+
+        # 全ノードのイン/アウトハンドルを設定
+        chain_nodes = [start_node] + new_intermediate_nodes + [end_node]
+        for i in range(k):
+            wc0, wc1, wc2, wc3 = restored_w_ctrls[i]
+
+            if mode == "LENGTH_ADJUST_BULGE" or (mode == "SIMILAR" and abs(ease_offset) > 1e-6):
+                seg_orig_len = float(src_segments[i]["length"])
+                weight = seg_orig_len / max(1e-6, float(src_chain_data["total_length"]))
+                goal_seg_len = max(0.001, seg_orig_len + ease_offset * weight)
+                seg_chord = math.hypot(wc3[0] - wc0[0], wc3[1] - wc0[1])
+                # ターゲット弦長が目標弧長より短く膨らませられる場合に調整（目標長が弦長以下の場合は相似カーブを維持）
+                if goal_seg_len > seg_chord + 1e-6:
+                    wc0, wc1, wc2, wc3 = adjust_segment_arc_length(
+                        wc0,
+                        wc1,
+                        wc2,
+                        wc3,
+                        target_length=goal_seg_len,
+                        mode="LENGTH_ADJUST_BULGE",
+                        flip_curvature=flip_curvature,
+                    )
+
+            lc0 = dst_piece.transform.inverse_apply(wc0)
+            lc1 = dst_piece.transform.inverse_apply(wc1)
+            lc2 = dst_piece.transform.inverse_apply(wc2)
+            lc3 = dst_piece.transform.inverse_apply(wc3)
+
+            nd_a = chain_nodes[i]
+            nd_b = chain_nodes[i + 1]
+
+            vx_s = lc3[0] - lc0[0]
+            vy_s = lc3[1] - lc0[1]
+            b1 = (lc0[0] + vx_s / 3.0, lc0[1] + vy_s / 3.0)
+            b2 = (lc0[0] + 2.0 * vx_s / 3.0, lc0[1] + 2.0 * vy_s / 3.0)
+            is_linear = (
+                math.hypot(lc1[0] - b1[0], lc1[1] - b1[1]) < 1e-6
+                and math.hypot(lc2[0] - b2[0], lc2[1] - b2[1]) < 1e-6
+            )
+
+            if is_linear:
+                nd_a.out_handle = None
+                nd_b.in_handle = None
+            else:
+                nd_a.out_handle = (lc1[0] - lc0[0], lc1[1] - lc0[1])
+                nd_b.in_handle = (lc2[0] - lc3[0], lc2[1] - lc3[1])
+                if i == 0:
+                    nd_a.kind = NodeKind.CORNER
+                if i == k - 1:
+                    nd_b.kind = NodeKind.CORNER
+
+        new_edge_ranges = []
+        for i in range(k):
+            er = EdgeRange(
+                piece_id=dst_piece.id,
+                path_id=dst_path.id,
+                start_node_id=chain_nodes[i].id,
+                end_node_id=chain_nodes[i + 1].id,
+                t0=0.0,
+                t1=1.0,
+            )
+            new_edge_ranges.append(er)
+
+        return new_edge_ranges
+
+    def match_seam_shape_and_length(
+        self,
+        seam_id: str,
+        *,
+        source_side: str = "A",
+        mode: str = "LENGTH_ADJUST_BULGE",
+        flip_curvature: bool = False,
+        apply_endpoint_offset: bool = False,
+        ease_value: float = 0.0,
+        ease_is_ratio: bool = False,
+    ) -> bool:
+        """Seam の片側（AまたはB）の形状と弧長をもう片側へ反映する."""
+        seam = self.seams.get(seam_id)
+        if not seam:
+            return False
+
+        a_ranges = seam.effective_a()
+        b_ranges = seam.effective_b()
+        if not a_ranges or not b_ranges:
+            return False
+
+        if source_side == "A":
+            eff_src = a_ranges
+            eff_dst = b_ranges
+        else:
+            eff_src = b_ranges
+            eff_dst = a_ranges
+
+        src_er = eff_src[0]
+        dst_er = eff_dst[0]
+        src_piece = self.pieces.get(src_er.piece_id)
+        dst_piece = self.pieces.get(dst_er.piece_id)
+        if not src_piece or not dst_piece:
+            return False
+        src_path = src_piece.paths.get(src_er.path_id)
+        dst_path = dst_piece.paths.get(dst_er.path_id)
+        if not src_path or not dst_path:
+            return False
+
+        ordered_src = order_edge_chain(src_path, eff_src)
+        ordered_dst = order_edge_chain(dst_path, eff_dst)
+        if not ordered_src or not ordered_dst:
+            return False
+
+        src_chain_data = extract_edge_chain_data(src_piece, src_path, chain_ranges=ordered_src)
+        if not src_chain_data:
+            return False
+
+        total_src_len = src_chain_data["total_length"]
+        total_ease_m = (total_src_len * ease_value) if ease_is_ratio else ease_value
+
+        new_dst_ranges = self.match_edge_chain_shape(
+            ordered_dst,
+            src_chain_data,
+            mode=mode,
+            reverse=seam.reverse,
+            flip_curvature=flip_curvature,
+            apply_endpoint_offset=apply_endpoint_offset,
+            ease_offset=total_ease_m,
+        )
+
+        if new_dst_ranges:
+            if source_side == "A":
+                seam.chain_b = new_dst_ranges
+                seam.b = new_dst_ranges[0]
+            else:
+                seam.chain_a = new_dst_ranges
+                seam.a = new_dst_ranges[0]
+            if len(new_dst_ranges) > 1 or (len(seam.chain_a) > 1 or len(seam.chain_b) > 1):
+                seam.mode = SeamMode.CHAIN
+            seam.sync_primary_from_chains()
+            return True
+
+        return False
+
     def get_seam_geometry(
         self,
         seam: Seam,
@@ -1029,45 +2270,9 @@ class Document:
         # pieces
         raw_pieces = data.get("pieces", {})
         for pid, pdata in raw_pieces.items():
-            paths = {}
-            for path_id, path_data in pdata.get("paths", {}).items():
-                nodes = []
-                for nd in path_data.get("nodes", []):
-                    pos = tuple(nd["position"])
-                    in_h = tuple(nd["in_handle"]) if nd.get("in_handle") else None
-                    out_h = tuple(nd["out_handle"]) if nd.get("out_handle") else None
-                    nodes.append(Node(
-                        id=nd["id"],
-                        position=pos,
-                        kind=NodeKind(nd.get("kind", "CORNER")),
-                        in_handle=in_h,
-                        out_handle=out_h,
-                    ))
-                paths[path_id] = Path(
-                    id=path_id,
-                    role=PathRole(path_data.get("role", "OUTER")),
-                    nodes=nodes,
-                    closed=path_data.get("closed", True),
-                )
-
-            t_data = pdata.get("transform", {})
-            aff = Affine2D(
-                tx=t_data.get("tx", 0.0),
-                ty=t_data.get("ty", 0.0),
-                rotation_rad=t_data.get("rotation_rad", 0.0),
-                sx=t_data.get("sx", 1.0),
-                sy=t_data.get("sy", 1.0),
-            )
-
-            doc.pieces[pid] = Piece(
-                id=pid,
-                name=pdata.get("name", "Piece"),
-                paths=paths,
-                outer_path_id=pdata.get("outer_path_id", ""),
-                transform=aff,
-                target_edge_length=pdata.get("target_edge_length", 0.015),
-                layer_id=pdata.get("layer_id", 0),
-            )
+            piece = Piece.from_dict(pdata)
+            piece.id = pid
+            doc.pieces[pid] = piece
 
         # seams
         raw_seams = data.get("seams", {})
