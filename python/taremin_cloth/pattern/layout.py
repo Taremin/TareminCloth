@@ -120,7 +120,7 @@ def compute_hud_layout(
     #   y_cursor = info_card.top - 110.0 (行5: Bone Pos)
     #   y_cursor = info_card.top - 128.0 (行6: Bone Angle)
     #   y_cursor = info_card.top - 146.0 (行7: Bone Offset)
-    #   y_cursor = info_card.top - 164.0 (行8: Tubular)
+    #   y_cursor = info_card.top - 164.0 (行8: Pattern Up)
     field_h = 18.0
     card_fields: dict[str, Rect2D] = {
         "target_edge_length": Rect2D(
@@ -159,7 +159,7 @@ def compute_hud_layout(
             w=card_w - 12.0,
             h=field_h,
         ),
-        "is_tubular": Rect2D(
+        "pattern_up_angle_deg": Rect2D(
             x=info_card.x + 6.0,
             y=(info_card.top - 164.0) - 5.0,
             w=card_w - 12.0,
@@ -189,13 +189,14 @@ def compute_hud_layout(
         "shape_match_flip_curvature": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 200.0) - 5.0, w=card_w - 12.0, h=field_h),
         "shape_match_ease": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 218.0) - 5.0, w=card_w - 12.0, h=field_h),
         "edge_match_seam": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
-        # 縫合選択カード用フィールド (行6〜行11)
+        # 縫合選択カード用フィールド (行6〜行12)
         "seam_match_a_to_b": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 128.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_b_to_a": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 146.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_mode": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 164.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_apply_endpoint_offset": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 182.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_flip_curvature": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 200.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_ease": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 218.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "seam_routing": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
     }
 
     compass_rect = Rect2D(

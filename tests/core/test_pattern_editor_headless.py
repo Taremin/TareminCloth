@@ -371,14 +371,32 @@ class TestPatternEditorHeadless(unittest.TestCase):
         pl = ctrl.doc.placements[p.id]
         self.assertEqual(pl.target_bone, "Spine")
 
-        # 2. "is_tubular" 行をクリックして筒モードをトグル
-        tubular_rect = layout.card_fields["is_tubular"]
-        t_click_x = tubular_rect.x + tubular_rect.w * 0.5
-        t_click_y = tubular_rect.y + tubular_rect.h * 0.5
+        # 2. "pattern_up_angle_deg" 行をクリックしてインライン編集 (-90度) ＆ T / Shift+T ショートカット検証
+        up_rect = layout.card_fields["pattern_up_angle_deg"]
+        u_click_x = up_rect.x + up_rect.w * 0.5
+        u_click_y = up_rect.y + up_rect.h * 0.5
 
-        self.assertFalse(pl.is_tubular)
-        ctrl.handle_event(EditorEvent(screen_pos=(t_click_x, t_click_y), is_press=True, button="LEFT"))
-        self.assertTrue(pl.is_tubular)
+        self.assertAlmostEqual(pl.pattern_up_angle_deg, 0.0)
+        ctrl.handle_event(EditorEvent(screen_pos=(u_click_x, u_click_y), is_press=True, button="LEFT"))
+        ctrl.handle_event(EditorEvent(screen_pos=(u_click_x, u_click_y), is_release=True, button="LEFT"))
+        self.assertEqual(ctrl.editing_field, "pattern_up_angle_deg")
+        ctrl.handle_event(EditorEvent(key="BACKSPACE"))
+        ctrl.handle_event(EditorEvent(key="-"))
+        ctrl.handle_event(EditorEvent(key="9"))
+        ctrl.handle_event(EditorEvent(key="0"))
+        ctrl.handle_event(EditorEvent(key="ENTER"))
+        self.assertAlmostEqual(pl.pattern_up_angle_deg, -90.0)
+
+        # Tキーで +90°回転 (-90 -> 0), Shift+T で -90°回転 (0 -> -90)
+        ctrl.handle_event(EditorEvent(key="T"))
+        self.assertAlmostEqual(pl.pattern_up_angle_deg, 0.0)
+        ctrl.handle_event(EditorEvent(key="T", shift=True))
+        self.assertAlmostEqual(pl.pattern_up_angle_deg, -90.0)
+        # Undo で 0° に戻る
+        ctrl.handle_event(EditorEvent(ctrl=True, key="Z"))
+        self.assertAlmostEqual(ctrl.doc.placements[p.id].pattern_up_angle_deg, 0.0)
+        ctrl.selection.select_piece(p.id)
+        pl = ctrl.doc.placements[p.id]
 
         # 3. "bone_angle_deg" 行をクリック（単発プレス＆リリース）してインライン数値編集 (45度)
         angle_rect = layout.card_fields["bone_angle_deg"]
@@ -451,6 +469,43 @@ class TestPatternEditorHeadless(unittest.TestCase):
         ctrl.handle_event(EditorEvent(ctrl=True, key="Z"))
         undone_pl = ctrl.doc.placements[p.id]
         self.assertAlmostEqual(undone_pl.bone_t, 0.5, places=2)
+
+    def test_seam_routing_toggle_card_and_shortcut(self):
+        """縫合選択時の Routing カードクリックおよび B キーによる Direct / Bone Wrap 切替検証."""
+        from taremin_cloth.pattern.document import EdgeRange, Seam, SeamRouting
+        from taremin_cloth.pattern.layout import compute_hud_layout
+
+        ctrl = self.controller
+        p = ctrl.doc.add_rectangle_piece((0.0, 0.0), (0.3, 0.2), name="Sleeve")
+        nodes = p.get_outer_path().nodes
+        seam = Seam(
+            id="s1",
+            a=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[0].id, end_node_id=nodes[1].id),
+            b=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[2].id, end_node_id=nodes[3].id),
+        )
+        ctrl.doc.seams[seam.id] = seam
+        ctrl.selection.select_seam(seam.id)
+
+        layout = compute_hud_layout(*ctrl.screen_size)
+        r_rect = layout.card_fields["seam_routing"]
+        rx = r_rect.x + r_rect.w * 0.5
+        ry = r_rect.y + r_rect.h * 0.5
+
+        # カードクリックで DIRECT -> BONE_WRAP
+        self.assertEqual(seam.routing, SeamRouting.DIRECT)
+        handled = ctrl.handle_event(EditorEvent(screen_pos=(rx, ry), is_press=True, button="LEFT"))
+        self.assertTrue(handled)
+        self.assertEqual(seam.routing, SeamRouting.BONE_WRAP)
+
+        # B キーで BONE_WRAP -> DIRECT
+        handled_b = ctrl.handle_event(EditorEvent(key="B"))
+        self.assertTrue(handled_b)
+        self.assertEqual(seam.routing, SeamRouting.DIRECT)
+        self.assertFalse(ctrl.picking_bone)
+
+        # Undo で BONE_WRAP に戻ること
+        ctrl.handle_event(EditorEvent(ctrl=True, key="Z"))
+        self.assertEqual(ctrl.doc.seams[seam.id].routing, SeamRouting.BONE_WRAP)
 
     def test_piece_drag_snaps_to_world_grid_and_alt_bypass(self):
         """ピース全体のドラッグ移動で基準ノードが共通グリッドに吸着し、Alt押下中は吸着しないこと."""

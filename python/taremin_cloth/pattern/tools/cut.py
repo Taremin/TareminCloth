@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import math
 from typing import TYPE_CHECKING
 
-from ..document import Document, EdgeRange, Node, NodeKind, Path, PathRole, Piece, Placement, Seam
+from ..document import Document, EdgeRange, Node, NodeKind, Path, PathRole, Piece, Seam
 from ..geometry import (
     Vec2,
     build_arc_table,
@@ -286,8 +286,8 @@ class CutTool(BaseTool):
                 # 配置プロキシの複製
                 orig_place = doc.placements.get(piece.id)
                 if orig_place:
-                    doc.placements[id_a] = Placement(piece_id=id_a, offset_3d=orig_place.offset_3d, euler_3d=orig_place.euler_3d)
-                    doc.placements[id_b] = Placement(piece_id=id_b, offset_3d=orig_place.offset_3d, euler_3d=orig_place.euler_3d)
+                    doc.placements[id_a] = orig_place.copy_for_piece(id_a)
+                    doc.placements[id_b] = orig_place.copy_for_piece(id_b)
 
                 # カットライン上の自動縫合を生成
                 seam_id = new_id()

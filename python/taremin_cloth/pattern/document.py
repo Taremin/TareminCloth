@@ -56,6 +56,22 @@ class SeamMode(str, Enum):
     CHAIN = "CHAIN"
 
 
+class SeamRouting(str, Enum):
+    """縫合エッジの3D空間ルーティング方式."""
+    DIRECT = "DIRECT"
+    BONE_WRAP = "BONE_WRAP"
+
+
+def normalize_angle_deg(angle: float) -> float:
+    """角度（度）の有限値を検証し [-180.0, 180.0] 範囲へ正規化する."""
+    if not math.isfinite(angle):
+        return 0.0
+    norm = ((float(angle) + 180.0) % 360.0) - 180.0
+    if norm == -180.0 and angle > 0.0:
+        return 180.0
+    return 0.0 if norm == 0.0 else norm
+
+
 class NotchKind(str, Enum):
     """合印（ノッチ）の形状種別."""
     V = "V"
@@ -268,6 +284,7 @@ class Seam:
     reverse: bool = False
     mode: SeamMode = SeamMode.SEGMENT
     shrink: float = 1.0
+    routing: SeamRouting = SeamRouting.DIRECT
     waypoints: list[Waypoint] = field(default_factory=list)
 
     def effective_a(self) -> list[EdgeRange]:
@@ -335,7 +352,41 @@ class Placement:
     bone_t: float = 0.5
     bone_angle_deg: float = 0.0
     surface_offset: float = 0.08
-    is_tubular: bool = False
+    pattern_up_angle_deg: float = 0.0
+
+    def copy_for_piece(self, piece_id: str, *, mirror_horizontal: bool = False) -> Placement:
+        """配置パラメータを指定ピース向けに複製する（必要に応じ左右反転も適用）."""
+        if not mirror_horizontal:
+            return Placement(
+                piece_id=piece_id,
+                offset_3d=self.offset_3d,
+                euler_3d=self.euler_3d,
+                preset=self.preset,
+                target_bone=self.target_bone,
+                bone_t=self.bone_t,
+                bone_angle_deg=self.bone_angle_deg,
+                surface_offset=self.surface_offset,
+                pattern_up_angle_deg=self.pattern_up_angle_deg,
+            )
+
+        from .placement import flip_bone_name_left_right
+        new_preset = self.preset
+        if new_preset == "ARM_LEFT":
+            new_preset = "ARM_RIGHT"
+        elif new_preset == "ARM_RIGHT":
+            new_preset = "ARM_LEFT"
+
+        return Placement(
+            piece_id=piece_id,
+            offset_3d=(-self.offset_3d[0], self.offset_3d[1], self.offset_3d[2]),
+            euler_3d=(self.euler_3d[0], -self.euler_3d[1], -self.euler_3d[2]),
+            preset=new_preset,
+            target_bone=flip_bone_name_left_right(self.target_bone),
+            bone_t=self.bone_t,
+            bone_angle_deg=normalize_angle_deg(-self.bone_angle_deg),
+            surface_offset=self.surface_offset,
+            pattern_up_angle_deg=normalize_angle_deg(-self.pattern_up_angle_deg),
+        )
 
 
 @dataclass
@@ -1338,23 +1389,13 @@ class Document:
                     reverse=seam.reverse,
                     mode=seam.mode,
                     shrink=seam.shrink,
+                    routing=seam.routing,
                     waypoints=[Waypoint(id=new_id(), position_3d=wp.position_3d) for wp in seam.waypoints],
                 )
 
         # Placement 複製
         if piece_id in self.placements:
-            orig_pl = self.placements[piece_id]
-            self.placements[new_pid] = Placement(
-                piece_id=new_pid,
-                offset_3d=orig_pl.offset_3d,
-                euler_3d=orig_pl.euler_3d,
-                preset=orig_pl.preset,
-                target_bone=orig_pl.target_bone,
-                bone_t=orig_pl.bone_t,
-                bone_angle_deg=orig_pl.bone_angle_deg,
-                surface_offset=orig_pl.surface_offset,
-                is_tubular=orig_pl.is_tubular,
-            )
+            self.placements[new_pid] = self.placements[piece_id].copy_for_piece(new_pid)
 
         return new_piece
 
@@ -1424,17 +1465,11 @@ class Document:
                 a.position = reflect_pos(a.position)
 
         if direction == "HORIZONTAL":
-            from .placement import flip_bone_name_left_right
             if piece_id in self.placements:
-                pl = self.placements[piece_id]
-                pl.target_bone = flip_bone_name_left_right(pl.target_bone)
-                pl.bone_angle_deg = -pl.bone_angle_deg
-                pl.offset_3d = (-pl.offset_3d[0], pl.offset_3d[1], pl.offset_3d[2])
-                pl.euler_3d = (pl.euler_3d[0], -pl.euler_3d[1], -pl.euler_3d[2])
-                if pl.preset == "ARM_LEFT":
-                    pl.preset = "ARM_RIGHT"
-                elif pl.preset == "ARM_RIGHT":
-                    pl.preset = "ARM_LEFT"
+                self.placements[piece_id] = self.placements[piece_id].copy_for_piece(
+                    piece_id,
+                    mirror_horizontal=True,
+                )
 
             if flip_name:
                 piece.name = self._symmetric_name(piece.name, fallback_to_sym=False)
@@ -1837,26 +1872,14 @@ class Document:
                     reverse=seam.reverse,
                     mode=seam.mode,
                     shrink=seam.shrink,
+                    routing=seam.routing,
                     waypoints=[Waypoint(id=new_id(), position_3d=wp.position_3d) for wp in seam.waypoints],
                 )
 
         if piece.id in self.placements:
-            pl = self.placements[piece.id]
-            new_preset = pl.preset
-            if new_preset == "ARM_LEFT":
-                new_preset = "ARM_RIGHT"
-            elif new_preset == "ARM_RIGHT":
-                new_preset = "ARM_LEFT"
-            self.placements[new_pid] = Placement(
-                piece_id=new_pid,
-                offset_3d=(-pl.offset_3d[0], pl.offset_3d[1], pl.offset_3d[2]),
-                euler_3d=(pl.euler_3d[0], -pl.euler_3d[1], -pl.euler_3d[2]),
-                preset=new_preset,
-                target_bone=flip_bone_name_left_right(pl.target_bone),
-                bone_t=pl.bone_t,
-                bone_angle_deg=-pl.bone_angle_deg,
-                surface_offset=pl.surface_offset,
-                is_tubular=pl.is_tubular,
+            self.placements[new_pid] = self.placements[piece.id].copy_for_piece(
+                new_pid,
+                mirror_horizontal=True,
             )
 
         if create_seam:
@@ -2297,6 +2320,12 @@ class Document:
                 for w in sdata.get("waypoints", [])
             ]
 
+            raw_routing = sdata.get("routing", SeamRouting.DIRECT.value)
+            try:
+                routing = SeamRouting(raw_routing)
+            except ValueError:
+                routing = SeamRouting.DIRECT
+
             doc.seams[sid] = Seam(
                 id=sid,
                 a=er_a,
@@ -2306,6 +2335,7 @@ class Document:
                 reverse=sdata.get("reverse", False),
                 mode=SeamMode(sdata.get("mode", "SEGMENT")),
                 shrink=sdata.get("shrink", 1.0),
+                routing=routing,
                 waypoints=wps,
             )
 
@@ -2346,9 +2376,9 @@ class Document:
                 preset=pldata.get("preset", "CHEST_FRONT"),
                 target_bone=pldata.get("target_bone", ""),
                 bone_t=float(pldata.get("bone_t", 0.5)),
-                bone_angle_deg=float(pldata.get("bone_angle_deg", 0.0)),
+                bone_angle_deg=normalize_angle_deg(float(pldata.get("bone_angle_deg", 0.0))),
                 surface_offset=float(pldata.get("surface_offset", 0.08)),
-                is_tubular=bool(pldata.get("is_tubular", False)),
+                pattern_up_angle_deg=normalize_angle_deg(float(pldata.get("pattern_up_angle_deg", 0.0))),
             )
 
         # reference_image

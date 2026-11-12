@@ -38,6 +38,7 @@ class ThemeColors:
 
     # 縫合
     seam_line: ColorRGBA = (0.95, 0.55, 0.2, 0.85)
+    seam_wrap: ColorRGBA = (0.75, 0.42, 1.0, 0.95)
     seam_mismatch: ColorRGBA = (0.95, 0.25, 0.25, 0.9)
     seam_candidate: ColorRGBA = (0.3, 0.9, 0.4, 0.9)
 

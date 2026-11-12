@@ -18,7 +18,7 @@ TOOL_NAMES: dict[str, str] = {
 
 # ツール別操作ガイド (英語マスターキー)
 TOOL_GUIDES: dict[str, str] = {
-    "SELECT": "Click: Select / DblClick or W: Split / Shift+D: Dup / M: Flip / U: Unfold / X: Delete",
+    "SELECT": "Click: Select / DblClick or W: Split / Shift+D: Dup / M: Flip / T: Rotate Up / U: Unfold / X: Delete",
     "RECTANGLE": "Drag opposite corners / Esc: Cancel",
     "POLYGON": "Click points / Click start or Enter to close / Esc: Cancel",
     "ELLIPSE": "Drag opposite corners / Esc: Cancel",
@@ -26,7 +26,7 @@ TOOL_GUIDES: dict[str, str] = {
     "NOTCH": "Click edge to add notch / Alt: Free pos / Esc: Cancel",
     "CUT": "Drag cut line across boundary twice / Esc: Cancel",
     "DART": "Click edge, then click dart apex / Esc: Cancel",
-    "SEW": "Click two edges to sew / Shift: Chain / Alt: Full edge / R: Flip",
+    "SEW": "Click two edges to sew / Shift: Chain / Alt: Full edge / R: Flip / B: Bone Wrap",
 }
 
 

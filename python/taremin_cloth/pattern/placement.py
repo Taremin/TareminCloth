@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
-from .document import Document, Placement
+from .document import Document, Placement, Seam
 from .geometry import triangulate_polygon_2d
 
 if TYPE_CHECKING:
@@ -157,6 +157,24 @@ def compute_bone_aligned_frame(
     return (plane_center, ex, normal, ez, axis_origin)
 
 
+def _rotate_plane_axes(
+    ex: np.ndarray,
+    ez: np.ndarray,
+    *,
+    pattern_up_angle_deg: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """2Dパターン上方向角度 (deg) に従い、面法線を保ったまま平面内基底 (ex, ez) を回転する."""
+    angle_f = float(pattern_up_angle_deg)
+    if not math.isfinite(angle_f) or angle_f == 0.0:
+        return (ex, ez)
+    phi = math.radians(angle_f)
+    cos_p = math.cos(phi)
+    sin_p = math.sin(phi)
+    ex_rot = (cos_p * ex + sin_p * ez).astype(np.float32)
+    ez_rot = (-sin_p * ex + cos_p * ez).astype(np.float32)
+    return (ex_rot, ez_rot)
+
+
 def project_2d_points_to_bone_plane(
     points_2d: Any,
     *,
@@ -165,6 +183,8 @@ def project_2d_points_to_bone_plane(
     bone_t: float = 0.5,
     bone_angle_deg: float = 0.0,
     surface_offset: float = 0.08,
+    pattern_up_angle_deg: float = 0.0,
+    centroid_2d: Optional[tuple[float, float]] = None,
 ) -> np.ndarray:
     """2D頂点列の重心を差し引いてボーン追従3D平面上のワールド座標列 (N, 3) へ投影する (Blender非依存)."""
     pts_arr = np.asarray(points_2d, dtype=np.float64)
@@ -178,13 +198,14 @@ def project_2d_points_to_bone_plane(
         bone_angle_deg=bone_angle_deg,
         surface_offset=surface_offset,
     )
-    c2d = np.mean(pts_arr, axis=0)
+    ex_rot, ez_rot = _rotate_plane_axes(ex, ez, pattern_up_angle_deg=pattern_up_angle_deg)
+    c2d = np.asarray(centroid_2d, dtype=np.float64) if centroid_2d is not None else np.mean(pts_arr, axis=0)
     du = pts_arr[:, 0] - c2d[0]
     dv = pts_arr[:, 1] - c2d[1]
     world_3d = (
         plane_center[np.newaxis, :]
-        + du[:, np.newaxis] * ex[np.newaxis, :]
-        + dv[:, np.newaxis] * ez[np.newaxis, :]
+        + du[:, np.newaxis] * ex_rot[np.newaxis, :]
+        + dv[:, np.newaxis] * ez_rot[np.newaxis, :]
     ).astype(np.float32)
     return world_3d
 
@@ -245,6 +266,7 @@ def compute_bone_placement_transform(
     bone_t: float = 0.5,
     bone_angle_deg: float = 0.0,
     surface_offset: float = 0.08,
+    pattern_up_angle_deg: float = 0.0,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
     """ボーン情報から Placement 用の (offset_3d, euler_3d) を算出する (Blender非依存)."""
     plane_center, ex, normal, ez, _ = compute_bone_aligned_frame(
@@ -254,9 +276,10 @@ def compute_bone_placement_transform(
         bone_angle_deg=bone_angle_deg,
         surface_offset=surface_offset,
     )
+    ex_rot, ez_rot = _rotate_plane_axes(ex, ez, pattern_up_angle_deg=pattern_up_angle_deg)
 
-    # 回転行列 R = [ex, -normal, ez]
-    R = np.column_stack([ex, -normal, ez])
+    # 回転行列 R = [ex_rot, -normal, ez_rot]
+    R = np.column_stack([ex_rot, -normal, ez_rot])
 
     # オイラー角 (XYZ順) の逆算
     # R = R_x * R_y * R_z
@@ -275,6 +298,23 @@ def compute_bone_placement_transform(
     offset_3d = (float(plane_center[0]), float(plane_center[1]), float(plane_center[2]))
     euler_3d = (float(rx), float(ry), float(rz))
     return (offset_3d, euler_3d)
+
+
+def resolve_seam_bone_wrap_target(
+    doc: Document,
+    seam: Seam,
+    *,
+    bones: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[Any], Optional[Placement]]:
+    """縫合に関連するピースの配置情報からボーン巻付け (BONE_WRAP) の基準ボーンと配置を解決する."""
+    if not bones:
+        return (None, None)
+    pl_a = doc.placements.get(seam.a.piece_id)
+    pl_b = doc.placements.get(seam.b.piece_id)
+    for pl in (pl_a, pl_b):
+        if pl and pl.target_bone and pl.target_bone in bones:
+            return (bones[pl.target_bone], pl)
+    return (None, None)
 
 
 def flip_bone_name_left_right(bone_name: str) -> str:

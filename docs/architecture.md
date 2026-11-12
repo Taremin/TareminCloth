@@ -1217,10 +1217,10 @@ graph TD
 6. **3D配置プロキシ統合・ボーン追従配置 & 特許回避アーキテクチャ (`placement.py`, `migration.py`, `build_types.py`)**:
    - `Document.placements` と 3D ビューポート内プロキシオブジェクト（`Proxy_<name>`）の双方向トランスフォーム同期。
    - **3Dビューポート1:1実寸連動 (`sync_view2d_from_region_3d`)**: エディタ起動時に3Dビューカメラを正面正投影（Front Ortho）化し、カメラの投影スケール・原点と2Dキャンバスをピクセル単位で完全一致させ、中ボタンドラッグやホイールズームを双方向同期。
-   - **ボーン追従平面配置 (`compute_bone_aligned_frame`)**: アーマチュアボーンの `head`-`tail` 軸に対し、位置比率 `bone_t`、軸周りロール角度 `bone_angle_deg`、オフセット `surface_offset` に基づき接線 $\mathbf{e}_x$・法線 $\mathbf{n}$・縦軸 $\mathbf{e}_z$ を算出。下向きボーン（腕・脚等）でもワールド $+Z$ との内積判定により型紙の上下逆転を自動防止。
-   - **特許回避構造（筒モード迂回中継点縫合）**: Marvelous Designer等の円筒バウンディングボリューム（Bounding Volumes）による「2Dメッシュ曲面プリベンド」（CLO社特許構成要件）を完全に回避するため、**型紙メッシュ自体は完全な平面のまま配置**し、袖や脚などの「筒（Tubular）」モード縫合エッジのみがボーン裏側（$\pm 120^\circ$）の2つの中継点（Waypoints）を経由する構造（$\mathbf{v}_a \to \mathbf{w}_1 \to \mathbf{w}_2 \to \mathbf{v}_b$）を自動生成。シミュレーション開始時の糸張力（Loose Edge拘束）によって布が自然にボーンを包み込み、破綻なく円筒状に巻き付く。
-   - **HUD 角度コンパスウィジェット**: 情報カード下部に円形コンパスを配備。ボーン断面円、法線針、型紙平面バー、筒モード迂回アークを描画し、ドラッグ操作（Shiftで15度スナップ）でリアルタイムに角度を調整可能。
-   - **対称複製時のボーン自動反転 (`flip_bone_name_left_right`)**: `Shift+U`（対称複製）実行時、`.L` $\leftrightarrow$ `.R`、`_L` $\leftrightarrow$ `_R`、`Left` $\leftrightarrow$ `Right` のボーン名を自動反転し、ロール角度を正負反転（$-\theta$）して即座にミラー配置。
+   - **ボーン追従平面配置 (`compute_bone_aligned_frame`, `project_2d_points_to_bone_plane`)**: アーマチュアボーンの `head`-`tail` 軸に対し、位置比率 `bone_t`、軸周りロール角度 `bone_angle_deg`、オフセット `surface_offset` に基づき接線 $\mathbf{e}_x$・法線 $\mathbf{n}$・縦軸 $\mathbf{e}_z$ を算出。下向きボーン（腕・脚等）でもワールド $+Z$ との内積判定により型紙の上下逆転を自動防止。さらに `pattern_up_angle_deg`（`T` / `Shift+T` で ±90° 回転・HUD スライダー/数値編集可）により、ボーン周囲のロールとは独立して 2D 型紙上のどの方向を $\mathbf{e}_z$（上向き）に揃えるかを面内回転でき、横長矩形など任意向きの袖型紙に対応。
+   - **特許回避構造（縫合単位のボーン巻付け迂回中継点縫合: `SeamRouting.BONE_WRAP`）**: Marvelous Designer等の円筒バウンディングボリューム（Bounding Volumes）による「2Dメッシュ曲面プリベンド」（CLO社特許構成要件）を完全に回避するため、**型紙メッシュ自体は完全な平面のまま配置**し、縫合（`Seam.routing`）ごとに直接縫合 (`DIRECT`) とボーン巻付け (`BONE_WRAP`、縫合選択中 `B` キーまたはカードクリックで切替) を明示選択できる設計。`BONE_WRAP` 指定の縫合エッジのみが関与ピースのボーン裏側（$\pm 120^\circ$）の2つの中継点（Waypoints）を経由する構造（$\mathbf{v}_a \to \mathbf{w}_1 \to \mathbf{w}_2 \to \mathbf{v}_b$）を自動生成し（分岐頂点 `cloth_degree > 1` やボーン未解決時は `DIRECT` にフォールバック）、袖ぐり等の通常縫合と混在させても破綻なく円筒状に巻き付く。
+   - **HUD 角度コンパス・向きインジケーター**: 情報カード下部に円形コンパスを配備し、ボーン断面円、法線針、型紙平面バー、配置角度・上向き角度を表示（ドラッグ操作・Shiftで15度スナップ対応）。2Dキャンバスにはボーン設定済みピースの上向き方向矢印と `BONE_WRAP` 縫合の識別色・マークを、3Dビューには平面・上向き軸・実縫合辺に沿った迂回アーチプレビューを描画。
+   - **対称複製時のボーン自動反転 (`flip_bone_name_left_right`)**: `Shift+U`（対称複製）および左右反転実行時、`.L` $\leftrightarrow$ `.R`、`_L` $\leftrightarrow$ `_R`、`Left` $\leftrightarrow$ `Right` のボーン名を自動反転し、ロール角度 `bone_angle_deg` およびパターン上方向角度 `pattern_up_angle_deg` を正負反転（$-\theta, -\phi$）して即座にミラー配置。
    - シーン内の既存 2D Curve 型紙オブジェクト（Bezier / Poly）を解析し、`Document` の Piece・Path・Node・Placement へ一括自動変換。
 7. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
    - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。

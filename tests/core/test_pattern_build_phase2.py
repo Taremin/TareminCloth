@@ -123,7 +123,6 @@ class TestPatternBuildPhase2(unittest.TestCase):
             bone_t=0.5,
             bone_angle_deg=0.0,
             surface_offset=0.08,
-            is_tubular=False,
         )
 
         bones = {
@@ -155,7 +154,9 @@ class TestPatternBuildPhase2(unittest.TestCase):
         self.assertAlmostEqual(mean_z, 1.2, delta=0.02)
 
     def test_build_tubular_waypoints_sewing(self) -> None:
-        """筒（Tubular）モード有効時、ボーン裏側を迂回する3本構成のLoose Edge列が自動生成されることの検証."""
+        """Seam.routing=BONE_WRAP 時、ボーン裏側を迂回する3本構成のLoose Edge列が生成されることの検証."""
+        from taremin_cloth.pattern.document import SeamRouting
+
         doc = Document.new()
         p_id = "sleeve_piece"
         path_id = "path_outer"
@@ -180,15 +181,15 @@ class TestPatternBuildPhase2(unittest.TestCase):
             bone_t=0.5,
             bone_angle_deg=0.0,
             surface_offset=0.08,
-            is_tubular=True,  # 筒モード ON
         )
 
-        # 自己縫合 (左辺 n3->n0 と 右辺 n1->n2 を縫合して筒状にする)
+        # 自己縫合 (左辺 n3->n0 と 右辺 n1->n2 を BONE_WRAP で縫合して筒状にする)
         seam_id = "tubular_seam"
         doc.seams[seam_id] = Seam(
             id=seam_id,
             a=EdgeRange(piece_id=p_id, path_id=path_id, start_node_id="n3", end_node_id="n0"),
             b=EdgeRange(piece_id=p_id, path_id=path_id, start_node_id="n1", end_node_id="n2"),
+            routing=SeamRouting.BONE_WRAP,
         )
 
         bones = {
@@ -207,10 +208,10 @@ class TestPatternBuildPhase2(unittest.TestCase):
         cloth_verts_count = len(geom.piece_vertex_map["Sleeve"])
         # 総頂点数（中継点頂点を含む）
         total_verts_count = len(verts)
-        self.assertGreater(total_verts_count, cloth_verts_count, "筒モードではボーン裏側に中継点頂点が追加される必要があります")
+        self.assertGreater(total_verts_count, cloth_verts_count, "BONE_WRAP ではボーン裏側に中継点頂点が追加される必要があります")
 
         # 縫合Loose Edgeの検証
-        # 直接縫合ならステップ数 S 本だが、筒モードでは va -> wp1 -> wp2 -> vb で 3*S 本になる
+        # 直接縫合ならステップ数 S 本だが、BONE_WRAP では va -> wp1 -> wp2 -> vb で 3*S 本になる
         self.assertGreater(len(geom.sewing_edges), 0)
         self.assertEqual(len(geom.sewing_edges) % 3, 0, "中継点付き縫合エッジは3本ペアでなければなりません")
 
@@ -222,7 +223,9 @@ class TestPatternBuildPhase2(unittest.TestCase):
             self.assertGreater(wp_pos[1], 0.0, "中継点はボーン裏側 (Y > 0) を迂回しなければなりません")
 
     def test_tubular_off_fallback_direct(self) -> None:
-        """筒（Tubular）モード無効時は、中継点を生成せず直接縫合Loose Edgeが生成されることの検証."""
+        """Seam.routing=DIRECT 時は、ボーン指定があっても中継点を生成せず直接縫合Loose Edgeが生成されることの検証."""
+        from taremin_cloth.pattern.document import SeamRouting
+
         doc = Document.new()
         p_id = "sleeve_piece"
         path_id = "path_outer"
@@ -247,7 +250,6 @@ class TestPatternBuildPhase2(unittest.TestCase):
             bone_t=0.5,
             bone_angle_deg=0.0,
             surface_offset=0.08,
-            is_tubular=False,  # 筒モード OFF
         )
 
         seam_id = "direct_seam"
@@ -255,6 +257,7 @@ class TestPatternBuildPhase2(unittest.TestCase):
             id=seam_id,
             a=EdgeRange(piece_id=p_id, path_id=path_id, start_node_id="n3", end_node_id="n0"),
             b=EdgeRange(piece_id=p_id, path_id=path_id, start_node_id="n1", end_node_id="n2"),
+            routing=SeamRouting.DIRECT,
         )
 
         bones = {
@@ -277,6 +280,85 @@ class TestPatternBuildPhase2(unittest.TestCase):
         for va, vb in geom.sewing_edges:
             self.assertLess(va, cloth_verts_count)
             self.assertLess(vb, cloth_verts_count)
+
+    def test_mixed_direct_and_bone_wrap_and_rotated_sleeve(self) -> None:
+        """横向き袖 (pattern_up_angle_deg=90) における BONE_WRAP + 別ピースとの DIRECT 混在、分岐保護、ボーン無しフォールバック検証."""
+        from taremin_cloth.pattern.document import SeamRouting
+
+        doc = Document.new()
+        # 横長袖 (幅 0.4 x 高さ 0.2) -> 90°回転して高さ 0.4m の縦方向配置にする
+        sleeve = doc.add_rectangle_piece((0.0, 0.0), (0.4, 0.2), name="HorizSleeve")
+        sleeve.target_edge_length = 0.08
+        s_nodes = sleeve.get_outer_path().nodes
+        doc.placements[sleeve.id] = Placement(
+            piece_id=sleeve.id,
+            target_bone="Arm_Bone",
+            bone_t=0.5,
+            bone_angle_deg=0.0,
+            surface_offset=0.08,
+            pattern_up_angle_deg=90.0,
+        )
+
+        # 袖ぐり相手パーツ (非ボーン平面ピース)
+        body = doc.add_rectangle_piece((0.6, 0.0), (0.8, 0.2), name="Body")
+        body.target_edge_length = 0.08
+        b_nodes = body.get_outer_path().nodes
+
+        # 縫合1: 横向き袖の下辺 (n0->n1) と 上辺 (n3->n2) を BONE_WRAP で筒縫い
+        wrap_seam = Seam(
+            id="wrap_seam",
+            a=EdgeRange(piece_id=sleeve.id, path_id=sleeve.outer_path_id, start_node_id=s_nodes[0].id, end_node_id=s_nodes[1].id),
+            b=EdgeRange(piece_id=sleeve.id, path_id=sleeve.outer_path_id, start_node_id=s_nodes[3].id, end_node_id=s_nodes[2].id),
+            routing=SeamRouting.BONE_WRAP,
+        )
+        doc.seams[wrap_seam.id] = wrap_seam
+
+        # 縫合2: +90°時にボーン上端になる右辺 (n1->n2) と 身頃左辺 (n3->n0) を通常の DIRECT 縫合
+        direct_seam = Seam(
+            id="armhole_seam",
+            a=EdgeRange(piece_id=sleeve.id, path_id=sleeve.outer_path_id, start_node_id=s_nodes[1].id, end_node_id=s_nodes[2].id),
+            b=EdgeRange(piece_id=body.id, path_id=body.outer_path_id, start_node_id=b_nodes[3].id, end_node_id=b_nodes[0].id),
+            routing=SeamRouting.DIRECT,
+        )
+        doc.seams[direct_seam.id] = direct_seam
+
+        bones = {
+            "Arm_Bone": BoneInfo3D(
+                name="Arm_Bone",
+                head_3d=(0.3, 0.0, 1.4),
+                tail_3d=(0.3, 0.0, 1.0),
+                radius=0.05,
+            )
+        }
+        geom = build_garment_mesh_geometry(doc, bones=bones)
+        verts = np.array(geom.vertices_3d)
+        sleeve_idxs = geom.piece_vertex_map["HorizSleeve"]
+        body_idxs = geom.piece_vertex_map["Body"]
+        cloth_count = len(sleeve_idxs) + len(body_idxs)
+
+        # 横長 0.4m の袖が Z 軸方向に約 0.4m の高さで配置されていること
+        sleeve_z_span = float(np.max(verts[sleeve_idxs, 2]) - np.min(verts[sleeve_idxs, 2]))
+        self.assertAlmostEqual(sleeve_z_span, 0.4, places=2)
+
+        # 中継点 (wp >= cloth_count) が wrap_seam 用に生成され、すべてボーン裏 (+Y > 0) にあること
+        self.assertGreater(len(verts), cloth_count)
+        for wp_idx in range(cloth_count, len(verts)):
+            self.assertGreater(float(verts[wp_idx, 1]), 0.0)
+
+        # DIRECT の armhole_seam は中継点を持たず袖頂点と身頃頂点を直接結ぶこと
+        body_set = set(body_idxs)
+        sleeve_set = set(sleeve_idxs)
+        direct_armhole_edges = [
+            (u, v) for u, v in geom.sewing_edges
+            if (u in sleeve_set and v in body_set) or (v in sleeve_set and u in body_set)
+        ]
+        self.assertGreater(len(direct_armhole_edges), 0)
+
+        # ボーン無し時の BONE_WRAP 安全フォールバック検証
+        geom_nobone = build_garment_mesh_geometry(doc, bones={})
+        total_nobone = len(geom_nobone.piece_vertex_map["HorizSleeve"]) + len(geom_nobone.piece_vertex_map["Body"])
+        self.assertEqual(len(geom_nobone.vertices_3d), total_nobone)
+        self.assertGreater(len(geom_nobone.sewing_edges), 0)
 
 
 if __name__ == "__main__":

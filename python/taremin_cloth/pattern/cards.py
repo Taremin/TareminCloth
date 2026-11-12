@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from .document import Document, NodeKind
+from .document import Document, NodeKind, SeamRouting
 from .session import SelectionState
 from .units import format_cm
 from ..i18n import trans
@@ -74,6 +74,8 @@ def format_selection_card_lines(
             lines.append(f"{trans('Apply End (Shift+O)')}: {trans('ON') if shape_match_apply_endpoint_offset else trans('OFF')}")
             lines.append(f"{trans('Flip Curve')}: {trans('ON') if shape_match_flip_curvature else trans('OFF')}")
             lines.append(f"{trans('Ease')}: {ease_str}")
+            routing_str = trans("Bone Wrap") if seam.routing == SeamRouting.BONE_WRAP else trans("Direct")
+            lines.append(f"{trans('Routing (B)')}: {routing_str}")
             return lines
 
     if selection.edge_ranges:
@@ -151,8 +153,8 @@ def format_selection_card_lines(
             lines.append(f"{trans('Bone Angle')}: {int(angle_val)}°")
             offset_val = pl.surface_offset if pl else 0.08
             lines.append(f"{trans('Bone Offset')}: {format_cm(offset_val)}")
-            tubular_val = pl.is_tubular if pl else False
-            lines.append(f"{trans('Tubular')}: {trans('ON') if tubular_val else trans('OFF')}")
+            up_angle_val = pl.pattern_up_angle_deg if pl else 0.0
+            lines.append(f"{trans('Pattern Up (T)')}: {int(round(up_angle_val))}°")
             if selection.node_ids:
                 lines.append(f"{trans('Selected Nodes')}: {len(selection.node_ids)}")
     else:

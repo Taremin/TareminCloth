@@ -167,7 +167,7 @@ class TestPatternPlacement(unittest.TestCase):
             bone_t=0.4,
             bone_angle_deg=45.0,
             surface_offset=0.06,
-            is_tubular=True,
+            pattern_up_angle_deg=30.0,
         )
 
         ctrl = EditorController(doc=doc)
@@ -201,7 +201,7 @@ class TestPatternPlacement(unittest.TestCase):
         self.assertAlmostEqual(sym_pl.bone_t, 0.4)
         self.assertAlmostEqual(sym_pl.bone_angle_deg, -45.0)
         self.assertAlmostEqual(sym_pl.surface_offset, 0.06)
-        self.assertTrue(sym_pl.is_tubular)
+        self.assertAlmostEqual(sym_pl.pattern_up_angle_deg, -30.0)
 
     def test_project_2d_points_and_tubular_waypoints(self) -> None:
         """2D頂点列のボーン追従3D投影および筒モード裏側中継点算出の単体テスト."""
@@ -238,6 +238,113 @@ class TestPatternPlacement(unittest.TestCase):
         self.assertGreater(float(wp2[1]), 0.0)
         self.assertLess(float(wp1[0]), 0.0)
         self.assertGreater(float(wp2[0]), 0.0)
+
+    def test_project_2d_points_pattern_up_rotation(self) -> None:
+        """pattern_up_angle_deg による2D面内回転が法線裏返りなくボーン軸沿いに投影されること."""
+        from taremin_cloth.pattern.placement import compute_bone_placement_transform
+        import numpy as np
+
+        head = (0.0, 0.0, 1.0)
+        tail = (0.0, 0.0, 2.0)
+        # 横長矩形 (幅 0.6 x 高さ 0.2)
+        pts_2d = [(0.0, 0.0), (0.6, 0.0), (0.6, 0.2), (0.0, 0.2)]
+
+        # +90°回転: 2Dの +X端 (インデックス1, 2) がボーン上方向 (+Z) に配置され、
+        # 高さ方向 (Z幅=0.6) と周方向幅 (X幅=0.2) になること
+        w90 = project_2d_points_to_bone_plane(
+            pts_2d,
+            head_3d=head,
+            tail_3d=tail,
+            bone_t=0.5,
+            bone_angle_deg=0.0,
+            surface_offset=0.10,
+            pattern_up_angle_deg=90.0,
+        )
+        self.assertAlmostEqual(float(w90[1][2]), 1.5 + 0.3, places=4)
+        self.assertAlmostEqual(float(w90[2][2]), 1.5 + 0.3, places=4)
+        self.assertAlmostEqual(float(w90[0][2]), 1.5 - 0.3, places=4)
+        self.assertAlmostEqual(float(w90[1][0] - w90[2][0]), 0.2, places=4)
+
+        # 表裏法線 ((v1-v0) x (v3-v0)) が角度を変えても常に正面 (-Y) を向き裏返らないこと
+        for ang in (0.0, 90.0, -90.0, 180.0, 45.0):
+            w_ang = project_2d_points_to_bone_plane(
+                pts_2d,
+                head_3d=head,
+                tail_3d=tail,
+                bone_t=0.5,
+                bone_angle_deg=0.0,
+                surface_offset=0.10,
+                pattern_up_angle_deg=ang,
+            )
+            normal_face = np.cross(w_ang[1] - w_ang[0], w_ang[3] - w_ang[0])
+            self.assertLess(float(normal_face[1]), 0.0, f"angle={ang} で面が裏返りました")
+
+            # compute_bone_placement_transform との一致確認
+            off, eul = compute_bone_placement_transform(
+                head,
+                tail,
+                bone_t=0.5,
+                bone_angle_deg=0.0,
+                surface_offset=0.10,
+                pattern_up_angle_deg=ang,
+            )
+            from taremin_cloth.pattern.build_types import _euler_to_rotation_matrix
+            R = _euler_to_rotation_matrix(eul)
+            c2d = np.mean(pts_2d, axis=0)
+            local_3d = np.array([[p[0] - c2d[0], 0.0, p[1] - c2d[1]] for p in pts_2d], dtype=np.float32)
+            via_xform = (local_3d @ R.T) + np.array(off, dtype=np.float32)
+            np.testing.assert_allclose(via_xform, w_ang, atol=1e-4)
+
+        # 横長回転済み矩形の上辺/下辺ペア (w90[0], w90[3]) に迂回点がボーン裏側 (+Y) にできること
+        wp1, wp2 = compute_tubular_waypoints_for_pair(
+            w90[0],
+            w90[3],
+            head_3d=head,
+            tail_3d=tail,
+            bone_t=0.5,
+            bone_angle_deg=0.0,
+            surface_offset=0.10,
+        )
+        self.assertGreater(float(wp1[1]), 0.0)
+        self.assertGreater(float(wp2[1]), 0.0)
+
+    def test_serialization_and_legacy_is_tubular_ignored(self) -> None:
+        """pattern_up_angle_deg と Seam.routing の往復シリアライズ、および旧 is_tubular 無視の検証."""
+        from taremin_cloth.pattern.document import Seam, EdgeRange, SeamRouting
+
+        doc = Document.new()
+        p = doc.add_rectangle_piece((0.0, 0.0), (0.3, 0.2), name="Sleeve")
+        doc.placements[p.id] = Placement(
+            piece_id=p.id,
+            target_bone="Arm",
+            pattern_up_angle_deg=-90.0,
+        )
+        nodes = p.get_outer_path().nodes
+        seam = Seam(
+            id="s_wrap",
+            a=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[0].id, end_node_id=nodes[1].id),
+            b=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[2].id, end_node_id=nodes[3].id),
+            routing=SeamRouting.BONE_WRAP,
+        )
+        doc.seams[seam.id] = seam
+
+        raw = doc.to_dict()
+        self.assertNotIn("is_tubular", raw["placements"][p.id])
+        self.assertEqual(raw["seams"][seam.id]["routing"], "BONE_WRAP")
+        self.assertAlmostEqual(raw["placements"][p.id]["pattern_up_angle_deg"], -90.0)
+
+        restored = Document.from_dict(raw)
+        self.assertAlmostEqual(restored.placements[p.id].pattern_up_angle_deg, -90.0)
+        self.assertEqual(restored.seams[seam.id].routing, SeamRouting.BONE_WRAP)
+
+        # 旧データ (is_tubular: True あり、routing なし) はマイグレーションせず安全に無視されること
+        legacy = doc.to_dict()
+        legacy["placements"][p.id]["is_tubular"] = True
+        legacy["placements"][p.id].pop("pattern_up_angle_deg", None)
+        legacy["seams"][seam.id].pop("routing", None)
+        restored_legacy = Document.from_dict(legacy)
+        self.assertAlmostEqual(restored_legacy.placements[p.id].pattern_up_angle_deg, 0.0)
+        self.assertEqual(restored_legacy.seams[seam.id].routing, SeamRouting.DIRECT)
 
 
 if __name__ == "__main__":

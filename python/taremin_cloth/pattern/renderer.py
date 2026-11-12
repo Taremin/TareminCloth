@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Optional
 
 from .cards import format_selection_card_lines
-from .document import Document, NodeKind, NotchKind, PathRole
+from .document import Document, NodeKind, NotchKind, PathRole, SeamRouting
 from .editor import EditorController
 from .geometry import (
     build_arc_table,
@@ -153,6 +153,41 @@ def build_render_commands(
                 points=s_poly_pts,
                 filled=True,
             ))
+
+            # ボーン追従配置ピースには2D上の「ボーン上方向 (+ez)」矢印インジケーターを描画
+            pl = doc.placements.get(piece.id)
+            if pl and pl.target_bone and sampled_outline:
+                xs = [pt[0] for pt in sampled_outline]
+                ys = [pt[1] for pt in sampled_outline]
+                cx_loc = sum(xs) / len(xs)
+                cy_loc = sum(ys) / len(ys)
+                span_min = min(max(xs) - min(xs), max(ys) - min(ys))
+                arrow_len = max(0.02, min(0.06, 0.3 * span_min))
+                phi = math.radians(pl.pattern_up_angle_deg)
+                dir_x = math.sin(phi)
+                dir_y = math.cos(phi)
+                tip_loc = (cx_loc + dir_x * arrow_len, cy_loc + dir_y * arrow_len)
+                s_center = view.world_to_screen(piece.transform.transform_point((cx_loc, cy_loc)))
+                s_tip = view.world_to_screen(piece.transform.transform_point(tip_loc))
+                up_col = (0.3, 1.0, 0.5, 0.9)
+                commands.append(DrawCommand(
+                    kind=DrawCommandKind.LINE,
+                    color=up_col,
+                    points=[s_center, s_tip],
+                    width=2.0,
+                ))
+                head_len = arrow_len * 0.35
+                for ang_off in (2.5, -2.5):
+                    hx = dir_x * math.cos(ang_off) - dir_y * math.sin(ang_off)
+                    hy = dir_x * math.sin(ang_off) + dir_y * math.cos(ang_off)
+                    head_pt = (tip_loc[0] + hx * head_len, tip_loc[1] + hy * head_len)
+                    s_head = view.world_to_screen(piece.transform.transform_point(head_pt))
+                    commands.append(DrawCommand(
+                        kind=DrawCommandKind.LINE,
+                        color=up_col,
+                        points=[s_tip, s_head],
+                        width=2.0,
+                    ))
 
         # パス輪郭線および内部線（ベジェ曲線の分割サンプリング）
         for path_id, path in piece.paths.items():
@@ -367,12 +402,16 @@ def build_render_commands(
     for seam in doc.seams.values():
         _, _, mismatch = doc.compute_seam_lengths(seam.id)
         is_selected = (seam.id in controller.selection.seam_ids)
+        is_bone_wrap = (seam.routing == SeamRouting.BONE_WRAP)
         if is_selected:
             seam_col = (1.0, 0.85, 0.2, 1.0)
             line_width = 2.5
         elif mismatch > 0.15:
             seam_col = th.seam_mismatch
             line_width = 1.8
+        elif is_bone_wrap:
+            seam_col = th.seam_wrap
+            line_width = 2.0
         else:
             seam_col = th.seam_line
             line_width = 1.8
@@ -404,13 +443,23 @@ def build_render_commands(
             # 中央を結ぶ薄い補助線（面同士の接続ガイド）
             s_mid_a = view.world_to_screen(mid_a)
             s_mid_b = view.world_to_screen(mid_b)
-            guide_col = (seam_col[0], seam_col[1], seam_col[2], seam_col[3] * 0.35)
+            guide_col = (seam_col[0], seam_col[1], seam_col[2], seam_col[3] * (0.75 if is_bone_wrap else 0.35))
             commands.append(DrawCommand(
                 kind=DrawCommandKind.LINE,
                 color=guide_col,
                 points=[s_mid_a, s_mid_b],
-                width=1.0,
+                width=1.4 if is_bone_wrap else 1.0,
             ))
+            if is_bone_wrap:
+                s_wrap_center = ((s_mid_a[0] + s_mid_b[0]) * 0.5, (s_mid_a[1] + s_mid_b[1]) * 0.5)
+                commands.append(DrawCommand(
+                    kind=DrawCommandKind.CIRCLE,
+                    color=seam_col,
+                    points=[s_wrap_center],
+                    radius=5.0,
+                    filled=False,
+                    width=1.6,
+                ))
 
             # 始点マーカー（小さなドット）でペア0を識別可能にする
             commands.append(DrawCommand(
@@ -646,6 +695,7 @@ def build_render_commands(
                     "bone_t": max(0.0, min(1.0, pl.bone_t)),
                     "bone_angle_deg": max(0.0, min(1.0, (pl.bone_angle_deg + 180.0) / 360.0)),
                     "surface_offset": max(0.0, min(1.0, pl.surface_offset / 0.2)),
+                    "pattern_up_angle_deg": max(0.0, min(1.0, (pl.pattern_up_angle_deg + 180.0) / 360.0)),
                 }
                 for f_name, ratio in slider_ratios.items():
                     if f_name in layout.card_fields:
@@ -760,27 +810,14 @@ def build_render_commands(
                     width=2.0,
                 ))
 
-                # 筒モード (is_tubular == True) の場合の裏側迂回ルート (Waypoints Loop)
-                if pl.is_tubular:
-                    back_nx = -nx
-                    back_ny = -ny
-                    r_back = r * 1.15
-                    w1 = (cx + r_back * (back_nx * 0.866 - back_ny * 0.5), cy + r_back * (back_ny * 0.866 + back_nx * 0.5))
-                    w2 = (cx + r_back * (back_nx * 0.866 + back_ny * 0.5), cy + r_back * (back_ny * 0.866 - back_nx * 0.5))
-                    commands.append(DrawCommand(
-                        kind=DrawCommandKind.POLYLINE,
-                        color=(1.0, 0.6, 0.15, 0.95),
-                        points=[p_bar_a, w1, w2, p_bar_b],
-                        width=1.8,
-                    ))
-
                 # 角度テキスト表示
                 deg_label = f"{int(pl.bone_angle_deg)}°"
+                up_label = f"{int(round(pl.pattern_up_angle_deg))}°"
                 commands.append(DrawCommand(
                     kind=DrawCommandKind.TEXT,
                     color=(0.9, 0.9, 0.9, 0.9),
                     points=[(c_rect.x + 8.0, c_rect.y + 6.0)],
-                    text=f"{trans('Angle')}: {deg_label}",
+                    text=f"{trans('Angle')}: {deg_label} / {trans('Up')}: {up_label}",
                     font_size=10,
                 ))
 
@@ -807,7 +844,7 @@ def build_render_commands(
                 "bone_t": trans("Bone Pos"),
                 "bone_angle_deg": trans("Bone Angle"),
                 "surface_offset": trans("Bone Offset"),
-                "is_tubular": trans("Tubular"),
+                "pattern_up_angle_deg": trans("Pattern Up (T)"),
                 "notch_from_start": trans("From Start"),
                 "notch_ratio": trans("Ratio"),
                 "shape_match_ease": trans("Ease"),

@@ -80,6 +80,46 @@ class TestPatternRenderer(unittest.TestCase):
         seam_lines = [c for c in cmds if c.kind == DrawCommandKind.LINE and c.color in (DEFAULT_THEME.seam_line, DEFAULT_THEME.seam_mismatch)]
         self.assertEqual(len(seam_lines), 2)
 
+    def test_bone_wrap_seam_and_up_arrow_render_commands(self):
+        """BONE_WRAP 縫合線の識別描画・ボーン付きピースの上方向矢印・カード文字列の検証."""
+        from taremin_cloth.pattern.document import EdgeRange, Placement, Seam, SeamRouting
+
+        p1 = self.doc.add_rectangle_piece((0.0, 0.0), (0.4, 0.2), name="Sleeve")
+        self.doc.placements[p1.id] = Placement(
+            piece_id=p1.id,
+            target_bone="UpperArm.L",
+            pattern_up_angle_deg=90.0,
+        )
+        nodes = p1.get_outer_path().nodes
+        seam = Seam(
+            id="s_wrap",
+            a=EdgeRange(piece_id=p1.id, path_id=p1.outer_path_id, start_node_id=nodes[0].id, end_node_id=nodes[1].id),
+            b=EdgeRange(piece_id=p1.id, path_id=p1.outer_path_id, start_node_id=nodes[3].id, end_node_id=nodes[2].id),
+            routing=SeamRouting.BONE_WRAP,
+        )
+        self.doc.seams[seam.id] = seam
+        self.ctrl.selection.select_piece(p1.id)
+
+        cmds = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        # 2D上方向矢印 (緑色 LINE 3本) と BONE_WRAP 縫合線・補助円が出力されること
+        up_arrows = [c for c in cmds if c.kind == DrawCommandKind.LINE and c.color == (0.3, 1.0, 0.5, 0.9)]
+        self.assertEqual(len(up_arrows), 3)
+        wrap_lines = [c for c in cmds if c.kind == DrawCommandKind.LINE and c.color == DEFAULT_THEME.seam_wrap]
+        self.assertEqual(len(wrap_lines), 2)
+        wrap_circles = [
+            c for c in cmds
+            if c.kind == DrawCommandKind.CIRCLE and c.color == DEFAULT_THEME.seam_wrap and not c.filled
+        ]
+        self.assertEqual(len(wrap_circles), 1)
+        texts = [c.text for c in cmds if c.kind == DrawCommandKind.TEXT]
+        self.assertTrue(any("90°" in t for t in texts))
+
+        # 縫合選択時は Routing 行が表示されること
+        self.ctrl.selection.select_seam(seam.id)
+        cmds_seam = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        seam_texts = [c.text for c in cmds_seam if c.kind == DrawCommandKind.TEXT]
+        self.assertTrue(any("Routing" in t or "経路" in t for t in seam_texts))
+
     def test_preview_render_commands(self):
         self.ctrl.active_tool_name = "RECTANGLE"
         self.ctrl.preview_points = [(0.0, 0.0), (0.2, 0.3)]

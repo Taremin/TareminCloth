@@ -16,7 +16,7 @@ from ..utils.pattern_ir import (
     WaypointGuideIR,
     sample_pattern_boundary_loop,
 )
-from .document import Document, EdgeRange, PathRole, Seam
+from .document import Document, EdgeRange, PathRole, Seam, SeamRouting
 from .geometry import (
     build_arc_table,
     point_in_polygon,
@@ -183,13 +183,12 @@ def document_to_contours_and_seams(
             )
         )
 
-    # 縫合ペアの変換 (筒モード単体ピースの自動左右辺縫合を含む)
-    effective_seams = _collect_effective_seams(doc, contours)
+    # 縫合ペアの変換
     seam_pairs: list[SeamPairIR] = []
     # ピースIDと名前の相互引当て
     piece_name_map = {pid: p.name for pid, p in doc.pieces.items()}
 
-    for seam in effective_seams:
+    for seam in doc.seams.values():
         sid = seam.id
         p_name_a = piece_name_map.get(seam.a.piece_id)
         p_name_b = piece_name_map.get(seam.b.piece_id)
@@ -221,78 +220,6 @@ def document_to_contours_and_seams(
         )
 
     return (contours, seam_pairs)
-
-
-def _collect_effective_seams(doc: Document, contours: list[PatternContour2D]) -> list[Seam]:
-    """明示的な Seam 定義に加え、筒モード (is_tubular) が有効で自己縫合が未定義のピースに対し左右側辺の自動縫合を合成して返す."""
-    effective_seams: list[Seam] = list(doc.seams.values())
-    has_self_seam: set[str] = {
-        s.a.piece_id for s in doc.seams.values() if s.a.piece_id == s.b.piece_id
-    }
-
-    for contour in contours:
-        piece = doc.pieces.get(contour.uid)
-        if not piece or piece.id in has_self_seam:
-            continue
-        pl = doc.placements.get(piece.id)
-        if not pl or not pl.is_tubular:
-            continue
-        path = piece.paths.get(piece.outer_path_id)
-        if not path or len(path.nodes) < 2:
-            continue
-        nodes = path.nodes
-        num_orig_segs = len(nodes)
-        if num_orig_segs < 2:
-            continue
-
-        orig_seg_candidates: list[tuple[float, float, str, str, float]] = []
-        for k in range(num_orig_segs):
-            n0 = nodes[k]
-            n1 = nodes[(k + 1) % num_orig_segs]
-            base_id = f"{n0.id}_{n1.id}"
-            subs = [s for s in contour.outer_segments if s.segment_id == base_id or s.segment_id.startswith(f"{base_id}@sub")]
-            if not subs:
-                continue
-            all_pts_sub = np.concatenate([s.polyline_2d for s in subs], axis=0)
-            mx = float(np.mean(all_pts_sub[:, 0]))
-            dv = float(all_pts_sub[-1, 1] - all_pts_sub[0, 1])
-            orig_seg_candidates.append((mx, abs(dv), n0.id, n1.id, dv))
-
-        if len(orig_seg_candidates) < 2:
-            continue
-
-        sorted_cands = sorted(orig_seg_candidates, key=lambda item: item[0])
-        cand_left = sorted_cands[0]
-        cand_right = sorted_cands[-1]
-
-        if cand_left[2] == cand_right[2] and cand_left[3] == cand_right[3]:
-            continue
-
-        dv_left = cand_left[4]
-        dv_right = cand_right[4]
-        # 外周ループは通常一方向（CCW）のため、左右の縦辺は上下逆向きに走る -> 平行に繋ぐため reverse=True
-        reverse = (dv_left * dv_right < 0.0)
-
-        effective_seams.append(
-            Seam(
-                id=f"auto_tubular_{piece.id}",
-                a=EdgeRange(
-                    piece_id=piece.id,
-                    path_id=piece.outer_path_id,
-                    start_node_id=cand_left[2],
-                    end_node_id=cand_left[3],
-                ),
-                b=EdgeRange(
-                    piece_id=piece.id,
-                    path_id=piece.outer_path_id,
-                    start_node_id=cand_right[2],
-                    end_node_id=cand_right[3],
-                ),
-                reverse=reverse,
-            )
-        )
-
-    return effective_seams
 
 
 def _resolve_edge_range_sub_segments(
@@ -345,14 +272,11 @@ def _resolve_edge_range_sub_segments(
 def _synchronize_document_seams(
     doc: Document,
     contours: list[PatternContour2D],
-    *,
-    effective_seams: Optional[list[Seam]] = None,
 ) -> None:
-    """Document の Seam 定義（部分縫合・鎖縫合・筒モード自動縫合含む）に基づき、各セグメントの目標分割数を完全同期する."""
+    """Document の Seam 定義（部分縫合・鎖縫合を含む）に基づき、各セグメントの目標分割数を完全同期する."""
     contour_map = {c.uid: c for c in contours}
 
-    seams_to_sync = effective_seams if effective_seams is not None else _collect_effective_seams(doc, contours)
-    for seam in seams_to_sync:
+    for seam in doc.seams.values():
         edges_a = seam.chain_a if seam.chain_a else [seam.a]
         edges_b = seam.chain_b if seam.chain_b else [seam.b]
 
@@ -493,9 +417,8 @@ def _build_document_sewing_loose_edges(
     doc: Document,
     bones: Optional[dict[str, Any]] = None,
     contours: Optional[list[PatternContour2D]] = None,
-    effective_seams: Optional[list[Seam]] = None,
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
-    """DocumentのSeam定義（部分縫合、鎖縫合、中継点、筒モード自動縫合含む）からLoose Edge列を生成する."""
+    """DocumentのSeam定義（部分縫合、鎖縫合、中継点、ボーン巻付けBONE_WRAP含む）からLoose Edge列を生成する."""
     all_positions = [base_positions[i].copy() for i in range(len(base_positions))]
     loose_edges: list[tuple[int, int]] = []
     piece_name_map = {p.id: p.name for p in doc.pieces.values()}
@@ -504,14 +427,7 @@ def _build_document_sewing_loose_edges(
     resolved_seams: list[tuple[Seam, list[int], list[int]]] = []
     cloth_degree: dict[int, int] = {}
 
-    if effective_seams is not None:
-        eff_seams = effective_seams
-    elif contours is not None:
-        eff_seams = _collect_effective_seams(doc, contours)
-    else:
-        eff_seams = list(doc.seams.values())
-
-    for seam in eff_seams:
+    for seam in doc.seams.values():
         verts_a = _extract_chain_verts(
             seam.a,
             seam.chain_a,
@@ -549,47 +465,43 @@ def _build_document_sewing_loose_edges(
 
         resolved_seams.append((seam, [p[0] for p in step_pairs], [p[1] for p in step_pairs]))
 
-    # Pass 2: Loose Edge 生成 (中継点付きで共有端点を持つ場合は直接縫合にフォールバック)
+    # Pass 2: Loose Edge 生成 (迂回付きで共有端点を持つ場合は直接縫合にフォールバック)
     seen_direct: set[tuple[int, int]] = set()
+    from .placement import compute_tubular_waypoints_for_pair, resolve_seam_bone_wrap_target
 
     for seam, list_a, list_b in resolved_seams:
         num_steps = len(list_a)
+        has_manual_waypoints = bool(seam.waypoints)
+        bone_info = None
+        pl_ref = None
+        if not has_manual_waypoints and seam.routing == SeamRouting.BONE_WRAP:
+            bone_info, pl_ref = resolve_seam_bone_wrap_target(doc, seam, bones=bones)
 
-        piece_a = doc.pieces.get(seam.a.piece_id)
-        piece_b = doc.pieces.get(seam.b.piece_id)
-        pl_a = doc.placements.get(piece_a.id) if piece_a else None
-        pl_b = doc.placements.get(piece_b.id) if piece_b else None
-
-        # 筒状縫合 (is_tubular): 手動 waypoint が無く、どちらかのパーツが is_tubular かつボーン指定がある場合
-        is_tubular = (not seam.waypoints) and (
-            (pl_a and pl_a.is_tubular and pl_a.target_bone)
-            or (pl_b and pl_b.is_tubular and pl_b.target_bone)
+        use_bone_wrap = (bone_info is not None and pl_ref is not None)
+        manual_wp_positions = (
+            [np.array(wp.position_3d, dtype=np.float32) for wp in seam.waypoints]
+            if has_manual_waypoints
+            else []
         )
-        target_bone_name = (pl_a.target_bone if (pl_a and pl_a.is_tubular) else (pl_b.target_bone if pl_b else None))
-        bone_info = bones.get(target_bone_name) if (bones and target_bone_name) else None
 
-        if not seam.waypoints and not (is_tubular and bone_info is not None):
-            for step in range(num_steps):
-                va = list_a[step]
-                vb = list_b[step]
-                pair = (min(va, vb), max(va, vb))
-                if pair not in seen_direct:
-                    seen_direct.add(pair)
-                    loose_edges.append((va, vb))
-        elif is_tubular and bone_info is not None:
-            # 筒モード: ボーン裏側を迂回する2つの中継点（Waypoints Loop）を自動生成
-            pl_ref = pl_a if (pl_a and pl_a.is_tubular) else pl_b
-            from .placement import compute_tubular_waypoints_for_pair
+        for step in range(num_steps):
+            va = list_a[step]
+            vb = list_b[step]
 
-            for step in range(num_steps):
-                va = list_a[step]
-                vb = list_b[step]
+            pair = (min(va, vb), max(va, vb))
+            if pair in seen_direct:
+                continue
+            seen_direct.add(pair)
 
-                pair = (min(va, vb), max(va, vb))
-                if pair in seen_direct:
-                    continue
-                seen_direct.add(pair)
+            # 共有端点（他の縫合線と端点を共有）または中継点なし直接縫合の場合は直接接続
+            is_branched = cloth_degree.get(va, 1) > 1 or cloth_degree.get(vb, 1) > 1
+            if (not has_manual_waypoints and not use_bone_wrap) or is_branched:
+                loose_edges.append((va, vb))
+                continue
 
+            if has_manual_waypoints:
+                mid_points = manual_wp_positions
+            else:
                 wp1, wp2 = compute_tubular_waypoints_for_pair(
                     all_positions[va],
                     all_positions[vb],
@@ -599,45 +511,17 @@ def _build_document_sewing_loose_edges(
                     bone_angle_deg=pl_ref.bone_angle_deg,
                     surface_offset=pl_ref.surface_offset,
                 )
+                mid_points = [wp1, wp2]
 
-                idx_w1 = len(all_positions)
-                all_positions.append(wp1)
-                idx_w2 = len(all_positions)
-                all_positions.append(wp2)
+            chain_nodes = [va]
+            for wp_pos in mid_points:
+                node_idx = len(all_positions)
+                all_positions.append(wp_pos)
+                chain_nodes.append(node_idx)
+            chain_nodes.append(vb)
 
-                # 3本のエッジで接続: va -> wp1 -> wp2 -> vb
-                loose_edges.append((va, idx_w1))
-                loose_edges.append((idx_w1, idx_w2))
-                loose_edges.append((idx_w2, vb))
-        else:
-            wp_positions = [np.array(wp.position_3d, dtype=np.float32) for wp in seam.waypoints]
-
-            for step in range(num_steps):
-                va = list_a[step]
-                vb = list_b[step]
-
-                # 共有端点（他の縫合線と端点を共有）の場合は直接縫合エッジにフォールバックして分岐トポロジーを防止
-                if cloth_degree.get(va, 1) > 1 or cloth_degree.get(vb, 1) > 1:
-                    pair = (min(va, vb), max(va, vb))
-                    if pair not in seen_direct:
-                        seen_direct.add(pair)
-                        loose_edges.append((va, vb))
-                    continue
-
-                pair = (min(va, vb), max(va, vb))
-                if pair in seen_direct:
-                    continue
-                seen_direct.add(pair)
-
-                chain_nodes = [va]
-                for wp_pos in wp_positions:
-                    node_idx = len(all_positions)
-                    all_positions.append(wp_pos)
-                    chain_nodes.append(node_idx)
-                chain_nodes.append(vb)
-
-                for k in range(len(chain_nodes) - 1):
-                    loose_edges.append((chain_nodes[k], chain_nodes[k + 1]))
+            for k in range(len(chain_nodes) - 1):
+                loose_edges.append((chain_nodes[k], chain_nodes[k + 1]))
 
     all_pos_arr = np.array(all_positions, dtype=np.float32)
     return all_pos_arr, loose_edges
@@ -663,8 +547,7 @@ def build_garment_mesh_geometry(
         )
 
     # 1. 縫合ペアの分割数同期 (鎖縫合・部分縫合を含む完全同期)
-    effective_seams = _collect_effective_seams(doc, contours)
-    _synchronize_document_seams(doc, contours, effective_seams=effective_seams)
+    _synchronize_document_seams(doc, contours)
 
     all_3d_positions: list[np.ndarray] = []
     all_uvs_2d: list[np.ndarray] = []
@@ -714,6 +597,7 @@ def build_garment_mesh_geometry(
                 bone_t=placement.bone_t,
                 bone_angle_deg=placement.bone_angle_deg,
                 surface_offset=placement.surface_offset,
+                pattern_up_angle_deg=placement.pattern_up_angle_deg,
             )
         else:
             offset_3d = np.array(placement.offset_3d if placement else (0.0, 0.0, 0.0), dtype=np.float32)
@@ -788,14 +672,13 @@ def build_garment_mesh_geometry(
     all_uvs = np.concatenate(all_uvs_2d, axis=0)
     all_locals = np.concatenate(all_local_2d, axis=0)
 
-    # 2. 縫合 Loose Edge の生成 (部分縫合・鎖縫合・中継点・筒状迂回対応)
+    # 2. 縫合 Loose Edge の生成 (部分縫合・鎖縫合・中継点・ボーン巻付けBONE_WRAP対応)
     final_positions_3d, sewing_edges = _build_document_sewing_loose_edges(
         base_positions_3d,
         segment_global_map,
         doc=doc,
         bones=bones,
         contours=contours,
-        effective_seams=effective_seams,
     )
 
     # 3. UV 全体正規化 (2% 余白 [0.02, 0.98] 適用)

@@ -7,7 +7,14 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .document import Document, EdgeRange, PathRole
+from .document import (
+    Document,
+    EdgeRange,
+    PathRole,
+    Placement,
+    SeamRouting,
+    normalize_angle_deg,
+)
 from .history import HistoryManager
 from .ids import new_id
 from .session import SelectionState, SnapSettings, ViewTransform2D
@@ -71,7 +78,7 @@ PIECE_CARD_FIELDS: tuple[str, ...] = (
     "bone_t",
     "bone_angle_deg",
     "surface_offset",
-    "is_tubular",
+    "pattern_up_angle_deg",
 )
 
 
@@ -309,7 +316,11 @@ class EditorController:
                         elif self.sliding_field == "bone_angle_deg":
                             # 1px で 1.0度 (感度: 1.0)
                             new_val = self.slide_start_val + dx * 1.0 * shift_mod
-                            pl.bone_angle_deg = ((new_val + 180.0) % 360.0) - 180.0
+                            pl.bone_angle_deg = normalize_angle_deg(new_val)
+                        elif self.sliding_field == "pattern_up_angle_deg":
+                            # 1px で 1.0度 (感度: 1.0)
+                            new_val = self.slide_start_val + dx * 1.0 * shift_mod
+                            pl.pattern_up_angle_deg = normalize_angle_deg(new_val)
                         elif self.sliding_field == "surface_offset":
                             # 100px で 0.1m = 10cm (感度: 0.001)
                             new_val = self.slide_start_val + dx * 0.001 * shift_mod
@@ -345,6 +356,8 @@ class EditorController:
                                 self.editing_buffer = f"{int(pl.bone_t * 100)}"
                             elif field == "bone_angle_deg":
                                 self.editing_buffer = f"{int(pl.bone_angle_deg)}"
+                            elif field == "pattern_up_angle_deg":
+                                self.editing_buffer = f"{int(round(pl.pattern_up_angle_deg))}"
                             elif field == "surface_offset":
                                 from .units import m_to_cm
                                 self.editing_buffer = f"{m_to_cm(pl.surface_offset):.1f}"
@@ -487,18 +500,7 @@ class EditorController:
                             self.is_dirty = True
                             return True
 
-                        elif field_name == "is_tubular":
-                            before_doc = self.doc.clone()
-                            pl.is_tubular = not pl.is_tubular
-                            self.history.record_change(
-                                description="Toggle Tubular Seam",
-                                before_doc=before_doc,
-                                after_doc=self.doc,
-                            )
-                            self.is_dirty = True
-                            return True
-
-                        elif field_name in ("bone_t", "bone_angle_deg", "surface_offset"):
+                        elif field_name in ("bone_t", "bone_angle_deg", "surface_offset", "pattern_up_angle_deg"):
                             # スライダー操作の準備（ドラッグでスライド調整、3px以内クリックでインライン直接入力）
                             self.sliding_field = field_name
                             self.slide_start_pos = event.screen_pos
@@ -508,6 +510,8 @@ class EditorController:
                                 self.slide_start_val = pl.bone_t
                             elif field_name == "bone_angle_deg":
                                 self.slide_start_val = pl.bone_angle_deg
+                            elif field_name == "pattern_up_angle_deg":
+                                self.slide_start_val = pl.pattern_up_angle_deg
                             elif field_name == "surface_offset":
                                 self.slide_start_val = pl.surface_offset
                             return True
@@ -530,6 +534,7 @@ class EditorController:
                     "seam_match_apply_endpoint_offset",
                     "seam_match_flip_curvature",
                     "seam_match_ease",
+                    "seam_routing",
                 ):
                     f_rect = layout.card_fields.get(f_name)
                     if f_rect and f_rect.contains(px, py):
@@ -555,6 +560,8 @@ class EditorController:
                             else:
                                 self.editing_buffer = f"{self.shape_match_ease_value * 100.0:+.2f}"
                             self.is_dirty = True
+                        elif f_name == "seam_routing":
+                            self.toggle_selected_seams_routing()
                         return True
 
             elif self.selection.edge_ranges and layout.info_card.contains(px, py):
@@ -728,12 +735,22 @@ class EditorController:
             self.is_dirty = True
             return True
 
-        # グローバルショートカット: ボーン選択モードトグル (B)
+        # グローバルショートカット: 縫合ボーン巻付けトグル / ボーン選択モードトグル (B)
         if not event.ctrl and not event.alt and event.key.upper() == "B":
-            if self.selection.piece_ids:
+            if self.selection.seam_ids:
+                if self.toggle_selected_seams_routing():
+                    return True
+            elif self.selection.piece_ids:
                 self.picking_bone = not self.picking_bone
                 self.is_dirty = True
                 return True
+
+        # グローバルショートカット: パターン上方向 ±90°回転 (T / Shift+T)
+        if not event.ctrl and not event.alt and event.key.upper() == "T":
+            if self.selection.piece_ids:
+                delta_deg = -90.0 if event.shift else 90.0
+                if self.rotate_selected_pieces_pattern_up(delta_deg=delta_deg):
+                    return True
 
         # グローバルショートカット: 形状合わせ方モード切替 (O / Shift+O)
         if not event.ctrl and not event.alt and event.key.upper() == "O":
@@ -878,7 +895,15 @@ class EditorController:
                 try:
                     clean_buf = self.editing_buffer.replace("°", "").replace("deg", "").strip()
                     val_f = float(clean_buf)
-                    pl.bone_angle_deg = ((val_f + 180.0) % 360.0) - 180.0
+                    pl.bone_angle_deg = normalize_angle_deg(val_f)
+                    modified = True
+                except ValueError:
+                    pass
+            elif self.editing_field == "pattern_up_angle_deg":
+                try:
+                    clean_buf = self.editing_buffer.replace("°", "").replace("deg", "").strip()
+                    val_f = float(clean_buf)
+                    pl.pattern_up_angle_deg = normalize_angle_deg(val_f)
                     modified = True
                 except ValueError:
                     pass
@@ -932,6 +957,72 @@ class EditorController:
             self.is_dirty = True
             return True
         return False
+
+    def rotate_selected_pieces_pattern_up(self, *, delta_deg: float = 90.0) -> bool:
+        """選択中ピースのボーン配置上方向角度 (pattern_up_angle_deg) を加算回転する."""
+        if not self.selection.piece_ids:
+            return False
+
+        before_doc = self.doc.clone()
+        last_angle = 0.0
+        modified = False
+        for pid in self.selection.piece_ids:
+            if pid not in self.doc.pieces:
+                continue
+            pl = self.doc.placements.get(pid)
+            if not pl:
+                pl = Placement(piece_id=pid)
+                self.doc.placements[pid] = pl
+            pl.pattern_up_angle_deg = normalize_angle_deg(pl.pattern_up_angle_deg + delta_deg)
+            last_angle = pl.pattern_up_angle_deg
+            modified = True
+
+        if not modified:
+            return False
+
+        self.history.record_change(
+            description="Rotate Pattern Up",
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self.status_message = f"{trans('Pattern Up')}: {int(round(last_angle))}°"
+        self.is_dirty = True
+        return True
+
+    def toggle_selected_seams_routing(self) -> bool:
+        """選択中縫合のルーティング方式 (Direct / Bone Wrap) をトグルする."""
+        target_seams = [self.doc.seams[sid] for sid in self.selection.seam_ids if sid in self.doc.seams]
+        if not target_seams:
+            return False
+
+        before_doc = self.doc.clone()
+        new_routing = (
+            SeamRouting.BONE_WRAP
+            if any(s.routing != SeamRouting.BONE_WRAP for s in target_seams)
+            else SeamRouting.DIRECT
+        )
+        has_any_bone = False
+        for seam in target_seams:
+            seam.routing = new_routing
+            pl_a = self.doc.placements.get(seam.a.piece_id)
+            pl_b = self.doc.placements.get(seam.b.piece_id)
+            if (pl_a and pl_a.target_bone) or (pl_b and pl_b.target_bone):
+                has_any_bone = True
+
+        self.history.record_change(
+            description="Toggle Seam Routing",
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        if new_routing == SeamRouting.BONE_WRAP:
+            if has_any_bone:
+                self.status_message = f"{trans('Routing')}: {trans('Bone Wrap')}"
+            else:
+                self.status_message = f"{trans('Routing')}: {trans('Bone Wrap')} ({trans('No target bone')})"
+        else:
+            self.status_message = f"{trans('Routing')}: {trans('Direct')}"
+        self.is_dirty = True
+        return True
 
     def delete_selected(self) -> bool:
         """現在選択中の要素（ノッチ、縫合、ノード、またはピース）を優先順位に従って削除し履歴に記録する.
@@ -1323,9 +1414,9 @@ class EditorController:
                     preset=str(pld.get("preset", "CHEST_FRONT")),
                     target_bone=str(pld.get("target_bone", "")),
                     bone_t=float(pld.get("bone_t", 0.5)),
-                    bone_angle_deg=float(pld.get("bone_angle_deg", 0.0)),
+                    bone_angle_deg=normalize_angle_deg(float(pld.get("bone_angle_deg", 0.0))),
                     surface_offset=float(pld.get("surface_offset", 0.08)),
-                    is_tubular=bool(pld.get("is_tubular", False)),
+                    pattern_up_angle_deg=normalize_angle_deg(float(pld.get("pattern_up_angle_deg", 0.0))),
                 )
             new_pids.append(new_pid)
 

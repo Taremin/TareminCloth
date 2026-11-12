@@ -56,21 +56,28 @@ class TestPatternEditorPlacementE2E(unittest.TestCase):
         self.assertEqual(all_bones[0][0], "Spine")
 
         # 3. 型紙ドキュメントおよび配置設定の作成
-        from taremin_cloth.pattern.document import Document, Placement
+        from taremin_cloth.pattern.document import Document, EdgeRange, Placement, Seam, SeamRouting
         from taremin_cloth.pattern.build import build_garment_mesh_in_place
         from taremin_cloth.pattern.bridge import save_document_to_scene
 
         doc = Document.new()
-        p = doc.add_rectangle_piece((0.0, 0.0), (0.2, 0.3), name="Sleeve")
+        p = doc.add_rectangle_piece((0.0, 0.0), (0.3, 0.2), name="Sleeve")
         pl = Placement(
             piece_id=p.id,
             target_bone="Spine",
             bone_t=0.6,
             bone_angle_deg=90.0,
             surface_offset=0.03,
-            is_tubular=True,
+            pattern_up_angle_deg=90.0,
         )
         doc.placements[p.id] = pl
+        nodes = p.get_outer_path().nodes
+        doc.seams["wrap_seam"] = Seam(
+            id="wrap_seam",
+            a=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[0].id, end_node_id=nodes[1].id),
+            b=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[3].id, end_node_id=nodes[2].id),
+            routing=SeamRouting.BONE_WRAP,
+        )
         save_document_to_scene(doc, scene=scene)
 
         # 4. 非破壊3D衣服メッシュのビルド実行
@@ -105,21 +112,28 @@ class TestPatternEditorPlacementE2E(unittest.TestCase):
     def test_draw_callback_3d_preview_execution(self):
         """PatternCanvasRenderer.draw_callback_3d が例外なく3Dプレビューおよび筒迂回ルートを描画すること."""
         from unittest.mock import MagicMock, patch
-        from taremin_cloth.pattern.document import Document, Placement
+        from taremin_cloth.pattern.document import Document, EdgeRange, Placement, Seam, SeamRouting
         from taremin_cloth.pattern.editor import EditorController
         from taremin_cloth.pattern.canvas import PatternCanvasRenderer
 
         doc = Document.new()
-        p = doc.add_rectangle_piece((0.5, 0.5), (0.7, 0.8), name="Sleeve")
+        p = doc.add_rectangle_piece((0.5, 0.5), (0.8, 0.7), name="Sleeve")
         pl = Placement(
             piece_id=p.id,
             target_bone="Spine",
             bone_t=0.5,
             bone_angle_deg=45.0,
             surface_offset=0.05,
-            is_tubular=True,
+            pattern_up_angle_deg=90.0,
         )
         doc.placements[p.id] = pl
+        nodes = p.get_outer_path().nodes
+        doc.seams["wrap_seam"] = Seam(
+            id="wrap_seam",
+            a=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[0].id, end_node_id=nodes[1].id),
+            b=EdgeRange(piece_id=p.id, path_id=p.outer_path_id, start_node_id=nodes[3].id, end_node_id=nodes[2].id),
+            routing=SeamRouting.BONE_WRAP,
+        )
 
         ctrl = EditorController(doc=doc)
         ctrl.selection.select_piece(p.id)

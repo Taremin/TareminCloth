@@ -20,7 +20,9 @@ from .document import (
     ReferenceImage,
     Seam,
     SeamMode,
+    SeamRouting,
     Waypoint,
+    normalize_angle_deg,
 )
 from .history import HistoryManager, HistoryEntry
 from .placement import (
@@ -53,7 +55,9 @@ __all__ = [
     "ReferenceImage",
     "Seam",
     "SeamMode",
+    "SeamRouting",
     "Waypoint",
+    "normalize_angle_deg",
     "HistoryManager",
     "HistoryEntry",
     "QUICK_PLACEMENT_PRESETS",
