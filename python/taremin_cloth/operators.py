@@ -7,10 +7,6 @@ import bpy
 from .engine.cache import (
     _simulators,
     _rest_positions,
-    _prev_coords_cache,
-    _mesh_char_len_cache,
-    _effective_substeps_cache,
-    _collider_prev_locs_cache,
     _prev_elastic_scales,
     _timeline_frame_cache,
     _buffered_start_frames,

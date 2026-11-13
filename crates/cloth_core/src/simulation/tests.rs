@@ -947,6 +947,43 @@ mod tests {
     }
 
     #[test]
+    fn test_adaptive_substeps_preserve_history_on_config_update() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.0, 0.05, 0.0],
+        ];
+        let edges = vec![[0, 1], [1, 2], [2, 0]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None,
+            None, None, 0, 0.005, 1000.0, 10.0, 1000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_adaptive_substep_options(true, 4, 40);
+        sim.effective_substeps = 20;
+
+        // 適応有効のまま他設定（apply_config 相当）や min/max 更新が入っても履歴が保持・クランプされること
+        let mut cfg = sim.export_config();
+        cfg.gravity = [0.0, 0.0, 0.0];
+        cfg.max_substeps = 18;
+        sim.apply_config(&cfg);
+        assert_eq!(sim.effective_substeps(), 18, "有効継続中の設定更新では履歴を保持し新範囲へクランプするべき");
+
+        // 無効化時は履歴が 0 にリセットされ、無効期間中の外部変位も再有効化後に持ち越されないこと
+        sim.set_adaptive_substep_options(false, 4, 40);
+        assert_eq!(sim.effective_substeps(), 0);
+        sim.note_external_displacement(0.50);
+        sim.set_adaptive_substep_options(true, 4, 40);
+        assert_eq!(sim.effective_substeps(), 0);
+        sim.step(1.0 / 60.0, 0);
+        assert_eq!(sim.effective_substeps(), 4, "無効期間中の外部変位は再有効化時にクリアされるべき");
+    }
+
+    #[test]
     fn test_adaptive_substeps_step_loop() {
         let ctx = match get_test_context() {
             Some(c) => c,

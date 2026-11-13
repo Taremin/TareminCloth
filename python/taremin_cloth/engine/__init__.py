@@ -6,10 +6,6 @@ taremin_cloth engine パッケージ
 from .cache import (
     _simulators,
     _rest_positions,
-    _prev_coords_cache,
-    _mesh_char_len_cache,
-    _effective_substeps_cache,
-    _collider_prev_locs_cache,
     _prev_elastic_scales,
     _timeline_frame_cache,
     _buffered_start_frames,
@@ -32,6 +28,7 @@ from .collider import (
     _collider_cache,
     _last_sync_info,
     clear_collider_cache,
+    clear_collider_motion_cache,
     sync_colliders,
 )
 from .params import (
@@ -78,10 +75,6 @@ from .runner import (
 __all__ = [
     "_simulators",
     "_rest_positions",
-    "_prev_coords_cache",
-    "_mesh_char_len_cache",
-    "_effective_substeps_cache",
-    "_collider_prev_locs_cache",
     "_prev_elastic_scales",
     "_timeline_frame_cache",
     "_buffered_start_frames",
@@ -102,6 +95,7 @@ __all__ = [
     "_collider_cache",
     "_last_sync_info",
     "clear_collider_cache",
+    "clear_collider_motion_cache",
     "sync_colliders",
     "sync_cloth_parameters",
     "sync_elastic_groups",

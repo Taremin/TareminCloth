@@ -13,14 +13,6 @@ from .simconfig import collect_sim_config, sim_config_signature, purge_applied_s
 _simulators = {}
 # レストポーズ（初期頂点座標）を保持するグローバルキャッシュ
 _rest_positions = {}
-# 直前フレームの頂点座標キャッシュ（適応型サブステップ制御用）
-_prev_coords_cache = {}
-# メッシュ特性長 (最小エッジ長と厚みから算出) キャッシュ
-_mesh_char_len_cache = {}
-# 直前フレームの適応サブステップ数キャッシュ（平滑化・ジッター防止用）
-_effective_substeps_cache = {}
-# コライダーの直前ワールド位置キャッシュ（コライダー速度検知用）
-_collider_prev_locs_cache = {}
 # 伸縮グループの直前スケールキャッシュ（急激な変化の平滑化用）
 _prev_elastic_scales = {}
 # 紐パーツの直前スケールキャッシュ（引き絞りの平滑化用）
@@ -243,14 +235,14 @@ def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
 
 def clear_simulator_for_object(obj_name, *, clear_timeline=True):
     """特定オブジェクトに対応するシミュレータおよび関連キャッシュを破棄する"""
-    global _simulators, _prev_coords_cache, _mesh_char_len_cache
-    global _effective_substeps_cache, _prev_elastic_scales, _prev_string_scales, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
-    had_sim = obj_name in _simulators
-    _simulators.pop(obj_name, None)
-    _prev_coords_cache.pop(obj_name, None)
-    _mesh_char_len_cache.pop(obj_name, None)
-    _effective_substeps_cache.pop(obj_name, None)
-    _collider_prev_locs_cache.pop(obj_name, None)
+    global _simulators
+    global _prev_elastic_scales, _prev_string_scales, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
+    entry = _simulators.pop(obj_name, None)
+    had_sim = entry is not None
+    if had_sim:
+        from .collider import clear_collider_motion_cache
+        sim = entry[0] if isinstance(entry, tuple) else entry
+        clear_collider_motion_cache(sim=sim)
     _prev_elastic_scales.pop(obj_name, None)
     _prev_string_scales.pop(obj_name, None)
     _prev_attachment_pin_targets.pop(obj_name, None)
@@ -273,23 +265,19 @@ def clear_simulator_for_object(obj_name, *, clear_timeline=True):
 
 def clear_simulators():
     """全シミュレータインスタンスおよび各種キャッシュを破棄する"""
-    from .collider import clear_collider_cache
+    from .collider import clear_collider_cache, clear_collider_motion_cache
     from .runner import restore_fast_playback
-    global _simulators, _prev_coords_cache
-    global _mesh_char_len_cache, _effective_substeps_cache, _collider_prev_locs_cache
+    global _simulators
     global _prev_elastic_scales, _prev_string_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
     global _attachment_pin_indices_cache, _prev_attachment_pin_targets, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
     restore_fast_playback()
     clear_collider_cache()
+    clear_collider_motion_cache()
     purge_applied_signature(None)
     from .params import clear_wrinkle_signature_cache
     clear_wrinkle_signature_cache(None)
     count = len(_simulators)
     _simulators.clear()
-    _prev_coords_cache.clear()
-    _mesh_char_len_cache.clear()
-    _effective_substeps_cache.clear()
-    _collider_prev_locs_cache.clear()
     _prev_elastic_scales.clear()
     _prev_string_scales.clear()
     _timeline_frame_cache.clear()

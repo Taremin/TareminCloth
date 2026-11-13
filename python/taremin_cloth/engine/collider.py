@@ -26,6 +26,9 @@ _bone_sdf_cache = {}
 _bone_sdf_signatures = {}
 _scene_mesh_collider_cache = {}
 _bone_pose_signatures = {}
+# コライダーおよびボーンSDFの移動量追跡キャッシュ（CFL適応サブステップの外部変位通知用）
+# clear_collider_cache()（設定変更時のみ）では消去せず、シミュレータ破棄時のみ消去する。
+_collider_motion_locs_cache = {}
 # 直近のコライダー同期のSDF取得元 {sim_id: {"sdf_source": "baked"|"disk"|"memory"|"failed"|"none"}}
 # 起動サマリー表示用。Blenderはシングルスレッド逐次実行のため、呼び出し直後の参照で安全。
 _last_sync_info = {}
@@ -89,6 +92,28 @@ def clear_collider_cache():
         clear_collider_armature_cache()
     except Exception:
         pass
+
+
+def clear_collider_motion_cache(*, sim=None):
+    """シミュレータ破棄時にコライダー移動量追跡キャッシュを破棄する。"""
+    if sim is None:
+        _collider_motion_locs_cache.clear()
+    else:
+        _collider_motion_locs_cache.pop(id(sim), None)
+
+
+def _measure_and_update_motion(sim_id: int, *, key: str, pos_arr: np.ndarray) -> float:
+    """対象コライダー（またはボーン群）の前フレームからの最大変位量を計算し、履歴を更新する。"""
+    per_sim = _collider_motion_locs_cache.setdefault(sim_id, {})
+    cur = np.asarray(pos_arr, dtype=np.float32)
+    prev = per_sim.get(key)
+    per_sim[key] = cur.copy()
+    if prev is None or prev.shape != cur.shape or cur.size == 0:
+        return 0.0
+    diff = cur - prev
+    if diff.ndim == 1:
+        return float(np.linalg.norm(diff))
+    return float(np.max(np.linalg.norm(diff, axis=1)))
 
 
 @allow_positional
@@ -655,6 +680,22 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                 sweep_margin=max_sweep_margin,
             )
 
+    # コライダーおよびボーンSDFの前フレームからの移動量を追跡し、CFL適応サブステップへ通知する
+    active_motion_keys = set()
+    max_col_disp = 0.0
+    for col_obj, _col_settings in collider_objs:
+        mkey = f"obj:{col_obj.name}"
+        active_motion_keys.add(mkey)
+        eval_col = col_obj.evaluated_get(depsgraph) if depsgraph else col_obj
+        col_loc = eval_col.matrix_world.translation
+        disp = _measure_and_update_motion(
+            sim_id,
+            key=mkey,
+            pos_arr=np.array([col_loc.x, col_loc.y, col_loc.z], dtype=np.float32),
+        )
+        if disp > max_col_disp:
+            max_col_disp = disp
+
     # 毎フレームのボーン変換行列更新 (BONE_SDF / MESH_SDF)
     if sim_id in _bone_sdf_cache:
         cache_entry = _bone_sdf_cache[sim_id]
@@ -675,6 +716,12 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
             w_arr_col = np.ascontiguousarray(np.transpose(w_arr_row, (0, 2, 1)), dtype=np.float32)
             inv_arr_col = np.ascontiguousarray(np.transpose(inv_arr_row, (0, 2, 1)), dtype=np.float32)
             sim.update_bone_transforms(w_arr_col, inv_arr_col)
+
+            mkey = f"meshsdf:{target_obj.name}"
+            active_motion_keys.add(mkey)
+            disp = _measure_and_update_motion(sim_id, key=mkey, pos_arr=w_arr_row[:, :3, 3])
+            if disp > max_col_disp:
+                max_col_disp = disp
 
         elif target_obj and getattr(target_obj, "pose", None):
             eval_arm = target_obj.evaluated_get(depsgraph) if depsgraph else target_obj
@@ -748,4 +795,20 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                     )
 
                 sim.update_bone_transforms(w_arr_col, inv_arr_col, dirty_bone_indices)
+
+                mkey = f"bonesdf:{target_obj.name}"
+                active_motion_keys.add(mkey)
+                disp = _measure_and_update_motion(sim_id, key=mkey, pos_arr=w_arr_row[:, :3, 3])
+                if disp > max_col_disp:
+                    max_col_disp = disp
+
+    # 無効化または削除されたコライダーの移動追跡履歴を掃除（再有効化時の誤爆防止）
+    per_sim_motion = _collider_motion_locs_cache.get(sim_id)
+    if per_sim_motion is not None:
+        for stale_key in list(per_sim_motion.keys()):
+            if stale_key not in active_motion_keys:
+                del per_sim_motion[stale_key]
+
+    if max_col_disp > 1e-5 and hasattr(sim, "note_external_displacement"):
+        sim.note_external_displacement(float(max_col_disp))
 

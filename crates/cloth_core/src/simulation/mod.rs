@@ -702,10 +702,20 @@ impl GpuClothSimulator {
         min_substeps: u32,
         max_substeps: u32,
     ) {
+        let min_s = min_substeps.max(1);
+        let max_s = max_substeps.max(min_s);
+        let was_enabled = self.enable_adaptive_substep;
         self.enable_adaptive_substep = enabled;
-        self.min_substeps = min_substeps.max(1);
-        self.max_substeps = max_substeps.max(self.min_substeps);
-        self.effective_substeps = 0;
+        self.min_substeps = min_s;
+        self.max_substeps = max_s;
+        // 既に適応モードが有効なまま設定を再適用した際はヒステリシス履歴を保持して範囲クランプのみ行い、
+        // 無効化時または無効→有効への初回切替時のみ履歴および保留中の外部変位をリセットする。
+        if !enabled || !was_enabled {
+            self.effective_substeps = 0;
+            self.pending_external_displacement = 0.0;
+        } else if self.effective_substeps > 0 {
+            self.effective_substeps = self.effective_substeps.clamp(min_s, max_s);
+        }
     }
 
     /// 直近の物理ステップで使用された実効サブステップ数を取得する

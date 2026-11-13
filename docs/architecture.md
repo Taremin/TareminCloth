@@ -175,7 +175,7 @@ Blender インタラクティブ操作における実行フレームレートを
    $$N_{\text{grav}} = \left\lceil \sqrt{\frac{0.5 \cdot \|\mathbf{g}\| \cdot \Delta t^2}{\ell_{\text{margin}}}} \right\rceil$$
 
 3. **外力変位通知機構 (`note_external_displacement`)**:
-   マウスドラッグ（Grab）やアタッチメントピン、ボーンアニメーション等の急激な外部変位が発生した際、ホスト側から即座に変位量 $`d_{\text{ext}}`$ をコアへ通知し、次フレームの判定対象変位に反映させます。
+   マウスドラッグ（Grab）やアタッチメントピン、あるいは `sync_colliders` で検出されるコライダーオブジェクト・Bone SDF / Mesh SDF ボーンアニメーションの急激な外部変位が発生した際、ホスト側から即座に変位量 $`d_{\text{ext}}`$ をコアへ通知し、次フレームの判定対象変位に反映させます（`set_adaptive_substep_options` でのパラメータ更新時は、適応機能が有効のまま継続する限り `effective_substeps` のヒステリシス履歴を保持して有効範囲でクランプし、無効化または無効からの切替時のみ履歴および保留中外部変位 `pending_external_displacement` をリセットします）。
    $$d_{\max} \leftarrow \max(d_{\max}, \; d_{\text{ext}})$$
 
 4. **ヒステリシス制御（剛性変動リミットサイクル発振・チャタリング防止）**:

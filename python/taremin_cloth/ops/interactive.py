@@ -22,7 +22,6 @@ from ..engine.runner import (
     begin_simulator_init,
     create_simulator_from_state,
     finalize_simulator_init,
-    get_effective_substeps,
     step_cloth_scene,
     step_cloth_object,
     restore_fast_playback,

@@ -9,10 +9,6 @@ import numpy as np
 from typing import Optional
 from .cache import (
     _simulators,
-    _prev_coords_cache,
-    _mesh_char_len_cache,
-    _effective_substeps_cache,
-    _collider_prev_locs_cache,
     _timeline_frame_cache,
     _buffered_start_frames,
     _waypoint_managers,
@@ -220,18 +216,7 @@ def finalize_simulator_init(obj, sim, state, *, scene=None):
     coords = state["coords"]
     settings = obj.taremin_cloth
 
-    # メッシュ特性長 (最小エッジ長と布厚み) を計算してキャッシュ
-    if len(edges_2d) > 0:
-        edge_diffs = pos_2d[edges_2d[:, 1]] - pos_2d[edges_2d[:, 0]]
-        edge_lens_sq = np.sum(edge_diffs ** 2, axis=1)
-        min_edge_len = float(np.sqrt(np.min(edge_lens_sq)))
-        if min_edge_len < 1e-4:
-            min_edge_len = 0.01
-    else:
-        min_edge_len = 0.02
     thickness = getattr(settings, "thickness", 0.005)
-    char_len = max(0.001, min(min_edge_len, thickness * 2.0))
-    _mesh_char_len_cache[obj.name] = char_len
 
     if state.get("seam_cluster_map"):
         set_seam_cluster_map(obj.name, state["seam_cluster_map"])
@@ -353,9 +338,11 @@ def get_effective_substeps(obj, coords=None, dt: float = 1.0 / 60.0, scene=None)
     if not settings or not getattr(settings, "enable_adaptive_substep", False):
         return base_steps
 
-    sim = _simulators.get(obj.name) if hasattr(obj, "name") else None
+    entry = _simulators.get(obj.name) if hasattr(obj, "name") else None
+    sim = entry[0] if isinstance(entry, tuple) else entry
     if sim is not None and hasattr(sim, "get_effective_substeps"):
-        return sim.get_effective_substeps()
+        eff = sim.get_effective_substeps()
+        return eff if eff > 0 else base_steps
 
     return base_steps
 
