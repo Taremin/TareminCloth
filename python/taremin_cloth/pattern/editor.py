@@ -14,6 +14,7 @@ from .document import (
     Path,
     PathRole,
     Placement,
+    ReferenceImage,
     SeamRouting,
     normalize_angle_deg,
 )
@@ -115,6 +116,14 @@ PIECE_CARD_FIELDS: tuple[str, ...] = (
     "bone_angle_deg",
     "surface_offset",
     "pattern_up_angle_deg",
+)
+REF_IMAGE_CARD_FIELDS: tuple[str, ...] = (
+    "ref_visible",
+    "ref_opacity",
+    "ref_width",
+    "ref_offset_x",
+    "ref_offset_y",
+    "ref_clear",
 )
 
 
@@ -293,6 +302,68 @@ class EditorController:
             and len(self.selection.node_ids) >= 2
         )
 
+    def _is_ref_image_card_mode(self) -> bool:
+        """未選択かつ下絵画像設定済み時の下絵調整カードを表示・操作すべき状態か判定する."""
+        return (not self.selection.has_any_selection()) and (self.doc.reference_image is not None)
+
+    def set_reference_image(
+        self,
+        ref: Optional[ReferenceImage],
+        *,
+        description: str = "Set Reference Image",
+    ) -> bool:
+        """ドキュメントの下絵参照画像を設定または更新し、Undo履歴へ記録する."""
+        before_doc = self.doc.clone()
+        self.doc.reference_image = ref
+        recorded = self.history.record_change(
+            description=description,
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self.is_dirty = True
+        return recorded
+
+    def toggle_reference_image_visible(self) -> bool:
+        """下絵参照画像の表示・非表示を切り替え、Undo履歴へ記録する."""
+        if self.doc.reference_image is None:
+            return False
+        before_doc = self.doc.clone()
+        self.doc.reference_image.visible = not self.doc.reference_image.visible
+        self.history.record_change(
+            description="Toggle Reference Image",
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self.is_dirty = True
+        return True
+
+    def clear_reference_image(self) -> bool:
+        """下絵参照画像を削除し、Undo履歴へ記録する."""
+        if self.doc.reference_image is None:
+            return False
+        return self.set_reference_image(None, description="Clear Reference Image")
+
+    def replace_document_in_place(
+        self,
+        new_doc: Document,
+        *,
+        description: str = "Replace Document",
+    ) -> bool:
+        """現在のドキュメント内容を外部ドキュメントでインプレース置換し、Undo履歴へ記録する."""
+        before_doc = self.doc.clone()
+        self.selection.clear()
+        self.transform_session = None
+        self.editing_field = None
+        self.editing_buffer = ""
+        HistoryManager._copy_doc_in_place(new_doc, self.doc)
+        recorded = self.history.record_change(
+            description=description,
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self.is_dirty = True
+        return recorded
+
     def handle_event(self, event: EditorEvent) -> bool:
         """入力イベントをアクティブツールまたはグローバルハンドラーへ配送する."""
         # Alt 押下中はグリッド/ノード吸着を一時無効化 (自由な微調整用)
@@ -419,29 +490,46 @@ class EditorController:
                 if abs(dx) > 3.0:
                     self.is_slider_dragging = True
 
-                if self.is_slider_dragging and self.selection.piece_ids:
+                if self.is_slider_dragging:
                     shift_mod = 0.2 if event.shift else 1.0
-                    for pid in self.selection.piece_ids:
-                        if pid not in self.doc.pieces:
-                            continue
-                        pl = self._get_or_create_placement(pid)
-                        if self.sliding_field == "bone_t":
-                            # 200px で 0.0〜1.0 (感度: 0.005)
-                            new_val = self.slide_start_val + dx * 0.005 * shift_mod
-                            pl.bone_t = max(0.0, min(1.0, new_val))
-                        elif self.sliding_field == "bone_angle_deg":
-                            # 1px で 1.0度 (感度: 1.0)
-                            new_val = self.slide_start_val + dx * 1.0 * shift_mod
-                            pl.bone_angle_deg = normalize_angle_deg(new_val)
-                        elif self.sliding_field == "pattern_up_angle_deg":
-                            # 1px で 1.0度 (感度: 1.0)
-                            new_val = self.slide_start_val + dx * 1.0 * shift_mod
-                            pl.pattern_up_angle_deg = normalize_angle_deg(new_val)
-                        elif self.sliding_field == "surface_offset":
-                            # 100px で 0.1m = 10cm (感度: 0.001)
-                            new_val = self.slide_start_val + dx * 0.001 * shift_mod
-                            pl.surface_offset = max(0.001, min(1.0, new_val))
-                    self.is_dirty = True
+                    if (
+                        self.sliding_field in ("ref_opacity", "ref_width", "ref_offset_x", "ref_offset_y")
+                        and self.doc.reference_image is not None
+                    ):
+                        ref_img = self.doc.reference_image
+                        if self.sliding_field == "ref_opacity":
+                            ref_img.opacity = max(0.0, min(1.0, self.slide_start_val + dx * 0.005 * shift_mod))
+                        elif self.sliding_field == "ref_width":
+                            ref_img.width = max(0.01, min(20.0, self.slide_start_val + dx * 0.005 * shift_mod))
+                        elif self.sliding_field == "ref_offset_x":
+                            _, oy = ref_img.offset
+                            ref_img.offset = (self.slide_start_val + dx * 0.002 * shift_mod, oy)
+                        elif self.sliding_field == "ref_offset_y":
+                            ox, _ = ref_img.offset
+                            ref_img.offset = (ox, self.slide_start_val + dx * 0.002 * shift_mod)
+                        self.is_dirty = True
+                    elif self.selection.piece_ids:
+                        for pid in self.selection.piece_ids:
+                            if pid not in self.doc.pieces:
+                                continue
+                            pl = self._get_or_create_placement(pid)
+                            if self.sliding_field == "bone_t":
+                                # 200px で 0.0〜1.0 (感度: 0.005)
+                                new_val = self.slide_start_val + dx * 0.005 * shift_mod
+                                pl.bone_t = max(0.0, min(1.0, new_val))
+                            elif self.sliding_field == "bone_angle_deg":
+                                # 1px で 1.0度 (感度: 1.0)
+                                new_val = self.slide_start_val + dx * 1.0 * shift_mod
+                                pl.bone_angle_deg = normalize_angle_deg(new_val)
+                            elif self.sliding_field == "pattern_up_angle_deg":
+                                # 1px で 1.0度 (感度: 1.0)
+                                new_val = self.slide_start_val + dx * 1.0 * shift_mod
+                                pl.pattern_up_angle_deg = normalize_angle_deg(new_val)
+                            elif self.sliding_field == "surface_offset":
+                                # 100px で 0.1m = 10cm (感度: 0.001)
+                                new_val = self.slide_start_val + dx * 0.001 * shift_mod
+                                pl.surface_offset = max(0.001, min(1.0, new_val))
+                        self.is_dirty = True
                 return True
             elif event.is_release and event.button == "LEFT":
                 field = self.sliding_field
@@ -463,6 +551,22 @@ class EditorController:
                     return True
                 else:
                     # 3px以内の単発クリック -> インライン数値直接入力を開始
+                    if (
+                        field in ("ref_opacity", "ref_width", "ref_offset_x", "ref_offset_y")
+                        and self.doc.reference_image is not None
+                    ):
+                        ref_img = self.doc.reference_image
+                        self.editing_field = field
+                        if field == "ref_opacity":
+                            self.editing_buffer = f"{int(round(max(0.0, min(1.0, ref_img.opacity)) * 100))}"
+                        elif field == "ref_width":
+                            self.editing_buffer = f"{m_to_cm(ref_img.width):.1f}"
+                        elif field == "ref_offset_x":
+                            self.editing_buffer = f"{m_to_cm(ref_img.offset[0]):.1f}"
+                        elif field == "ref_offset_y":
+                            self.editing_buffer = f"{m_to_cm(ref_img.offset[1]):.1f}"
+                        self.is_dirty = True
+                        return True
                     first_pid = self.selection.get_active_piece_id()
                     if first_pid and first_pid in self.doc.pieces:
                         pl = self._get_or_create_placement(first_pid)
@@ -587,7 +691,6 @@ class EditorController:
                             target_seg = next((tbl for s_id, _, tbl in segs if s_id == notch.segment_start_id), None)
                             if field_name == "notch_from_start":
                                 from .geometry import arc_length_at_t
-                                from .units import m_to_cm
                                 s_cur = arc_length_at_t(target_seg, notch.t) if target_seg else 0.0
                                 self.editing_buffer = f"{m_to_cm(s_cur):.1f}"
                             elif field_name == "notch_ratio":
@@ -629,7 +732,6 @@ class EditorController:
 
                         self.editing_field = field_name
                         if field_name == "target_edge_length":
-                            from .units import m_to_cm
                             self.editing_buffer = f"{m_to_cm(p.target_edge_length):.1f}"
                         elif field_name == "layer_id":
                             self.editing_buffer = str(p.layer_id)
@@ -733,6 +835,33 @@ class EditorController:
                         if f_rect and f_rect.contains(px, py):
                             self.align_selected_nodes(axis=axis_k.upper(), mode=mode_k.upper())
                             return True
+
+            elif self._is_ref_image_card_mode() and layout.info_card.contains(px, py):
+                ref_img = self.doc.reference_image
+                if ref_img is not None:
+                    for f_name in REF_IMAGE_CARD_FIELDS:
+                        f_rect = layout.card_fields.get(f_name)
+                        if not f_rect or not f_rect.contains(px, py):
+                            continue
+                        if f_name == "ref_visible":
+                            self.toggle_reference_image_visible()
+                            return True
+                        if f_name == "ref_clear":
+                            self.clear_reference_image()
+                            return True
+                        self.sliding_field = f_name
+                        self.slide_start_pos = event.screen_pos
+                        self.is_slider_dragging = False
+                        self.slide_before_doc = self.doc.clone()
+                        if f_name == "ref_opacity":
+                            self.slide_start_val = float(ref_img.opacity)
+                        elif f_name == "ref_width":
+                            self.slide_start_val = float(ref_img.width)
+                        elif f_name == "ref_offset_x":
+                            self.slide_start_val = float(ref_img.offset[0])
+                        elif f_name == "ref_offset_y":
+                            self.slide_start_val = float(ref_img.offset[1])
+                        return True
 
             # HUD矩形領域内の誤作図防止ガード
             if (
@@ -1290,6 +1419,53 @@ class EditorController:
                     self.is_dirty = True
                 except ValueError:
                     pass
+            return
+
+        if self.editing_field in ("ref_opacity", "ref_width", "ref_offset_x", "ref_offset_y"):
+            ref_img = self.doc.reference_image
+            if ref_img is not None:
+                before_doc = self.doc.clone()
+                modified_ref = False
+                buf = self.editing_buffer.strip()
+                if self.editing_field == "ref_opacity":
+                    try:
+                        is_pct = "%" in buf
+                        clean_buf = buf.replace("%", "").strip()
+                        val_f = float(clean_buf)
+                        if is_pct or val_f > 1.0:
+                            val_f /= 100.0
+                        ref_img.opacity = max(0.0, min(1.0, val_f))
+                        modified_ref = True
+                    except ValueError:
+                        pass
+                elif self.editing_field == "ref_width":
+                    from .units import parse_length_input
+                    try:
+                        val_m = parse_length_input(buf, default_unit="cm")
+                        if 0.01 <= val_m <= 20.0:
+                            ref_img.width = val_m
+                            modified_ref = True
+                    except ValueError:
+                        pass
+                elif self.editing_field in ("ref_offset_x", "ref_offset_y"):
+                    from .units import parse_length_input
+                    try:
+                        val_m = parse_length_input(buf, default_unit="cm")
+                        ox, oy = ref_img.offset
+                        if self.editing_field == "ref_offset_x":
+                            ref_img.offset = (val_m, oy)
+                        else:
+                            ref_img.offset = (ox, val_m)
+                        modified_ref = True
+                    except ValueError:
+                        pass
+                if modified_ref:
+                    self.history.record_change(
+                        description=f"Edit {self.editing_field}",
+                        before_doc=before_doc,
+                        after_doc=self.doc,
+                    )
+                    self.is_dirty = True
             return
 
         if self.selection.notch_ids and self.editing_field in ("notch_from_start", "notch_ratio"):

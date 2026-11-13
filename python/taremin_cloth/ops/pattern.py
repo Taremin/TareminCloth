@@ -40,12 +40,52 @@ from ..utils.pattern_view import (
 from ..utils.view3d import (
     extract_armature_bones_for_canvas,
     get_viewport_overlay_offsets,
+    is_mouse_over_viewport_chrome,
     pan_region_3d_by_pixels,
     stop_animation,
     sync_view2d_from_region_3d,
     tag_redraw_view3d,
     zoom_region_3d,
 )
+
+# 現在起動中の型紙エディタモーダルセッション参照（パネル等からの即時同期用）
+_active_pattern_editor_op = None
+
+
+def set_active_pattern_editor_op(op) -> None:
+    """現在起動中の型紙エディタモーダルオペレーター（またはテスト用モック）を登録する."""
+    global _active_pattern_editor_op
+    _active_pattern_editor_op = op
+
+
+def clear_active_pattern_editor_op() -> None:
+    """起動中の型紙エディタ参照をクリアする."""
+    global _active_pattern_editor_op
+    _active_pattern_editor_op = None
+
+
+def get_active_pattern_editor_controller():
+    """現在起動中の型紙エディタの EditorController を返す. 未起動・無効時は None."""
+    op = _active_pattern_editor_op
+    if op is None:
+        return None
+    try:
+        return getattr(op, "controller", None)
+    except ReferenceError:
+        clear_active_pattern_editor_op()
+        return None
+
+
+def get_active_pattern_canvas():
+    """現在起動中の型紙エディタの PatternCanvasRenderer を返す. 未起動・無効時は None."""
+    op = _active_pattern_editor_op
+    if op is None:
+        return None
+    try:
+        return getattr(op, "canvas", None)
+    except ReferenceError:
+        clear_active_pattern_editor_op()
+        return None
 
 
 class TAREMIN_OT_create_pattern_piece(Operator):
@@ -330,6 +370,7 @@ class TAREMIN_OT_pattern_editor(Operator):
         self._last_mouse = (float(event.mouse_region_x), float(event.mouse_region_y))
 
         context.scene.taremin_pattern_editor_active = True
+        set_active_pattern_editor_op(self)
         context.window_manager.modal_handler_add(self)
         tag_redraw_view3d(context)
         self.report({'INFO'}, i18n.trans("Opened Pattern Editor (Press Esc to close)"))
@@ -353,6 +394,31 @@ class TAREMIN_OT_pattern_editor(Operator):
         dx = mx - self._last_mouse[0]
         dy = my - self._last_mouse[1]
         self._last_mouse = (mx, my)
+
+        # Nパネル・ヘッダー等のUIクローム上の操作はエディタのモーダル入力中でない限りBlender側へパススルー
+        if (
+            not self.controller.is_modal_input_active
+            and not self._pan_dragging
+            and is_mouse_over_viewport_chrome(
+                getattr(context, "area", None),
+                mouse_x=float(event.mouse_x),
+                mouse_y=float(event.mouse_y),
+            )
+            and event.type in (
+                'LEFTMOUSE',
+                'SELECTMOUSE',
+                'RIGHTMOUSE',
+                'ACTIONMOUSE',
+                'MIDDLEMOUSE',
+                'WHEELUPMOUSE',
+                'WHEELDOWNMOUSE',
+                'WHEELINMOUSE',
+                'WHEELOUTMOUSE',
+                'MOUSEMOVE',
+                'INBETWEEN_MOUSEMOVE',
+            )
+        ):
+            return {'PASS_THROUGH'}
 
         # 中ボタンドラッグによる Pan 移動 (3Dビューポートと1:1連動)
         if event.type == 'MIDDLEMOUSE':
@@ -539,6 +605,7 @@ class TAREMIN_OT_pattern_editor(Operator):
                 pass
 
         self.canvas.unregister_handler()
+        clear_active_pattern_editor_op()
         context.scene.taremin_pattern_editor_active = False
         save_document_to_scene(self.controller.doc, scene=context.scene)
         try:
@@ -1046,7 +1113,8 @@ class TAREMIN_OT_export_pattern_json(Operator, ExportHelper):
     filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
 
     def execute(self, context):
-        doc = load_document_from_scene(context.scene)
+        active_ctrl = get_active_pattern_editor_controller()
+        doc = active_ctrl.doc if active_ctrl is not None else load_document_from_scene(context.scene)
         try:
             doc.save_to_file(self.filepath)
             self.report({'INFO'}, i18n.trans("Exported pattern to: %s") % self.filepath)
@@ -1071,7 +1139,15 @@ class TAREMIN_OT_import_pattern_json(Operator, ImportHelper):
         try:
             from ..pattern.document import Document
             doc = Document.load_from_file(self.filepath)
-            save_document_to_scene(doc, scene=context.scene)
+            active_ctrl = get_active_pattern_editor_controller()
+            if active_ctrl is not None:
+                active_ctrl.replace_document_in_place(doc, description="Import Pattern JSON")
+                active_canvas = get_active_pattern_canvas()
+                if active_canvas is not None:
+                    active_canvas.clear_image_cache()
+                save_document_to_scene(active_ctrl.doc, scene=context.scene, push_undo=False)
+            else:
+                save_document_to_scene(doc, scene=context.scene)
             build_garment_mesh_in_place(doc, scene=context.scene)
             tag_redraw_view3d(context)
             self.report({'INFO'}, i18n.trans("Imported pattern from: %s") % self.filepath)
@@ -1093,26 +1169,91 @@ class TAREMIN_OT_set_reference_image(Operator, ImportHelper):
     filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.bmp", options={'HIDDEN'})
 
     def execute(self, context):
-        doc = load_document_from_scene(context.scene)
         import bpy
         aspect = 1.0
         try:
             img = bpy.data.images.load(self.filepath, check_existing=True)
+            if hasattr(img, "reload"):
+                try:
+                    img.reload()
+                except Exception:
+                    pass
             if img.size[0] > 0 and img.size[1] > 0:
                 aspect = float(img.size[1]) / float(img.size[0])
         except Exception:
             pass
         from ..pattern.document import ReferenceImage
-        doc.reference_image = ReferenceImage(
+        ref = ReferenceImage(
             image_path=self.filepath,
             width=1.0,
             opacity=0.5,
             visible=True,
             aspect_ratio=aspect,
         )
-        save_document_to_scene(doc, scene=context.scene)
+        active_ctrl = get_active_pattern_editor_controller()
+        if active_ctrl is not None:
+            active_ctrl.set_reference_image(ref, description="Set Reference Image")
+            active_canvas = get_active_pattern_canvas()
+            if active_canvas is not None:
+                active_canvas.clear_image_cache(image_path=self.filepath)
+            save_document_to_scene(active_ctrl.doc, scene=context.scene, push_undo=False)
+        else:
+            doc = load_document_from_scene(context.scene)
+            doc.reference_image = ref
+            save_document_to_scene(doc, scene=context.scene)
         tag_redraw_view3d(context)
         self.report({'INFO'}, i18n.trans("Loaded reference image: %s") % self.filepath)
+        return {'FINISHED'}
+
+
+class TAREMIN_OT_toggle_reference_image(Operator):
+    """下絵画像の表示・非表示を切り替える"""
+    bl_idname = "taremin_cloth.toggle_reference_image"
+    bl_label = "Toggle Reference Image"
+    bl_description = "Show or hide the background reference image on the 2D drafting canvas"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        active_ctrl = get_active_pattern_editor_controller()
+        if active_ctrl is not None:
+            if not active_ctrl.toggle_reference_image_visible():
+                return {'CANCELLED'}
+            save_document_to_scene(active_ctrl.doc, scene=context.scene, push_undo=False)
+        else:
+            doc = load_document_from_scene(context.scene)
+            if doc.reference_image is None:
+                return {'CANCELLED'}
+            doc.reference_image.visible = not doc.reference_image.visible
+            save_document_to_scene(doc, scene=context.scene)
+        tag_redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class TAREMIN_OT_clear_reference_image(Operator):
+    """設定されている下絵画像を削除する"""
+    bl_idname = "taremin_cloth.clear_reference_image"
+    bl_label = "Clear Reference Image"
+    bl_description = "Remove the background reference image from the 2D drafting canvas"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        active_ctrl = get_active_pattern_editor_controller()
+        if active_ctrl is not None:
+            if not active_ctrl.clear_reference_image():
+                return {'CANCELLED'}
+            active_canvas = get_active_pattern_canvas()
+            if active_canvas is not None:
+                active_canvas.clear_image_cache()
+            save_document_to_scene(active_ctrl.doc, scene=context.scene, push_undo=False)
+        else:
+            doc = load_document_from_scene(context.scene)
+            if doc.reference_image is None:
+                return {'CANCELLED'}
+            doc.reference_image = None
+            save_document_to_scene(doc, scene=context.scene)
+        tag_redraw_view3d(context)
         return {'FINISHED'}
 
 
@@ -1151,6 +1292,8 @@ classes = (
     TAREMIN_OT_export_pattern_json,
     TAREMIN_OT_import_pattern_json,
     TAREMIN_OT_set_reference_image,
+    TAREMIN_OT_toggle_reference_image,
+    TAREMIN_OT_clear_reference_image,
     TAREMIN_OT_migrate_curves_to_pattern,
     TAREMIN_OT_create_pattern_piece,
     TAREMIN_OT_toggle_pattern_2d_view,
@@ -1171,6 +1314,7 @@ def register():
 
 
 def unregister():
+    clear_active_pattern_editor_op()
     for cls in reversed(classes):
         try:
             bpy.utils.unregister_class(cls)

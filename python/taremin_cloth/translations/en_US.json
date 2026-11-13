@@ -1198,5 +1198,18 @@
   "X/Y/N: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel": "X/Y/N: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel",
   "X/Y: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel": "X/Y: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel",
   "pieces": "pieces",
-  "selected": "selected"
+  "selected": "selected",
+  "Clear Image": "Clear Image",
+  "Clear Reference Image": "Clear Reference Image",
+  "Hide Image": "Hide Image",
+  "Offset X": "Offset X",
+  "Offset Y": "Offset Y",
+  "Opacity": "Opacity",
+  "Ref Image": "Ref Image",
+  "Reference": "Reference",
+  "Remove the background reference image from the 2D drafting canvas": "Remove the background reference image from the 2D drafting canvas",
+  "Show Image": "Show Image",
+  "Show or hide the background reference image on the 2D drafting canvas": "Show or hide the background reference image on the 2D drafting canvas",
+  "Toggle Reference Image": "Toggle Reference Image",
+  "Visible": "Visible"
 }

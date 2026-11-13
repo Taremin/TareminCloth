@@ -1,9 +1,100 @@
+import json
+import os
 import bpy
 from . import i18n
 from .operators import is_interactive_running, get_interactive_cloth_object_name
 from .utils import topology
 from .utils.self_collision_fit import draw_thickness_warning_ui
 from .utils.validation import validate_cloth_mesh
+
+# パネル描画毎フレームでのJSON再解析を避けるための下絵メタ情報キャッシュ
+_ref_image_ui_cache: dict[int, tuple[str, tuple[str, bool] | None]] = {}
+
+
+def _get_panel_reference_image_info(scene) -> tuple[str, bool] | None:
+    """現在シーンまたは起動中パターンエディタの下絵メタ情報 (表示名, visible) を返す。"""
+    try:
+        from .ops.pattern import get_active_pattern_editor_controller
+
+        controller = get_active_pattern_editor_controller()
+        if controller is not None:
+            ref = controller.doc.reference_image
+            if ref is None or not ref.image_path:
+                return None
+            name = os.path.basename(ref.image_path) or ref.image_path
+            return (name, bool(ref.visible))
+    except Exception:
+        pass
+
+    raw_json = getattr(scene, "taremin_pattern_document", "") or ""
+    if not raw_json:
+        return None
+
+    scene_key = scene.as_pointer() if hasattr(scene, "as_pointer") else id(scene)
+    cached = _ref_image_ui_cache.get(scene_key)
+    if cached is not None and cached[0] == raw_json:
+        return cached[1]
+
+    info: tuple[str, bool] | None = None
+    try:
+        data = json.loads(raw_json)
+        ref_data = data.get("reference_image") if isinstance(data, dict) else None
+        if isinstance(ref_data, dict):
+            path = str(ref_data.get("image_path") or "")
+            if path:
+                name = os.path.basename(path) or path
+                info = (name, bool(ref_data.get("visible", True)))
+    except Exception:
+        info = None
+
+    # キャッシュ肥大化防止のため上限を超えたらクリア
+    if len(_ref_image_ui_cache) > 16:
+        _ref_image_ui_cache.clear()
+    _ref_image_ui_cache[scene_key] = (raw_json, info)
+    return info
+
+
+def _draw_pattern_drafting_box(layout, context) -> None:
+    """Nパネル共通の2Dパターン製図エディタ操作ボックスを描画する。"""
+    scene = context.scene
+    box_pattern = layout.box()
+    box_pattern.label(text=i18n.trans("2D Pattern Drafting"), icon='IMAGE_PLANE')
+
+    row_main = box_pattern.row(align=True)
+    is_pat_active = getattr(scene, "taremin_pattern_editor_active", False)
+    row_main.operator(
+        "taremin_cloth.pattern_editor",
+        text=i18n.trans("Close Pattern Editor") if is_pat_active else i18n.trans("Open Pattern Editor"),
+        icon='CANCEL' if is_pat_active else 'EDITMODE_HLT',
+        depress=is_pat_active,
+    )
+    row_main.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
+
+    row_io = box_pattern.row(align=True)
+    row_io.operator("taremin_cloth.import_pattern_json", text=i18n.trans("Import JSON"), icon='IMPORT')
+    row_io.operator("taremin_cloth.export_pattern_json", text=i18n.trans("Export JSON"), icon='EXPORT')
+
+    row_extra = box_pattern.row(align=True)
+    row_extra.operator("taremin_cloth.set_reference_image", text=i18n.trans("Reference Image"), icon='IMAGE_DATA')
+    row_extra.operator("taremin_cloth.migrate_curves_to_pattern", text=i18n.trans("Migrate Curves"), icon='CURVE_DATA')
+
+    ref_info = _get_panel_reference_image_info(scene)
+    if ref_info is not None:
+        ref_name, ref_visible = ref_info
+        row_ref_info = box_pattern.row(align=True)
+        row_ref_info.label(text=f"{i18n.trans('Reference')}: {ref_name}", icon='IMAGE_DATA')
+        row_ref_ctrl = box_pattern.row(align=True)
+        row_ref_ctrl.operator(
+            "taremin_cloth.toggle_reference_image",
+            text=i18n.trans("Hide Image") if ref_visible else i18n.trans("Show Image"),
+            icon='HIDE_OFF' if ref_visible else 'HIDE_ON',
+            depress=ref_visible,
+        )
+        row_ref_ctrl.operator(
+            "taremin_cloth.clear_reference_image",
+            text=i18n.trans("Clear Image"),
+            icon='TRASH',
+        )
 
 
 def _sewing_priority_status_text(obj):
@@ -388,25 +479,7 @@ class TAREMIN_CLOTH_PT_main_panel(bpy.types.Panel):
                 box_sim.label(text=i18n.trans("No cloth objects in scene"), icon='INFO')
 
         # --- 2D型紙製図エディタ（常時アクセス可能） ---
-        box_pattern_main = layout.box()
-        box_pattern_main.label(text=i18n.trans("2D Pattern Drafting"), icon='IMAGE_PLANE')
-        row_pat_main = box_pattern_main.row(align=True)
-        is_pat_active = getattr(scene, "taremin_pattern_editor_active", False)
-        row_pat_main.operator(
-            "taremin_cloth.pattern_editor",
-            text=i18n.trans("Close Pattern Editor") if is_pat_active else i18n.trans("Open Pattern Editor"),
-            icon='CANCEL' if is_pat_active else 'EDITMODE_HLT',
-            depress=is_pat_active,
-        )
-        row_pat_main.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
-
-        row_io = box_pattern_main.row(align=True)
-        row_io.operator("taremin_cloth.import_pattern_json", text=i18n.trans("Import JSON"), icon='IMPORT')
-        row_io.operator("taremin_cloth.export_pattern_json", text=i18n.trans("Export JSON"), icon='EXPORT')
-
-        row_extra = box_pattern_main.row(align=True)
-        row_extra.operator("taremin_cloth.set_reference_image", text=i18n.trans("Reference Image"), icon='IMAGE_DATA')
-        row_extra.operator("taremin_cloth.migrate_curves_to_pattern", text=i18n.trans("Migrate Curves"), icon='CURVE_DATA')
+        _draw_pattern_drafting_box(layout, context)
 
         # --- オブジェクト未選択またはメッシュ以外 ---
         if not obj or obj.type != 'MESH':
@@ -1111,25 +1184,7 @@ class TAREMIN_CLOTH_PT_pattern_piece(bpy.types.Panel):
         pat = getattr(obj, "taremin_pattern", None) if obj else None
 
         # 2D 型紙エディタ起動ブロック
-        box_editor = layout.box()
-        box_editor.label(text=i18n.trans("2D Pattern Drafting"), icon='IMAGE_PLANE')
-        row_ed = box_editor.row(align=True)
-        is_active = getattr(context.scene, "taremin_pattern_editor_active", False)
-        row_ed.operator(
-            "taremin_cloth.pattern_editor",
-            text=i18n.trans("Close Pattern Editor") if is_active else i18n.trans("Open Pattern Editor"),
-            icon='CANCEL' if is_active else 'EDITMODE_HLT',
-            depress=is_active,
-        )
-        row_ed.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
-
-        row_ed_io = box_editor.row(align=True)
-        row_ed_io.operator("taremin_cloth.import_pattern_json", text=i18n.trans("Import JSON"), icon='IMPORT')
-        row_ed_io.operator("taremin_cloth.export_pattern_json", text=i18n.trans("Export JSON"), icon='EXPORT')
-
-        row_ed_extra = box_editor.row(align=True)
-        row_ed_extra.operator("taremin_cloth.set_reference_image", text=i18n.trans("Reference Image"), icon='IMAGE_DATA')
-        row_ed_extra.operator("taremin_cloth.migrate_curves_to_pattern", text=i18n.trans("Migrate Curves"), icon='CURVE_DATA')
+        _draw_pattern_drafting_box(layout, context)
 
         if not obj:
             return

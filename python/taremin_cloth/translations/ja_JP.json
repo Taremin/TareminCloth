@@ -1198,5 +1198,18 @@
   "X/Y/N: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel": "X/Y/N: 軸固定 | Enter/左クリック: 確定 | Esc/右クリック: キャンセル",
   "X/Y: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel": "X/Y: 軸固定 | Enter/左クリック: 確定 | Esc/右クリック: キャンセル",
   "pieces": "ピース",
-  "selected": "個選択"
+  "selected": "個選択",
+  "Clear Image": "画像をクリア",
+  "Clear Reference Image": "下絵を削除",
+  "Hide Image": "画像を非表示",
+  "Offset X": "オフセット X",
+  "Offset Y": "オフセット Y",
+  "Opacity": "不透明度",
+  "Ref Image": "下絵",
+  "Reference": "下絵",
+  "Remove the background reference image from the 2D drafting canvas": "2D製図キャンバスから背景の下絵を削除します",
+  "Show Image": "画像を表示",
+  "Show or hide the background reference image on the 2D drafting canvas": "2D製図キャンバスの背景の下絵を表示または非表示にします",
+  "Toggle Reference Image": "下絵表示切替",
+  "Visible": "表示"
 }

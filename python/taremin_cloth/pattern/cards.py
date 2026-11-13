@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from .document import Document, NodeKind, SeamRouting
 from .session import SelectionState
 from .transform_ops import summarize_multi_node_info
@@ -167,6 +169,22 @@ def format_selection_card_lines(
             return lines
 
     if not selection.has_any_selection():
+        if doc.reference_image:
+            ref_img = doc.reference_image
+            img_name = os.path.basename(ref_img.image_path) if ref_img.image_path else trans("None")
+            if len(img_name) > 18:
+                img_name = img_name[:15] + "..."
+            vis_str = trans("ON") if ref_img.visible else trans("OFF")
+            opacity_pct = int(round(max(0.0, min(1.0, float(ref_img.opacity))) * 100))
+            lines.append(f"{trans('Ref Image')}: {img_name}")
+            lines.append(f"{trans('Visible')}: {vis_str}")
+            lines.append(f"{trans('Opacity')}: {opacity_pct}%")
+            lines.append(f"{trans('Width')}: {format_cm(ref_img.width)}")
+            lines.append(f"{trans('Offset X')}: {format_cm(ref_img.offset[0])}")
+            lines.append(f"{trans('Offset Y')}: {format_cm(ref_img.offset[1])}")
+            lines.append(f"[{trans('Clear Image')}]")
+            lines.append(trans("Click piece or node"))
+            return lines
         lines.append(trans("No Selection"))
         lines.append(trans("Click piece or node"))
         return lines

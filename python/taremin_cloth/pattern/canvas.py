@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+import os
+from typing import Optional, Sequence
 
 try:
     import blf
@@ -28,6 +29,7 @@ from .placement import (
     resolve_seam_bone_wrap_target,
 )
 from .renderer import DrawCommandKind, build_render_commands
+from ..utils.logger import logger
 from ..utils.view3d import get_viewport_overlay_offsets
 
 
@@ -39,6 +41,9 @@ class PatternCanvasRenderer:
         self._handler = None
         self._handler_3d = None
         self._shader_2d = None
+        self._shader_image = None
+        self._image_name_cache: dict[str, str] = {}
+        self._failed_image_paths: set[str] = set()
         self.all_bones_data: list = []
 
     def _get_overlay_bones(self) -> list:
@@ -52,6 +57,103 @@ class PatternCanvasRenderer:
             # Blender 4.0+ / 5.x 共通組み込みシェーダー
             self._shader_2d = gpu.shader.from_builtin('UNIFORM_COLOR')
         return self._shader_2d
+
+    def _get_image_shader(self):
+        if self._shader_image is None and _HAS_GPU:
+            try:
+                self._shader_image = gpu.shader.from_builtin('IMAGE_COLOR')
+            except Exception as e:
+                logger.warning(f"[Pattern] Failed to create IMAGE_COLOR shader: {e}")
+                return None
+        return self._shader_image
+
+    @staticmethod
+    def _normalize_image_path(image_path: str) -> str:
+        """Blenderの相対パス (//...) を展開して正規化したパス文字列を返す."""
+        if not image_path:
+            return ""
+        try:
+            import bpy
+            abs_p = bpy.path.abspath(image_path)
+        except Exception:
+            abs_p = image_path
+        return os.path.normpath(os.path.abspath(abs_p))
+
+    def clear_image_cache(self, *, image_path: Optional[str] = None) -> None:
+        """下絵画像のテクスチャ解決キャッシュ・失敗キャッシュをクリアする."""
+        if image_path is None:
+            self._image_name_cache.clear()
+            self._failed_image_paths.clear()
+            return
+        norm_p = self._normalize_image_path(image_path)
+        self._image_name_cache.pop(norm_p, None)
+        self._failed_image_paths.discard(norm_p)
+        self._image_name_cache.pop(image_path, None)
+        self._failed_image_paths.discard(image_path)
+
+    def _resolve_image_texture(self, image_path: str):
+        """画像パスから bpy.types.Image を解決して GPUTexture を返す. 無効時は None."""
+        if not _HAS_GPU or not image_path:
+            return None
+
+        import bpy
+        norm_path = self._normalize_image_path(image_path)
+        if not norm_path or norm_path in self._failed_image_paths:
+            return None
+
+        # 1. キャッシュ済みの Image データブロック名から安全に復元（StructRNA寿命・Undo耐性）
+        cached_name = self._image_name_cache.get(norm_path)
+        if cached_name:
+            img = bpy.data.images.get(cached_name)
+            if (
+                img is not None
+                and img.size[0] > 0
+                and img.size[1] > 0
+                and (img.has_data or img.packed_file is not None)
+            ):
+                try:
+                    return gpu.texture.from_image(img)
+                except Exception as e:
+                    logger.warning(f"[Pattern] Failed to create GPU texture from cached image '{cached_name}': {e}")
+                    self._failed_image_paths.add(norm_path)
+                    return None
+            self._image_name_cache.pop(norm_path, None)
+
+        # 2. 既存の bpy.data.images（パック画像含む）からパス一致を探索
+        resolved_img = None
+        for cand in bpy.data.images:
+            if not getattr(cand, "filepath", ""):
+                continue
+            if self._normalize_image_path(cand.filepath) == norm_path:
+                if cand.size[0] > 0 and cand.size[1] > 0 and (cand.has_data or cand.packed_file is not None):
+                    resolved_img = cand
+                    break
+
+        # 3. 見つからない場合はディスク上の実ファイルを確認して読み込み
+        if resolved_img is None:
+            if not os.path.isfile(norm_path):
+                self._failed_image_paths.add(norm_path)
+                return None
+            try:
+                resolved_img = bpy.data.images.load(norm_path, check_existing=True)
+            except Exception as e:
+                logger.warning(f"[Pattern] Failed to load reference image '{norm_path}': {e}")
+                self._failed_image_paths.add(norm_path)
+                return None
+
+        if resolved_img is None or resolved_img.size[0] <= 0 or resolved_img.size[1] <= 0:
+            self._failed_image_paths.add(norm_path)
+            return None
+
+        try:
+            tex = gpu.texture.from_image(resolved_img)
+        except Exception as e:
+            logger.warning(f"[Pattern] Failed to convert image to GPU texture '{norm_path}': {e}")
+            self._failed_image_paths.add(norm_path)
+            return None
+
+        self._image_name_cache[norm_path] = resolved_img.name
+        return tex
 
     def register_handler(self) -> None:
         """3DビューポートのPOST_PIXELおよびPOST_VIEW描画ハンドラーを登録する."""
@@ -90,6 +192,7 @@ class PatternCanvasRenderer:
             except Exception:
                 pass
             self._handler_3d = None
+        self.clear_image_cache()
 
     def draw_callback(self, context) -> None:
         """ビューポート再描画時に呼び出されるメイン描画処理."""
@@ -135,8 +238,44 @@ class PatternCanvasRenderer:
                 self._draw_circle(shader, cmd.points[0], radius=cmd.radius, color=cmd.color, filled=cmd.filled)
             elif cmd.kind == DrawCommandKind.TEXT:
                 self._draw_text(cmd.points[0], cmd.text, color=cmd.color, font_size=cmd.font_size)
+            elif cmd.kind == DrawCommandKind.IMAGE:
+                self._draw_image(cmd.points, color=cmd.color, image_path=cmd.image_path)
 
         gpu.state.blend_set('NONE')
+
+    def _draw_image(
+        self,
+        points: Sequence[tuple[float, float]],
+        *,
+        color,
+        image_path: str,
+    ) -> None:
+        """4隅スクリーン座標 (左下, 右下, 右上, 左上) へ下絵画像をアルファブレンド描画する."""
+        if len(points) < 4 or not image_path:
+            return
+        tex = self._resolve_image_texture(image_path)
+        if tex is None:
+            return
+        img_shader = self._get_image_shader()
+        if img_shader is None:
+            return
+
+        p0, p1, p2, p3 = points[0], points[1], points[2], points[3]
+        tri_pos = [p0, p1, p2, p0, p2, p3]
+        tri_uv = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ]
+
+        img_shader.bind()
+        img_shader.uniform_sampler("image", tex)
+        img_shader.uniform_float("color", color)
+        batch = batch_for_shader(img_shader, 'TRIS', {"pos": tri_pos, "texCoord": tri_uv})
+        batch.draw(img_shader)
 
     def _draw_lines(self, shader, points: Sequence[tuple[float, float]], *, color, width: float) -> None:
         if len(points) < 2:

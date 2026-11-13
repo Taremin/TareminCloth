@@ -147,5 +147,36 @@ class TestPatternIOMigration(unittest.TestCase):
         self.assertAlmostEqual(doc.placements[piece.id].offset_3d[1], -0.2)
 
 
+class TestReferenceImageSerialization(unittest.TestCase):
+    """下絵参照画像 (ReferenceImage) のシリアライズ・複製・履歴テスト。"""
+
+    def test_reference_image_roundtrip_and_clone(self):
+        from taremin_cloth.pattern.document import Document, ReferenceImage
+
+        doc = Document()
+        doc.reference_image = ReferenceImage(
+            image_path="//textures/pattern_ref.png",
+            offset=(0.15, -0.25),
+            width=1.4,
+            aspect_ratio=1.25,
+            opacity=0.65,
+            visible=False,
+        )
+
+        payload = doc.to_dict()
+        restored = Document.from_dict(payload)
+        self.assertIsNotNone(restored.reference_image)
+        self.assertEqual(restored.reference_image.image_path, "//textures/pattern_ref.png")
+        self.assertEqual(restored.reference_image.offset, (0.15, -0.25))
+        self.assertAlmostEqual(restored.reference_image.width, 1.4)
+        self.assertAlmostEqual(restored.reference_image.aspect_ratio, 1.25)
+        self.assertAlmostEqual(restored.reference_image.opacity, 0.65)
+        self.assertFalse(restored.reference_image.visible)
+
+        cloned = restored.clone()
+        cloned.reference_image.opacity = 0.2
+        self.assertAlmostEqual(restored.reference_image.opacity, 0.65)
+
+
 if __name__ == "__main__":
     unittest.main()

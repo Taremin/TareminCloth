@@ -248,3 +248,28 @@ def extract_armature_bones_for_canvas(
         pass
 
     return bones_map
+
+
+def is_mouse_over_viewport_chrome(
+    area: Any,
+    *,
+    mouse_x: float,
+    mouse_y: float,
+) -> bool:
+    """ウィンドウ座標 (mouse_x, mouse_y) が 3Dビューポートの UI / TOOLS / HEADER 領域上にあるか判定する."""
+    if not area or getattr(area, "type", "") != 'VIEW_3D':
+        return False
+
+    for r in getattr(area, "regions", []):
+        if getattr(r, "type", "") not in ('UI', 'TOOLS', 'HEADER', 'TOOL_HEADER'):
+            continue
+        if getattr(r, "width", 0) <= 1 or getattr(r, "height", 0) <= 1:
+            continue
+        rx = getattr(r, "x", None)
+        ry = getattr(r, "y", None)
+        if rx is None or ry is None:
+            continue
+        if rx <= mouse_x <= (rx + r.width) and ry <= mouse_y <= (ry + r.height):
+            return True
+
+    return False

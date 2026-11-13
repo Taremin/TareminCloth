@@ -168,6 +168,29 @@ def build_render_commands(
     sw, sh = screen_size
     commands: list[DrawCommand] = []
 
+    # 0.5. 参考下絵画像（Reference Image）の描画（不透明度が高くてもグリッドが見えるよう最背面に配置）
+    ref_corners: Optional[list[tuple[float, float]]] = None
+    if doc.reference_image and doc.reference_image.visible and doc.reference_image.image_path:
+        ref_img = doc.reference_image
+        rx, ry = ref_img.offset
+        rw = max(0.01, float(ref_img.width))
+        aspect = max(1e-4, float(getattr(ref_img, "aspect_ratio", 1.0)))
+        rh = rw * aspect
+        # 4隅のワールド座標（左下・右下・右上・左上）
+        c_p0 = view.world_to_screen((rx, ry))
+        c_p1 = view.world_to_screen((rx + rw, ry))
+        c_p2 = view.world_to_screen((rx + rw, ry + rh))
+        c_p3 = view.world_to_screen((rx, ry + rh))
+        ref_corners = [c_p0, c_p1, c_p2, c_p3]
+        alpha = max(0.0, min(1.0, float(ref_img.opacity)))
+        img_col: ColorRGBA = (1.0, 1.0, 1.0, alpha)
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.IMAGE,
+            color=img_col,
+            points=ref_corners,
+            image_path=ref_img.image_path,
+        ))
+
     # 1. グリッド線の生成
     # 画面四隅のワールド座標を逆算
     w_min_x, w_min_y = view.screen_to_world((0.0, 0.0))
@@ -213,29 +236,12 @@ def build_render_commands(
         ))
         y_val += grid_step
 
-    # 1.5. 参考下絵画像（Reference Image）の描画
-    if doc.reference_image and doc.reference_image.visible and doc.reference_image.image_path:
-        ref_img = doc.reference_image
-        rx, ry = ref_img.offset
-        rw = max(0.01, ref_img.width)
-        rh = rw * getattr(ref_img, "aspect_ratio", 1.0)
-        # 4隅のワールド座標
-        c_p0 = view.world_to_screen((rx, ry))
-        c_p1 = view.world_to_screen((rx + rw, ry))
-        c_p2 = view.world_to_screen((rx + rw, ry + rh))
-        c_p3 = view.world_to_screen((rx, ry + rh))
-        img_col: ColorRGBA = (1.0, 1.0, 1.0, float(ref_img.opacity))
-        commands.append(DrawCommand(
-            kind=DrawCommandKind.IMAGE,
-            color=img_col,
-            points=[c_p0, c_p1, c_p2, c_p3],
-            image_path=ref_img.image_path,
-        ))
-        # 下絵の枠線
+    # 1.5. 参考下絵画像の枠線（グリッドの上に表示して境界を視認可能にする）
+    if ref_corners is not None:
         commands.append(DrawCommand(
             kind=DrawCommandKind.POLYLINE,
             color=(0.4, 0.7, 1.0, 0.4),
-            points=[c_p0, c_p1, c_p2, c_p3, c_p0],
+            points=[ref_corners[0], ref_corners[1], ref_corners[2], ref_corners[3], ref_corners[0]],
             width=1.0,
         ))
 
@@ -837,6 +843,25 @@ def build_render_commands(
                         width=1.5,
                     ))
 
+        # 未選択・下絵あり時のスライダー進行バー背景描画
+        if (not controller.selection.has_any_selection()) and doc.reference_image is not None:
+            ref_img = doc.reference_image
+            ref_slider_ratios = {
+                "ref_opacity": max(0.0, min(1.0, float(ref_img.opacity))),
+                "ref_width": max(0.0, min(1.0, float(ref_img.width) / 3.0)),
+            }
+            for f_name, ratio in ref_slider_ratios.items():
+                if f_name in layout.card_fields:
+                    f_rect = layout.card_fields[f_name]
+                    is_active_slider = (controller.sliding_field == f_name)
+                    bar_color = (0.22, 0.45, 0.55, 0.65) if is_active_slider else (0.16, 0.28, 0.35, 0.4)
+                    commands.append(DrawCommand(
+                        kind=DrawCommandKind.RECT,
+                        color=bar_color,
+                        points=[(f_rect.x, f_rect.y), (f_rect.x + f_rect.w * ratio, f_rect.top)],
+                        filled=True,
+                    ))
+
         # 複数頂点整列カード時の X / Y 整列ボタングループ描画
         if (
             not controller.selection.notch_ids
@@ -977,6 +1002,10 @@ def build_render_commands(
                 "notch_ratio": trans("Ratio"),
                 "shape_match_ease": trans("Ease"),
                 "seam_match_ease": trans("Ease"),
+                "ref_opacity": trans("Opacity"),
+                "ref_width": trans("Width"),
+                "ref_offset_x": trans("Offset X"),
+                "ref_offset_y": trans("Offset Y"),
             }
             label = label_map.get(controller.editing_field, controller.editing_field)
             commands.append(DrawCommand(

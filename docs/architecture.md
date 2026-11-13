@@ -1200,10 +1200,11 @@ graph TD
    - `build_render_commands`: ドキュメントとセッション状態から `DrawCommand`（`LINE`, `POLYLINE`, `POLYGON`, `CIRCLE`, `RECT`, `TEXT`, `IMAGE`）のリストを純粋関数として生成。
    - 5領域HUDレイアウト（ヘッダーバー、左ツールレール、下部アクションバー、右上情報カード、数値入力カード）。
    - 選択辺のハイライト表示（`POLYLINE` 総数を不変に保ちつつ選択セグメントのみ専用色・太線描画）およびモーダル変形中の軸ロックガイドライン・ピボット円・ラバーバンド線・操作ヒント表示。
-   - 単一/複数要素対応情報カード（`cards.py`）: 頂点（1点座標編集 / 複数点サマリー＆X/Y 8方向整列ボタン）、辺（単一辺 Subdivide/Unfold/Mirror/Match、複数辺 Subdivide All）、縫合（Match A->B, Match B->A, Mode, Flip Direction (`F`), Flip Curvature, Ease, Mismatch常時表示）、ピース（単一および複数選択時の `Mixed` 表示・共通属性/配置一括更新・`active_piece_id` 基準スライダー/コンパス）。
-   - ツールレールのクリックによるツール切替、下部「Build 3D」「Close」ボタンクリック、および情報カード内数値（解像度・レイヤーID等）のインライン編集・cm単位解釈（`parse_length_input`）。
-   - 寸法線表示（Lキートグル）、ノッチ描画、内部線描画、下絵画像（参考画像）の `gpu.texture` / `IMAGE_COLOR` による実画像アルファブレンド描画に対応。
-   - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。
+   - 単一/複数要素対応情報カード（`cards.py`）: 未選択＋下絵設定時（ファイル名、表示トグル、不透明度スライダー、幅・Offset X/Y 数値編集、Clear ボタン）、頂点（1点座標編集 / 複数点サマリー＆X/Y 8方向整列ボタン）、辺（単一辺 Subdivide/Unfold/Mirror/Match、複数辺 Subdivide All）、縫合（Match A->B, Match B->A, Mode, Flip Direction (`F`), Flip Curvature, Ease, Mismatch常時表示）、ピース（単一および複数選択時の `Mixed` 表示・共通属性/配置一括更新・`active_piece_id` 基準スライダー/コンパス）。
+   - ツールレールのクリックによるツール切替、下部「Build 3D」「Close」ボタンクリック、および情報カード内数値（解像度・レイヤーID・下絵幅/オフセット等）のインライン編集・cm単位解釈（`parse_length_input`）。
+   - 寸法線表示（Lキートグル）、ノッチ描画、内部線描画、下絵画像（参考画像）に対応。下絵画像本体（`DrawCommandKind.IMAGE`）は背景グリッド線の背面に、境界枠線（`POLYLINE`）はグリッド前面に配置される。
+   - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。下絵画像は組み込みシェーダー `IMAGE_COLOR` と `gpu.texture.from_image` を用いてアルファブレンド描画し、`bpy.data.images` データブロック名キャッシュ・失敗パス負キャッシュ・`size <= 0` ガード・`clear_image_cache` による明示無効化を備える。
+   - Blender統合・Nパネル連携（`ops/pattern.py`, `panels.py`, `utils/view3d.py`）: モーダル中はアクティブセッション（`get_active_pattern_editor_controller`）経由で参照画像の読込・表示切替（`toggle_reference_image`）・削除（`clear_reference_image`）・JSON入出力の変更を即時反映し、UIクローム領域（`UI`/`TOOLS`/`HEADER`）上のマウス操作は `is_mouse_over_viewport_chrome` により `PASS_THROUGH` してNパネルと併用可能。
 5. **非破壊3Dメッシュ統合ビルド (`build_types.py`, `build.py`)**:
    - オブジェクトを削除・再生成せず、`clear_simulators()` 後に `mesh.clear_geometry()` と `mesh.from_pydata()` でジオメトリのみ In-Place 更新。
    - 既存オブジェクトのマテリアル、モディファイア、物理設定を完全に保持。

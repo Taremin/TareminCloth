@@ -197,6 +197,13 @@ def compute_hud_layout(
         "seam_match_flip_curvature": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 200.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_ease": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 218.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_routing": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
+        # 未選択時の下絵参照画像調整カード用フィールド (行1〜行6)
+        "ref_visible": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 38.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "ref_opacity": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 56.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "ref_width": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 74.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "ref_offset_x": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 92.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "ref_offset_y": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 110.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "ref_clear": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 128.0) - 5.0, w=card_w - 12.0, h=field_h),
     }
 
     # 複数頂点整列カード用ボタンフィールド (行4: top-92, 行6: top-128 に4等分配置)
