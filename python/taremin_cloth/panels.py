@@ -61,13 +61,23 @@ def _draw_pattern_drafting_box(layout, context) -> None:
     box_pattern.label(text=i18n.trans("2D Pattern Drafting"), icon='IMAGE_PLANE')
 
     row_main = box_pattern.row(align=True)
-    is_pat_active = getattr(scene, "taremin_pattern_editor_active", False)
-    row_main.operator(
-        "taremin_cloth.pattern_editor",
-        text=i18n.trans("Close Pattern Editor") if is_pat_active else i18n.trans("Open Pattern Editor"),
-        icon='CANCEL' if is_pat_active else 'EDITMODE_HLT',
-        depress=is_pat_active,
-    )
+    from .ops.pattern import is_pattern_editor_active
+
+    is_pat_active = is_pattern_editor_active(scene=scene)
+    if is_pat_active:
+        row_main.operator(
+            "taremin_cloth.close_pattern_editor",
+            text=i18n.trans("Close Pattern Editor"),
+            icon='CANCEL',
+            depress=True,
+        )
+    else:
+        row_main.operator(
+            "taremin_cloth.pattern_editor",
+            text=i18n.trans("Open Pattern Editor"),
+            icon='EDITMODE_HLT',
+            depress=False,
+        )
     row_main.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
 
     row_io = box_pattern.row(align=True)

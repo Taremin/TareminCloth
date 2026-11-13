@@ -87,12 +87,16 @@ from .ops import (
     TAREMIN_CLOTH_OT_stop_gui_preview,
     TAREMIN_CLOTH_OT_apply_gui_pose,
     TAREMIN_CLOTH_OT_sync_gui_colliders,
+    TAREMIN_OT_close_pattern_editor,
     is_gui_preview_running,
     get_gui_fps_stats,
     FPSCounter,
     is_interactive_running,
     stop_interactive_if_running,
     get_interactive_cloth_object_name,
+    is_pattern_editor_active,
+    register_pattern_editor_handlers,
+    unregister_pattern_editor_handlers,
     resolve_debug_filepath,
     get_pending_debug_save,
     clear_pending_debug_save,
@@ -109,6 +113,7 @@ classes = OPERATOR_CLASSES
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    register_pattern_editor_handlers()
     handlers = getattr(getattr(bpy, "app", None), "handlers", None)
     if handlers and hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
         if cloth_frame_handler not in handlers.frame_change_post:
@@ -120,6 +125,7 @@ def unregister():
     if handlers and hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
         if cloth_frame_handler in handlers.frame_change_post:
             handlers.frame_change_post.remove(cloth_frame_handler)
+    unregister_pattern_editor_handlers()
     clear_simulators()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

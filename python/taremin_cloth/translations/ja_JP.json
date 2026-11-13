@@ -229,6 +229,7 @@
   "Close": "閉じる",
   "Close Open Boundaries": "開放境界（穴）を自動で閉じる",
   "Close Pattern Editor": "型紙エディタを閉じる",
+  "Close the active 2D garment pattern drafting editor": "現在開いている2D型紙製図エディタを閉じます",
   "Closed cycle detected:": "閉ループ (閉路) が検出されました:",
   "Closed Pattern Editor": "型紙エディタを閉じました",
   "Closure Threshold": "結合閾値",

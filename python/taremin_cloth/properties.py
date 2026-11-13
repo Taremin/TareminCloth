@@ -1612,6 +1612,7 @@ def register():
         name="Pattern Editor Active",
         description="Whether the 2D pattern editor modal session is currently active",
         default=False,
+        options={'SKIP_SAVE'},
     )
 
 

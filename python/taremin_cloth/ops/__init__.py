@@ -81,6 +81,7 @@ from .wrinkle import (
 )
 from .pattern import (
     TAREMIN_OT_pattern_editor,
+    TAREMIN_OT_close_pattern_editor,
     TAREMIN_OT_export_pattern_json,
     TAREMIN_OT_import_pattern_json,
     TAREMIN_OT_set_reference_image,
@@ -94,6 +95,9 @@ from .pattern import (
     TAREMIN_OT_sync_arrangement_proxy,
     TAREMIN_OT_build_garment,
     TAREMIN_OT_remesh_to_quad,
+    is_pattern_editor_active,
+    register_pattern_editor_handlers,
+    unregister_pattern_editor_handlers,
 )
 
 OPERATOR_CLASSES = (
@@ -146,6 +150,7 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
     TAREMIN_OT_pattern_editor,
+    TAREMIN_OT_close_pattern_editor,
     TAREMIN_OT_export_pattern_json,
     TAREMIN_OT_import_pattern_json,
     TAREMIN_OT_set_reference_image,
@@ -164,6 +169,7 @@ OPERATOR_CLASSES = (
 __all__ = [
     "OPERATOR_CLASSES",
     "TAREMIN_OT_pattern_editor",
+    "TAREMIN_OT_close_pattern_editor",
     "TAREMIN_CLOTH_OT_toggle_cloth",
     "TAREMIN_CLOTH_OT_reset_selected",
     "TAREMIN_CLOTH_OT_reset_all",
@@ -215,6 +221,9 @@ __all__ = [
     "FPSCounter",
     "is_interactive_running",
     "stop_interactive_if_running",
+    "is_pattern_editor_active",
+    "register_pattern_editor_handlers",
+    "unregister_pattern_editor_handlers",
     "resolve_debug_filepath",
     "get_last_benchmark_summary",
     "TAREMIN_CLOTH_OT_confirm_debug_save",

@@ -502,6 +502,98 @@ class TestPanels(unittest.TestCase):
         self.assertIn("taremin_cloth.build_garment", operators)
 
 
+import tests
+
+
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
+class TestPatternEditorStateAndHandlers(unittest.TestCase):
+    """パターンエディタ状態管理・SKIP_SAVE・ハンドラ・パネル切替のBlender実機統合テスト"""
+
+    def setUp(self):
+        import taremin_cloth
+        from taremin_cloth.ops.pattern import clear_active_pattern_editor_op
+
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        taremin_cloth.register()
+        clear_active_pattern_editor_op()
+        bpy.context.scene.taremin_pattern_editor_active = False
+
+    def tearDown(self):
+        import taremin_cloth
+        from taremin_cloth.ops.pattern import clear_active_pattern_editor_op
+
+        clear_active_pattern_editor_op()
+        if getattr(bpy.context, "scene", None) is not None:
+            bpy.context.scene.taremin_pattern_editor_active = False
+        try:
+            taremin_cloth.register()
+        except Exception:
+            pass
+
+    def test_skip_save_panel_toggle_load_handlers_and_unregister(self):
+        """SKIP_SAVE・Nパネル開閉切替・ファイル読込ハンドラ・登録解除の整合性を検証する"""
+        from types import SimpleNamespace
+        import taremin_cloth
+        from taremin_cloth.ops.pattern import (
+            _on_pattern_editor_load_post,
+            _on_pattern_editor_load_pre,
+            clear_active_pattern_editor_op,
+            is_pattern_editor_active,
+            set_active_pattern_editor_op,
+        )
+        from taremin_cloth.panels import TAREMIN_CLOTH_PT_main_panel
+
+        # 1. シーンフラグが SKIP_SAVE であること
+        prop = bpy.types.Scene.bl_rna.properties["taremin_pattern_editor_active"]
+        self.assertTrue(prop.is_skip_save)
+
+        # 2. load_pre / load_post ハンドラが register() で登録されていること
+        self.assertIn(_on_pattern_editor_load_pre, bpy.app.handlers.load_pre)
+        self.assertIn(_on_pattern_editor_load_post, bpy.app.handlers.load_post)
+
+        # 3. 非起動時のパネルと poll()
+        self.assertFalse(is_pattern_editor_active(scene=bpy.context.scene))
+        self.assertFalse(bpy.ops.taremin_cloth.close_pattern_editor.poll())
+        ops_idle = render_panel(TAREMIN_CLOTH_PT_main_panel).get_operators()
+        self.assertIn("taremin_cloth.pattern_editor", ops_idle)
+        self.assertNotIn("taremin_cloth.close_pattern_editor", ops_idle)
+
+        # 4. 起動中（偽セッション）時のパネルと poll()
+        fake_op = SimpleNamespace(
+            controller=SimpleNamespace(sync_to_mesh=lambda: None),
+            canvas=SimpleNamespace(),
+        )
+        set_active_pattern_editor_op(fake_op)
+        bpy.context.scene.taremin_pattern_editor_active = True
+
+        self.assertTrue(is_pattern_editor_active(scene=bpy.context.scene))
+        self.assertTrue(bpy.ops.taremin_cloth.close_pattern_editor.poll())
+        ops_active = render_panel(TAREMIN_CLOTH_PT_main_panel).get_operators()
+        self.assertIn("taremin_cloth.close_pattern_editor", ops_active)
+        self.assertNotIn("taremin_cloth.pattern_editor", ops_active)
+
+        # 5. 新規シーン読込（read_homefile）で persistent ハンドラが発火し、状態がクリアされること
+        bpy.ops.wm.read_homefile(use_empty=True)
+        self.assertFalse(is_pattern_editor_active(scene=bpy.context.scene))
+        self.assertFalse(bpy.context.scene.taremin_pattern_editor_active)
+        self.assertIn(_on_pattern_editor_load_pre, bpy.app.handlers.load_pre)
+        self.assertIn(_on_pattern_editor_load_post, bpy.app.handlers.load_post)
+
+        # 6. unregister() でアクティブセッションのクリアとハンドラ解除が行われること
+        set_active_pattern_editor_op(fake_op)
+        bpy.context.scene.taremin_pattern_editor_active = True
+        taremin_cloth.unregister()
+        self.assertFalse(is_pattern_editor_active())
+        self.assertNotIn(_on_pattern_editor_load_pre, bpy.app.handlers.load_pre)
+        self.assertNotIn(_on_pattern_editor_load_post, bpy.app.handlers.load_post)
+
+        # 後続処理のために再登録して確認
+        clear_active_pattern_editor_op()
+        taremin_cloth.register()
+        self.assertIn(_on_pattern_editor_load_pre, bpy.app.handlers.load_pre)
+        self.assertIn(_on_pattern_editor_load_post, bpy.app.handlers.load_post)
+
+
 if __name__ == "__main__":
 
     unittest.main()

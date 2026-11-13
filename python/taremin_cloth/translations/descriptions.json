@@ -69,6 +69,7 @@
   "Capsule collider",
   "Clear bone transforms and restore rest pose",
   "Clear cloth_layer attribute to use default layer ID",
+  "Close the active 2D garment pattern drafting editor",
   "Cloth layer number (0=innermost)",
   "Cloth material preset",
   "Cloth thickness in meters",

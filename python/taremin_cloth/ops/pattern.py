@@ -48,20 +48,224 @@ from ..utils.view3d import (
     zoom_region_3d,
 )
 
-# 現在起動中の型紙エディタモーダルセッション参照（パネル等からの即時同期用）
+# 現在起動中の型紙エディタモーダルセッション参照（パネル等からの即時同期およびライフサイクル管理用）
 _active_pattern_editor_op = None
+_active_pattern_editor_canvas = None
 
 
 def set_active_pattern_editor_op(op) -> None:
     """現在起動中の型紙エディタモーダルオペレーター（またはテスト用モック）を登録する."""
-    global _active_pattern_editor_op
+    global _active_pattern_editor_op, _active_pattern_editor_canvas
     _active_pattern_editor_op = op
+    try:
+        _active_pattern_editor_canvas = getattr(op, "canvas", None) if op is not None else None
+    except ReferenceError:
+        _active_pattern_editor_canvas = None
 
 
 def clear_active_pattern_editor_op() -> None:
     """起動中の型紙エディタ参照をクリアする."""
-    global _active_pattern_editor_op
+    global _active_pattern_editor_op, _active_pattern_editor_canvas
     _active_pattern_editor_op = None
+    _active_pattern_editor_canvas = None
+
+
+def _is_pattern_editor_op_alive(op) -> bool:
+    """渡された型紙エディタオペレータが生存中の有効なセッションかを返す."""
+    if op is None:
+        return False
+    try:
+        # MagicMock 等では _session_closed が Truthy なモックになるため厳密に `is True` で判定する
+        if getattr(op, "_session_closed", False) is True:
+            return False
+        # Blender側でモーダルが破棄済みの場合は属性アクセス時に ReferenceError となる
+        getattr(op, "controller", None)
+        getattr(op, "canvas", None)
+        return True
+    except ReferenceError:
+        return False
+    except Exception:
+        return False
+
+
+def is_pattern_editor_active(*, scene=None) -> bool:
+    """現在有効な2D型紙エディタセッションが稼働中かどうかを返す."""
+    del scene  # シーン引数付き呼び出しの将来互換性を保持
+    return _is_pattern_editor_op_alive(_active_pattern_editor_op)
+
+
+def _sync_pattern_editor_active_flag(*, scene=None, active: bool) -> None:
+    """シーン上の taremin_pattern_editor_active フラグをセッション状態と同期する."""
+    target_state = bool(active)
+    if scene is not None:
+        try:
+            if hasattr(scene, "taremin_pattern_editor_active"):
+                scene.taremin_pattern_editor_active = target_state
+        except (ReferenceError, AttributeError):
+            pass
+    if not target_state:
+        scenes = getattr(getattr(bpy, "data", None), "scenes", None)
+        if scenes is not None:
+            try:
+                for sc in scenes:
+                    try:
+                        if getattr(sc, "taremin_pattern_editor_active", False) is True:
+                            sc.taremin_pattern_editor_active = False
+                    except (ReferenceError, AttributeError):
+                        pass
+            except Exception:
+                pass
+
+
+def _resolve_editor_space_and_rv3d(op, *, context=None):
+    """復元対象となる SpaceView3D と RegionView3D を安全に解決する."""
+    area = None
+    if op is not None:
+        try:
+            saved_area = getattr(op, "_editor_area", None)
+            if saved_area is not None and getattr(saved_area, "type", "") == 'VIEW_3D':
+                area = saved_area
+        except (ReferenceError, AttributeError):
+            area = None
+
+    if area is None and context is not None:
+        try:
+            ctx_area = getattr(context, "area", None)
+            if ctx_area is not None and getattr(ctx_area, "type", "") == 'VIEW_3D':
+                area = ctx_area
+        except (ReferenceError, AttributeError):
+            area = None
+
+    space = None
+    rv3d = None
+    if context is not None:
+        try:
+            ctx_space = getattr(context, "space_data", None)
+            if ctx_space is not None and getattr(ctx_space, "type", "") == 'VIEW_3D':
+                if area is None or getattr(area, "spaces", None) is None:
+                    space = ctx_space
+                else:
+                    active_space = getattr(area.spaces, "active", None)
+                    space = active_space or ctx_space
+        except (ReferenceError, AttributeError):
+            pass
+
+    if space is None and area is not None:
+        try:
+            space = getattr(getattr(area, "spaces", None), "active", None)
+        except (ReferenceError, AttributeError):
+            space = None
+
+    if space is not None:
+        try:
+            rv3d = getattr(space, "region_3d", None)
+        except (ReferenceError, AttributeError):
+            rv3d = None
+
+    if rv3d is None and context is not None:
+        try:
+            rv3d = getattr(context, "region_data", None)
+        except (ReferenceError, AttributeError):
+            rv3d = None
+
+    return space, rv3d
+
+
+def _cleanup_pattern_editor_session(
+    op,
+    *,
+    context=None,
+    save_and_build: bool = False,
+    reason: str = "",
+) -> None:
+    """型紙エディタセッションの後始末を一元的にかつ冪等に実行する."""
+    del reason  # 将来の診断ログ拡張用に理由識別子を受け取る
+    global _active_pattern_editor_op, _active_pattern_editor_canvas
+
+    already_closed = False
+    ctrl = None
+    canvas = None
+    op_scene = None
+
+    if op is not None:
+        try:
+            already_closed = getattr(op, "_session_closed", False) is True
+            op._session_closed = True
+        except (ReferenceError, AttributeError):
+            already_closed = False
+
+        if not already_closed:
+            try:
+                ctrl = getattr(op, "controller", None)
+            except (ReferenceError, AttributeError):
+                ctrl = None
+            try:
+                canvas = getattr(op, "canvas", None)
+            except (ReferenceError, AttributeError):
+                canvas = None
+            try:
+                op_scene = getattr(op, "_session_scene", None)
+            except (ReferenceError, AttributeError):
+                op_scene = None
+
+            # 1. ツールバー（Tパネル）およびツールヘッダー表示状態の復元
+            try:
+                space, rv3d = _resolve_editor_space_and_rv3d(op, context=context)
+                if space is not None and getattr(space, "type", "") == 'VIEW_3D':
+                    if hasattr(op, "_orig_show_toolbar"):
+                        space.show_region_toolbar = op._orig_show_toolbar
+                    if hasattr(op, "_orig_show_tool_header"):
+                        space.show_region_tool_header = op._orig_show_tool_header
+
+                # 2. 3Dビューポートカメラの復元
+                if rv3d is not None and hasattr(op, "_orig_view_perspective"):
+                    rv3d.view_perspective = op._orig_view_perspective
+                    rv3d.view_rotation = op._orig_view_rotation
+                    rv3d.view_location = op._orig_view_location
+                    rv3d.view_distance = op._orig_view_distance
+            except Exception:
+                pass
+
+    # 3. 描画ハンドラの解除（op 側が ReferenceError でも退避参照から重複なく確実に解除する）
+    fallback_canvas = _active_pattern_editor_canvas
+    targets = (canvas,) if fallback_canvas is canvas else (canvas, fallback_canvas)
+    for target_canvas in targets:
+        if target_canvas is not None:
+            try:
+                target_canvas.unregister_handler()
+            except Exception:
+                pass
+
+    # 4. グローバル参照の解放
+    if op is None or _active_pattern_editor_op is op or not _is_pattern_editor_op_alive(_active_pattern_editor_op):
+        clear_active_pattern_editor_op()
+    else:
+        _active_pattern_editor_canvas = None
+
+    # 5. シーンフラグの完全リセット
+    ctx_scene = getattr(context, "scene", None) if context is not None else None
+    _sync_pattern_editor_active_flag(scene=op_scene, active=False)
+    _sync_pattern_editor_active_flag(scene=ctx_scene, active=False)
+
+    # 6. 通常終了時のみドキュメント保存および 3D 衣装メッシュの自動ビルドを実行
+    if save_and_build and not already_closed and ctrl is not None:
+        target_scene = ctx_scene or op_scene
+        if target_scene is not None:
+            try:
+                save_document_to_scene(ctrl.doc, scene=target_scene)
+            except Exception as exc:
+                logger.warning(f"[Pattern] Auto save on editor close error: {exc}")
+            try:
+                build_garment_mesh_in_place(ctrl.doc, scene=target_scene)
+            except Exception as exc:
+                logger.warning(f"[Pattern] Auto build on editor close error: {exc}")
+
+    # 7. 再描画要求
+    if context is not None:
+        try:
+            tag_redraw_view3d(context)
+        except Exception:
+            pass
 
 
 def get_active_pattern_editor_controller():
@@ -70,6 +274,9 @@ def get_active_pattern_editor_controller():
     if op is None:
         return None
     try:
+        if getattr(op, "_session_closed", False) is True:
+            clear_active_pattern_editor_op()
+            return None
         return getattr(op, "controller", None)
     except ReferenceError:
         clear_active_pattern_editor_op()
@@ -82,6 +289,9 @@ def get_active_pattern_canvas():
     if op is None:
         return None
     try:
+        if getattr(op, "_session_closed", False) is True:
+            clear_active_pattern_editor_op()
+            return None
         return getattr(op, "canvas", None)
     except ReferenceError:
         clear_active_pattern_editor_op()
@@ -300,6 +510,62 @@ class TAREMIN_OT_sync_arrangement_proxy(Operator):
         return {'FINISHED'}
 
 
+def _format_pattern_editor_active_diagnostics(context) -> str:
+    """パターンエディタ既起動時および不整合検知時の診断文字列を組み立てる（副作用なし）."""
+    scene = getattr(context, "scene", None)
+    scene_name = getattr(scene, "name", None) if scene is not None else None
+    active_flag = getattr(scene, "taremin_pattern_editor_active", None) if scene is not None else None
+    area = getattr(context, "area", None)
+    area_type = getattr(area, "type", None) if area is not None else None
+
+    try:
+        interactive_active = is_interactive_active()
+    except Exception as exc:
+        interactive_active = f"error({type(exc).__name__})"
+
+    # 診断読み取りで _active_pattern_editor_op をクリアしないよう直接参照する
+    op = _active_pattern_editor_op
+    if op is None:
+        op_state = "op_ref=None"
+    else:
+        try:
+            # Blender側でモーダルが破棄済みの場合は属性アクセス時に ReferenceError となる
+            ctrl = getattr(op, "controller", None)
+            canvas = getattr(op, "canvas", None)
+            closed = getattr(op, "_session_closed", False) is True
+            if ctrl is not None:
+                ctrl_state = (
+                    f"controller(tool={getattr(ctrl, 'active_tool_name', None)!r}, "
+                    f"modal_input={getattr(ctrl, 'is_modal_input_active', None)}, "
+                    f"editing_field={getattr(ctrl, 'editing_field', None)!r}, "
+                    f"picking_bone={getattr(ctrl, 'picking_bone', None)}, "
+                    f"sliding_field={getattr(ctrl, 'sliding_field', None)!r}, "
+                    f"has_transform={getattr(ctrl, 'transform_session', None) is not None}, "
+                    f"request_close={getattr(ctrl, 'request_close', None)})"
+                )
+            else:
+                ctrl_state = "controller=None"
+
+            if canvas is not None:
+                canvas_state = (
+                    f"canvas(handler_2d={getattr(canvas, '_handler', None) is not None}, "
+                    f"handler_3d={getattr(canvas, '_handler_3d', None) is not None})"
+                )
+            else:
+                canvas_state = "canvas=None"
+
+            op_state = f"op_ref=present, op_rna_alive=True, closed={closed}, {ctrl_state}, {canvas_state}"
+        except ReferenceError:
+            op_state = "op_ref=present, op_rna_alive=False(ReferenceError)"
+        except Exception as exc:
+            op_state = f"op_ref=present, op_inspect_error={type(exc).__name__}({exc})"
+
+    return (
+        f"scene={scene_name!r}, flag={active_flag!r}, area={area_type!r}, "
+        f"interactive={interactive_active!r}, {op_state}"
+    )
+
+
 class TAREMIN_OT_pattern_editor(Operator):
     """2D型紙・縫合エディタを開くモーダルオペレーター"""
     bl_idname = "taremin_cloth.pattern_editor"
@@ -308,75 +574,139 @@ class TAREMIN_OT_pattern_editor(Operator):
     bl_translation_context = i18n.CONTEXT
 
     def invoke(self, context, event):
-        if getattr(context.scene, "taremin_pattern_editor_active", False):
+        scene = getattr(context, "scene", None)
+        scene_flag = bool(getattr(scene, "taremin_pattern_editor_active", False))
+        op_ref = _active_pattern_editor_op
+        op_alive = _is_pattern_editor_op_alive(op_ref)
+
+        if op_alive:
+            try:
+                diag = _format_pattern_editor_active_diagnostics(context)
+            except Exception as exc:
+                diag = f"diagnostics_error={type(exc).__name__}({exc})"
+            if not scene_flag:
+                # セッション実体が生存しているのにシーンフラグだけ False になった不整合を検出・修復
+                logger.warning(
+                    f"[Pattern] Detected active pattern editor session with False scene flag (syncing): {diag}"
+                )
+                _sync_pattern_editor_active_flag(scene=scene, active=True)
+            else:
+                logger.warning(f"[Pattern] Cannot open pattern editor (already active): {diag}")
             self.report({'WARNING'}, i18n.trans("Pattern editor is already active"))
             return {'CANCELLED'}
+
+        # 生存セッション不在にもかかわらずフラグや参照が残っている不正状態を検出し、記録した上で復旧
+        if scene_flag or op_ref is not None or _active_pattern_editor_canvas is not None:
+            try:
+                diag = _format_pattern_editor_active_diagnostics(context)
+            except Exception as exc:
+                diag = f"diagnostics_error={type(exc).__name__}({exc})"
+            logger.warning(f"[Pattern] Detected stale pattern editor state (cleaning up): {diag}")
+            _cleanup_pattern_editor_session(
+                op_ref,
+                context=context,
+                save_and_build=False,
+                reason="stale_state_recovery",
+            )
 
         if is_interactive_active():
             self.report({'WARNING'}, i18n.trans("Cannot open pattern editor during interactive simulation"))
             return {'CANCELLED'}
 
-        # タイムラインアニメーション再生中の場合は停止
-        stop_animation(context)
+        self._session_closed = False
+        self._session_scene = scene
+        self._editor_area = getattr(context, "area", None)
+        self.controller = None
+        self.canvas = None
 
-        # 既存のSpaceView3D設定をバックアップし、被り防止のためTパネル（Toolbar）およびツールヘッダーを非表示化
-        space = getattr(context, "space_data", None)
-        if space and getattr(space, "type", "") == 'VIEW_3D':
-            self._orig_show_toolbar = getattr(space, "show_region_toolbar", False)
-            space.show_region_toolbar = False
-            self._orig_show_tool_header = getattr(space, "show_region_tool_header", False)
-            space.show_region_tool_header = False
+        try:
+            # タイムラインアニメーション再生中の場合は停止
+            stop_animation(context)
 
-        doc = load_document_from_scene(context.scene)
-        self.controller = EditorController(doc=doc)
-        region = getattr(context, "region", None)
-        rv3d = getattr(context, "region_data", None)
-        if region:
-            self.controller.screen_size = (region.width, region.height)
+            # 既存のSpaceView3D設定をバックアップし、被り防止のためTパネル（Toolbar）およびツールヘッダーを非表示化
+            space = getattr(context, "space_data", None)
+            if space and getattr(space, "type", "") == 'VIEW_3D':
+                self._orig_show_toolbar = getattr(space, "show_region_toolbar", False)
+                space.show_region_toolbar = False
+                self._orig_show_tool_header = getattr(space, "show_region_tool_header", False)
+                space.show_region_tool_header = False
 
-        # 3Dビューポートカメラのバックアップと正面正投影 (Front Ortho) 設定
-        if rv3d:
-            try:
-                self._orig_view_perspective = rv3d.view_perspective
-                self._orig_view_rotation = rv3d.view_rotation.copy()
-                self._orig_view_location = rv3d.view_location.copy()
-                self._orig_view_distance = rv3d.view_distance
-                rv3d.view_perspective = 'ORTHO'
-                # 正面 (-Y から +Y を見る)
-                rv3d.view_rotation = Quaternion((0.7071068, 0.7071068, 0.0, 0.0))
-            except Exception:
-                pass
+            doc = load_document_from_scene(scene)
+            self.controller = EditorController(doc=doc)
+            region = getattr(context, "region", None)
+            rv3d = getattr(context, "region_data", None)
+            if region:
+                self.controller.screen_size = (region.width, region.height)
 
-        # シーン内アーマチュアからボーン情報を単一ソース (BoneInfo3D) として抽出
-        self.armature_obj = _find_target_armature(context)
-        self.controller.bones = extract_armature_bones_for_canvas(context.scene)
-        self.all_bones_data = [b.to_overlay_tuple() for b in self.controller.bones.values()]
+            # 3Dビューポートカメラのバックアップと正面正投影 (Front Ortho) 設定
+            if rv3d:
+                try:
+                    self._orig_view_perspective = rv3d.view_perspective
+                    self._orig_view_rotation = rv3d.view_rotation.copy()
+                    self._orig_view_location = rv3d.view_location.copy()
+                    self._orig_view_distance = rv3d.view_distance
+                    rv3d.view_perspective = 'ORTHO'
+                    # 正面 (-Y から +Y を見る)
+                    rv3d.view_rotation = Quaternion((0.7071068, 0.7071068, 0.0, 0.0))
+                except Exception:
+                    pass
 
-        # 3Dビューポートの投影スケールを2Dキャンバスへ1:1実寸同期
-        if region and rv3d:
-            sync_view2d_from_region_3d(region, rv3d, view_2d=self.controller.view)
+            # シーン内アーマチュアからボーン情報を単一ソース (BoneInfo3D) として抽出
+            self.armature_obj = _find_target_armature(context)
+            self.controller.bones = extract_armature_bones_for_canvas(scene)
+            self.all_bones_data = [b.to_overlay_tuple() for b in self.controller.bones.values()]
 
-        # 初期オフセットの算出
-        lo, ro, to, bo = get_viewport_overlay_offsets(area=getattr(context, "area", None))
-        self.controller.left_offset = lo
-        self.controller.right_offset = ro
-        self.controller.top_offset = to
-        self.controller.bottom_offset = bo
+            # 3Dビューポートの投影スケールを2Dキャンバスへ1:1実寸同期
+            if region and rv3d:
+                sync_view2d_from_region_3d(region, rv3d, view_2d=self.controller.view)
 
-        self.canvas = PatternCanvasRenderer(self.controller)
-        self.canvas.register_handler()
+            # 初期オフセットの算出
+            lo, ro, to, bo = get_viewport_overlay_offsets(area=getattr(context, "area", None))
+            self.controller.left_offset = lo
+            self.controller.right_offset = ro
+            self.controller.top_offset = to
+            self.controller.bottom_offset = bo
 
-        self._pan_dragging = False
-        self._last_mouse = (float(event.mouse_region_x), float(event.mouse_region_y))
+            self.canvas = PatternCanvasRenderer(self.controller)
+            self.canvas.register_handler()
 
-        context.scene.taremin_pattern_editor_active = True
-        set_active_pattern_editor_op(self)
-        context.window_manager.modal_handler_add(self)
-        tag_redraw_view3d(context)
-        self.report({'INFO'}, i18n.trans("Opened Pattern Editor (Press Esc to close)"))
-        return {'RUNNING_MODAL'}
+            self._pan_dragging = False
+            self._last_mouse = (float(event.mouse_region_x), float(event.mouse_region_y))
+
+            context.window_manager.modal_handler_add(self)
+            set_active_pattern_editor_op(self)
+            _sync_pattern_editor_active_flag(scene=scene, active=True)
+            tag_redraw_view3d(context)
+            self.report({'INFO'}, i18n.trans("Opened Pattern Editor (Press Esc to close)"))
+            return {'RUNNING_MODAL'}
+        except Exception as exc:
+            logger.error(f"[Pattern] Failed to open pattern editor: {exc}", exc_info=True)
+            _cleanup_pattern_editor_session(
+                self,
+                context=context,
+                save_and_build=False,
+                reason="invoke_error",
+            )
+            self.report({'ERROR'}, f"Failed to open pattern editor: {exc}")
+            return {'CANCELLED'}
 
     def modal(self, context, event):
+        if getattr(self, "_session_closed", False) is True:
+            return {'FINISHED'}
+        try:
+            return self._modal_impl(context, event)
+        except Exception as exc:
+            logger.error(f"[Pattern] Unhandled exception in pattern editor modal: {exc}", exc_info=True)
+            _cleanup_pattern_editor_session(
+                self,
+                context=context,
+                save_and_build=False,
+                reason="modal_error",
+            )
+            self.report({'ERROR'}, f"Pattern editor stopped due to error: {exc}")
+            return {'CANCELLED'}
+
+    def _modal_impl(self, context, event):
         region = getattr(context, "region", None)
         rv3d = getattr(context, "region_data", None)
         if region:
@@ -585,34 +915,62 @@ class TAREMIN_OT_pattern_editor(Operator):
         return {'PASS_THROUGH'}
 
     def _finish(self, context):
-        # ツールバー（Tパネル）およびツールヘッダーの表示状態を元に戻す
-        space = getattr(context, "space_data", None)
-        if space and getattr(space, "type", "") == 'VIEW_3D':
-            if hasattr(self, "_orig_show_toolbar"):
-                space.show_region_toolbar = self._orig_show_toolbar
-            if hasattr(self, "_orig_show_tool_header"):
-                space.show_region_tool_header = self._orig_show_tool_header
+        _cleanup_pattern_editor_session(
+            self,
+            context=context,
+            save_and_build=True,
+            reason="finished",
+        )
+        self.report({'INFO'}, i18n.trans("Closed Pattern Editor"))
+        return {'FINISHED'}
 
-        # 3Dビューポートカメラの復元
-        rv3d = getattr(context, "region_data", None)
-        if rv3d and hasattr(self, "_orig_view_perspective"):
-            try:
-                rv3d.view_perspective = self._orig_view_perspective
-                rv3d.view_rotation = self._orig_view_rotation
-                rv3d.view_location = self._orig_view_location
-                rv3d.view_distance = self._orig_view_distance
-            except Exception:
-                pass
+    def cancel(self, context):
+        logger.info("[Pattern] Pattern editor modal cancelled by Blender")
+        _cleanup_pattern_editor_session(
+            self,
+            context=context,
+            save_and_build=False,
+            reason="cancelled",
+        )
 
-        self.canvas.unregister_handler()
-        clear_active_pattern_editor_op()
-        context.scene.taremin_pattern_editor_active = False
-        save_document_to_scene(self.controller.doc, scene=context.scene)
+
+class TAREMIN_OT_close_pattern_editor(Operator):
+    """起動中の2D型紙・縫合エディタを閉じるオペレーター"""
+    bl_idname = "taremin_cloth.close_pattern_editor"
+    bl_label = "Close Pattern Editor"
+    bl_description = "Close the active 2D garment pattern drafting editor"
+    bl_translation_context = i18n.CONTEXT
+
+    @classmethod
+    def poll(cls, context):
+        scene = getattr(context, "scene", None)
+        return is_pattern_editor_active(scene=scene) or bool(
+            getattr(scene, "taremin_pattern_editor_active", False)
+        )
+
+    def execute(self, context):
+        op_ref = _active_pattern_editor_op
+        if _is_pattern_editor_op_alive(op_ref):
+            _cleanup_pattern_editor_session(
+                op_ref,
+                context=context,
+                save_and_build=True,
+                reason="close_operator",
+            )
+            self.report({'INFO'}, i18n.trans("Closed Pattern Editor"))
+            return {'FINISHED'}
+
         try:
-            build_garment_mesh_in_place(self.controller.doc, scene=context.scene)
-        except Exception as e:
-            logger.warning(f"[Pattern] Auto build on editor close error: {e}")
-        tag_redraw_view3d(context)
+            diag = _format_pattern_editor_active_diagnostics(context)
+        except Exception as exc:
+            diag = f"diagnostics_error={type(exc).__name__}({exc})"
+        logger.warning(f"[Pattern] Close requested without active session (cleaning up): {diag}")
+        _cleanup_pattern_editor_session(
+            op_ref,
+            context=context,
+            save_and_build=False,
+            reason="close_stale",
+        )
         self.report({'INFO'}, i18n.trans("Closed Pattern Editor"))
         return {'FINISHED'}
 
@@ -1287,8 +1645,105 @@ class TAREMIN_OT_migrate_curves_to_pattern(Operator):
         return {'FINISHED'}
 
 
+def _persistent(func):
+    """Blender環境では@persistentを適用し、モックテスト環境では元の関数をそのまま返す."""
+    app = getattr(bpy, "app", None)
+    handlers = getattr(app, "handlers", None)
+    persistent_fn = getattr(handlers, "persistent", None)
+    if (
+        callable(persistent_fn)
+        and "Mock" not in type(persistent_fn).__name__
+        and not hasattr(persistent_fn, "_mock_name")
+    ):
+        return persistent_fn(func)
+    return func
+
+
+@_persistent
+def _on_pattern_editor_load_pre(_dummy=None) -> None:
+    """ファイル読み込み前に稼働中パターンエディタセッションを安全に解放する."""
+    op = _active_pattern_editor_op
+    if op is not None or _active_pattern_editor_canvas is not None:
+        logger.info("[Pattern] Cleaning up pattern editor session before file load")
+        _cleanup_pattern_editor_session(
+            op,
+            context=getattr(bpy, "context", None),
+            save_and_build=False,
+            reason="load_pre",
+        )
+
+
+@_persistent
+def _on_pattern_editor_load_post(_dummy=None) -> None:
+    """ファイル読み込み後に過去の .blend に残った状態フラグや参照を初期化する."""
+    stale_scenes = []
+    scenes = getattr(getattr(bpy, "data", None), "scenes", None)
+    if scenes is not None:
+        try:
+            for sc in scenes:
+                if getattr(sc, "taremin_pattern_editor_active", False) is True:
+                    stale_scenes.append(getattr(sc, "name", "?"))
+        except Exception:
+            pass
+    if stale_scenes or _active_pattern_editor_op is not None or _active_pattern_editor_canvas is not None:
+        logger.warning(
+            f"[Pattern] Resetting stale pattern editor state after file load (scenes={stale_scenes!r})"
+        )
+    _cleanup_pattern_editor_session(
+        _active_pattern_editor_op,
+        context=getattr(bpy, "context", None),
+        save_and_build=False,
+        reason="load_post",
+    )
+
+
+def register_pattern_editor_handlers() -> None:
+    """パターンエディタのファイル読込前後ハンドラを登録する."""
+    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    if handlers:
+        for attr_name, fn in (
+            ("load_pre", _on_pattern_editor_load_pre),
+            ("load_post", _on_pattern_editor_load_post),
+        ):
+            handler_list = getattr(handlers, attr_name, None)
+            if handler_list is not None and hasattr(handler_list, "append"):
+                try:
+                    if fn not in handler_list:
+                        handler_list.append(fn)
+                except Exception:
+                    pass
+    _sync_pattern_editor_active_flag(
+        scene=getattr(getattr(bpy, "context", None), "scene", None),
+        active=False,
+    )
+
+
+def unregister_pattern_editor_handlers() -> None:
+    """パターンエディタのアクティブセッションを終了し、読込前後ハンドラを解除する."""
+    _cleanup_pattern_editor_session(
+        _active_pattern_editor_op,
+        context=getattr(bpy, "context", None),
+        save_and_build=False,
+        reason="unregister",
+    )
+    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    if handlers:
+        for attr_name, fn in (
+            ("load_pre", _on_pattern_editor_load_pre),
+            ("load_post", _on_pattern_editor_load_post),
+        ):
+            handler_list = getattr(handlers, attr_name, None)
+            if handler_list is not None and hasattr(handler_list, "remove"):
+                try:
+                    if fn in handler_list:
+                        handler_list.remove(fn)
+                except Exception:
+                    pass
+
+
 classes = (
     TAREMIN_OT_pattern_editor,
+    TAREMIN_OT_close_pattern_editor,
     TAREMIN_OT_export_pattern_json,
     TAREMIN_OT_import_pattern_json,
     TAREMIN_OT_set_reference_image,
@@ -1311,10 +1766,11 @@ def register():
             bpy.utils.register_class(cls)
         except ValueError:
             pass
+    register_pattern_editor_handlers()
 
 
 def unregister():
-    clear_active_pattern_editor_op()
+    unregister_pattern_editor_handlers()
     for cls in reversed(classes):
         try:
             bpy.utils.unregister_class(cls)
