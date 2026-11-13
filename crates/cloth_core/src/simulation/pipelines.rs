@@ -886,7 +886,15 @@ pub fn build_simulation_resources(
     let hash_capacity = num_total_particles;
     // 2階層 Blelloch Scan (256 x 256) の上限である 65536 バケット以下にクランプする
     let table_size = (hash_capacity * 4).next_power_of_two().clamp(1024, 65536);
-    let spatial_hash = GpuSpatialHash::new(context, &shared.hash_bgl, &vertex_buffer, hash_capacity, cell_size, table_size);
+    let spatial_hash = GpuSpatialHash::new(
+        context,
+        &shared.hash_bgl,
+        &vertex_buffer,
+        num_vertices,
+        hash_capacity,
+        cell_size,
+        table_size,
+    );
 
     let self_col_params = SelfCollisionParams {
         cell_size,

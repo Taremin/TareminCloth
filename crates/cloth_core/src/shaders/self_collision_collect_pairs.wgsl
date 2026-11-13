@@ -246,6 +246,50 @@ fn closest_points_segments(p1: vec3<f32>, q1: vec3<f32>, p2: vec3<f32>, q2: vec3
     return vec2<f32>(s, t);
 }
 
+// アンカー対 (u, w) が E-E ペア収集ループの (index=u, j=w) 判定に到達可能かを対称に判定する
+fn can_ee_anchor_reach(
+    u: u32, v_u: GpuVertex, len_u: f32,
+    w: u32, v_w: GpuVertex, len_w: f32,
+) -> bool {
+    if (v_u.inv_mass <= 0.0) {
+        return false;
+    }
+    let cell_u = vec3<i32>(floor(v_u.prev_pos / params.cell_size));
+    let cell_w = vec3<i32>(floor(v_w.prev_pos / params.cell_size));
+    let dcell = abs(cell_u - cell_w);
+    if (dcell.x > 1 || dcell.y > 1 || dcell.z > 1) {
+        return false;
+    }
+    let diff = v_u.prev_pos - v_w.prev_pos;
+    let dist_sq = dot(diff, diff);
+    let mode_f = f32(params.margin_mode);
+    let hu = min(length(v_u.velocity) * params.dt_frame * params.velocity_horizon_scale, params.max_horizon) * mode_f;
+    let hw = min(length(v_w.velocity) * params.dt_frame * params.velocity_horizon_scale, params.max_horizon) * mode_f;
+    let bound = v_u.thickness + v_w.thickness + (len_u + len_w) * 1.3 + params.safety_margin + hu + hw;
+    if (dist_sq > bound * bound) {
+        return false;
+    }
+    if ((island_ids[u] == island_ids[w]) && (params.exclude_neighbors != 0u)) {
+        let dist = sqrt(max(dist_sq, 0.0));
+        if (is_topologically_near_folded(u, w, dist)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 候補アンカー (u, w) が現在試行中の (cur_u, cur_w) より辞書順で小さく、かつ到達可能かを返す
+fn is_smaller_anchor_reachable(
+    u: u32, v_u: GpuVertex, len_u: f32,
+    w: u32, v_w: GpuVertex, len_w: f32,
+    cur_u: u32, cur_w: u32,
+) -> bool {
+    if (u > cur_u || (u == cur_u && w >= cur_w)) {
+        return false;
+    }
+    return can_ee_anchor_reach(u, v_u, len_u, w, v_w, len_w);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
@@ -456,13 +500,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 continue;
                                             }
                                             let v_ui = vertices[ui];
-                                            // 動的エッジ {index, ui} は小頂点側のみが所有し、重複収集を防ぐ
-                                            if (v_ui.inv_mass > 0.0 && index > ui) {
-                                                continue;
-                                            }
+                                            let local_len_ui = local_edge_lengths[ui];
                                             let p_ui = v_ui.prev_pos;
                                             let len_sq_i = dot(p_ui - p_i, p_ui - p_i);
-                                            let max_len_i = (local_len_i + local_edge_lengths[ui]) * 1.5;
+                                            let max_len_i = (local_len_i + local_len_ui) * 1.5;
                                             if (len_sq_i > max_len_i * max_len_i || len_sq_i <= 1e-12) {
                                                 continue;
                                             }
@@ -474,16 +515,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 }
                                                 if (ui != j && ui != vj && index != vj) {
                                                     let v_vj = vertices[vj];
-                                                    let edge_j_has_pin = (v_j.inv_mass <= 0.0) || (v_vj.inv_mass <= 0.0);
+                                                    let local_len_vj = local_edge_lengths[vj];
 
                                                     let c_j = min(j, vj);
                                                     let c_vj = max(j, vj);
 
-                                                    // 重複排除: 相手がピンでない動的エッジ同士なら index < c_j
-                                                    if (!is_pinned_i && (edge_j_has_pin || index < c_j)) {
+                                                    // 到達可能な全8アンカー候補のうち辞書順最小の (index, j) のみが収集する (重複・粗大エッジ見逃しゼロ)
+                                                    let has_smaller_anchor =
+                                                        is_smaller_anchor_reachable(index, v_i, local_len_i, vj, v_vj, local_len_vj, index, j) ||
+                                                        is_smaller_anchor_reachable(ui, v_ui, local_len_ui, j, v_j, local_len_j, index, j) ||
+                                                        is_smaller_anchor_reachable(ui, v_ui, local_len_ui, vj, v_vj, local_len_vj, index, j) ||
+                                                        is_smaller_anchor_reachable(j, v_j, local_len_j, index, v_i, local_len_i, index, j) ||
+                                                        is_smaller_anchor_reachable(j, v_j, local_len_j, ui, v_ui, local_len_ui, index, j) ||
+                                                        is_smaller_anchor_reachable(vj, v_vj, local_len_vj, index, v_i, local_len_i, index, j) ||
+                                                        is_smaller_anchor_reachable(vj, v_vj, local_len_vj, ui, v_ui, local_len_ui, index, j);
+
+                                                    if (!is_pinned_i && !has_smaller_anchor) {
                                                         let p_vj = v_vj.prev_pos;
                                                         let len_sq_j = dot(p_vj - p_j, p_vj - p_j);
-                                                        let max_len_j = (local_len_j + local_edge_lengths[vj]) * 1.5;
+                                                        let max_len_j = (local_len_j + local_len_vj) * 1.5;
                                                         if (len_sq_j > max_len_j * max_len_j || len_sq_j <= 1e-12) {
                                                             continue;
                                                         }

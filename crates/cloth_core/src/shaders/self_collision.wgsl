@@ -320,7 +320,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                 for (var k = cell_start; k < cell_end; k = k + 1u) {
                     let j = sorted_indices[k];
-                    if (j == index) {
+                    if (j >= params.num_vertices || j == index) {
                         continue;
                     }
 

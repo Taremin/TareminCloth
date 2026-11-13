@@ -215,11 +215,12 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
 
 2. **空間ハッシュ・近傍探索 (Spatial Hashing)**:
    - **動的セルサイズ自動決定**:
-     布の幾何学的解像度（平均エッジ長）と物理厚みに応じ、セルサイズを以下の数式により動的に自動算出：
-     $$\text{cell-size} = \max\left( \text{thickness} \times 4.0, \; \text{mean-edge-length} \times 0.5, \; 0.01 \right)$$
-     布本体エッジ（縫合用ルーズエッジを除く）の平均長 $`L_{\text{mean}}`$ に対し、エッジ半長（$`0.5L`$）を基準とすることで、粗いローポリゴンメッシュでも端点が隣接27セル内に収まることを幾何学的に保証しつつ、セル肥大化によるバケット飽和（ペアキャッシュ枠あふれ等）を防止。
+     布の幾何学的解像度（最大・平均エッジ長）と物理厚みに応じ、セルサイズを以下の数式により動的に自動算出：
+     $$\text{edge-based-size} = \min\left( \max(\text{max-edge-length} \times 0.85, \; \text{mean-edge-length}), \; 0.025 \right)$$
+     $$\text{cell-size} = \max\left( \text{thickness} \times 4.0, \; \text{edge-based-size}, \; 0.01 \right)$$
+     密なメッシュで三角形中央の死角を排除しつつ、粗大メッシュでセル肥大化によるバケット飽和（ペアキャッシュ枠あふれ等）を防ぐためエッジ由来項に `0.025m` (2.5cm) の上限クランプを設定。
    - **デュアル空間ハッシュパイプライン (Counting Sort 6相)**:
-     - **頂点空間ハッシュ (`GpuSpatialHash`)**: 頂点座標 $`p_i`$ をキーとしてセルIDを算出し、V-T（頂点対面）およびマルチレイヤー接触候補を並列抽出。
+     - **頂点空間ハッシュ (`GpuSpatialHash`)**: 頂点座標 $`p_i`$ をキーとしてセルIDを算出し、V-T（頂点対面）およびマルチレイヤー・仮想粒子V-V接触候補を並列抽出。`algo=0/1` 用（実頂点数 `real_num_vertices`）と `algo=2` 用（仮想粒子含む総粒子数 `num_total_particles`）の2系統のパラメータバッファ／BindGroup（`real_grid_bind_group` / `grid_bind_group`）を保持して `dispatch_build` で動的切替を行い、V-T/E-E 経路における $`t=0`$ 凍結仮想頂点の混入・実行時モード切替汚染を防止。
      - **エッジ空間ハッシュ (`GpuEdgeSpatialHash`)**: エッジ中点 $`p_{\text{mid}} = (p_{u0} + p_{u1}) / 2`$ をキーとしてエッジインデックスを直接セルへソート（`spatial_grid_sort_edges.wgsl`）。E-E（エッジ対エッジ）接触解決専用の独立グリッド。
      - **2階層 Blelloch Scan 上限保証とテーブルサイズ統一**: GPU Counting Sort（`spatial_grid_sort.wgsl` / `spatial_grid_sort_edges.wgsl`）の2階層ワークグループ排他 Prefix Sum（`scan_top`: 最大256ブロック × 256要素）の上限に合わせ、頂点・エッジ双方のハッシュテーブルサイズを `table_size = (hash_capacity * 4).next_power_of_two().clamp(1024, 65536)` に統一・クランプし、ブロック超過によるバケット先頭番地への潰れ（要素消失）および頂点・エッジ間の `SimParams.table_size` 不一致を防止。
 
@@ -239,7 +240,7 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
        - **Coupled モード (オプション)**: 反復ループ内部で距離・縫合拘束と交互に同調解決（Coupled XPBD）。極めて激しい衝突下でのエッジ過剰伸長を抑制。
        - **低ステップ時自動協調モード (`auto_coupled_on_low_substeps`, 既定ON)**: 適応サブステップ等でサブステップ数が低くなった場合（$`\le 8`$）、Decoupledモードのままだと反復内の距離拘束収縮力に押し出しが負けて素体コライダーを貫通・滑落する現象を防ぐため、実効的にCoupled解決を自動強制するフェイルセーフオプション。
      - **自己衝突 (Self-Collision)**:
-        - **Solve パス (V-T / V-V 特化: `self_collision.wgsl`)**: 頂点スレッド駆動による頂点空間ハッシュ近傍探索および V-T（頂点対面）/ V-V（頂点対頂点）幾何接触解決。重厚なエッジ直積二重ループを新 E-E パスへ完全分離したことでレジスタ使用量と分岐待ち合わせが大幅削減され、従来の 78.4 ms から 15.7 ms 〜 22.7 ms（約 4〜5 倍高速）へ劇的に軽量化。
+        - **Solve パス (V-T / V-V 特化: `self_collision.wgsl`)**: 頂点スレッド駆動による頂点空間ハッシュ近傍探索（`j >= params.num_vertices` の仮想・範囲外インデックス防御付き）および V-T（頂点対面）/ V-V（頂点対頂点）幾何接触解決。重厚なエッジ直積二重ループを新 E-E パスへ完全分離したことでレジスタ使用量と分岐待ち合わせが大幅削減され、従来の 78.4 ms から 15.7 ms 〜 22.7 ms（約 4〜5 倍高速）へ劇的に軽量化。
           - **動的三角形との相対 V-T CCD**: 終点時刻 $\tau=1$ の相手三角形を静止基準とし、重心移動量 $\Delta T$ を考慮した相対始点 $\mathbf{p}_{\text{rel\_old}, i} = x_{\text{old}, i} + \Delta T$（符号整合性保証）から相対ベクトル $\mathbf{v}_{\text{rel}} = p_i - \mathbf{p}_{\text{rel\_old}, i}$ に対する Möller–Trumbore 交差判定を実施。衝突時刻 {\text{hit}}$ 手前の安全位置 $\mathbf{p}_{\text{safe}}$ への補正量を、自頂点だけでなく相手三角形3頂点へ重心座標重みと逆質量比に応じた 100% ハード CCD 変位としてアトミック分配（完全な運動量保存）。
         - **Solve EE パス (Edge-Centric E-E 特化: `self_collision_ee_direct.wgsl`)**: エッジ自身（メッシュの全エッジ $`N_e`$ 本）をスレッドとしてディスパッチする新アーキテクチャ。
           - **専用エッジ空間ハッシュによる多段アクセスの完全排除**: エッジ中点をキーとする `GpuEdgeSpatialHash` を直接走査することで、従来の「頂点セル $`\to`$ 頂点 $`\to`$ 隣接エッジリスト $`\to`$ 相手エッジ」という3段階の不規則メモリアクセスを撤廃し、「エッジセル $`\to`$ 相手エッジ」の1段階直接アクセスに単純化。E-E計算時間を 44.95 ms から 27.73 ms へ約 38.3% 高速化。
@@ -252,7 +253,7 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
         - **エッジ衝突間隔制御 (`self_collision_ee_substep_interval`, 既定 `1`)**: E-E（エッジ対エッジ）接触解決の実行頻度を制御（`0`: 完全無効 [速度最優先、約26.6 FPS]、`1`: 毎サブステップ実行 [完全精度・貫通防止、リアルタイム域達成]、`N >= 2`: Nサブステップ毎 [例: N=2 で 17.9 FPS]）。サブステップディスパッチ時に `solve_ee` パスの実行有無を直接分岐するためオーバーヘッドゼロ。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
           - **Collect Pairs パス (`self_collision_collect_pairs.wgsl`)**: フレーム先頭サブステップ（`sub_idx == 0`）でのみ空間ハッシュ近傍探索を実行し、接近頂点・面（V-T）および稜線（E-E）ペアを抽出して専用ストレージバッファにキャッシュ。`margin_mode=AUTO`（既定）では頂点速度×フレームdt×係数（`velocity_horizon_scale=1.3`、`max_horizon=0.02`でクランプ）のスイープホライゾンを収集 bound に加算し、フレーム内に接近するペアの取りこぼしを防止。`FIXED` では従来の静的収集（厚み+マージンのみ）。
-          - **保持方式 (頂点メジャー固定枠)**: 頂点スレッドが候補を距離昇順の Top-K（V-Tは面トリプルで重複排除）に保持し、`index*quota+k` のコンパクト配置へ書き戻す（未使用枠はセンチネル）。総予算 `max_pairs` から枠数 `quota = clamp(budget/N, 1, 8)` を導出。グローバルアトミックは統計（受理数・破棄数）のみで格納は競合なし・決定的。バッファ物理確保は N*8。
+          - **保持方式 (頂点メジャー固定枠) と E-E 正準所有権**: 頂点スレッドが候補を距離昇順の Top-K（V-Tは面トリプルで重複排除）に保持し、`index*quota+k` のコンパクト配置へ書き戻す（未使用枠はセンチネル）。E-E 収集では両エッジ $`E_1=\{i, u_i\}, E_2=\{j, v_j\}`$ の端点対全 8 候補のうち 27 近傍セル・広域バウンド・トポロジー条件を満たして到達可能なペアから辞書順最小 `(u*, w*)` のみを採用する正準所有権ガード（`can_ee_anchor_reach` / `is_smaller_anchor_reachable`）を用い、粗大メッシュでの片側到達不能による取りこぼしと重複収集の双方をゼロ化。総予算 `max_pairs` から枠数 `quota = clamp(budget/N, 1, 8)` を導出。グローバルアトミックは統計（受理数・破棄数）のみで格納は競合なし・決定的。バッファ物理確保は N*8。
           - **Narrowphase Solve パス (`self_collision_solve_vt.wgsl` / `self_collision_solve_ee.wgsl`)**: キャッシュされた有効ペアのみをピンポイントで並列ディスパッチ。センチネル枠は早期リターン。解決パラメータの上限値はスロット数 (N*quota)。
           - **カウンタ (`PairCounters`)**: `vt/ee_count` は受理候補総数（枠超過分を含む）、`vt/ee_dropped` は枠不足破棄数。`get_pair_cache_stats()` の4値は従来通り（件数・予算上限）。
           - **時間的再利用（Amortization）**: 以降のサブステップ（`sub_idx > 0`）では空間ハッシュ構築および全頂点ペア収集パスをスキップ。フレームdtは `step()` 先頭で収集パラメータへ毎フレーム反映。

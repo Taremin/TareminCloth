@@ -1495,5 +1495,93 @@ mod tests {
         );
         assert_eq!(sim.dynamic_pins.len(), 0);
     }
+
+    fn read_u32_buffer_sync(ctx: &GpuContext, buffer: &wgpu::Buffer, count: usize) -> Vec<u32> {
+        let size = (count * std::mem::size_of::<u32>()) as u64;
+        let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Test u32 Staging Buffer"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Test Copy u32 Buffer"),
+        });
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
+        ctx.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..size);
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        ctx.device.poll(wgpu::Maintain::Wait);
+        pollster::block_on(receiver.receive()).unwrap().unwrap();
+
+        let mapped = slice.get_mapped_range();
+        let out: Vec<u32> = bytemuck::cast_slice(&mapped).to_vec();
+        drop(mapped);
+        staging.unmap();
+        out
+    }
+
+    #[test]
+    fn test_spatial_hash_virtual_particles_isolation_across_algos() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let mesh = make_quad_mesh();
+        let real_count = mesh.vertices.len() as u32;
+        let mut sim = GpuClothSimulator::new(Arc::clone(&ctx), mesh);
+        assert!(
+            sim.num_virtual_vertices > 0,
+            "1m quad は仮想頂点を生成するべき (num_virtual_vertices={})",
+            sim.num_virtual_vertices
+        );
+        let total_count = real_count + sim.num_virtual_vertices;
+        let table_size = sim.spatial_hash.table_size as usize;
+
+        sim.set_enable_self_collision(true);
+        sim.gravity = [0.0, 0.0, 0.0];
+
+        let check_hash_entries = |sim: &GpuClothSimulator, expected_count: u32, expect_only_real: bool, label: &str| {
+            let cell_starts = read_u32_buffer_sync(&ctx, &sim.spatial_hash.cell_starts_buffer, table_size + 1);
+            let actual_count = cell_starts[table_size];
+            assert_eq!(
+                actual_count, expected_count,
+                "{}: 空間ハッシュ登録数が不正 (expected={}, actual={})",
+                label, expected_count, actual_count
+            );
+            let sorted = read_u32_buffer_sync(&ctx, &sim.spatial_hash.sorted_indices_buffer, actual_count as usize);
+            if expect_only_real {
+                assert!(
+                    sorted.iter().all(|&idx| idx < real_count),
+                    "{}: sorted_indices に仮想頂点 (>= {}) が混入した: {:?}",
+                    label,
+                    real_count,
+                    sorted
+                );
+            }
+        };
+
+        // 1. algo=1 (PairCache V-T/E-E): 実頂点のみ登録
+        sim.set_self_collision_algorithm(1);
+        sim.step(1.0 / 60.0, 2);
+        check_hash_entries(&sim, real_count, true, "algo=1 (初期)");
+
+        // 2. algo=2 (V-V 仮想頂点): 実頂点 + 仮想頂点の全粒子を登録
+        sim.set_self_collision_algorithm(2);
+        sim.step(1.0 / 60.0, 2);
+        check_hash_entries(&sim, total_count, false, "algo=2");
+
+        // 3. algo=0 (Direct V-T/E-E) へ戻した際も仮想頂点が完全に除外されること
+        sim.set_self_collision_algorithm(0);
+        sim.step(1.0 / 60.0, 2);
+        check_hash_entries(&sim, real_count, true, "algo=0 (algo=2後)");
+
+        // 4. 再び algo=1 へ戻した際も実頂点のみ登録されること
+        sim.set_self_collision_algorithm(1);
+        sim.step(1.0 / 60.0, 2);
+        check_hash_entries(&sim, real_count, true, "algo=1 (algo=0後)");
+    }
 }
 

@@ -22,8 +22,11 @@ pub struct GpuSpatialHash {
     pub cell_currents_buffer: wgpu::Buffer,
     pub block_sums_buffer: wgpu::Buffer,
     pub params_buffer: wgpu::Buffer,
+    pub real_params_buffer: wgpu::Buffer,
 
     pub grid_bind_group: wgpu::BindGroup,
+    pub real_grid_bind_group: wgpu::BindGroup,
+    pub real_num_vertices: u32,
     pub table_size: u32,
     pub cell_size: f32,
 }
@@ -36,7 +39,8 @@ impl GpuSpatialHash {
         context: &Arc<GpuContext>,
         hash_bgl: &wgpu::BindGroupLayout,
         vertex_buffer: &wgpu::Buffer,
-        num_vertices: u32,
+        real_num_vertices: u32,
+        num_total_particles: u32,
         cell_size: f32,
         table_size: u32,
     ) -> Self {
@@ -66,7 +70,7 @@ impl GpuSpatialHash {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        let sorted_indices_init = vec![0u32; num_vertices.max(1) as usize];
+        let sorted_indices_init = vec![0u32; num_total_particles.max(1) as usize];
         let sorted_indices_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("SpatialGrid Sorted Indices Buffer"),
             contents: bytemuck::cast_slice(&sorted_indices_init),
@@ -80,52 +84,58 @@ impl GpuSpatialHash {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         });
 
-        let params = SpatialHashParams {
-            cell_size,
-            table_size,
-            num_vertices,
-            num_blocks,
+        // algo=2 (仮想頂点含む全粒子) 用と algo=0/1 (実頂点のみ) 用で Params/BindGroup を分離する
+        let create_params_and_bg = |vert_count: u32, label_suffix: &str| {
+            let params = SpatialHashParams {
+                cell_size,
+                table_size,
+                num_vertices: vert_count,
+                num_blocks,
+            };
+            let p_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("SpatialGrid Params Buffer ({label_suffix})")),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("SpatialGrid Sort BG ({label_suffix})")),
+                layout: hash_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: vertex_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: cell_counts_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: cell_starts_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: cell_currents_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: sorted_indices_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: block_sums_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: p_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            (p_buf, bg)
         };
-        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("SpatialGrid Params Buffer"),
-            contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
 
-        let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("SpatialGrid Sort BG"),
-            layout: hash_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: cell_counts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: cell_starts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: cell_currents_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: sorted_indices_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: block_sums_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let (params_buffer, grid_bind_group) = create_params_and_bg(num_total_particles, "total");
+        let (real_params_buffer, real_grid_bind_group) = create_params_and_bg(real_num_vertices, "real");
 
         Self {
             cell_starts_buffer,
@@ -134,7 +144,10 @@ impl GpuSpatialHash {
             cell_currents_buffer,
             block_sums_buffer,
             params_buffer,
+            real_params_buffer,
             grid_bind_group,
+            real_grid_bind_group,
+            real_num_vertices,
             table_size,
             cell_size,
         }
@@ -152,6 +165,11 @@ impl GpuSpatialHash {
     ) {
         let num_blocks = self.table_size.div_ceil(256);
         let vert_workgroups = num_vertices.div_ceil(256);
+        let active_bg = if num_vertices <= self.real_num_vertices {
+            &self.real_grid_bind_group
+        } else {
+            &self.grid_bind_group
+        };
 
         // 1. カウンタクリア (ハードウェアDMAゼロクリア)
         encoder.clear_buffer(&self.cell_counts_buffer, 0, None);
@@ -165,7 +183,7 @@ impl GpuSpatialHash {
                 timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.count);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.set_bind_group(0, active_bg, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             drop(cpass);
             prof.end_pass(encoder, query);
@@ -179,7 +197,7 @@ impl GpuSpatialHash {
                 timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scan_blocks);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.set_bind_group(0, active_bg, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
             drop(cpass);
             prof.end_pass(encoder, query);
@@ -193,7 +211,7 @@ impl GpuSpatialHash {
                 timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scan_top);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.set_bind_group(0, active_bg, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
             drop(cpass);
             prof.end_pass(encoder, query);
@@ -207,7 +225,7 @@ impl GpuSpatialHash {
                 timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.add_offsets);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.set_bind_group(0, active_bg, &[]);
             cpass.dispatch_workgroups(num_blocks, 1, 1);
             drop(cpass);
             prof.end_pass(encoder, query);
@@ -221,7 +239,7 @@ impl GpuSpatialHash {
                 timestamp_writes: prof.pass_writes(&query),
             });
             cpass.set_pipeline(&hash.scatter);
-            cpass.set_bind_group(0, &self.grid_bind_group, &[]);
+            cpass.set_bind_group(0, active_bg, &[]);
             cpass.dispatch_workgroups(vert_workgroups, 1, 1);
             drop(cpass);
             prof.end_pass(encoder, query);
