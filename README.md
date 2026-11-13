@@ -430,11 +430,18 @@ python run_tests.py --ci -t tests/physics/test_demo_scenes.py
 
 ## 🧪 テストの実行
 
-プロジェクト内のテストハーネスを使用して、Blender 5.2 LTS ヘッドレス環境での全テスト（単体・物理検証・E2Eテスト）を実行できます。
+プロジェクト内のテストハーネスを使用して、CI 相当のスタンドアロン環境（`--ci`）や Blender ヘッドレス環境での並列テストを実行できます。
 
 ```powershell
-# 全テストの一括実行
+# Blender 実環境が必要なテストを並列実行（既定ワーカー数 2）
 python run_tests.py
+
+# スタンドアロン（Blender不要）のPythonテスト一括並列実行（CI相当・既定最大4ワーカー）
+python run_tests.py --ci
+
+# スタンドアロン含む全テストを Blender 上で実行 / ワーカー数や粒度の指定
+python run_tests.py --all -j 2
+python run_tests.py --ci --granularity auto -j 4
 ```
 
 ---
@@ -475,6 +482,7 @@ taremin_cloth/
 │   └── fixtures/garments/tshirt/  # Tシャツ型紙OBJ + 縫合JSON + scene.json
 ├── tools/bake_siroino_fixtures.py # 素体OBJ化と型紙生成 (Blender 5.2使用)
 ├── tools/check_sewing.py          # 縫合対応辺の辺長整合検査 (chains/orphans報告)
+├── tools/parallel_unittest.py     # 共有キュー + 常駐ワーカーによる並列 unittest ランナー
 ├── tools/setup_tailored_patterns.py # 新規シーンからの洋裁テスト衣服4着 + 素体コライダー一括構築
 ├── remotion-xpbd/               # GPU XPBD動作原理 explainer動画 (Remotionサブプロジェクト)
 │   ├── src/Main.tsx             # 全14チャプタのタイムライン (130秒)

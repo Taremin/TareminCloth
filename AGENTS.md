@@ -38,9 +38,14 @@ cargo build --release -p taremin_cloth_core
 Copy-Item "target/release/taremin_cloth_core.dll" "taremin_cloth_core.pyd" -Force
 Copy-Item "target/release/taremin_cloth_core.dll" "python/taremin_cloth/taremin_cloth_core.pyd" -Force
 
-# 3. Python側の主要単体・統合テストの実行（高速スタンドアロン・Blender不要）
-# 【推奨】GitHub Actions CIと同一の最小隔離環境（.venv_ci）で自動実行
+# 3. Python側の主要単体・統合テストの実行（並列・高速スタンドアロン・Blender不要）
+# 【推奨】GitHub Actions CIと同一の最小隔離環境（.venv_ci）で自動並列実行（既定ワーカー数は CPU コア数の半分・最大 4）
 python run_tests.py --ci
+# ワーカー数や実行粒度を指定して実行（--workers 1 / -j 1 で順次実行にフォールバック）
+python run_tests.py --ci -j 4
+python run_tests.py --ci --granularity file
+# 共有キュー + 常駐ワーカーランナーを直接実行する場合
+python -m tools.parallel_unittest --standalone
 # 特定のテストモジュールだけをピンポイントで試行錯誤
 python run_tests.py --ci -t test_quick_pinning.py
 python run_tests.py --ci -t test_i18n.py
@@ -64,6 +69,9 @@ python -m unittest tests/core/test_sdf_baker_gpu.py
 python -m unittest discover -s tests/core -t .
 
 # 4. Blenderアドオン結合・E2Eテストの実行（tools/blender_manager による自動解決）
+# 既定では Blender 実環境が必要なテストのみを並列実行（既定ワーカー数 2、--all でスタンドアロン含め全実行）
+python run_tests.py
+python run_tests.py --all -j 2
 python run_tests.py --test test_simulation_e2e.py
 ```
 

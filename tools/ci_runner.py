@@ -86,8 +86,11 @@ def ensure_ci_venv(repo_root: Path) -> Path:
 
 def run_ci_tests(
     repo_root: Optional[Path] = None,
+    *,
     test_pattern: Optional[str] = None,
     clean: bool = False,
+    workers: Optional[int] = None,
+    granularity: str = "auto",
 ) -> int:
     """CI再現環境上でテストを実行する"""
     if repo_root is None:
@@ -99,49 +102,20 @@ def run_ci_tests(
 
     py_exe = ensure_ci_venv(repo_root)
 
-    # 実行時環境変数の構築（Windows cp1252等の文字化け防止）
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
+    try:
+        from .parallel_unittest import run_parallel_python_tests
+    except ImportError:
+        from tools.parallel_unittest import run_parallel_python_tests
 
-    # テストコマンドの構築
-    if test_pattern:
-        # 指定された単体テストファイルまたはパターンの実行
-        target = test_pattern
-        if not target.startswith("tests") and not target.startswith("tests/core"):
-            candidate = repo_root / "tests" / "core" / target
-            if candidate.exists():
-                target = f"tests/core/{target}"
-            else:
-                candidate = repo_root / "tests" / target
-                if candidate.exists():
-                    target = f"tests/{target}"
-
-        print(f"\n[CI Runner] 単体テスト実行: {target}")
-        cmd = [str(py_exe), "-m", "unittest", target]
-        result = subprocess.run(cmd, cwd=repo_root, env=env)
-        return result.returncode
-    else:
-        # CI（ci.yml）と同一のスタンドアロン全件ディスカバリテスト実行
-        # (e2e は Blender プロセス起動が必要なため別枠)
-        test_dirs = [
-            "tests/core",
-            "tests/physics",
-            "tests/collider",
-            "tests/interactive",
-            "tests/regression",
-        ]
-        total_ret = 0
-        for td in test_dirs:
-            target_path = repo_root / td
-            if not target_path.exists():
-                continue
-            print(f"\n[CI Runner] スタンドアロンテスト実行: python -m unittest discover -s {td} -t .")
-            cmd = [str(py_exe), "-m", "unittest", "discover", "-s", td, "-t", "."]
-            res = subprocess.run(cmd, cwd=repo_root, env=env)
-            if res.returncode != 0:
-                total_ret = res.returncode
-        return total_ret
+    return run_parallel_python_tests(
+        repo_root,
+        python_exe=py_exe,
+        pattern=test_pattern,
+        workers=workers,
+        granularity=granularity,
+        scope="standalone" if not test_pattern else "all",
+        verbosity=1 if not test_pattern else 2,
+    )
 
 
 if __name__ == "__main__":
@@ -156,11 +130,29 @@ if __name__ == "__main__":
         help="実行するテストファイル名またはパス（例: test_quick_pinning.py）",
     )
     parser.add_argument(
+        "--workers",
+        "-j",
+        type=int,
+        default=None,
+        help="並列ワーカー数（1 で直列実行）",
+    )
+    parser.add_argument(
+        "--granularity",
+        choices=["auto", "file", "method"],
+        default="auto",
+        help="並列タスクの分割粒度",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="CI再現仮想環境（.venv_ci）を削除します",
     )
     args = parser.parse_args()
 
-    exit_code = run_ci_tests(test_pattern=args.test, clean=args.clean)
+    exit_code = run_ci_tests(
+        test_pattern=args.test,
+        clean=args.clean,
+        workers=args.workers,
+        granularity=args.granularity,
+    )
     sys.exit(exit_code)

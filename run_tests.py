@@ -45,7 +45,25 @@ def main():
     parser.add_argument(
         "--ci",
         action="store_true",
-        help="GitHub Actions CI と同一の最小クリーン環境（.venv_ci）でスタンドアロンテスト（tests/core）を実行します（Blender不要）。",
+        help="GitHub Actions CI と同一の最小クリーン環境（.venv_ci）でスタンドアロンテストを実行します（Blender不要）。",
+    )
+    parser.add_argument(
+        "--workers",
+        "-j",
+        type=int,
+        default=None,
+        help="並列実行ワーカー数（1 を指定すると従来の直列実行になります）。",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Blender 実行時に、--ci 対象のスタンドアロンテストも含む tests/ 全件を実行します。",
+    )
+    parser.add_argument(
+        "--granularity",
+        choices=["auto", "file", "method"],
+        default="auto",
+        help="並列テストのタスク分割粒度（既定: auto）。",
     )
     parser.add_argument(
         "--download-only",
@@ -82,6 +100,8 @@ def main():
             repo_root=Path(__file__).parent,
             test_pattern=args.test,
             clean=False,
+            workers=args.workers,
+            granularity=args.granularity,
         )
 
 
@@ -116,6 +136,9 @@ def main():
         blender_path=blender_exe,
         test_pattern=args.test,
         cwd=Path(__file__).parent,
+        workers=args.workers,
+        include_all=args.all,
+        granularity=args.granularity,
     )
 
     if returncode == 0:

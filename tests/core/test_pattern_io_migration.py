@@ -2,6 +2,7 @@
 """Phase 4 Step 4.2 & 4.3: パターン外部JSON保存・読込、下絵画像、Curveマイグレーションの単体テスト."""
 
 import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock
 
@@ -49,8 +50,8 @@ class TestPatternIOMigration(unittest.TestCase):
             visible=True,
         )
 
-        test_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scratch", "test_roundtrip.json"))
-        try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_path = os.path.join(tmp_dir, "test_roundtrip.json")
             doc.save_to_file(test_path)
             self.assertTrue(os.path.exists(test_path))
 
@@ -67,9 +68,6 @@ class TestPatternIOMigration(unittest.TestCase):
             self.assertEqual(loaded.reference_image.image_path, "test_pattern.png")
             self.assertAlmostEqual(loaded.reference_image.width, 0.4)
             self.assertAlmostEqual(loaded.reference_image.opacity, 0.6)
-        finally:
-            if os.path.exists(test_path):
-                os.remove(test_path)
 
     def test_reference_image_render_command(self) -> None:
         """下絵画像が設定されている場合、IMAGE描画コマンドが発行されること."""

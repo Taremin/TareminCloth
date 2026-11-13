@@ -7,6 +7,7 @@ Frame 50（布同士が接近し接触が始まる直前）から再実行し、
 """
 
 import os
+import tempfile
 import unittest
 import numpy as np
 
@@ -45,6 +46,20 @@ class TestPenetrationReplayRedGreen(unittest.TestCase):
 
         cls.c0_set = components[0]
         cls.c1_set = components[1]
+
+        artifacts_dir = os.environ.get("TAREMIN_TEST_ARTIFACTS_DIR")
+        if artifacts_dir:
+            os.makedirs(artifacts_dir, exist_ok=True)
+            cls._artifacts_tmpdir = None
+            cls._artifacts_dir = artifacts_dir
+        else:
+            cls._artifacts_tmpdir = tempfile.TemporaryDirectory(prefix="taremin_penetration_")
+            cls._artifacts_dir = cls._artifacts_tmpdir.name
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "_artifacts_tmpdir", None) is not None:
+            cls._artifacts_tmpdir.cleanup()
 
     def count_cross_sheet_intersections(self, positions: np.ndarray) -> int:
         """2枚の布の間で発生している三角形交差ペア数を精密カウント"""
@@ -97,7 +112,7 @@ class TestPenetrationReplayRedGreen(unittest.TestCase):
         # Redテスト完了時にもRustコア内蔵の高速Z-bufferレンダラーで可視化画像を保存
         from taremin_cloth.mesh_renderer import render_mesh_to_file
         img_path, red_px = render_mesh_to_file(
-            "scratch/test_penetration_red_result.png",
+            os.path.join(self._artifacts_dir, "test_penetration_red_result.png"),
             out.reshape(-1, 3),
             self.replayer.faces,
             width=800,
@@ -143,7 +158,7 @@ class TestPenetrationReplayRedGreen(unittest.TestCase):
         # テスト完了時にRustコア内蔵の高速Z-bufferレンダラーで可視化画像を保存
         from taremin_cloth.mesh_renderer import render_mesh_to_file
         img_path, red_px = render_mesh_to_file(
-            "scratch/test_penetration_green_result.png",
+            os.path.join(self._artifacts_dir, "test_penetration_green_result.png"),
             out.reshape(-1, 3),
             self.replayer.faces,
             width=800,

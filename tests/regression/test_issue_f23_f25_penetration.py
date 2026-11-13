@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 import numpy as np
 from taremin_cloth.replayer import ClothReplayer, get_frame
@@ -35,6 +36,20 @@ class TestColliderCollisionPenetrationReplay(unittest.TestCase):
 
         cls.c0_set = components[0]
         cls.c1_set = components[1] if len(components) > 1 else set()
+
+        artifacts_dir = os.environ.get("TAREMIN_TEST_ARTIFACTS_DIR")
+        if artifacts_dir:
+            os.makedirs(artifacts_dir, exist_ok=True)
+            cls._artifacts_tmpdir = None
+            cls._artifacts_dir = artifacts_dir
+        else:
+            cls._artifacts_tmpdir = tempfile.TemporaryDirectory(prefix="taremin_f25_")
+            cls._artifacts_dir = cls._artifacts_tmpdir.name
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "_artifacts_tmpdir", None) is not None:
+            cls._artifacts_tmpdir.cleanup()
 
     def count_cross_sheet_intersections(self, positions: np.ndarray) -> int:
         """2枚の布の間で発生している三角形交差ペア数をカウント"""
@@ -87,9 +102,8 @@ class TestColliderCollisionPenetrationReplay(unittest.TestCase):
         # レンダリング画像の保存
         try:
             from taremin_cloth.mesh_renderer import render_mesh_to_file
-            os.makedirs("scratch", exist_ok=True)
             render_mesh_to_file(
-                "scratch/test_f25_red_result.png",
+                os.path.join(self._artifacts_dir, "test_f25_red_result.png"),
                 pos,
                 self.replayer.faces,
                 width=1024,
@@ -138,9 +152,8 @@ class TestColliderCollisionPenetrationReplay(unittest.TestCase):
         # レンダリング画像の保存
         try:
             from taremin_cloth.mesh_renderer import render_mesh_to_file
-            os.makedirs("scratch", exist_ok=True)
             render_mesh_to_file(
-                "scratch/test_f25_green_result.png",
+                os.path.join(self._artifacts_dir, "test_f25_green_result.png"),
                 pos,
                 self.replayer.faces,
                 width=1024,

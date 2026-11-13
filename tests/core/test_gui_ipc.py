@@ -5,6 +5,7 @@ Taremin Cloth GUI IPC通信プロトコル自動テスト
 """
 
 import os
+import socket
 import subprocess
 import time
 import unittest
@@ -22,8 +23,15 @@ from taremin_cloth.engine.gui_client import ClothGuiClient
 
 
 class TestGuiIpc(unittest.TestCase):
-    SERVER_PORT = 9059
+    SERVER_PORT = 0
     server_process = None
+
+    @staticmethod
+    def _find_free_port() -> int:
+        """ループバック上で利用可能な空きTCPポートを動的取得する"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
 
     @classmethod
     def setUpClass(cls):
@@ -55,14 +63,26 @@ class TestGuiIpc(unittest.TestCase):
                 "taremin_cloth_gui binary not found (cargo build --release -p cloth_gui)"
             )
 
+        cls.SERVER_PORT = cls._find_free_port()
+
         # ヘッドレスモードでサーバーを起動
         cls.server_process = subprocess.Popen(
             [exe_path, "--port", str(cls.SERVER_PORT), "--headless"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        # 起動待機
-        time.sleep(0.5)
+        # ソケット接続可能になるまでポーリング待機（最大3秒）
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if cls.server_process.poll() is not None:
+                raise RuntimeError(
+                    f"taremin_cloth_gui が起動途中で終了しました (exit={cls.server_process.returncode})"
+                )
+            try:
+                with socket.create_connection(("127.0.0.1", cls.SERVER_PORT), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
 
     @classmethod
     def tearDownClass(cls):

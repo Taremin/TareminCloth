@@ -415,9 +415,9 @@ def main():
             print("[*] Rust 単体テスト & WGSLアライメント検証を実行中 (cargo test)...")
             run_cmd(["cargo", "test"], repo_root, "Rust 単体テスト")
 
-            # 5-2: Python tests
-            print("[*] Python 単体テストを実行中 (python -m unittest discover -s tests/core -t .)...")
-            run_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tests/core", "-t", "."], repo_root, "Python 単体テスト")
+            # 5-2: Python tests (スタンドアロン全テストを並列実行)
+            print("[*] Python スタンドアロンテストを実行中 (python -m tools.parallel_unittest --standalone)...")
+            run_cmd([sys.executable, "-m", "tools.parallel_unittest", "--standalone"], repo_root, "Python スタンドアロンテスト")
 
             # 5-3: Markdown Link, Mermaid & Math Check
             print("[*] ドキュメント整合性を検証中 (check_markdown_links)...")

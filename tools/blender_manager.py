@@ -368,37 +368,34 @@ def resolve_blender(version_spec: Optional[str] = None) -> Path:
 
 def run_blender_unittest(
     blender_path: Path,
+    *,
     test_pattern: Optional[str] = None,
     cwd: Optional[Path] = None,
     verbosity: int = 2,
+    workers: Optional[int] = None,
+    include_all: bool = False,
+    granularity: str = "auto",
 ) -> int:
-    """Blenderのバックグラウンドプロセスでunittestを実行する"""
+    """Blenderのバックグラウンドプロセスでunittestを実行する（並列・スコープ絞込対応）"""
     if cwd is None:
         cwd = Path.cwd()
 
-    pattern_arg = f"'{test_pattern}'" if test_pattern else "'*'"
+    try:
+        from .parallel_unittest import run_parallel_blender_tests
+    except ImportError:
+        from tools.parallel_unittest import run_parallel_blender_tests
 
-    python_expr = f"""
-import sys, unittest
-sys.path.insert(0, '.')
-suite = unittest.defaultTestLoader.discover('tests', pattern={pattern_arg}, top_level_dir='.')
-runner = unittest.TextTestRunner(verbosity={verbosity})
-result = runner.run(suite)
-sys.exit(0 if result.wasSuccessful() else 1)
-""".strip().replace("\n", "; ")
-
-    cmd = [
-        str(blender_path),
-        "--background",
-        "--factory-startup",
-        "--python-expr",
-        python_expr,
-    ]
-
-    print(f"\n[BlenderManager] テスト実行コマンド:")
+    print(f"\n[BlenderManager] テスト実行:")
     print(f"  Blender: {blender_path}")
     print(f"  作業ディレクトリ: {cwd}")
     print("-" * 60)
 
-    res = subprocess.run(cmd, cwd=str(cwd))
-    return res.returncode
+    return run_parallel_blender_tests(
+        cwd,
+        blender_path=blender_path,
+        pattern=test_pattern,
+        workers=workers,
+        include_all=include_all,
+        granularity=granularity,
+        verbosity=verbosity,
+    )
