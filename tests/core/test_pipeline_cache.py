@@ -13,6 +13,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import taremin_cloth_core
+from tests import is_slow_gpu_env
 
 
 def _grid(n=12):
@@ -81,7 +82,8 @@ class TestPipelineCache(unittest.TestCase):
         self.assertIn("shared_cache_hit", second)
         # 2個目はパイプラインコンパイルなし (相対比較で flaky 回避)
         self.assertLess(data["second_ms"], data["first_ms"])
-        self.assertLess(second["shared_cache_hit"], 100.0)
+        max_hit_ms = 1000.0 if is_slow_gpu_env() else 100.0
+        self.assertLess(second["shared_cache_hit"], max_hit_ms)
 
         entries = data["cache"]
         self.assertGreaterEqual(len(entries), 1)

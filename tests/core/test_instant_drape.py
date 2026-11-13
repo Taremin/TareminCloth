@@ -1,8 +1,16 @@
 """Quasi-Static Instant Drape (準静的一瞬ドレープ) の単体テスト。"""
 
+import os
+import sys
 import unittest
 import numpy as np
 import time
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from tests import is_slow_gpu_env
 
 try:
     import taremin_cloth_core as core
@@ -63,7 +71,8 @@ class TestInstantDrape(unittest.TestCase):
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         self.assertEqual(executed, 40)
-        self.assertLess(elapsed_ms, 500.0, f"Instant drape took too long: {elapsed_ms:.1f}ms")
+        max_ms = 5000.0 if is_slow_gpu_env() else 500.0
+        self.assertLess(elapsed_ms, max_ms, f"Instant drape took too long: {elapsed_ms:.1f}ms (limit={max_ms:.1f}ms)")
 
         out_flat = np.zeros(len(positions) * 3, dtype=np.float32)
         sim.get_positions(out_flat)

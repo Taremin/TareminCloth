@@ -23,6 +23,8 @@ if python_dir not in sys.path:
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from tests import is_ci_env
+
 from taremin_cloth.engine import params as params_mod
 from taremin_cloth.engine.wrinkle_field import (
     WrinkleCurveDesc,
@@ -382,11 +384,13 @@ class TestPerfSmoke(unittest.TestCase):
         crest = [_wave_ring(n=48)]
         root = [_wave_ring(n=48, z=-0.02)]
         o, ax, no = (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)
+        max_bake_ms = 5000.0 if is_ci_env() else 1000.0
+        max_pose_ms = 500.0 if is_ci_env() else 100.0
         t0 = time.perf_counter()
         bake_wrinkle_2d_sdf_texture(crest, root, o, ax, no, width=128, height=128)
         bake_ms = (time.perf_counter() - t0) * 1000.0
         print(f"\n[perf] full bake 128px 2 curves: {bake_ms:.1f}ms")
-        self.assertLess(bake_ms, 1000.0, f"フルベイクが遅すぎます: {bake_ms:.1f}ms")
+        self.assertLess(bake_ms, max_bake_ms, f"フルベイクが遅すぎます: {bake_ms:.1f}ms (limit={max_bake_ms:.1f}ms)")
 
         pb, arm, obj, sim = _make_world([0, 0, 0], [0, 0, 0.2])
         curves = ([_ring_item()], [_ring_item()])
@@ -401,7 +405,7 @@ class TestPerfSmoke(unittest.TestCase):
             params_mod.sync_wrinkle_field(sim, obj)
             pose_ms = (time.perf_counter() - t0) * 1000.0
         print(f"[perf] pose-only sync: {pose_ms:.2f}ms")
-        self.assertLess(pose_ms, 100.0, f"pose-only同期が遅すぎます: {pose_ms:.2f}ms")
+        self.assertLess(pose_ms, max_pose_ms, f"pose-only同期が遅すぎます: {pose_ms:.2f}ms (limit={max_pose_ms:.1f}ms)")
 
 
 if __name__ == "__main__":

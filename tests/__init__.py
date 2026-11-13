@@ -99,3 +99,44 @@ except ImportError:
     # bpy が利用できない環境（スタンドアロンPythonテスト実行時）
     panel_test_utils = None
 
+
+_SOFTWARE_GPU_KEYWORDS = (
+    "basic render",
+    "warp",
+    "llvmpipe",
+    "lavapipe",
+    "software",
+    "cpu",
+)
+
+
+def is_ci_env() -> bool:
+    """CI 実行環境（GitHub Actions 等）かどうかを返す"""
+    import os
+
+    return os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+def is_software_gpu() -> bool:
+    """現在の GPU がソフトウェアエミュレーション（WARP / llvmpipe 等）かを返す"""
+    try:
+        import taremin_cloth_core
+
+        info = taremin_cloth_core.get_current_gpu_device()
+        if isinstance(info, dict):
+            if info.get("device_type") == "CPU":
+                return True
+            name = str(info.get("name", "")).lower()
+            if any(k in name for k in _SOFTWARE_GPU_KEYWORDS):
+                return True
+        name = str(taremin_cloth_core.get_gpu_device_name()).lower()
+        return any(k in name for k in _SOFTWARE_GPU_KEYWORDS)
+    except Exception:
+        return False
+
+
+def is_slow_gpu_env() -> bool:
+    """CI またはソフトウェア GPU など、絶対時間ベンチマークが低速・不安定な環境かを返す"""
+    return is_ci_env() or is_software_gpu()
+
+

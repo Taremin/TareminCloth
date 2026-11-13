@@ -55,16 +55,32 @@ class TestParallelUnittestDiscovery(unittest.TestCase):
         self.assertEqual(core_units[-1].priority, 3)
 
     def test_standalone_discovery_matches_unittest_discover_count(self):
-        """standalone スコープの収集総テスト数が従来の unittest discover と完全一致すること"""
-        units = discover_test_units(REPO_ROOT, granularity="auto", scope="standalone")
+        """standalone スコープが Blender 必須テストを除外し、blender スコープと合わせて unittest discover 総数と一致すること"""
+        standalone_units = discover_test_units(REPO_ROOT, granularity="auto", scope="standalone")
+        blender_units = discover_test_units(REPO_ROOT, granularity="auto", scope="blender")
+
+        # standalone に Blender 必須テストが混入していないこと
+        for u in standalone_units:
+            self.assertFalse(u.requires_blender, f"Blender必須テストが standalone に混入: {u.file_path}")
+
+        # standalone と blender でファイルが重複しないこと
+        standalone_files = {u.file_path.resolve() for u in standalone_units}
+        blender_files = {u.file_path.resolve() for u in blender_units}
+        self.assertFalse(standalone_files & blender_files)
+
         loader = unittest.TestLoader()
-        parallel_total = sum(loader.loadTestsFromName(u.target).countTestCases() for u in units)
+        standalone_total = sum(loader.loadTestsFromName(u.target).countTestCases() for u in standalone_units)
+        blender_non_e2e_total = sum(
+            loader.loadTestsFromName(u.target).countTestCases()
+            for u in blender_units
+            if "e2e" not in u.file_path.parts
+        )
 
         traditional_total = 0
         for d in ("tests/core", "tests/physics", "tests/collider", "tests/interactive", "tests/regression"):
             traditional_total += loader.discover(d, pattern="test_*.py", top_level_dir=".").countTestCases()
 
-        self.assertEqual(parallel_total, traditional_total)
+        self.assertEqual(standalone_total + blender_non_e2e_total, traditional_total)
 
     def test_blender_scope_excludes_non_blender_tests(self):
         """blender スコープは e2e と _IS_REAL_BLENDER 依存ファイルのみを正確に抽出すること"""
@@ -271,6 +287,73 @@ class TestParallelUnittestExecution(unittest.TestCase):
         self.assertTrue(units[0].uses_gpu)
         self.assertEqual(units[0].priority, 1)
 
+    def test_uses_gpu_ignores_mock_docstring_and_cpu_core_calls(self):
+        """モック文字列・docstring・純CPU関数のtaremin_cloth_core呼出はCPUレーンに分類されること"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pkg_dir = Path(tmp_dir) / "cpu_cls_tests"
+            pkg_dir.mkdir()
+            (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+
+            # 1. @patch モック文字列テスト
+            (pkg_dir / "test_mock_only.py").write_text(
+                (
+                    "import unittest\n"
+                    "from unittest.mock import patch\n"
+                    "class TestMock(unittest.TestCase):\n"
+                    "    @patch('taremin_cloth_core.ClothSimulator')\n"
+                    "    def test_m(self, mock_sim):\n"
+                    "        self.assertTrue(True)\n"
+                ),
+                encoding="utf-8",
+            )
+            # 2. docstring・文字列リテラルのみのテスト
+            (pkg_dir / "test_docstring_only.py").write_text(
+                (
+                    '"""ClothSimulator / bake_bone_sdf / replayer の表記テスト"""\n'
+                    "import unittest\n"
+                    "class TestDoc(unittest.TestCase):\n"
+                    "    def test_d(self):\n"
+                    "        s = 'ClothSimulator'\n"
+                    "        self.assertEqual(s, 'ClothSimulator')\n"
+                ),
+                encoding="utf-8",
+            )
+            # 3. 純 CPU 関数のみを taremin_cloth_core から呼ぶテスト
+            (pkg_dir / "test_cpu_core_only.py").write_text(
+                (
+                    "import unittest\n"
+                    "import taremin_cloth_core\n"
+                    "class TestCpuCore(unittest.TestCase):\n"
+                    "    def test_c(self):\n"
+                    "        self.assertTrue(hasattr(taremin_cloth_core, 'remesh_pattern'))\n"
+                ),
+                encoding="utf-8",
+            )
+
+            units = discover_test_units(tmp_path := Path(tmp_dir), test_roots=[pkg_dir], scope="all")
+            by_name = {u.file_path.name: u for u in units}
+            self.assertFalse(by_name["test_mock_only.py"].uses_gpu)
+            self.assertFalse(by_name["test_docstring_only.py"].uses_gpu)
+            self.assertFalse(by_name["test_cpu_core_only.py"].uses_gpu)
+
+        # リポジトリ内の代表ファイルが意図通り分類されること
+        cpu_expected = (
+            "test_face_layers.py",
+            "test_geometry_public_api.py",
+            "test_overlay_coords.py",
+            "test_parallel_unittest.py",
+        )
+        for fname in cpu_expected:
+            u = discover_test_units(REPO_ROOT, pattern=fname, scope="all")
+            self.assertTrue(len(u) >= 1)
+            self.assertFalse(any(x.uses_gpu for x in u), f"{fname} が誤って GPU 判定された")
+
+        gpu_expected = ("test_cloth_core.py", "test_bone_sdf_baker.py")
+        for fname in gpu_expected:
+            u = discover_test_units(REPO_ROOT, pattern=fname, scope="all")
+            self.assertTrue(len(u) >= 1)
+            self.assertTrue(all(x.uses_gpu for x in u), f"{fname} が GPU 判定されなかった")
+
     def test_software_gpu_lane_runs_gpu_units_on_single_worker_and_retires_on_device_lost(self):
         """Software GPU モードでは GPU ユニットを専任ワーカーで順次実行し、Device Lost 後は別プロセスへ交代すること"""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -284,7 +367,8 @@ class TestParallelUnittestExecution(unittest.TestCase):
             (pkg_dir / "test_gpu_sim.py").write_text(
                 (
                     "import os, unittest\n"
-                    "import taremin_cloth_core  # noqa: F401\n"
+                    "if False:\n"
+                    "    from taremin_cloth_core import ClothSimulator  # noqa: F401\n"
                     f"LOG_PATH = {str(log_file)!r}\n"
                     "class TestGpuFirst(unittest.TestCase):\n"
                     "    def test_first(self):\n"

@@ -4,9 +4,16 @@
 """
 
 import os
+import sys
 import unittest
 import numpy as np
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import taremin_cloth_core
+from tests import is_software_gpu
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures", "sewing_heavy")
 
@@ -23,11 +30,11 @@ class TestSewingClosureHeavy(unittest.TestCase):
     def _require_physical_gpu(self):
         """11k頂点×10kコライダーのため物理GPU必須。ソフトウェアGPUではスキップ。
         (WARP実測で60フレームが制限時間内に終わらないため)"""
-        try:
-            name = taremin_cloth_core.get_gpu_device_name().lower()
-        except Exception:
-            return
-        if any(k in name for k in ("basic render", "warp", "llvmpipe", "lavapipe", "software", "cpu")):
+        if is_software_gpu():
+            try:
+                name = taremin_cloth_core.get_gpu_device_name().lower()
+            except Exception:
+                name = "software"
             self.skipTest(f"物理GPU必須のためスキップ (device={name})")
 
     def test_closure_without_self_collision(self):

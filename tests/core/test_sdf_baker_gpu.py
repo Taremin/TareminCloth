@@ -4,7 +4,7 @@ import unittest
 import time
 import numpy as np
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
@@ -13,6 +13,7 @@ if project_root not in sys.path:
 
 import taremin_cloth_core
 from taremin_cloth.engine.sdf_baker import bake_bone_sdf_from_data, BoneSdfBakeResult
+from tests import is_ci_env, is_software_gpu
 
 
 class TestSdfBakerGpu(unittest.TestCase):
@@ -152,9 +153,7 @@ class TestSdfBakerGpu(unittest.TestCase):
         
         # ソフトウェアアダプタ（WARP/Basic Render Driver/llvmpipe等）やCI環境ではCPUエミュレーション実行のため閾値を緩和
         dev_name = taremin_cloth_core.get_gpu_device_name().lower()
-        is_software = any(name in dev_name for name in ["basic render", "warp", "llvmpipe", "lavapipe", "software", "cpu"])
-        is_ci = os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true"
-        max_allowed = 60.0 if (is_software or is_ci) else 2.0
+        max_allowed = 60.0 if (is_software_gpu() or is_ci_env()) else 2.0
 
         self.assertLess(elapsed, max_allowed, f"10ボーンの64^3ベイクが{max_allowed}秒未満で完了すること (デバイス: {dev_name})")
 

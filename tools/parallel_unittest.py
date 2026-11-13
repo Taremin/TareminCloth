@@ -177,21 +177,60 @@ def _is_blender_required_file(file_path: Path, text: str) -> bool:
     return False
 
 
+_GPU_IDENTIFIERS = frozenset(
+    {
+        "ClothSimulator",
+        "ClothSimulatorCore",
+        "ClothReplayer",
+        "GpuSdfBaker",
+        "MeshSdfBaker",
+        "bake_bone_sdf",
+        "bake_mesh_sdf",
+        "bake_bone_sdf_from_data",
+        "bake_mesh_sdf_from_data",
+        "bake_bone_sdf_gpu",
+        "bake_mesh_sdf_gpu",
+        "step_cloth_scene",
+        "create_replayer",
+        "is_gpu_available",
+        "get_gpu_device_name",
+        "get_current_gpu_device",
+        "list_gpu_devices",
+        "shared_pipeline_cache_info",
+    }
+)
+
+
 def _uses_gpu(text: str) -> bool:
-    return any(
-        kw in text
-        for kw in (
-            "taremin_cloth_core",
-            "ClothSimulator",
-            "ClothReplayer",
-            "GpuSdfBaker",
-            "MeshSdfBaker",
-            "bake_bone_sdf",
-            "bake_mesh_sdf",
-            "step_cloth_scene",
-            "replayer",
-        )
-    )
+    """AST 走査により実際に GPU 実行 API・ラッパーを参照しているか判定する。
+
+    docstring・コメント・テスト用ダミー文字列・@patch("...") モック文字列では True にしない。
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return any(ident in text for ident in _GPU_IDENTIFIERS)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _GPU_IDENTIFIERS:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in _GPU_IDENTIFIERS:
+            return True
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                head = alias.name.split(".")[-1]
+                if head in _GPU_IDENTIFIERS or head == "replayer":
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            mod_tail = (node.module or "").split(".")[-1]
+            for alias in node.names:
+                if alias.name == "*" and node.module == "taremin_cloth_core":
+                    return True
+                if alias.name in _GPU_IDENTIFIERS or alias.name == "replayer":
+                    return True
+            if mod_tail == "replayer":
+                return True
+    return False
 
 
 def _detect_software_gpu(*, python_exe: Optional[str] = None) -> bool:
@@ -296,9 +335,14 @@ def _extract_units_from_file(
     repo_root: Path,
     *,
     granularity: str = "auto",
+    source_text: Optional[str] = None,
 ) -> List[TestUnit]:
     """単一の test_*.py ファイルから実行ユニット一覧を構築する"""
-    text = file_path.read_text(encoding="utf-8", errors="ignore")
+    text = (
+        source_text
+        if source_text is not None
+        else file_path.read_text(encoding="utf-8", errors="ignore")
+    )
     rel_posix = _normalize_rel_path(file_path, repo_root)
     mod_name = ".".join(Path(rel_posix).with_suffix("").parts)
     requires_blender = _is_blender_required_file(file_path, text)
@@ -429,6 +473,7 @@ def discover_test_units(
 
     seen_files: set[Path] = set()
     matched_files: List[Path] = []
+    matched_texts: Dict[Path, str] = {}
     for root in roots:
         if not root.exists():
             continue
@@ -446,18 +491,26 @@ def discover_test_units(
                 if not _matches_pattern(f, repo_root=repo_root, pattern=pattern):
                     continue
             else:
-                if scope == "standalone" and "e2e" in f.parts:
+                txt = f.read_text(encoding="utf-8", errors="ignore")
+                is_blender_req = _is_blender_required_file(f, txt)
+                if scope == "standalone" and is_blender_req:
                     continue
-                if scope == "blender":
-                    txt = f.read_text(encoding="utf-8", errors="ignore")
-                    if not _is_blender_required_file(f, txt):
-                        continue
+                if scope == "blender" and not is_blender_req:
+                    continue
+                matched_texts[f] = txt
 
             matched_files.append(f)
 
     units: List[TestUnit] = []
     for f in matched_files:
-        units.extend(_extract_units_from_file(f, repo_root, granularity=granularity))
+        units.extend(
+            _extract_units_from_file(
+                f,
+                repo_root,
+                granularity=granularity,
+                source_text=matched_texts.get(f),
+            )
+        )
 
     # LPT + 同一ファイル分散 + GPUリセット末尾配置
     units.sort(key=lambda u: (u.priority, -u.weight, u.target))
