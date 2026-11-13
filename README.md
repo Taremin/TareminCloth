@@ -19,8 +19,8 @@ Blender 5.2 LTS 向けの **GPU XPBD（Extended Position-Based Dynamics）布シ
   - **ベジェ曲線 / 平面メッシュの自動リメッシュ**: ベジェ曲線や平面ポリゴンから境界ループ・ノッチ（合印）を抽出し、Rust 2D CDT（拘束Delaunay分割）とBotsch-Kobbelt等方性リメッシュにより高品質な2D三角メッシュを生成。
   - **縫合・中継ガイド自動同期**: 縫合ペア間の不等長弧長分割およびノッチ位置を自動整合し、中継ガイド付き Loose Edge を一発生成。
   - **ワンクリック3D衣装ビルド**: 各パーツの3Dオイラー配置・UVレイヤー（`UVMap_Pattern`）・頂点グループ・`cloth_layer`属性を単一のシミュレーション用メッシュへ自動統合。
-- **⏹️ プロダクションQuadリメッシュ & 3D逆写像 (Production Quad Remeshing)**:
-  - シミュレーション後の布メッシュから、外周 Boundary Quad Belt を保持した本番用Quadトポロジー（Quad比率 85%以上）を生成。
+- **⏹️ プロダクションQuadリメッシュ & 3D逆写像 (Production Quad Remeshing [実験的機能])**:
+  - プリファレンス > 実験的機能（`enable_quad_remesh`）から有効化。シミュレーション後の布メッシュから、外周 Boundary Quad Belt を保持した構造化 / Hybrid Quad トポロジーを生成し、`STATIC_MERGED`（縫合済み単一メッシュ化）および `KEEP_PATTERN`（縫い目維持）に対応。
   - 2D空間ハッシュによる高速 Point-In-Triangle 重心座標逆写像により、シワやドレープの曲面形状を高精度（誤差1.5mm未満）に再現。
   - 縫合ペア境界の3D中点スナップにより、UVアイランドを独立維持したまま縫い目ギャップを完全ゼロ化。
 
@@ -454,7 +454,8 @@ taremin_cloth/
 │   ├── utils/                   # 描画・メッシュ抽出・型紙中間表現(IR)・ビュー制御等の共通処理
 │   │   ├── pattern_ir.py        # 2D型紙中間表現 & 縫合・中継ガイド同期
 │   │   ├── pattern_builder.py   # Curve/Mesh 型紙から単一3D衣服メッシュの統合ビルダー
-│   │   └── pattern_view.py      # 2D製図特化ビューポート制御 (Top直交 & 回転ロック)
+│   │   ├── pattern_view.py      # 2D製図特化ビューポート制御 (Top直交 & 回転ロック)
+│   │   └── quad_remesh_prep.py  # Quadリメッシュ用 UVアイランド分割・境界/穴抽出・縫い目統合
 │   └── taremin_cloth_core.pyd   # PyO3 GPU コアバイナリ
 ├── crates/
 │   ├── cloth_core/              # wgpu XPBD 物理計算コア & WGSL シェーダー
@@ -462,12 +463,13 @@ taremin_cloth/
 │   │   │   ├── context.rs       # GPU Device / Queue 管理
 │   │   │   ├── mesh.rs          # 頂点・拘束・コライダー構造体
 │   │   │   ├── coloring.rs      # グラフ彩色 (Welsh-Powell)
+│   │   │   ├── geometry_2d.rs   # 2D幾何判定（内外判定・交差判定・凸Quad検証）
 │   │   │   ├── pattern_remesh.rs# 2D CDT & Botsch-Kobbelt 等方性リメッシュ
 │   │   │   ├── quad_remesh.rs   # 本番用Quadリメッシュ & 3D Barycentric 逆写像
 │   │   │   ├── simulation/      # シミュレーションループ & ディスパッチ
 │   │   │   └── shaders/         # WGSL コンピュートシェーダー群
 │   ├── cloth_gui/               # 独立プロセス型 IPC リアルタイムGUIビューア
-│   └── cloth_py/                # PyO3 Python バインディング (remesh_pattern_2d, remesh_cloth_to_quad_3d等)
+│   └── cloth_py/                # PyO3 Python バインディング (remesh_pattern_2d, remesh_cloth_to_quad_3d_ext等)
 ├── tests/                       # 単体テスト & E2E テスト
 │   └── fixtures/bodies/siroino/   # E2E素体 (.blend / コライダーOBJ) + 出所記録 (CC0)
 │   └── fixtures/garments/tshirt/  # Tシャツ型紙OBJ + 縫合JSON + scene.json

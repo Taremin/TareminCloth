@@ -1007,7 +1007,9 @@ class TAREMIN_CLOTH_PT_pattern(bpy.types.Panel):
 
         row_build = box_pattern.row(align=True)
         row_build.operator("taremin_cloth.build_garment", text=i18n.trans("Build 3D Garment"), icon='MOD_CLOTH')
-        row_build.operator("taremin_cloth.remesh_to_quad", text=i18n.trans("Remesh to Quad"), icon='MOD_REMESH')
+        from .preferences import is_quad_remesh_enabled
+        if is_quad_remesh_enabled(context):
+            row_build.operator("taremin_cloth.remesh_to_quad", text=i18n.trans("Remesh to Quad"), icon='MOD_REMESH')
 
         if hasattr(obj, "taremin_pattern"):
             pat = obj.taremin_pattern

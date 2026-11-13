@@ -1159,7 +1159,7 @@ graph TD
     BUILD -->|CDT & Botsch-Kobbelt等方性| RUST_CDT[2D等方性三角メッシュ<br>remesh_pattern_2d]
     RUST_CDT -->|3D配置 & 縫合LooseEdge| MESH[Garment_Cloth<br>clear_geometry & from_pydata]
     MESH -->|XPBDシミュレーション| SIM[Taremin Cloth GPU XPBD]
-    SIM -->|重心逆写像 & 境界ベルト| QUAD[本番用Quadトポロジー<br>remesh_cloth_to_quad_3d]
+    SIM -->|前処理/結合 quad_remesh_prep.py| QUAD[本番用Quadトポロジー<br>remesh_cloth_to_quad_3d_ext]
 ```
 
 ### 13.1 主要コンポーネント
@@ -1223,15 +1223,18 @@ graph TD
    - **HUD 角度コンパス・向きインジケーター**: 情報カード下部に円形コンパスを配備し、ボーン断面円、法線針、型紙平面バー、配置角度・上向き角度を表示（ドラッグ操作・Shiftで15度スナップ対応）。2Dキャンバスにはボーン設定済みピースの上向き方向矢印と `BONE_WRAP` 縫合の識別色・マークを、3Dビューには平面・上向き軸・実縫合辺に沿った迂回アーチプレビューを描画。
    - **対称複製時のボーン自動反転 (`flip_bone_name_left_right`)**: `Shift+U`（対称複製）および左右反転実行時、`.L` $\leftrightarrow$ `.R`、`_L` $\leftrightarrow$ `_R`、`Left` $\leftrightarrow$ `Right` のボーン名を自動反転し、ロール角度 `bone_angle_deg` およびパターン上方向角度 `pattern_up_angle_deg` を正負反転（$-\theta, -\phi$）して即座にミラー配置。
    - シーン内の既存 2D Curve 型紙オブジェクト（Bezier / Poly）を解析し、`Document` の Piece・Path・Node・Placement へ一括自動変換。
-7. **Rust 2D CDT & Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/pattern_remesh.rs`)**:
+7. **Rust 2D 幾何ユーティリティ & CDT / Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/{geometry_2d.rs, pattern_remesh.rs}`)**:
+   - `geometry_2d.rs` に共通 2D 幾何判定（符号付き面積、外周・穴ポリゴン内外判定、線分交差・厳密内部交差判定、厳密凸四角形・CCW 検証）を集約。
    - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。
    - 境界頂点 `0..B` の完全不変保護（外周長・面積厳密保存）および内部拘束線（`internal_constraints`）の強制維持。
    - エッジ分割・縮約・Delaunay flip・ラプラシアン平滑化によるスリバー三角形の完全解消（最小角 $\ge 18^\circ$）。
-8. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`)**:
-   - 外周 Boundary Quad Belt の構築による境界エッジ整列。
-   - 構造化グリッド充填 / QuadDominant リメッシュ（Quad比率 $\ge 85\%$）。
-   - 2D空間ハッシュによる高速 Point-In-Triangle 重心逆写像（ドレープ曲面へのZ誤差 $< 1.5\,\text{mm}$）。
-   - UVアイランド独立維持 ＋ 縫合ペア3D中点スナップによる縫い目隙間 $0.0\,\text{m}$ 補正。
+8. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`, `python/taremin_cloth/utils/quad_remesh_prep.py`)**:
+   - 実験的機能フラグ `enable_quad_remesh`（プリファレンス > 実験的機能、既定無効）で UI およびオペレーター `poll()` をゲート制御。
+   - Python 前処理 (`prepare_quad_remesh_islands`) による UV アイランド分割・半辺境界トレース（バタフライ頂点最小角分岐）・ネスト深度による外周/穴分類・縫い目トポロジー抽出。
+   - Rust 拡張 API (`remesh_cloth_to_quad_3d_ext_core` / `QuadRemeshOptions`) による入力検証、3D 平均エッジ長基準の UV スケール換算 (`target_size_in_3d`)、外周 CCW / 穴 CW 正規化と鏡像 UV 出力巻き順反転 (`flip_output_winding`)。
+   - 穴なし・厳密凸 4 辺形・境界辺長比 `0.65..=1.5` かつ TFI/平滑化後の全頂点領域内＆凸 CCW 検証に合格した場合のみ構造化グリッドを生成し、それ以外は Hybrid Quad（マイター/折り返し/非隣接距離/内角 `[20°, 160°]`/自己交差ガード付き境界ベルト＋内部正方グリッド＋`spade` CDT＋Greedy ＆ 増加路 2-opt 三角形ペアリング＋角 `[22°, 158°]` ガード付き平滑化）へフォールバック。
+   - `BarycentricMapper`（参照三角形のみの AABB、ハッシュ上限 `256` クランプ、空ガードおよび真の三角形最近接点 `closest_barycentric_on_triangle_2d` による境界外フォールバック）で 3D 逆写像。
+   - Python 後処理 (`merge_island_outputs`) で `STATIC_MERGED`（縫合クラスタ・UV シームの 3D 重心統合、`enable_sewing=False`）および `KEEP_PATTERN`（アイランド分離・縫合 Loose Edge / `WaypointSeam` 中継点チェーン再構築、`enable_sewing=True`）に対応。
 
 
 

@@ -400,6 +400,8 @@
   "Enable Async Readback": "Enable Async Readback",
   "Enable Cloth": "Enable Cloth",
   "Enable cloth simulation for this object": "Enable cloth simulation for this object",
+  "Enable Quad Remesh": "Enable Quad Remesh",
+  "Enable quad remesh conversion operator for pattern garments (Experimental)": "Enable quad remesh conversion operator for pattern garments (Experimental)",
   "Enable cloths only, pause colliders": "Enable cloths only, pause colliders",
   "Enable Collider": "Enable Collider",
   "Enable collider animation driving": "Enable collider animation driving",
@@ -449,7 +451,6 @@
   "Fabric Presets": "Fabric Presets",
   "Face Layers (Layered Cloth)": "Face Layers (Layered Cloth)",
   "Failed to build garment: %s": "Failed to build garment: %s",
-  "Failed to detect boundary loop": "Failed to detect boundary loop",
   "Failed to export pattern: %s": "Failed to export pattern: %s",
   "Failed to import pattern: %s": "Failed to import pattern: %s",
   "Falloff": "Falloff",
@@ -1163,5 +1164,15 @@
   "Wrinkle influence preview: curve lines only, influence range only, or both": "Wrinkle influence preview: curve lines only, influence range only, or both",
   "Wrinkle Slide: Drag mouse to slide along bone (Wheel: Radius, Shift+Wheel: Influence)": "Wrinkle Slide: Drag mouse to slide along bone (Wheel: Radius, Shift+Wheel: Influence)",
   "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "Zero vertex overhead during sim; split quads along strain on stop (Recommended)",
-  "Zero-area degenerate face(s) detected:": "Zero-area degenerate face(s) detected:"
+  "Zero-area degenerate face(s) detected:": "Zero-area degenerate face(s) detected:",
+  "How seams and UV islands are handled in the remeshed garment": "How seams and UV islands are handled in the remeshed garment",
+  "Keep Pattern": "Keep Pattern",
+  "Keep UV islands separated and rebuild sewing loose edges": "Keep UV islands separated and rebuild sewing loose edges",
+  "Merge Mode": "Merge Mode",
+  "Merge seam clusters and UV seams into a single welded 3D mesh without sewing edges": "Merge seam clusters and UV seams into a single welded 3D mesh without sewing edges",
+  "Replace Original": "Replace Original",
+  "Replace the active cloth object mesh in-place instead of creating a new object": "Replace the active cloth object mesh in-place instead of creating a new object",
+  "Static Merged": "Static Merged",
+  "Structured Rectangular Grid": "Structured Rectangular Grid",
+  "Use pure structured quad grid on convex rectangular pattern islands when aspect fits": "Use pure structured quad grid on convex rectangular pattern islands when aspect fits"
 }

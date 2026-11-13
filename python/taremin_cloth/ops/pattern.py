@@ -21,7 +21,7 @@ from ..pattern.canvas import PatternCanvasRenderer
 from ..pattern.document import Document
 from ..pattern.editor import EditorController, EditorEvent
 from ..pattern.keymap import resolve_tool_hotkey
-from ..properties import FloatProperty, StringProperty, EnumProperty
+from ..properties import FloatProperty, StringProperty, EnumProperty, BoolProperty
 from ..utils.drawing import is_interactive_active
 from ..utils.logger import logger
 from ..utils.pattern_builder import build_garment_from_patterns
@@ -652,6 +652,218 @@ class TAREMIN_OT_build_garment(Operator):
             return {'CANCELLED'}
 
 
+def _extract_quad_remesh_source_data(obj, mesh, *, uv_layer):
+    """Blender メッシュから Quad リメッシュ用の三角形・コーナー UV・縫合線・属性を抽出する"""
+    import numpy as np
+    from ..utils.mesh_extract import (
+        extract_mesh_vertices_and_triangles,
+        get_cloth_layer_ids,
+        get_pin_weights,
+    )
+
+    positions_3d, tris = extract_mesh_vertices_and_triangles(mesh)
+    if tris is None or len(tris) == 0:
+        return None
+
+    mesh.calc_loop_triangles()
+    lt_list = mesh.loop_triangles
+    n_tris = len(lt_list)
+
+    tri_uvs = np.zeros((n_tris, 3, 2), dtype=np.float32)
+    tri_mats = np.zeros(n_tris, dtype=np.int32)
+    uv_data = uv_layer.data
+    polys = mesh.polygons
+
+    attr_piece = mesh.attributes.get("pattern_piece_index")
+    has_face_piece = bool(attr_piece and attr_piece.domain == 'FACE')
+    tri_pieces = np.full(n_tris, -1, dtype=np.int32)
+
+    for fi, lt in enumerate(lt_list):
+        li0, li1, li2 = lt.loops[0], lt.loops[1], lt.loops[2]
+        uv0 = uv_data[li0].uv
+        uv1 = uv_data[li1].uv
+        uv2 = uv_data[li2].uv
+        tri_uvs[fi, 0, 0] = uv0[0]
+        tri_uvs[fi, 0, 1] = uv0[1]
+        tri_uvs[fi, 1, 0] = uv1[0]
+        tri_uvs[fi, 1, 1] = uv1[1]
+        tri_uvs[fi, 2, 0] = uv2[0]
+        tri_uvs[fi, 2, 1] = uv2[1]
+
+        poly_idx = lt.polygon_index
+        tri_mats[fi] = polys[poly_idx].material_index
+        if has_face_piece:
+            tri_pieces[fi] = int(attr_piece.data[poly_idx].value)
+
+    # 面に含まれない孤立エッジ（縫合線・BONE_WRAP 中継パス）を抽出
+    face_edge_keys = set()
+    for poly in polys:
+        pverts = poly.vertices
+        m = len(pverts)
+        for k in range(m):
+            a = pverts[k]
+            b = pverts[(k + 1) % m]
+            face_edge_keys.add((a, b) if a < b else (b, a))
+
+    loose_edges = []
+    for edge in mesh.edges:
+        a, b = edge.vertices[0], edge.vertices[1]
+        key = (a, b) if a < b else (b, a)
+        if key not in face_edge_keys:
+            loose_edges.append((int(a), int(b)))
+
+    n_verts = len(positions_3d)
+    settings = getattr(obj, "taremin_cloth", None)
+    vertex_layers = get_cloth_layer_ids(obj, settings=settings, n_verts=n_verts, faces_2d=tris)
+    if vertex_layers is None:
+        vertex_layers = np.zeros(n_verts, dtype=np.int32)
+    else:
+        vertex_layers = np.asarray(vertex_layers, dtype=np.int32)
+
+    vertex_pins = get_pin_weights(obj, settings=settings, n_verts=n_verts)
+    if vertex_pins is None:
+        vertex_pins = np.zeros(n_verts, dtype=np.float32)
+
+    # 元 Piece_* 頂点グループ名を引き継ぐための頂点別マップ
+    piece_vg_by_vert: dict[int, list[str]] = {}
+    piece_vgs = [vg for vg in obj.vertex_groups if vg.name.startswith("Piece_")]
+    if piece_vgs:
+        vg_idx_to_name = {vg.index: vg.name for vg in piece_vgs}
+        for v in mesh.vertices:
+            names = [vg_idx_to_name[g.group] for g in v.groups if g.group in vg_idx_to_name and g.weight > 0.0]
+            if names:
+                piece_vg_by_vert[v.index] = names
+
+    return {
+        "positions_3d": positions_3d,
+        "tris": tris,
+        "tri_uvs": tri_uvs,
+        "tri_mats": tri_mats,
+        "tri_pieces": tri_pieces if has_face_piece else None,
+        "loose_edges": loose_edges,
+        "vertex_layers": vertex_layers,
+        "vertex_pins": vertex_pins,
+        "piece_vg_by_vert": piece_vg_by_vert,
+    }
+
+
+def _apply_merged_quad_mesh_attributes(
+    src_obj,
+    dst_obj,
+    *,
+    src_mesh,
+    merged,
+    scene,
+    uv_layer_name: str,
+    piece_vg_by_vert: dict[int, list[str]],
+) -> None:
+    """統合済み Quad メッシュにループ UV・マテリアル・属性・頂点グループ・設定を反映する"""
+    import numpy as np
+
+    dst_mesh = dst_obj.data
+
+    # 1. マテリアルスロットとポリゴン別 material_index
+    if src_mesh is not None:
+        dst_mesh.materials.clear()
+        for mat in src_mesh.materials:
+            dst_mesh.materials.append(mat)
+
+    n_quads = len(merged.quads)
+    n_tris = len(merged.triangles)
+    n_faces = len(dst_mesh.polygons)
+
+    if n_faces > 0 and n_faces == (n_quads + n_tris):
+        face_mats = np.concatenate([merged.quad_material_indices, merged.tri_material_indices]).astype(np.int32)
+        if len(dst_mesh.materials) > 0:
+            face_mats = np.clip(face_mats, 0, len(dst_mesh.materials) - 1)
+            dst_mesh.polygons.foreach_set("material_index", face_mats)
+
+        # 2. ループ単位 UV 書き込み（UVシーム結合時もコーナーUVを完全維持）
+        new_uv_layer = dst_mesh.uv_layers.new(name=uv_layer_name)
+        flat_q_uv = merged.quad_corner_uvs.reshape(-1, 2) if n_quads > 0 else np.zeros((0, 2), dtype=np.float32)
+        flat_t_uv = merged.tri_corner_uvs.reshape(-1, 2) if n_tris > 0 else np.zeros((0, 2), dtype=np.float32)
+        flat_uvs = np.concatenate([flat_q_uv, flat_t_uv], axis=0).astype(np.float32).ravel()
+        if len(flat_uvs) == len(new_uv_layer.data) * 2:
+            new_uv_layer.data.foreach_set("uv", flat_uvs)
+        else:
+            all_uv_faces = list(merged.quad_corner_uvs) + list(merged.tri_corner_uvs)
+            for poly, f_uvs in zip(dst_mesh.polygons, all_uv_faces):
+                for li, uv in zip(poly.loop_indices, f_uvs):
+                    new_uv_layer.data[li].uv = (float(uv[0]), float(uv[1]))
+
+        # 3. pattern_piece_index / cloth_layer 面属性
+        face_pieces = np.concatenate([merged.quad_piece_indices, merged.tri_piece_indices]).astype(np.int32)
+        attr_piece = dst_mesh.attributes.get("pattern_piece_index") or dst_mesh.attributes.new(
+            name="pattern_piece_index", type='INT', domain='FACE'
+        )
+        attr_piece.data.foreach_set("value", face_pieces)
+
+        face_layers = np.concatenate([merged.quad_cloth_layers, merged.tri_cloth_layers]).astype(np.int32)
+        attr_layer = dst_mesh.attributes.get("cloth_layer") or dst_mesh.attributes.new(
+            name="cloth_layer", type='INT', domain='FACE'
+        )
+        attr_layer.data.foreach_set("value", face_layers)
+
+    # 4. 既存の Piece_* / Pin 頂点グループを再構築
+    for vg in list(dst_obj.vertex_groups):
+        if vg.name.startswith("Piece_") or vg.name in ("Cloth_Pin", "Pin"):
+            dst_obj.vertex_groups.remove(vg)
+
+    # アイランドごとの代表 Piece_* 名を決定
+    island_to_piece_name: dict[int, str] = {}
+    for isl in scene.islands:
+        name_counts: dict[str, int] = {}
+        for orig_vi in isl.local_to_orig_vi:
+            for nm in piece_vg_by_vert.get(int(orig_vi), ()):
+                name_counts[nm] = name_counts.get(nm, 0) + 1
+        if name_counts:
+            island_to_piece_name[isl.island_id] = max(name_counts, key=name_counts.get)
+        elif isl.dominant_piece_index >= 0:
+            island_to_piece_name[isl.island_id] = f"Piece_{isl.dominant_piece_index}"
+
+    piece_name_to_verts: dict[str, list[int]] = {}
+    for vi, isl_set in enumerate(merged.vertex_island_ids):
+        for isl_id in isl_set:
+            p_name = island_to_piece_name.get(isl_id)
+            if p_name:
+                piece_name_to_verts.setdefault(p_name, []).append(vi)
+
+    for p_name, verts in piece_name_to_verts.items():
+        if verts:
+            vg = dst_obj.vertex_groups.get(p_name) or dst_obj.vertex_groups.new(name=p_name)
+            vg.add(verts, 1.0, 'REPLACE')
+
+    # Pin 頂点グループ引き継ぎ
+    pin_weights = merged.vertex_pin_weights
+    if len(pin_weights) == len(dst_mesh.vertices) and float(np.max(pin_weights)) > 1e-6:
+        pin_vg_name = ""
+        if hasattr(src_obj, "taremin_cloth"):
+            pin_vg_name = getattr(src_obj.taremin_cloth, "pin_vertex_group", "") or ""
+        if not pin_vg_name:
+            pin_vg_name = "Cloth_Pin"
+        vg_pin = dst_obj.vertex_groups.get(pin_vg_name) or dst_obj.vertex_groups.new(name=pin_vg_name)
+        for vi, w in enumerate(pin_weights):
+            fw = float(w)
+            if fw > 1e-6:
+                vg_pin.add([vi], fw, 'REPLACE')
+
+
+def _copy_taremin_cloth_settings(src_obj, dst_obj) -> None:
+    """taremin_cloth プロパティグループの設定値をコピーする"""
+    if not hasattr(src_obj, "taremin_cloth") or not hasattr(dst_obj, "taremin_cloth"):
+        return
+    src_s = src_obj.taremin_cloth
+    dst_s = dst_obj.taremin_cloth
+    for prop in src_s.bl_rna.properties:
+        pid = prop.identifier
+        if pid == "rna_type" or prop.is_readonly:
+            continue
+        try:
+            setattr(dst_s, pid, getattr(src_s, pid))
+        except Exception:
+            pass
+
+
 class TAREMIN_OT_remesh_to_quad(Operator):
     """シミュレーション済み布メッシュをプロダクションQuadトポロジーに変換するオペレーター"""
     bl_idname = "taremin_cloth.remesh_to_quad"
@@ -665,13 +877,43 @@ class TAREMIN_OT_remesh_to_quad(Operator):
         description="Target grid size for production quad elements",
         default=0.010,
         min=0.002,
-        max=0.050,
+        max=0.100,
         unit='LENGTH',
+    )
+    remesh_mode: EnumProperty(
+        name="Merge Mode",
+        description="How seams and UV islands are handled in the remeshed garment",
+        items=[
+            (
+                'STATIC_MERGED',
+                "Static Merged",
+                "Merge seam clusters and UV seams into a single welded 3D mesh without sewing edges",
+            ),
+            (
+                'KEEP_PATTERN',
+                "Keep Pattern",
+                "Keep UV islands separated and rebuild sewing loose edges",
+            ),
+        ],
+        default='STATIC_MERGED',
+    )
+    keep_structured_grid: BoolProperty(
+        name="Structured Rectangular Grid",
+        description="Use pure structured quad grid on convex rectangular pattern islands when aspect fits",
+        default=True,
+    )
+    replace_original: BoolProperty(
+        name="Replace Original",
+        description="Replace the active cloth object mesh in-place instead of creating a new object",
+        default=False,
     )
 
     @classmethod
     def poll(cls, context):
         if is_interactive_active():
+            return False
+        from ..preferences import is_quad_remesh_enabled
+        if not is_quad_remesh_enabled(context):
             return False
         obj = context.active_object
         return bool(obj and obj.type == 'MESH' and hasattr(obj, "taremin_cloth") and obj.taremin_cloth.is_cloth)
@@ -687,100 +929,109 @@ class TAREMIN_OT_remesh_to_quad(Operator):
             self.report({'ERROR'}, i18n.trans("Core engine taremin_cloth_core is not available"))
             return {'CANCELLED'}
 
-        if not hasattr(core, "remesh_cloth_to_quad_3d"):
+        if not hasattr(core, "remesh_cloth_to_quad_3d_ext"):
             self.report({'ERROR'}, i18n.trans("Quad remeshing is not supported in current core module"))
             return {'CANCELLED'}
 
-        from ..utils.mesh_extract import extract_mesh_vertices_and_triangles
         import numpy as np
+        from ..utils.quad_remesh_prep import merge_island_outputs, prepare_quad_remesh_islands
 
         mesh = obj.data
-        positions_3d, tris = extract_mesh_vertices_and_triangles(mesh)
-        if tris is None or len(tris) == 0:
-            self.report({'WARNING'}, i18n.trans("Mesh contains no triangles to remesh"))
-            return {'CANCELLED'}
-
-        # UVレイヤーの取得
-        uv_layer = mesh.uv_layers.get("UVMap_Pattern") or mesh.uv_layers.active
+        uv_layer = (
+            mesh.uv_layers.get("UVMap")
+            or mesh.uv_layers.get("UVMap_Pattern")
+            or mesh.uv_layers.active
+        )
         if not uv_layer:
             self.report({'ERROR'}, i18n.trans("No UV map found for 2D pattern inverse mapping"))
             return {'CANCELLED'}
 
-        uvs_2d = np.zeros((len(positions_3d), 2), dtype=np.float32)
-        uv_counts = np.zeros(len(positions_3d), dtype=np.int32)
-        mesh.calc_loop_triangles()
-        for lt in mesh.loop_triangles:
-            for vi, li in zip(lt.vertices, lt.loops):
-                uv = uv_layer.data[li].uv
-                uvs_2d[vi] += np.array([uv[0], uv[1]], dtype=np.float32)
-                uv_counts[vi] += 1
-        mask = uv_counts > 0
-        uvs_2d[mask] /= uv_counts[mask, None]
-
-        # 境界エッジの抽出
-        edge_face_counts = {}
-        for t in tris:
-            for k in range(3):
-                e = (min(t[k], t[(k + 1) % 3]), max(t[k], t[(k + 1) % 3]))
-                edge_face_counts[e] = edge_face_counts.get(e, 0) + 1
-        boundary_edges = [e for e, count in edge_face_counts.items() if count == 1]
-
-        if not boundary_edges:
-            self.report({'ERROR'}, i18n.trans("Failed to detect boundary loop"))
+        src = _extract_quad_remesh_source_data(obj, mesh, uv_layer=uv_layer)
+        if src is None:
+            self.report({'WARNING'}, i18n.trans("Mesh contains no triangles to remesh"))
             return {'CANCELLED'}
 
-        # 境界ループのチェーン化
-        adj = {}
-        for u, v in boundary_edges:
-            adj.setdefault(u, []).append(v)
-            adj.setdefault(v, []).append(u)
-
-        start_v = boundary_edges[0][0]
-        loop_verts = [start_v]
-        curr_v = adj[start_v][0]
-        prev_v = start_v
-        while curr_v != start_v and len(loop_verts) < len(boundary_edges):
-            loop_verts.append(curr_v)
-            neighbors = adj[curr_v]
-            next_v = neighbors[1] if neighbors[0] == prev_v else neighbors[0]
-            prev_v = curr_v
-            curr_v = next_v
-
-        boundary_loop_2d = uvs_2d[loop_verts]
-
         try:
-            out = core.remesh_cloth_to_quad_3d(
-                sim_positions_3d=positions_3d,
-                sim_uvs_2d=uvs_2d,
-                sim_triangles=tris.astype(np.uint32),
-                boundary_loop_2d=boundary_loop_2d,
-                target_quad_size=self.target_quad_size,
-                boundary_belt_loops=1,
-                smoothing_iterations=10,
+            scene = prepare_quad_remesh_islands(
+                src["positions_3d"],
+                src["tris"],
+                triangle_uvs=src["tri_uvs"],
+                loose_edges=src["loose_edges"],
+                triangle_piece_ids=src["tri_pieces"],
+                triangle_material_indices=src["tri_mats"],
+                vertex_cloth_layers=src["vertex_layers"],
+                vertex_pin_weights=src["vertex_pins"],
             )
+            island_outputs = []
+            for island in scene.islands:
+                out = core.remesh_cloth_to_quad_3d_ext(
+                    sim_positions_3d=island.positions_3d,
+                    sim_uvs_2d=island.uvs_2d,
+                    sim_triangles=island.triangles.astype(np.uint32),
+                    boundary_loop_2d=island.boundary_loop_2d,
+                    hole_loops_2d=island.hole_loops_2d,
+                    target_quad_size=self.target_quad_size,
+                    boundary_belt_loops=1,
+                    smoothing_iterations=10,
+                    keep_structured_when_possible=self.keep_structured_grid,
+                    target_size_in_3d=True,
+                )
+                island_outputs.append(out)
+
+            merged = merge_island_outputs(scene, island_outputs, mode=self.remesh_mode)
         except Exception as e:
             self.report({'ERROR'}, i18n.trans("Quad remesh failed: %s") % str(e))
             return {'CANCELLED'}
 
-        quad_pos = out["positions_3d"]
-        quads = out["quads"]
-        quad_uvs = out["uvs_2d"]
-
-        # 新規メッシュ・オブジェクト生成
+        # 新規メッシュ生成（Quads + 残余 Triangles + KeepPattern 用 Loose Edges）
         quad_mesh = bpy.data.meshes.new(f"{obj.name}_Quad_Mesh")
-        polys = [list(q) for q in quads]
-        quad_mesh.from_pydata(quad_pos, [], polys)
+        polys = [list(q) for q in merged.quads.tolist()] + [list(t) for t in merged.triangles.tolist()]
+        quad_mesh.from_pydata(merged.positions_3d.tolist(), merged.loose_edges, polys)
         quad_mesh.update()
 
-        # UVレイヤー設定
-        new_uv_layer = quad_mesh.uv_layers.new(name="UVMap_Pattern")
-        for poly in quad_mesh.polygons:
-            for li, vi in zip(poly.loop_indices, poly.vertices):
-                new_uv_layer.data[li].uv = (quad_uvs[vi][0], quad_uvs[vi][1])
+        if self.replace_original:
+            old_mesh = obj.data
+            obj.data = quad_mesh
+            _apply_merged_quad_mesh_attributes(
+                obj,
+                obj,
+                src_mesh=old_mesh,
+                merged=merged,
+                scene=scene,
+                uv_layer_name=uv_layer.name,
+                piece_vg_by_vert=src["piece_vg_by_vert"],
+            )
+            if hasattr(obj, "taremin_cloth"):
+                obj.taremin_cloth.enable_sewing = bool(
+                    self.remesh_mode == 'KEEP_PATTERN' and len(merged.loose_edges) > 0
+                )
+            if old_mesh is not None and old_mesh.users == 0:
+                bpy.data.meshes.remove(old_mesh)
+            self.report({'INFO'}, i18n.trans("Created quad mesh: %s") % obj.name)
+            return {'FINISHED'}
 
         quad_obj = bpy.data.objects.new(f"{obj.name}_Quad", quad_mesh)
-        context.collection.objects.link(quad_obj)
+        if obj.users_collection:
+            for col in obj.users_collection:
+                col.objects.link(quad_obj)
+        else:
+            context.collection.objects.link(quad_obj)
+
         quad_obj.matrix_world = obj.matrix_world.copy()
+        _copy_taremin_cloth_settings(obj, quad_obj)
+        _apply_merged_quad_mesh_attributes(
+            obj,
+            quad_obj,
+            src_mesh=mesh,
+            merged=merged,
+            scene=scene,
+            uv_layer_name=uv_layer.name,
+            piece_vg_by_vert=src["piece_vg_by_vert"],
+        )
+        if hasattr(quad_obj, "taremin_cloth"):
+            quad_obj.taremin_cloth.enable_sewing = bool(
+                self.remesh_mode == 'KEEP_PATTERN' and len(merged.loose_edges) > 0
+            )
 
         for o in context.selected_objects:
             o.select_set(False)

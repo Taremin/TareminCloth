@@ -29,6 +29,9 @@ use cloth_core::{
     ray_plane_hit as core_ray_plane_hit,
     remesh_pattern_2d_core as core_remesh_pattern_2d,
     remesh_cloth_to_quad_3d_core as core_remesh_cloth_to_quad_3d,
+    remesh_cloth_to_quad_3d_ext_core as core_remesh_cloth_to_quad_3d_ext,
+    QuadRemeshOptions as CoreQuadRemeshOptions,
+    QuadRemeshOutput as CoreQuadRemeshOutput,
 };
 
 /// GPUが利用可能かどうかを判定する
@@ -2945,46 +2948,43 @@ fn remesh_pattern_2d<'py>(
 }
 
 /// シミュレーション済み布メッシュをプロダクションQuadトポロジーに変換し、3D重心逆写像を行う
-#[pyfunction]
-#[pyo3(signature = (
-    sim_positions_3d,
-    sim_uvs_2d,
-    sim_triangles,
-    boundary_loop_2d,
-    target_quad_size=0.010,
-    boundary_belt_loops=1,
-    smoothing_iterations=10
-))]
-fn remesh_cloth_to_quad_3d<'py>(
+fn parse_array_nx3_f32(arr: &PyReadonlyArray2<f32>, name: &str) -> PyResult<Vec<[f32; 3]>> {
+    let shape = arr.shape();
+    if shape[1] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} の列数は 3 である必要があります (指定: {})",
+            shape[1]
+        )));
+    }
+    Ok(arr.as_array().rows().into_iter().map(|r| [r[0], r[1], r[2]]).collect())
+}
+
+fn parse_array_nx2_f32(arr: &PyReadonlyArray2<f32>, name: &str) -> PyResult<Vec<[f32; 2]>> {
+    let shape = arr.shape();
+    if shape[1] != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} の列数は 2 である必要があります (指定: {})",
+            shape[1]
+        )));
+    }
+    Ok(arr.as_array().rows().into_iter().map(|r| [r[0], r[1]]).collect())
+}
+
+fn parse_array_nx3_u32(arr: &PyReadonlyArray2<u32>, name: &str) -> PyResult<Vec<[u32; 3]>> {
+    let shape = arr.shape();
+    if shape[1] != 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} の列数は 3 である必要があります (指定: {})",
+            shape[1]
+        )));
+    }
+    Ok(arr.as_array().rows().into_iter().map(|r| [r[0], r[1], r[2]]).collect())
+}
+
+fn quad_remesh_output_to_pydict<'py>(
     py: Python<'py>,
-    sim_positions_3d: PyReadonlyArray2<f32>,
-    sim_uvs_2d: PyReadonlyArray2<f32>,
-    sim_triangles: PyReadonlyArray2<u32>,
-    boundary_loop_2d: PyReadonlyArray2<f32>,
-    target_quad_size: f32,
-    boundary_belt_loops: u32,
-    smoothing_iterations: u32,
+    output: CoreQuadRemeshOutput,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let pos_view = sim_positions_3d.as_slice()?;
-    let uv_view = sim_uvs_2d.as_slice()?;
-    let tri_view = sim_triangles.as_slice()?;
-    let bnd_view = boundary_loop_2d.as_slice()?;
-
-    let pos_3d: Vec<[f32; 3]> = pos_view.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-    let uvs_2d: Vec<[f32; 2]> = uv_view.chunks_exact(2).map(|c| [c[0], c[1]]).collect();
-    let tris: Vec<[u32; 3]> = tri_view.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-    let boundary: Vec<[f32; 2]> = bnd_view.chunks_exact(2).map(|c| [c[0], c[1]]).collect();
-
-    let output = core_remesh_cloth_to_quad_3d(
-        &pos_3d,
-        &uvs_2d,
-        &tris,
-        &boundary,
-        target_quad_size,
-        boundary_belt_loops,
-        smoothing_iterations,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
-
     let out_dict = PyDict::new(py);
 
     // positions_3d: [M, 3]
@@ -3037,6 +3037,105 @@ fn remesh_cloth_to_quad_3d<'py>(
     Ok(out_dict)
 }
 
+/// シミュレーション済み布メッシュを UV 座標経由で Quad トポロジーにリメッシュし 3D 座標を再復元する
+#[pyfunction]
+#[pyo3(signature = (
+    sim_positions_3d,
+    sim_uvs_2d,
+    sim_triangles,
+    boundary_loop_2d,
+    target_quad_size=0.010,
+    boundary_belt_loops=1,
+    smoothing_iterations=10
+))]
+fn remesh_cloth_to_quad_3d<'py>(
+    py: Python<'py>,
+    sim_positions_3d: PyReadonlyArray2<f32>,
+    sim_uvs_2d: PyReadonlyArray2<f32>,
+    sim_triangles: PyReadonlyArray2<u32>,
+    boundary_loop_2d: PyReadonlyArray2<f32>,
+    target_quad_size: f32,
+    boundary_belt_loops: u32,
+    smoothing_iterations: u32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let pos_3d = parse_array_nx3_f32(&sim_positions_3d, "sim_positions_3d")?;
+    let uvs_2d = parse_array_nx2_f32(&sim_uvs_2d, "sim_uvs_2d")?;
+    let tris = parse_array_nx3_u32(&sim_triangles, "sim_triangles")?;
+    let boundary = parse_array_nx2_f32(&boundary_loop_2d, "boundary_loop_2d")?;
+
+    let output = core_remesh_cloth_to_quad_3d(
+        &pos_3d,
+        &uvs_2d,
+        &tris,
+        &boundary,
+        target_quad_size,
+        boundary_belt_loops,
+        smoothing_iterations,
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    quad_remesh_output_to_pydict(py, output)
+}
+
+/// 穴・3Dスケール換算・構造化制御に対応した拡張 Quad リメッシュ関数
+#[pyfunction]
+#[pyo3(signature = (
+    sim_positions_3d,
+    sim_uvs_2d,
+    sim_triangles,
+    boundary_loop_2d,
+    hole_loops_2d=None,
+    target_quad_size=0.010,
+    boundary_belt_loops=1,
+    smoothing_iterations=10,
+    keep_structured_when_possible=true,
+    target_size_in_3d=true
+))]
+#[allow(clippy::too_many_arguments)]
+fn remesh_cloth_to_quad_3d_ext<'py>(
+    py: Python<'py>,
+    sim_positions_3d: PyReadonlyArray2<f32>,
+    sim_uvs_2d: PyReadonlyArray2<f32>,
+    sim_triangles: PyReadonlyArray2<u32>,
+    boundary_loop_2d: PyReadonlyArray2<f32>,
+    hole_loops_2d: Option<Vec<PyReadonlyArray2<f32>>>,
+    target_quad_size: f32,
+    boundary_belt_loops: u32,
+    smoothing_iterations: u32,
+    keep_structured_when_possible: bool,
+    target_size_in_3d: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let pos_3d = parse_array_nx3_f32(&sim_positions_3d, "sim_positions_3d")?;
+    let uvs_2d = parse_array_nx2_f32(&sim_uvs_2d, "sim_uvs_2d")?;
+    let tris = parse_array_nx3_u32(&sim_triangles, "sim_triangles")?;
+    let boundary = parse_array_nx2_f32(&boundary_loop_2d, "boundary_loop_2d")?;
+
+    let mut holes = Vec::new();
+    if let Some(raw_holes) = hole_loops_2d {
+        for (idx, h) in raw_holes.iter().enumerate() {
+            holes.push(parse_array_nx2_f32(h, &format!("hole_loops_2d[{idx}]"))?);
+        }
+    }
+
+    let output = core_remesh_cloth_to_quad_3d_ext(
+        &pos_3d,
+        &uvs_2d,
+        &tris,
+        &boundary,
+        &holes,
+        CoreQuadRemeshOptions {
+            target_quad_size,
+            boundary_belt_loops,
+            smoothing_iterations,
+            keep_structured_when_possible,
+            target_size_in_3d,
+        },
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+
+    quad_remesh_output_to_pydict(py, output)
+}
+
 /// taremin_cloth_core Python モジュール
 #[pymodule]
 fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -3073,6 +3172,7 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(audit_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(remesh_pattern_2d, m)?)?;
     m.add_function(wrap_pyfunction!(remesh_cloth_to_quad_3d, m)?)?;
+    m.add_function(wrap_pyfunction!(remesh_cloth_to_quad_3d_ext, m)?)?;
     m.add_class::<ClothSimulator>()?;
     Ok(())
 }

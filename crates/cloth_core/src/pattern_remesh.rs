@@ -4,88 +4,10 @@
 use std::collections::{HashMap, HashSet};
 use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 
-/// 2D符号付き面積 (Shoelace formula)
-pub fn polygon_signed_area_2d(pts: &[[f32; 2]]) -> f32 {
-    let n = pts.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut area = 0.0f32;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
-    }
-    0.5 * area
-}
-
-/// 三角形の2D符号付き面積 (p0 -> p1 -> p2, CCW > 0)
-#[inline]
-pub fn triangle_signed_area_2d(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2]) -> f32 {
-    0.5 * ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]))
-}
-
-/// 三角形の最小内角（ラジアン）を計算
-pub fn triangle_min_angle_rad(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2]) -> f32 {
-    let d01 = [(p1[0] - p0[0]), (p1[1] - p0[1])];
-    let d12 = [(p2[0] - p1[0]), (p2[1] - p1[1])];
-    let d20 = [(p0[0] - p2[0]), (p0[1] - p2[1])];
-
-    let l01 = (d01[0] * d01[0] + d01[1] * d01[1]).sqrt();
-    let l12 = (d12[0] * d12[0] + d12[1] * d12[1]).sqrt();
-    let l20 = (d20[0] * d20[0] + d20[1] * d20[1]).sqrt();
-
-    if l01 < 1e-12 || l12 < 1e-12 || l20 < 1e-12 {
-        return 0.0;
-    }
-
-    let cos0 = ((l01 * l01 + l20 * l20 - l12 * l12) / (2.0 * l01 * l20)).clamp(-1.0, 1.0);
-    let cos1 = ((l01 * l01 + l12 * l12 - l20 * l20) / (2.0 * l01 * l12)).clamp(-1.0, 1.0);
-    let cos2 = ((l12 * l12 + l20 * l20 - l01 * l01) / (2.0 * l12 * l20)).clamp(-1.0, 1.0);
-
-    let a0 = cos0.acos();
-    let a1 = cos1.acos();
-    let a2 = cos2.acos();
-
-    a0.min(a1).min(a2)
-}
-
-/// Winding Number 法による2D点多角形内外判定 (非ゼロなら内部)
-pub fn winding_number_2d(p: [f32; 2], polygon: &[[f32; 2]]) -> i32 {
-    let mut wn = 0;
-    let n = polygon.len();
-    for i in 0..n {
-        let p1 = polygon[i];
-        let p2 = polygon[(i + 1) % n];
-        if p1[1] <= p[1] {
-            if p2[1] > p[1] {
-                let cross = (p2[0] - p1[0]) * (p[1] - p1[1]) - (p[0] - p1[0]) * (p2[1] - p1[1]);
-                if cross > 0.0 {
-                    wn += 1;
-                }
-            }
-        } else if p2[1] <= p[1] {
-            let cross = (p2[0] - p1[0]) * (p[1] - p1[1]) - (p[0] - p1[0]) * (p2[1] - p1[1]);
-            if cross < 0.0 {
-                wn -= 1;
-            }
-        }
-    }
-    wn
-}
-
-/// 点と線分の最短距離の二乗
-pub fn point_to_segment_dist_sq(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
-    let ab = [b[0] - a[0], b[1] - a[1]];
-    let ap = [p[0] - a[0], p[1] - a[1]];
-    let ab_len_sq = ab[0] * ab[0] + ab[1] * ab[1];
-    if ab_len_sq < 1e-12 {
-        return ap[0] * ap[0] + ap[1] * ap[1];
-    }
-    let t = ((ap[0] * ab[0] + ap[1] * ab[1]) / ab_len_sq).clamp(0.0, 1.0);
-    let proj = [a[0] + t * ab[0], a[1] + t * ab[1]];
-    let d = [p[0] - proj[0], p[1] - proj[1]];
-    d[0] * d[0] + d[1] * d[1]
-}
+pub use crate::geometry_2d::{
+    point_to_segment_dist_sq, polygon_signed_area_2d, triangle_min_angle_rad,
+    triangle_signed_area_2d, winding_number_2d,
+};
 
 /// 2D型紙のリメッシュ内部データ構造
 struct RemeshMesh2D {

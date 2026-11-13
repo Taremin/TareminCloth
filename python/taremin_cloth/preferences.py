@@ -72,6 +72,7 @@ def save_preferences_to_disk(prefs=None) -> bool:
         "enable_standalone_gui": getattr(prefs, "enable_standalone_gui", False),
         "enable_wrinkle_field": getattr(prefs, "enable_wrinkle_field", False),
         "enable_async_readback": getattr(prefs, "enable_async_readback", False),
+        "enable_quad_remesh": getattr(prefs, "enable_quad_remesh", False),
     }
     filepath = get_preferences_filepath()
     try:
@@ -144,6 +145,8 @@ def apply_saved_preferences(prefs=None) -> bool:
             prefs.enable_wrinkle_field = bool(data["enable_wrinkle_field"])
         if "enable_async_readback" in data and hasattr(prefs, "enable_async_readback"):
             prefs.enable_async_readback = bool(data["enable_async_readback"])
+        if "enable_quad_remesh" in data and hasattr(prefs, "enable_quad_remesh"):
+            prefs.enable_quad_remesh = bool(data["enable_quad_remesh"])
     finally:
         _is_restoring = False
 
@@ -377,6 +380,12 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         default=False,
         update=_on_experimental_update,
     )
+    enable_quad_remesh: BoolProperty(
+        name="Enable Quad Remesh",
+        description="Enable quad remesh conversion operator for pattern garments (Experimental)",
+        default=False,
+        update=_on_experimental_update,
+    )
 
     def draw(self, context):
         global _has_restored_preferences
@@ -431,6 +440,7 @@ class TareminClothPreferences(bpy.types.AddonPreferences):
         box_exp.prop(self, "enable_standalone_gui", text=i18n.trans("Enable Standalone GUI Client"))
         box_exp.prop(self, "enable_wrinkle_field", text=i18n.trans("Enable Wrinkle Field"))
         box_exp.prop(self, "enable_async_readback", text=i18n.trans("Enable Async Readback"))
+        box_exp.prop(self, "enable_quad_remesh", text=i18n.trans("Enable Quad Remesh"))
 
 
 
@@ -447,8 +457,8 @@ def get_preferences(context=None):
     return None
 
 
-def is_wrinkle_field_enabled(context=None) -> bool:
-    """ドレープガイド実験フラグの有効判定（共通ヘルパー）。
+def _is_experimental_pref_enabled(attr_name: str, *, context=None) -> bool:
+    """実験的機能フラグの共通有効判定ヘルパー。
 
     実Blenderで実Bool値Falseの場合のみFalseを返す。
     プリファレンス未取得・モック環境（Blender非依存テスト）では
@@ -460,33 +470,27 @@ def is_wrinkle_field_enabled(context=None) -> bool:
             return True
         if type(prefs).__module__.startswith("unittest.mock"):
             return True
-        v = getattr(prefs, "enable_wrinkle_field", False)
+        v = getattr(prefs, attr_name, False)
         if not isinstance(v, bool):
             return True
         return bool(v)
     except Exception:
         return True
+
+
+def is_wrinkle_field_enabled(context=None) -> bool:
+    """ドレープガイド実験フラグの有効判定（共通ヘルパー）。"""
+    return _is_experimental_pref_enabled("enable_wrinkle_field", context=context)
 
 
 def is_async_readback_experimental_enabled(context=None) -> bool:
-    """非同期リードバック実験フラグの有効判定（共通ヘルパー）。
+    """非同期リードバック実験フラグの有効判定（共通ヘルパー）。"""
+    return _is_experimental_pref_enabled("enable_async_readback", context=context)
 
-    実Blenderで実Bool値Falseの場合のみFalseを返す。
-    プリファレンス未取得・モック環境（Blender非依存テスト）では
-    従来互換のためTrueを返す。
-    """
-    try:
-        prefs = get_preferences(context)
-        if prefs is None:
-            return True
-        if type(prefs).__module__.startswith("unittest.mock"):
-            return True
-        v = getattr(prefs, "enable_async_readback", False)
-        if not isinstance(v, bool):
-            return True
-        return bool(v)
-    except Exception:
-        return True
+
+def is_quad_remesh_enabled(context=None) -> bool:
+    """Quadリメッシュ実験フラグの有効判定（共通ヘルパー）。"""
+    return _is_experimental_pref_enabled("enable_quad_remesh", context=context)
 
 
 def _deferred_restore_preferences():

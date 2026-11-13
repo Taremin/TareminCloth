@@ -400,6 +400,8 @@
   "Enable Async Readback": "非同期リードバックを有効化",
   "Enable Cloth": "布シミュレーションを有効化",
   "Enable cloth simulation for this object": "このオブジェクトでClothシミュレーションを有効にする",
+  "Enable Quad Remesh": "Quadリメッシュを有効化",
+  "Enable quad remesh conversion operator for pattern garments (Experimental)": "型紙衣装メッシュのQuadリメッシュ変換機能を有効化します（実験的機能）",
   "Enable cloths only, pause colliders": "布のみ有効化し、コライダーを一時停止",
   "Enable Collider": "コライダーを有効化",
   "Enable collider animation driving": "コライダーアニメーション駆動を有効化",
@@ -449,7 +451,6 @@
   "Fabric Presets": "布素材プリセット",
   "Face Layers (Layered Cloth)": "Face レイヤー (レイヤード布・重ね着)",
   "Failed to build garment: %s": "衣装の構築に失敗しました: %s",
-  "Failed to detect boundary loop": "境界ループの検出に失敗しました",
   "Failed to export pattern: %s": "型紙のエクスポートに失敗しました: %s",
   "Failed to import pattern: %s": "型紙のインポートに失敗しました: %s",
   "Falloff": "減衰",
@@ -1163,5 +1164,15 @@
   "Wrinkle influence preview: curve lines only, influence range only, or both": "シワ影響プレビュー: カーブ線のみ、影響範囲のみ、または両方",
   "Wrinkle Slide: Drag mouse to slide along bone (Wheel: Radius, Shift+Wheel: Influence)": "シワスライド: マウスドラッグでボーンに沿ってスライド (ホイール: 太さ, Shift+ホイール: 影響幅)",
   "Zero vertex overhead during sim; split quads along strain on stop (Recommended)": "シミュレーション中の頂点オーバーヘッドゼロ。停止時に歪みに沿ってQuadを分割 (推奨)",
-  "Zero-area degenerate face(s) detected:": "初期面積0の縮退面が検出されました:"
+  "Zero-area degenerate face(s) detected:": "初期面積0の縮退面が検出されました:",
+  "How seams and UV islands are handled in the remeshed garment": "リメッシュ後の衣装における縫合線およびUVアイランドの扱いを指定します",
+  "Keep Pattern": "型紙維持 (縫合線保持)",
+  "Keep UV islands separated and rebuild sewing loose edges": "UVアイランドを分離したまま、縫合線および中継点エッジを再構築します",
+  "Merge Mode": "結合モード",
+  "Merge seam clusters and UV seams into a single welded 3D mesh without sewing edges": "縫合クラスタとUVシームを3D頂点統合し、縫合エッジのない単一の静的メッシュを生成します",
+  "Replace Original": "元メッシュを置換",
+  "Replace the active cloth object mesh in-place instead of creating a new object": "新規オブジェクトを作成せず、アクティブな布オブジェクトのメッシュを直接置き換えます",
+  "Static Merged": "静止統合 (シーム結合)",
+  "Structured Rectangular Grid": "矩形構造化グリッド優先",
+  "Use pure structured quad grid on convex rectangular pattern islands when aspect fits": "凸四角形の型紙アイランドでアスペクト比が適合する場合に100%構造化Quadグリッドを使用します"
 }
