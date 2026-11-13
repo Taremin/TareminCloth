@@ -29,10 +29,13 @@ class TestAddonRegistration(unittest.TestCase):
         obj = bpy.context.active_object
         self.assertIsNotNone(obj)
 
-        # プロパティの存在確認
+        # プロパティの存在確認（木綿基準デフォルト値と一致すること）
         self.assertTrue(hasattr(obj, "taremin_cloth"))
         self.assertFalse(obj.taremin_cloth.is_cloth)
-        self.assertEqual(obj.taremin_cloth.stiffness, 1000.0)
+        self.assertEqual(obj.taremin_cloth.stiffness, 1500.0)
+        self.assertEqual(obj.taremin_cloth.tension_stiffness, 1500.0)
+        self.assertEqual(obj.taremin_cloth.compression_stiffness, 150.0)
+        self.assertEqual(obj.taremin_cloth.bending_stiffness, 15.0)
         self.assertEqual(obj.taremin_cloth.substeps, 20)
 
         # オペレーターの実行テスト

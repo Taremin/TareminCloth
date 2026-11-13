@@ -170,10 +170,10 @@ def collect_sim_config(settings: Any, *, scene: Any = None) -> Dict[str, Any]:
         "compression_damping": _f(settings, "compression_damping", 5.0),
         "shear_damping": _f(settings, "shear_damping", 5.0),
         "bending_damping": _f(settings, "bending_damping", 0.5),
-        "tension_stiffness": _f(settings, "tension_stiffness", 1000.0),
-        "compression_stiffness": _f(settings, "compression_stiffness", 100.0),
+        "tension_stiffness": _f(settings, "tension_stiffness", 1500.0),
+        "compression_stiffness": _f(settings, "compression_stiffness", 150.0),
         "shear_stiffness": _f(settings, "shear_stiffness", 100.0),
-        "bending_stiffness": _f(settings, "bending_stiffness", 10.0),
+        "bending_stiffness": _f(settings, "bending_stiffness", 15.0),
         "solver_iterations": _i(settings, "solver_iterations", 2),
         "solver_mode": 1 if _get(settings, "solver_mode", "COLORING") == "ATOMIC" else 0,
         "workgroup_size": _i(settings, "workgroup_size", 32),
@@ -330,10 +330,10 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         sim.set_edge_margin_offset(float(cfg.get("edge_margin_offset", 0.0)))
     if hasattr(sim, "set_stiffness_all"):
         sim.set_stiffness_all(
-            float(cfg.get("tension_stiffness", 1000.0)),
-            float(cfg.get("compression_stiffness", 100.0)),
+            float(cfg.get("tension_stiffness", 1500.0)),
+            float(cfg.get("compression_stiffness", 150.0)),
             float(cfg.get("shear_stiffness", 100.0)),
-            float(cfg.get("bending_stiffness", 10.0)),
+            float(cfg.get("bending_stiffness", 15.0)),
         )
     if hasattr(sim, "set_sewing_stiffness"):
         sim.set_sewing_stiffness(float(cfg.get("sewing_stiffness", 10000.0)))
