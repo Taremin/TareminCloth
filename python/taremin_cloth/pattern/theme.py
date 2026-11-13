@@ -53,6 +53,10 @@ class ThemeColors:
     # ノッチ（合印）
     notch: ColorRGBA = (1.0, 0.85, 0.2, 0.95)
     notch_selected: ColorRGBA = (1.0, 0.95, 0.4, 1.0)
+    notch_preview: ColorRGBA = (0.35, 0.92, 1.0, 0.9)
+    notch_snap_midpoint: ColorRGBA = (0.45, 0.95, 0.55, 0.95)
+    notch_snap_reference: ColorRGBA = (1.0, 0.65, 0.25, 0.95)
+    notch_preview_text: ColorRGBA = (0.85, 0.96, 1.0, 0.98)
 
     # 寸法線テキスト
     dimension_text: ColorRGBA = (0.75, 0.78, 0.84, 0.85)

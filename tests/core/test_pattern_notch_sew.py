@@ -9,6 +9,7 @@ from taremin_cloth.pattern.document import (
     EdgeRange,
     NodeKind,
     Notch,
+    NotchSnapKind,
     Piece,
     Seam,
 )
@@ -631,6 +632,251 @@ class TestPatternNotchGeometryAndDocument(unittest.TestCase):
         # "From Start: 20.0|" または "開始点から: 20.0|" が含まれること
         has_label = any("From Start: 20.0|" in t or "開始点から: 20.0|" in t for t in text_cmds)
         self.assertTrue(has_label, f"テキスト描画に From Start が見つかりません: {text_cmds}")
+
+    def test_resolve_notch_snap_kinds_and_split_lengths(self) -> None:
+        """resolve_notch_snap が 1cm刻み / 中点 / Free / 既存ノッチ重複 / 分割弧長を正しく解決すること."""
+        doc = Document.new()
+        p = doc.add_rectangle_piece((0.0, 0.0), (0.35, 0.20), name="Rect")
+        outer = p.paths[p.outer_path_id]
+        n0 = outer.nodes[0]  # 下辺: 長さ 0.35m (35cm)
+
+        # 1. 中点スナップ (t=0.5 付近 -> 17.5cm ずつ)
+        res_mid = doc.resolve_notch_snap(p.id, n0.id, raw_t=0.495, path_id=outer.id)
+        self.assertEqual(res_mid.kind, NotchSnapKind.MIDPOINT)
+        self.assertAlmostEqual(res_mid.t, 0.5, places=5)
+        self.assertAlmostEqual(res_mid.split_left_len, 0.175, places=5)
+        self.assertAlmostEqual(res_mid.split_right_len, 0.175, places=5)
+        self.assertEqual(res_mid.left_t_range, (0.0, 0.5))
+        self.assertEqual(res_mid.right_t_range, (0.5, 1.0))
+
+        # 2. 1cm 刻みスナップ (raw_t=0.3 -> 0.105m -> 0.10m へ丸め)
+        res_step = doc.resolve_notch_snap(p.id, n0.id, raw_t=0.295, path_id=outer.id)
+        self.assertEqual(res_step.kind, NotchSnapKind.STEP_1CM)
+        self.assertAlmostEqual(res_step.arc_s, 0.10, places=4)
+        self.assertAlmostEqual(res_step.split_left_len, 0.10, places=4)
+        self.assertAlmostEqual(res_step.split_right_len, 0.25, places=4)
+
+        # 3. Alt 押下相当 (snap_enabled=False) -> FREE
+        raw_t_free = 0.295
+        res_free = doc.resolve_notch_snap(
+            p.id, n0.id, raw_t=raw_t_free, path_id=outer.id, snap_enabled=False
+        )
+        self.assertEqual(res_free.kind, NotchSnapKind.FREE)
+        self.assertAlmostEqual(res_free.t, raw_t_free, places=5)
+        self.assertAlmostEqual(res_free.split_left_len + res_free.split_right_len, 0.35, places=5)
+
+        # 4. 既存ノッチ近傍 (< 1mm) -> EXISTING + existing_notch_id
+        doc.notches["ex1"] = Notch(
+            id="ex1", piece_id=p.id, path_id=outer.id, segment_start_id=n0.id, t=0.10 / 0.35
+        )
+        res_ex = doc.resolve_notch_snap(p.id, n0.id, raw_t=(0.10 / 0.35) + 0.001, path_id=outer.id)
+        self.assertEqual(res_ex.kind, NotchSnapKind.EXISTING)
+        self.assertEqual(res_ex.existing_notch_id, "ex1")
+
+        # 5. 非対称ベジェ曲線で、既存ノッチ ex1 がある場合のサブ区間和と、単独時の全長和を検証
+        outer.nodes[0].kind = NodeKind.SMOOTH
+        outer.nodes[0].out_handle = (0.05, 0.15)
+        res_bez_sub = doc.resolve_notch_snap(p.id, n0.id, raw_t=0.40, path_id=outer.id, snap_enabled=False)
+        self.assertGreater(res_bez_sub.left_t_range[0], 0.0)
+        self.assertLess(res_bez_sub.split_left_len + res_bez_sub.split_right_len, res_bez_sub.total_length)
+
+        del doc.notches["ex1"]
+        res_bez = doc.resolve_notch_snap(p.id, n0.id, raw_t=0.40, path_id=outer.id, snap_enabled=False)
+        self.assertAlmostEqual(res_bez.split_left_len + res_bez.split_right_len, res_bez.total_length, places=4)
+
+    def test_resolve_notch_snap_clipboard_and_seam_partner(self) -> None:
+        """クリップボード参照長および Seam 相手ノッチ位置へ優先スナップすることを検証."""
+        doc = Document.new()
+        p_a = doc.add_rectangle_piece((0.0, 0.0), (0.40, 0.20), name="A")
+        p_b = doc.add_rectangle_piece((0.6, 0.0), (0.30, 0.20), name="B")
+        outer_a = p_a.paths[p_a.outer_path_id]
+        outer_b = p_b.paths[p_b.outer_path_id]
+        a0, a1 = outer_a.nodes[0], outer_a.nodes[1]  # 長さ 0.40m
+        b0, b1 = outer_b.nodes[0], outer_b.nodes[1]  # 長さ 0.30m
+
+        # 1. クリップボード長 (0.123m) へのスナップ（1cm刻み 0.120m より優先）
+        res_clip = doc.resolve_notch_snap(
+            p_a.id,
+            a0.id,
+            raw_t=0.124 / 0.40,
+            path_id=outer_a.id,
+            clipboard_length=0.123,
+        )
+        self.assertEqual(res_clip.kind, NotchSnapKind.CLIPBOARD)
+        self.assertAlmostEqual(res_clip.arc_s, 0.123, places=4)
+        self.assertAlmostEqual(res_clip.ref_length, 0.123, places=4)
+
+        # snap_enabled=False 時はクリップボード長へもスナップしない
+        res_clip_off = doc.resolve_notch_snap(
+            p_a.id,
+            a0.id,
+            raw_t=0.124 / 0.40,
+            path_id=outer_a.id,
+            snap_enabled=False,
+            clipboard_length=0.123,
+        )
+        self.assertEqual(res_clip_off.kind, NotchSnapKind.FREE)
+
+        # 2. Seam 相手ノッチへのスナップ (reverse=False, B側ノッチ = 始点から 0.085m)
+        doc.notches["nb"] = Notch(
+            id="nb",
+            piece_id=p_b.id,
+            path_id=outer_b.id,
+            segment_start_id=b0.id,
+            t=0.085 / 0.30,
+        )
+        seam = Seam(
+            id="s_ab",
+            a=EdgeRange(piece_id=p_a.id, path_id=outer_a.id, start_node_id=a0.id, end_node_id=a1.id),
+            b=EdgeRange(piece_id=p_b.id, path_id=outer_b.id, start_node_id=b0.id, end_node_id=b1.id),
+            reverse=False,
+        )
+        doc.seams[seam.id] = seam
+
+        res_seam = doc.resolve_notch_snap(
+            p_a.id,
+            a0.id,
+            raw_t=0.086 / 0.40,
+            path_id=outer_a.id,
+        )
+        self.assertEqual(res_seam.kind, NotchSnapKind.SEAM_PARTNER)
+        self.assertAlmostEqual(res_seam.arc_s, 0.085, places=4)
+        self.assertAlmostEqual(res_seam.ref_length, 0.085, places=4)
+
+        # 3. reverse=True のとき: 相手全長 0.30 - 0.085 = 0.215m および 自全長 0.40 - 0.085 = 0.315m 側へスナップ
+        seam.reverse = True
+        res_seam_rev = doc.resolve_notch_snap(
+            p_a.id,
+            a0.id,
+            raw_t=0.316 / 0.40,
+            path_id=outer_a.id,
+        )
+        self.assertEqual(res_seam_rev.kind, NotchSnapKind.SEAM_PARTNER)
+        self.assertAlmostEqual(res_seam_rev.arc_s, 0.315, places=4)
+
+        # 4. 相手側が逆方向 EdgeRange (b1 -> b0) でも正しく対応弧長へマップされること
+        seam.reverse = False
+        seam.b = EdgeRange(piece_id=p_b.id, path_id=outer_b.id, start_node_id=b1.id, end_node_id=b0.id)
+        # b 終端(b1)から nb (b0+0.085) までの距離は 0.30 - 0.085 = 0.215m
+        res_seam_inv_er = doc.resolve_notch_snap(
+            p_a.id,
+            a0.id,
+            raw_t=0.214 / 0.40,
+            path_id=outer_a.id,
+        )
+        self.assertEqual(res_seam_inv_er.kind, NotchSnapKind.SEAM_PARTNER)
+        self.assertAlmostEqual(res_seam_inv_er.arc_s, 0.215, places=4)
+
+    def test_resolve_notch_snap_existing_preserves_both_split_lengths(self) -> None:
+        """EXISTING 判定時に左右両方の分割区間と弧長が非ゼロで正しく算出されることを検証."""
+        doc = Document.new()
+        p = doc.add_rectangle_piece((0.0, 0.0), (0.3, 0.2), name="Rect")
+        outer = p.paths[p.outer_path_id]
+        n0 = outer.nodes[0]
+
+        doc.notches["n1"] = Notch(id="n1", piece_id=p.id, path_id=outer.id, segment_start_id=n0.id, t=0.25)
+        doc.notches["n2"] = Notch(id="n2", piece_id=p.id, path_id=outer.id, segment_start_id=n0.id, t=0.75)
+
+        res1 = doc.resolve_notch_snap(p.id, n0.id, raw_t=0.251, path_id=outer.id)
+        self.assertEqual(res1.kind, NotchSnapKind.EXISTING)
+        self.assertEqual(res1.existing_notch_id, "n1")
+        self.assertEqual(res1.left_t_range, (0.0, 0.25))
+        self.assertEqual(res1.right_t_range, (0.25, 0.75))
+        self.assertAlmostEqual(res1.split_left_len, 0.075, places=4)
+        self.assertAlmostEqual(res1.split_right_len, 0.150, places=4)
+
+        res2 = doc.resolve_notch_snap(p.id, n0.id, raw_t=0.749, path_id=outer.id)
+        self.assertEqual(res2.kind, NotchSnapKind.EXISTING)
+        self.assertEqual(res2.existing_notch_id, "n2")
+        self.assertEqual(res2.left_t_range, (0.25, 0.75))
+        self.assertEqual(res2.right_t_range, (0.75, 1.0))
+        self.assertAlmostEqual(res2.split_left_len, 0.150, places=4)
+        self.assertAlmostEqual(res2.split_right_len, 0.075, places=4)
+
+    def test_clamp_boundary_notch_remains_in_breakpoints_on_bezier(self) -> None:
+        """隣接ノッチ 1mm 限界クランプで移動した後も get_segment_notch_breakpoints から脱落しないことを検証."""
+        from taremin_cloth.pattern.document import Node, NodeKind, Path, PathRole, Piece
+
+        doc = Document.new()
+        outer = Path(
+            id="outer",
+            role=PathRole.OUTER,
+            nodes=[
+                Node(id="b0", position=(0.0, 0.0), kind=NodeKind.SMOOTH, out_handle=(0.05, 0.12)),
+                Node(id="b1", position=(0.3, 0.0), kind=NodeKind.SMOOTH, in_handle=(0.24, -0.08)),
+                Node(id="b2", position=(0.3, 0.2), kind=NodeKind.CORNER),
+                Node(id="b3", position=(0.0, 0.2), kind=NodeKind.CORNER),
+            ],
+            closed=True,
+        )
+        p = Piece(id="p_bez", name="Bez", paths={"outer": outer}, outer_path_id="outer")
+        doc.pieces[p.id] = p
+
+        doc.notches["n_fixed"] = Notch(id="n_fixed", piece_id=p.id, path_id=outer.id, segment_start_id="b0", t=0.4)
+        doc.notches["n_move"] = Notch(id="n_move", piece_id=p.id, path_id=outer.id, segment_start_id="b0", t=0.6)
+
+        snap_res = doc.resolve_notch_snap(
+            p.id,
+            "b0",
+            raw_t=0.4001,
+            path_id=outer.id,
+            snap_enabled=False,
+            exclude_notch_id="n_move",
+        )
+        moved = doc.move_notch("n_move", snap_res.t)
+        self.assertTrue(moved)
+
+        bps = doc.get_segment_notch_breakpoints(p.id, "b0", path_id=outer.id)
+        self.assertEqual(len(bps), 4)
+        self.assertAlmostEqual(bps[1], 0.4, places=5)
+        self.assertAlmostEqual(bps[2], doc.notches["n_move"].t, places=5)
+        self.assertAlmostEqual(snap_res.left_t_range[0], bps[1], places=5)
+        self.assertAlmostEqual(snap_res.left_t_range[1], bps[2], places=5)
+        self.assertAlmostEqual(snap_res.right_t_range[1], bps[3], places=5)
+
+    def test_resolve_notch_snap_chain_seam_partner(self) -> None:
+        """複数セグメント連結の CHAIN 縫合越しに縫合相手ノッチ距離へスナップすることを検証."""
+        doc = Document.new()
+        p_a = doc.add_rectangle_piece((0.0, 0.0), (0.3, 0.2), name="PieceA")
+        p_b = doc.add_rectangle_piece((0.0, 0.3), (0.3, 0.5), name="PieceB")
+        outer_a = p_a.paths[p_a.outer_path_id]
+        outer_b = p_b.paths[p_b.outer_path_id]
+        a0, a1 = outer_a.nodes[0], outer_a.nodes[1]
+        b0, b1 = outer_b.nodes[0], outer_b.nodes[1]
+
+        seam = Seam(
+            id="seam_chain",
+            a=EdgeRange(piece_id=p_a.id, path_id=outer_a.id, start_node_id=a0.id, end_node_id=a1.id),
+            b=EdgeRange(piece_id=p_b.id, path_id=outer_b.id, start_node_id=b0.id, end_node_id=b1.id),
+            reverse=False,
+        )
+        doc.seams[seam.id] = seam
+
+        # Piece A の下辺 (0.30m) を t=0.5 (0.15m) で分割して CHAIN 縫合化
+        mid_node = doc.insert_node_on_segment(p_a.id, outer_a.id, seg_idx=0, t=0.5)
+        self.assertIsNotNone(mid_node)
+        self.assertEqual(len(seam.chain_a), 2)
+
+        # Piece A の 2 セグメント目（先頭から 0.15 + 0.07 = 0.22m）へノッチを配置
+        doc.notches["na_chain"] = Notch(
+            id="na_chain",
+            piece_id=p_a.id,
+            path_id=outer_a.id,
+            segment_start_id=mid_node.id,
+            t=0.07 / 0.15,
+        )
+
+        # 順方向: Piece B の先頭から 0.22m 付近へスナップすること
+        res_fwd = doc.resolve_notch_snap(p_b.id, b0.id, raw_t=0.221 / 0.30, path_id=outer_b.id)
+        self.assertEqual(res_fwd.kind, NotchSnapKind.SEAM_PARTNER)
+        self.assertAlmostEqual(res_fwd.arc_s, 0.22, places=4)
+        self.assertAlmostEqual(res_fwd.ref_length, 0.22, places=4)
+
+        # reverse=True: Piece B の終点から 0.22m (= 先頭から 0.08m) 側へスナップすること
+        seam.reverse = True
+        res_rev = doc.resolve_notch_snap(p_b.id, b0.id, raw_t=0.079 / 0.30, path_id=outer_b.id)
+        self.assertEqual(res_rev.kind, NotchSnapKind.SEAM_PARTNER)
+        self.assertAlmostEqual(res_rev.arc_s, 0.08, places=4)
 
 
 if __name__ == "__main__":

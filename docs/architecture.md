@@ -1191,7 +1191,7 @@ graph TD
        - *合わせ方モード*: `SIMILAR`（相似拡大）、`LENGTH_ADJUST_BULGE`（端点固定・膨らみ調整）、`LENGTH_MOVE_END`（終点ノード移動伸張）。進行方向反転（`reverse`）、膨らみ反転（`flip_curvature`）、イセコミ量（`+0.5cm` / `+5mm` / `+5%` 等）のインライン編集に対応。
    - `RectangleTool` / `PolygonTool` / `EllipseTool`: 矩形、多角形、楕円（Ramanujan近似と4点ベジェ）作図。
    - `InternalLineTool`: ピース内部への折れ線・曲線描画（Rust CDT内部拘束線に自動連携）。
-   - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。
+   - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。`resolve_notch_snap` によるスナップ解決（既存ノッチ `< 1mm` 重複抑止選択・`Seam` 接続相手ノッチ・クリップボード辺長・中点 50%・1cm刻み・`Alt` 自由配置）、ホバー位置プレビュー＆分割後前後実寸弧長表示、`Alt` トグル即時再評価に対応。
    - `CutTool`: 弧長サンプリング交差判定と `split_cubic_bezier` による曲線対応ピース2分割、および元の縫合・ノッチ（$`t`$ 比率再計算）・アンカー（内外判定振り分け）の自動引き継ぎ。
    - `DartTool`: 曲線弧長位置サンプリング（`point_at_arc_length`）による正確な開口部2点算出と、三角スリット切り込み・自動縫合。
    - `SewTool`: 2辺クリックによる基本縫合、およびShift+クリック・Enter確定による鎖縫合（1対多、多対多）。
@@ -1202,7 +1202,7 @@ graph TD
    - 選択辺のハイライト表示（`POLYLINE` 総数を不変に保ちつつ選択セグメントのみ専用色・太線描画）およびモーダル変形中の軸ロックガイドライン・ピボット円・ラバーバンド線・操作ヒント表示。
    - 単一/複数要素対応情報カード（`cards.py`）: 未選択＋下絵設定時（ファイル名、表示トグル、不透明度スライダー、幅・Offset X/Y 数値編集、Clear ボタン）、頂点（1点座標編集 / 複数点サマリー＆X/Y 8方向整列ボタン）、辺（単一辺 Subdivide/Unfold/Mirror/Match、複数辺 Subdivide All）、縫合（Match A->B, Match B->A, Mode, Flip Direction (`F`), Flip Curvature, Ease, Mismatch常時表示）、ピース（単一および複数選択時の `Mixed` 表示・共通属性/配置一括更新・`active_piece_id` 基準スライダー/コンパス）。
    - ツールレールのクリックによるツール切替、下部「Build 3D」「Close」ボタンクリック、および情報カード内数値（解像度・レイヤーID・下絵幅/オフセット等）のインライン編集・cm単位解釈（`parse_length_input`）。
-   - 寸法線表示（Lキートグル）、ノッチ描画、内部線描画、下絵画像（参考画像）に対応。下絵画像本体（`DrawCommandKind.IMAGE`）は背景グリッド線の背面に、境界枠線（`POLYLINE`）はグリッド前面に配置される。
+   - 寸法線表示（Lキートグル）、ノッチ描画・ノッチプレビュー描画（`NotchPreviewState` に基づき、`NotchTool` ホバー時および `SelectTool` ノッチドラッグ移動時にスナップ種別バッジ・分割後前後区間長を表示し、重なる既存 `dimension_text` を抑止）、内部線描画、下絵画像（参考画像）に対応。下絵画像本体（`DrawCommandKind.IMAGE`）は背景グリッド線の背面に、境界枠線（`POLYLINE`）はグリッド前面に配置される。
    - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。下絵画像は組み込みシェーダー `IMAGE_COLOR` と `gpu.texture.from_image` を用いてアルファブレンド描画し、`bpy.data.images` データブロック名キャッシュ・失敗パス負キャッシュ・`size <= 0` ガード・`clear_image_cache` による明示無効化を備える。
    - Blender統合・Nパネル連携（`ops/pattern.py`, `panels.py`, `utils/view3d.py`）: モーダル中はアクティブセッション（`get_active_pattern_editor_controller`）経由で参照画像の読込・表示切替（`toggle_reference_image`）・削除（`clear_reference_image`）・JSON入出力の変更を即時反映し、UIクローム領域（`UI`/`TOOLS`/`HEADER`）上のマウス操作は `is_mouse_over_viewport_chrome` により `PASS_THROUGH` してNパネルと併用可能。
 5. **非破壊3Dメッシュ統合ビルド (`build_types.py`, `build.py`)**:
@@ -1215,7 +1215,7 @@ graph TD
      - 対向する合印ノッチ同士が縫合される場合、合印位置のメッシュ頂点同士が 1対1 で完全に一致・整列するよう、ノッチ間区間ごとに分割数を独立同期。
      - 外周CCWと逆順に指定された `EdgeRange`（`end_node_id -> start_node_id`）において、サブセグメント列および各サブセグメント頂点列を幾何学的進行方向へ反転（`is_backward` 反転結合）し、3D縫合エッジのX字ねじれを完全に解消。
      - 辺上ノード挿入（`insert_node_on_segment`）時に、分割点を跨ぐ `Seam` を `SeamMode.CHAIN`（鎖縫合）へ自動昇格・分割して縫合の連続性を維持。
-     - ノッチのドラッグ移動（1cm刻み・中点スナップ対応）およびHUDカードでのインライン実寸（cm）・比率指定編集。重複ノッチ生成抑止（1mm未満近接抑止）。
+     - ノッチのドラッグ移動（`Seam` 相手・クリップボード辺長・1cm刻み・中点スナップおよび分割弧長ライブプレビュー対応）およびHUDカードでのインライン実寸（cm）・比率指定編集。重複ノッチ生成抑止（1mm未満近接抑止）。
    - 共有端点を持つ中継点付き縫合における直接縫合エッジへのフォールバック（G1ギャップ解消・分岐エラー防止）。
    - UVレイアウト展開へのピース配置アフィン変換（`piece.transform`）適用と周囲 2% 余白パディング（`[0.02, 0.98]`）。
    - 閉じた内部穴パス（`role == PathRole.HOLE`）の Winding Number 三角形除去による穴あきメッシュ構築。

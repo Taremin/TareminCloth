@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
-from .document import Document, EdgeRange
+from .document import Document, EdgeRange, NotchKind, NotchSnapKind, NotchSnapResult
 
 
 @dataclass
@@ -93,6 +93,61 @@ class SnapSettings:
     snap_nodes: bool = True
     grid_size: float = 0.01  # 1cm (0.01m)
     snap_threshold_pixels: float = 10.0  # ピクセル半径以内なら吸着
+
+
+@dataclass(frozen=True)
+class NotchPreviewState:
+    """ノッチ追加・移動操作中の2Dキャンバスプレビュー状態."""
+    mode: str  # "CREATE" | "MOVE"
+    piece_id: str
+    path_id: str
+    segment_start_id: str
+    t: float
+    kind: NotchKind
+    depth: float
+    width: float
+    snap_kind: NotchSnapKind
+    split_left_len: float
+    split_right_len: float
+    left_t_range: tuple[float, float]
+    right_t_range: tuple[float, float]
+    ref_length: Optional[float] = None
+    existing_notch_id: Optional[str] = None
+    snap_enabled: bool = True
+
+    @classmethod
+    def from_snap_result(
+        cls,
+        snap: NotchSnapResult,
+        *,
+        mode: str,
+        piece_id: str,
+        path_id: str,
+        segment_start_id: str,
+        kind: NotchKind = NotchKind.V,
+        depth: float = 0.005,
+        width: float = 0.004,
+        snap_enabled: bool = True,
+    ) -> NotchPreviewState:
+        """NotchSnapResult からキャンバス描画用の NotchPreviewState を構築する."""
+        return cls(
+            mode=mode,
+            piece_id=piece_id,
+            path_id=path_id,
+            segment_start_id=segment_start_id,
+            t=snap.t,
+            kind=kind,
+            depth=depth,
+            width=width,
+            snap_kind=snap.kind,
+            split_left_len=snap.split_left_len,
+            split_right_len=snap.split_right_len,
+            left_t_range=snap.left_t_range,
+            right_t_range=snap.right_t_range,
+            ref_length=snap.ref_length,
+            existing_notch_id=snap.existing_notch_id,
+            snap_enabled=snap_enabled,
+        )
 
 
 @dataclass

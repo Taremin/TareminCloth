@@ -17,6 +17,7 @@ from ..geometry import (
     closest_point_on_table,
 )
 from ..selection import HitResult, HitTargetKind, hit_test
+from ..session import NotchPreviewState
 from ..transform_ops import (
     TransformSnapshot,
     apply_translation,
@@ -342,14 +343,29 @@ class SelectTool(BaseTool):
                             tbl = build_arc_table(*ctrls)
                             local_pos = piece.transform.inverse_apply(event.world_pos)
                             _, raw_t, _ = closest_point_on_table(tbl, local_pos)
-                            snapped_t = controller.doc.snap_notch_t(
+                            clip_len = controller.copied_edge_length
+                            snap_res = controller.doc.resolve_notch_snap(
                                 notch.piece_id,
                                 notch.segment_start_id,
                                 raw_t=raw_t,
                                 path_id=notch.path_id,
                                 snap_enabled=not event.alt,
+                                exclude_notch_id=notch.id,
+                                clipboard_length=clip_len,
                             )
-                            controller.doc.move_notch(target.notch_id, snapped_t)
+                            controller.doc.move_notch(target.notch_id, snap_res.t)
+                            controller.notch_preview = NotchPreviewState.from_snap_result(
+                                snap_res,
+                                mode="MOVE",
+                                piece_id=notch.piece_id,
+                                path_id=notch.path_id,
+                                segment_start_id=notch.segment_start_id,
+                                kind=notch.kind,
+                                depth=notch.depth,
+                                width=notch.width,
+                                snap_enabled=not event.alt,
+                            )
+                            controller.is_dirty = True
             return True
 
         if target.kind in (
@@ -436,6 +452,7 @@ class SelectTool(BaseTool):
                 toggle=self._pending_shift_toggle,
             )
             self._reset_drag_state()
+            controller.notch_preview = None
             controller.is_dirty = True
             return True
 
@@ -443,6 +460,9 @@ class SelectTool(BaseTool):
         drag_target = self.drag_target
         moved = self._has_drag_moved
         self._reset_drag_state()
+        if controller.notch_preview is not None:
+            controller.notch_preview = None
+            controller.is_dirty = True
 
         if moved and before_doc is not None:
             if drag_target and drag_target.kind == HitTargetKind.HANDLE:
@@ -544,6 +564,9 @@ class SelectTool(BaseTool):
         if self.is_dragging and self.before_drag_doc is not None:
             controller.doc = self.before_drag_doc
         self._reset_drag_state()
+        if controller.notch_preview is not None:
+            controller.notch_preview = None
+            controller.is_dirty = True
         if self.is_box_selecting:
             self.is_box_selecting = False
             controller.preview_points.clear()

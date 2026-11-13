@@ -3,7 +3,7 @@
 
 import unittest
 
-from taremin_cloth.pattern.document import Document, Node, NodeKind, NotchKind, Path, PathRole
+from taremin_cloth.pattern.document import Document, Node, NodeKind, NotchKind, NotchSnapKind, Path, PathRole
 from taremin_cloth.pattern.editor import EditorController, EditorEvent
 from taremin_cloth.pattern.ids import new_id
 from taremin_cloth.pattern.renderer import DrawCommandKind, build_render_commands
@@ -219,6 +219,186 @@ class TestPatternInternalNotch(unittest.TestCase):
         from taremin_cloth.pattern.document import NodeKind
         first_node = self.ctrl.doc.pieces[self.piece.id].paths[self.piece.outer_path_id].nodes[0]
         self.assertEqual(first_node.kind, NodeKind.SMOOTH)
+
+    def test_notch_tool_hover_preview_and_alt_refresh(self) -> None:
+        """NotchTool のホバープレビュー、Alt即時再評価、既存ノッチ重複警告、およびクリア動作を検証."""
+        self.ctrl.set_active_tool("NOTCH")
+        # 下辺 (0,0)->(0.3,0) 上の t=0.5 付近にホバー -> MIDPOINT プレビュー (15cm / 15cm)
+        self.ctrl.is_dirty = False
+        self.ctrl.handle_event(self._event((0.148, 0.0), is_move=True))
+        self.assertTrue(self.ctrl.is_dirty)
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        pv = self.ctrl.notch_preview
+        self.assertEqual(pv.mode, "CREATE")
+        self.assertEqual(pv.snap_kind, NotchSnapKind.MIDPOINT)
+        self.assertAlmostEqual(pv.split_left_len, 0.15, places=4)
+        self.assertAlmostEqual(pv.split_right_len, 0.15, places=4)
+
+        # カーソルを動かさず Alt 押下 -> 即座に FREE へ切り替わること
+        self.ctrl.is_dirty = False
+        self.ctrl.handle_event(EditorEvent(alt=True, key="LEFT_ALT"))
+        self.assertTrue(self.ctrl.is_dirty)
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.assertEqual(self.ctrl.notch_preview.snap_kind, NotchSnapKind.FREE)
+        self.assertFalse(self.ctrl.notch_preview.snap_enabled)
+
+        # Alt 解放 -> MIDPOINT スナップへ復帰すること
+        self.ctrl.handle_event(EditorEvent(alt=False))
+        self.assertEqual(self.ctrl.notch_preview.snap_kind, NotchSnapKind.MIDPOINT)
+
+        # クリックでノッチ作成後、プレビューがクリアされること
+        self.ctrl.handle_event(self._event((0.148, 0.0), is_press=True, button="LEFT"))
+        self.assertEqual(len(self.ctrl.doc.notches), 1)
+        self.assertIsNone(self.ctrl.notch_preview)
+
+        # 作成した既存ノッチ上へ再度ホバー -> EXISTING として重複抑止候補が表示されること
+        self.ctrl.handle_event(self._event((0.1502, 0.0), is_move=True))
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.assertEqual(self.ctrl.notch_preview.snap_kind, NotchSnapKind.EXISTING)
+        self.assertIsNotNone(self.ctrl.notch_preview.existing_notch_id)
+
+        # 辺から離れた位置へ移動するとプレビューが消えること
+        self.ctrl.handle_event(self._event((0.15, 0.2), is_move=True))
+        self.assertIsNone(self.ctrl.notch_preview)
+
+        # 再度ホバー後にツール切替するとプレビューがクリアされること
+        self.ctrl.handle_event(self._event((0.10, 0.0), is_move=True))
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.ctrl.set_active_tool("SELECT")
+        self.assertIsNone(self.ctrl.notch_preview)
+
+    def test_select_tool_notch_drag_preview_and_cleanup(self) -> None:
+        """SelectTool でのノッチドラッグ中に MOVE プレビュー・クリップボードスナップ・解放後クリアが行われることを検証."""
+        self.ctrl.set_active_tool("NOTCH")
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_press=True, button="LEFT"))
+        notch_id = next(iter(self.ctrl.doc.notches.keys()))
+
+        # クリップボード辺長 (0.123m) を設定
+        self.ctrl.edge_clipboard = {"length": 0.123}
+        self.ctrl.set_active_tool("SELECT")
+
+        # ノッチを掴んで x=0.124 へドラッグ移動
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_press=True, button="LEFT"))
+        self.ctrl.handle_event(self._event((0.124, 0.0), is_move=True))
+
+        pv = self.ctrl.notch_preview
+        self.assertIsNotNone(pv)
+        self.assertEqual(pv.mode, "MOVE")
+        self.assertEqual(pv.snap_kind, NotchSnapKind.CLIPBOARD)
+        self.assertAlmostEqual(pv.split_left_len, 0.123, places=4)
+        self.assertAlmostEqual(pv.split_right_len, 0.3 - 0.123, places=4)
+        self.assertAlmostEqual(self.ctrl.doc.notches[notch_id].t, 0.123 / 0.3, places=4)
+
+        # マウスボタンを離すとプレビューがクリアされること
+        self.ctrl.handle_event(self._event((0.124, 0.0), is_release=True, button="LEFT"))
+        self.assertIsNone(self.ctrl.notch_preview)
+
+    def test_notch_preview_cleared_on_doc_mutations(self) -> None:
+        """undo / redo / delete_selected / replace_document_in_place 後に古い notch_preview が残留しないことを検証."""
+        self.ctrl.set_active_tool("NOTCH")
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_press=True, button="LEFT"))
+        self.assertEqual(len(self.ctrl.doc.notches), 1)
+        nid = next(iter(self.ctrl.doc.notches.keys()))
+
+        # 1. ホバー状態で undo -> プレビュークリア
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_move=True))
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.ctrl.is_dirty = False
+        self.assertTrue(self.ctrl.undo())
+        self.assertIsNone(self.ctrl.notch_preview)
+        self.assertTrue(self.ctrl.is_dirty)
+
+        # 2. ホバー状態で redo -> プレビュークリア
+        self.ctrl.handle_event(self._event((0.10, 0.0), is_move=True))
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.ctrl.is_dirty = False
+        self.assertTrue(self.ctrl.redo())
+        self.assertIsNone(self.ctrl.notch_preview)
+        self.assertTrue(self.ctrl.is_dirty)
+
+        # 3. ノッチ選択 + ホバー状態で delete_selected -> プレビュークリア
+        self.ctrl.handle_event(self._event((0.10, 0.0), is_move=True))
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        piece_id = next(iter(self.ctrl.doc.pieces.keys()))
+        self.ctrl.selection.select_notch(piece_id, nid)
+        self.ctrl.is_dirty = False
+        self.assertTrue(self.ctrl.delete_selected())
+        self.assertIsNone(self.ctrl.notch_preview)
+        self.assertTrue(self.ctrl.is_dirty)
+
+        # 4. ホバー状態で replace_document_in_place -> プレビュークリア
+        self.ctrl.handle_event(self._event((0.10, 0.0), is_move=True))
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.ctrl.is_dirty = False
+        from taremin_cloth.pattern.document import Document
+        new_doc = Document.new()
+        new_doc.add_rectangle_piece((0.0, 0.0), (0.5, 0.3), name="Replaced")
+        self.assertTrue(self.ctrl.replace_document_in_place(new_doc))
+        self.assertIsNone(self.ctrl.notch_preview)
+        self.assertTrue(self.ctrl.is_dirty)
+
+    def test_key_release_with_default_button_does_not_fire_mouse_up(self) -> None:
+        """button 既定値を持つ key+is_release イベントで on_mouse_up が誤発火しないことを検証."""
+        self.ctrl.set_active_tool("NOTCH")
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_press=True, button="LEFT"))
+        self.ctrl.set_active_tool("SELECT")
+
+        # ノッチドラッグ開始
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_press=True, button="LEFT"))
+        self.ctrl.handle_event(self._event((0.12, 0.0), is_move=True))
+        self.assertTrue(self.ctrl.active_tool.is_dragging)
+        self.assertIsNotNone(self.ctrl.notch_preview)
+
+        # is_release=True, key="LEFT_ALT"（button 省略＝既定 "LEFT"）でもドラッグ解除されないこと
+        self.ctrl.handle_event(EditorEvent(alt=False, is_release=True, key="LEFT_ALT"))
+        self.assertTrue(self.ctrl.active_tool.is_dragging)
+        self.assertIsNotNone(self.ctrl.notch_preview)
+
+        # 通常のマウスボタン解放でのみドラッグ終了すること
+        self.ctrl.handle_event(self._event((0.12, 0.0), is_release=True, button="LEFT"))
+        self.assertFalse(self.ctrl.active_tool.is_dragging)
+        self.assertIsNone(self.ctrl.notch_preview)
+
+    def test_ops_style_alt_toggle_refreshes_notch_and_sew_tool(self) -> None:
+        """ops/pattern.py 同等形式イベント (非ゼロ screen_pos, button='', key='LEFT_ALT'/解放時 '') での Alt 再評価検証."""
+        from taremin_cloth.pattern.document import NotchSnapKind
+
+        # 1. NotchTool
+        self.ctrl.set_active_tool("NOTCH")
+        hover_screen = self.ctrl.view.world_to_screen((0.149, 0.0))
+        self.assertNotEqual(hover_screen, (0.0, 0.0))
+        self.ctrl.handle_event(self._event((0.149, 0.0), is_move=True))
+        saved_last_pos = self.ctrl._last_world_pos
+        self.assertIsNotNone(saved_last_pos)
+        self.assertEqual(self.ctrl.notch_preview.snap_kind, NotchSnapKind.MIDPOINT)
+
+        # ops/pattern.py 経路での Alt 押下（現在カーソルの非ゼロ screen_pos かつ button=''）
+        self.ctrl.handle_event(EditorEvent(screen_pos=hover_screen, alt=True, key="LEFT_ALT", button=""))
+        self.assertEqual(self.ctrl._last_world_pos, saved_last_pos)
+        self.assertEqual(self.ctrl.notch_preview.snap_kind, NotchSnapKind.FREE)
+
+        # ops/pattern.py 経路での Alt 解放（key=''、is_press=False、is_release=False、button=''）
+        self.ctrl.handle_event(EditorEvent(screen_pos=hover_screen, alt=False, key="", button=""))
+        self.assertEqual(self.ctrl._last_world_pos, saved_last_pos)
+        self.assertEqual(self.ctrl.notch_preview.snap_kind, NotchSnapKind.MIDPOINT)
+
+        # ノッチを作成して SewTool を検証
+        self.ctrl.handle_event(self._event((0.15, 0.0), is_press=True, button="LEFT"))
+        self.ctrl.set_active_tool("SEW")
+        sew_screen = self.ctrl.view.world_to_screen((0.08, 0.0))
+        self.ctrl.handle_event(self._event((0.08, 0.0), is_move=True))
+        self.assertEqual(len(self.ctrl.preview_seam_candidates), 1)
+        cand = self.ctrl.preview_seam_candidates[0]
+        self.assertAlmostEqual(cand.t0, 0.0, places=4)
+        self.assertAlmostEqual(cand.t1, 0.5, places=4)
+
+        # SewTool でもカーソル位置を維持したまま Alt 押下で辺全体 (0.0..1.0) へ切り替わること
+        self.ctrl.handle_event(EditorEvent(screen_pos=sew_screen, alt=True, key="LEFT_ALT", button=""))
+        self.assertEqual(len(self.ctrl.preview_seam_candidates), 1)
+        self.assertAlmostEqual(self.ctrl.preview_seam_candidates[0].t1, 1.0, places=4)
+
+        self.ctrl.handle_event(EditorEvent(screen_pos=sew_screen, alt=False, key="", button=""))
+        self.assertAlmostEqual(self.ctrl.preview_seam_candidates[0].t1, 0.5, places=4)
 
 
 if __name__ == "__main__":

@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from ..document import Notch, NotchKind
-from ..geometry import build_arc_table, arc_length_at_t
+from ..document import Notch, NotchKind, NotchSnapResult
 from ..ids import new_id
-from ..selection import HitTargetKind, hit_test
+from ..selection import HitResult, HitTargetKind, hit_test
+from ..session import NotchPreviewState
 from .base import BaseTool
 
 if TYPE_CHECKING:
@@ -24,11 +24,12 @@ class NotchTool(BaseTool):
     def __init__(self, *, default_kind: NotchKind = NotchKind.V) -> None:
         self.default_kind = default_kind
 
-    def on_mouse_down(self, controller: EditorController, event: EditorEvent) -> bool:
-        if event.button != "LEFT":
-            return False
-
-        # 辺のヒットテスト（許容距離 12px 相当のワールド距離）
+    def _resolve_notch_candidate(
+        self,
+        controller: EditorController,
+        event: EditorEvent,
+    ) -> Optional[tuple[HitResult, NotchSnapResult]]:
+        """現在のマウス位置からノッチ配置候補の辺ヒットとスナップ結果を解決する."""
         threshold = controller.view.pixel_to_world_dist(12.0)
         hit = hit_test(
             controller.doc,
@@ -36,50 +37,40 @@ class NotchTool(BaseTool):
             edge_threshold=threshold,
             allowed_kinds={HitTargetKind.EDGE},
         )
-
         if not hit or hit.kind != HitTargetKind.EDGE:
-            return False
-
+            return None
         if not hit.segment_start_node_id or not hit.path_id:
-            return False
+            return None
 
         piece = controller.doc.pieces.get(hit.piece_id)
-        if not piece:
-            return False
+        if not piece or not piece.paths.get(hit.path_id):
+            return None
 
-        path = piece.paths.get(hit.path_id)
-        if not path:
-            return False
-
-        snapped_t = controller.doc.snap_notch_t(
+        clip_len = controller.copied_edge_length
+        snap_res = controller.doc.resolve_notch_snap(
             hit.piece_id,
             hit.segment_start_node_id,
             raw_t=hit.edge_t,
             path_id=hit.path_id,
             snap_enabled=not event.alt,
+            clipboard_length=clip_len,
         )
+        return (hit, snap_res)
 
-        # 同一セグメント上の既存ノッチとの実寸弧長差を検査 (1mm未満なら既存ノッチを選択して重複抑止)
-        nodes = path.nodes
-        n_nodes = len(nodes)
-        num_segs = n_nodes if path.closed else n_nodes - 1
-        seg_idx = next((i for i in range(num_segs) if nodes[i].id == hit.segment_start_node_id), None)
-        if seg_idx is not None:
-            ctrls = path.get_segment_controls(seg_idx)
-            table = build_arc_table(*ctrls)
-            s_snapped = arc_length_at_t(table, snapped_t)
+    def on_mouse_down(self, controller: EditorController, event: EditorEvent) -> bool:
+        if event.button != "LEFT":
+            return False
 
-            for existing in controller.doc.notches.values():
-                if (
-                    existing.piece_id == hit.piece_id
-                    and existing.path_id == hit.path_id
-                    and existing.segment_start_id == hit.segment_start_node_id
-                ):
-                    s_ex = arc_length_at_t(table, existing.t)
-                    if abs(s_ex - s_snapped) < 0.001:
-                        controller.selection.select_notch(hit.piece_id, existing.id)
-                        controller.is_dirty = True
-                        return True
+        cand = self._resolve_notch_candidate(controller, event)
+        if cand is None:
+            return False
+
+        hit, snap_res = cand
+        if snap_res.existing_notch_id:
+            controller.selection.select_notch(hit.piece_id, snap_res.existing_notch_id)
+            controller.notch_preview = None
+            controller.is_dirty = True
+            return True
 
         before_doc = controller.doc.clone()
         notch_id = new_id()
@@ -88,7 +79,7 @@ class NotchTool(BaseTool):
             piece_id=hit.piece_id,
             path_id=hit.path_id,
             segment_start_id=hit.segment_start_node_id,
-            t=snapped_t,
+            t=snap_res.t,
             kind=self.default_kind,
             depth=0.005,  # 5mm
             width=0.004,  # 4mm
@@ -97,6 +88,7 @@ class NotchTool(BaseTool):
 
         # 作成したノッチを選択状態にする
         controller.selection.select_notch(hit.piece_id, notch_id)
+        controller.notch_preview = None
 
         controller.history.record_change(
             description="Add Notch",
@@ -107,6 +99,36 @@ class NotchTool(BaseTool):
         return True
 
     def on_mouse_move(self, controller: EditorController, event: EditorEvent) -> bool:
+        prev = controller.notch_preview
+        cand = self._resolve_notch_candidate(controller, event)
+        if cand is None:
+            controller.notch_preview = None
+        else:
+            hit, snap_res = cand
+            kind = self.default_kind
+            depth = 0.005
+            width = 0.004
+            if snap_res.existing_notch_id:
+                existing = controller.doc.notches.get(snap_res.existing_notch_id)
+                if existing is not None:
+                    kind = existing.kind
+                    depth = existing.depth
+                    width = existing.width
+            controller.notch_preview = NotchPreviewState.from_snap_result(
+                snap_res,
+                mode="CREATE",
+                piece_id=hit.piece_id,
+                path_id=hit.path_id,
+                segment_start_id=hit.segment_start_node_id,
+                kind=kind,
+                depth=depth,
+                width=width,
+                snap_enabled=not event.alt,
+            )
+
+        if controller.notch_preview != prev:
+            controller.is_dirty = True
+            return True
         return False
 
     def on_mouse_up(self, controller: EditorController, event: EditorEvent) -> bool:
@@ -116,4 +138,6 @@ class NotchTool(BaseTool):
         return False
 
     def cancel(self, controller: EditorController) -> None:
-        pass
+        if controller.notch_preview is not None:
+            controller.notch_preview = None
+            controller.is_dirty = True

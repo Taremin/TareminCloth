@@ -20,7 +20,7 @@ from .document import (
 )
 from .history import HistoryManager
 from .ids import new_id
-from .session import SelectionState, SnapSettings, ViewTransform2D
+from .session import NotchPreviewState, SelectionState, SnapSettings, ViewTransform2D
 from .tools.base import BaseTool
 from .transform_ops import (
     TransformModalSession,
@@ -198,6 +198,7 @@ class EditorController:
         # プレビュー用一時幾何（描画系が参照）
         self.preview_points: list[tuple[float, float]] = []
         self.preview_seam_candidates: list[EdgeRange] = []
+        self.notch_preview: Optional[NotchPreviewState] = None
 
         # 既定ツールの初期登録
         from .tools import (
@@ -238,6 +239,58 @@ class EditorController:
             self.active_tool_name = tool_name
             self.preview_points.clear()
             self.preview_seam_candidates.clear()
+            self._invalidate_notch_preview()
+            self.is_dirty = True
+
+    @property
+    def copied_edge_length(self) -> Optional[float]:
+        """辺クリップボードに保持されている辺全長 (m) を返す（未保持時は None）."""
+        if not isinstance(self.edge_clipboard, dict):
+            return None
+        val = self.edge_clipboard.get("length")
+        if val is None:
+            val = self.edge_clipboard.get("total_length")
+        return float(val) if isinstance(val, (int, float)) else None
+
+    def _invalidate_notch_preview(self) -> None:
+        """ドキュメント変更等により古くなったノッチプレビュー状態を破棄する."""
+        self.notch_preview = None
+
+    def _record_doc_change(
+        self,
+        *,
+        description: str,
+        before_doc: Document,
+    ) -> bool:
+        """履歴へ変更を記録し、ドキュメント更新に伴うノッチプレビューを破棄する."""
+        recorded = self.history.record_change(
+            description=description,
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self._invalidate_notch_preview()
+        return recorded
+
+    def _recompute_hover_preview_at_last_pos(self, *, event: EditorEvent) -> None:
+        """修飾キー切替時に直近ポインタ位置でホバー／ドラッグプレビューを再評価する."""
+        tool = self.active_tool
+        if not tool or self._last_world_pos is None:
+            return
+        should_refresh = (
+            self.active_tool_name in ("NOTCH", "SEW")
+            or (self.active_tool_name == "SELECT" and getattr(tool, "is_dragging", False))
+        )
+        if not should_refresh:
+            return
+        synth_move = EditorEvent(
+            screen_pos=self.view.world_to_screen(self._last_world_pos),
+            world_pos=self._last_world_pos,
+            is_move=True,
+            shift=event.shift,
+            ctrl=event.ctrl,
+            alt=event.alt,
+        )
+        if tool.on_mouse_move(self, synth_move):
             self.is_dirty = True
 
     @property
@@ -356,10 +409,9 @@ class EditorController:
         self.editing_field = None
         self.editing_buffer = ""
         HistoryManager._copy_doc_in_place(new_doc, self.doc)
-        recorded = self.history.record_change(
+        recorded = self._record_doc_change(
             description=description,
             before_doc=before_doc,
-            after_doc=self.doc,
         )
         self.is_dirty = True
         return recorded
@@ -367,19 +419,21 @@ class EditorController:
     def handle_event(self, event: EditorEvent) -> bool:
         """入力イベントをアクティブツールまたはグローバルハンドラーへ配送する."""
         # Alt 押下中はグリッド/ノード吸着を一時無効化 (自由な微調整用)
+        prev_snap_bypass = self._snap_bypass
         self._snap_bypass = bool(event.alt)
+        snap_bypass_changed = (prev_snap_bypass != self._snap_bypass)
 
-        # ワールド座標・スクリーン座標の同期（キー単体イベント時は直近カーソル位置を維持）
-        is_key_only = (
-            bool(event.key or event.unicode)
-            and not event.is_press
-            and not event.is_release
-            and not event.is_move
+        # ワールド座標・スクリーン座標の同期（キー・修飾状態イベント時は直近カーソル位置を維持）
+        is_mouse_action = (
+            (event.is_press or event.is_release or event.is_double_click)
+            and not event.key
+            and bool(event.button)
         )
+        is_non_pointer_event = (not event.is_move) and (not is_mouse_action)
         if event.screen_pos == (0.0, 0.0) and event.world_pos != (0.0, 0.0):
             event.screen_pos = self.view.world_to_screen(event.world_pos)
             self._last_world_pos = event.world_pos
-        elif is_key_only and event.screen_pos == (0.0, 0.0) and self._last_world_pos is not None:
+        elif is_non_pointer_event and event.screen_pos == (0.0, 0.0) and self._last_world_pos is not None:
             event.world_pos = self._last_world_pos
             event.screen_pos = self.view.world_to_screen(self._last_world_pos)
         else:
@@ -1070,15 +1124,24 @@ class EditorController:
             if not consumed and event.key.upper() in ("ESCAPE", "ESC") and self._is_active_tool_busy():
                 tool.cancel(self)
                 consumed = True
-        elif event.is_press:
+        elif is_mouse_action and event.is_press:
             consumed = tool.on_mouse_down(self, event)
-        elif event.is_move:
+        elif event.is_move and not event.key:
             consumed = tool.on_mouse_move(self, event)
-        elif event.is_release:
+        elif is_mouse_action and event.is_release:
             consumed = tool.on_mouse_up(self, event)
 
         if consumed:
             self.is_dirty = True
+
+        # 修飾キー (Alt) 状態変化時はカーソルを動かさなくてもホバー/ドラッグプレビューを即時再評価する
+        if (
+            snap_bypass_changed
+            and not consumed
+            and is_non_pointer_event
+        ):
+            self._recompute_hover_preview_at_last_pos(event=event)
+
         return consumed
 
     def start_modal_transform(
@@ -1356,6 +1419,7 @@ class EditorController:
         self.transform_session = None
         self.status_message = ""
         self.history.commit_transaction(self.doc)
+        self._invalidate_notch_preview()
         self.is_dirty = True
 
     def _cancel_transform_session(self) -> None:
@@ -1460,10 +1524,9 @@ class EditorController:
                     except ValueError:
                         pass
                 if modified_ref:
-                    self.history.record_change(
+                    self._record_doc_change(
                         description=f"Edit {self.editing_field}",
                         before_doc=before_doc,
-                        after_doc=self.doc,
                     )
                     self.is_dirty = True
             return
@@ -1483,10 +1546,9 @@ class EditorController:
                             from .geometry import point_at_arc_length
                             _, target_t = point_at_arc_length(target_seg, s_m)
                             if self.doc.move_notch(nid, target_t):
-                                self.history.record_change(
+                                self._record_doc_change(
                                     description="Edit Notch Distance",
                                     before_doc=before_doc,
-                                    after_doc=self.doc,
                                 )
                                 self.is_dirty = True
                         except ValueError:
@@ -1498,10 +1560,9 @@ class EditorController:
                             if ratio_f > 1.0:
                                 ratio_f /= 100.0
                             if self.doc.move_notch(nid, ratio_f):
-                                self.history.record_change(
+                                self._record_doc_change(
                                     description="Edit Notch Ratio",
                                     before_doc=before_doc,
-                                    after_doc=self.doc,
                                 )
                                 self.is_dirty = True
                         except ValueError:
@@ -1574,10 +1635,9 @@ class EditorController:
                 except ValueError:
                     pass
         if modified:
-            self.history.record_change(
+            self._record_doc_change(
                 description=f"Edit {self.editing_field}",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
 
@@ -1607,10 +1667,9 @@ class EditorController:
                 modified = True
 
         if modified:
-            self.history.record_change(
+            self._record_doc_change(
                 description="Flip Seam Direction",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             return True
@@ -1638,10 +1697,9 @@ class EditorController:
         if not modified:
             return False
 
-        self.history.record_change(
+        self._record_doc_change(
             description="Rotate Pattern Up",
             before_doc=before_doc,
-            after_doc=self.doc,
         )
         self.status_message = f"{trans('Pattern Up')}: {int(round(last_angle))}°"
         self.is_dirty = True
@@ -1667,10 +1725,9 @@ class EditorController:
             if (pl_a and pl_a.target_bone) or (pl_b and pl_b.target_bone):
                 has_any_bone = True
 
-        self.history.record_change(
+        self._record_doc_change(
             description="Toggle Seam Routing",
             before_doc=before_doc,
-            after_doc=self.doc,
         )
         if new_routing == SeamRouting.BONE_WRAP:
             if has_any_bone:
@@ -1702,6 +1759,13 @@ class EditorController:
             return False
 
         before_doc = self.doc.clone()
+        if self._delete_selected_impl(before_doc=before_doc):
+            self._invalidate_notch_preview()
+            return True
+        return False
+
+    def _delete_selected_impl(self, *, before_doc: Document) -> bool:
+        """削除実処理（ノッチ、縫合、ノード、内部線、ピース）."""
         modified = False
 
         # 1. ノッチ削除（ノッチ選択時はノッチのみを削除し、ピース本体は削除しない）
@@ -1937,6 +2001,7 @@ class EditorController:
         if res:
             self.doc, _ = res
             self.selection.clear()
+            self._invalidate_notch_preview()
             self.is_dirty = True
             return True
         return False
@@ -1947,6 +2012,7 @@ class EditorController:
         if res:
             self.doc, _ = res
             self.selection.clear()
+            self._invalidate_notch_preview()
             self.is_dirty = True
             return True
         return False
@@ -1968,10 +2034,9 @@ class EditorController:
         for pid, nid in inserted:
             self.selection.select_node(pid, nid, add=True)
         desc = "Subdivide Edge" if len(inserted) == 1 else "Subdivide Edges"
-        self.history.record_change(
+        self._record_doc_change(
             description=desc,
             before_doc=before_doc,
-            after_doc=self.doc,
         )
         self.is_dirty = True
         return True
@@ -1987,10 +2052,9 @@ class EditorController:
             return False
         axis_u = axis.upper()
         mode_u = mode.upper()
-        self.history.record_change(
+        self._record_doc_change(
             description=f"Align Nodes {axis_u} ({mode_u.title()})",
             before_doc=before_doc,
-            after_doc=self.doc,
         )
         self.is_dirty = True
         return True
@@ -2034,10 +2098,9 @@ class EditorController:
         if self.doc.unfold_piece_along_edge(er):
             self.selection.clear()
             self.selection.select_piece(pid)
-            self.history.record_change(
+            self._record_doc_change(
                 description="Unfold Piece",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             return True
@@ -2054,10 +2117,9 @@ class EditorController:
         if new_piece:
             self.selection.clear()
             self.selection.select_piece(new_piece.id)
-            self.history.record_change(
+            self._record_doc_change(
                 description="Symmetric Duplicate Piece",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             return True
@@ -2084,10 +2146,9 @@ class EditorController:
             for npid in new_pids:
                 self.selection.select_piece(npid, add=True)
             desc = "Duplicate Mirrored Piece" if mirror_horizontal else "Duplicate Piece"
-            self.history.record_change(
+            self._record_doc_change(
                 description=desc,
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             return True
@@ -2223,10 +2284,9 @@ class EditorController:
             self.selection.clear()
             for npid in new_pids:
                 self.selection.select_piece(npid, add=True)
-            self.history.record_change(
+            self._record_doc_change(
                 description="Paste Piece",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             return True
@@ -2243,10 +2303,9 @@ class EditorController:
                 modified = True
         if modified:
             desc = "Flip Piece Horizontal" if direction == "HORIZONTAL" else "Flip Piece Vertical"
-            self.history.record_change(
+            self._record_doc_change(
                 description=desc,
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             return True
@@ -2333,10 +2392,9 @@ class EditorController:
             if self.shape_match_apply_endpoint_offset:
                 mode_desc += f", {trans('Offset')}"
             self.status_message = f"{trans('Edge shape pasted')} ({mode_desc})"
-            self.history.record_change(
+            self._record_doc_change(
                 description="Paste Edge Shape",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             logger.debug("[Pattern] paste_edge_shape: SUCCESS")
@@ -2401,10 +2459,9 @@ class EditorController:
                 modified = True
         if modified:
             self.status_message = trans("Seam shape matched")
-            self.history.record_change(
+            self._record_doc_change(
                 description="Match Seam Shape",
                 before_doc=before_doc,
-                after_doc=self.doc,
             )
             self.is_dirty = True
             logger.debug("[Pattern] match_selected_seam: SUCCESS")

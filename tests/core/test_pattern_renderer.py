@@ -136,6 +136,116 @@ class TestPatternRenderer(unittest.TestCase):
         self.assertTrue(layout.header_bar.contains(500.0, 780.0))
         self.assertTrue(layout.footer_bar.contains(500.0, 20.0))
 
+    def test_notch_preview_render_commands_and_show_lengths(self):
+        """ノッチプレビュー時の幾何・分割長表示・通常寸法テキストの重なり回避を検証."""
+        from taremin_cloth.pattern.editor import EditorEvent
+
+        p = self.doc.add_rectangle_piece((0.0, 0.0), (0.4, 0.2), name="Panel")
+        self.ctrl.set_active_tool("NOTCH")
+        # x=0.10 (下辺 0.40m の 10cm / 30cm 位置) にホバー
+        w_pos = (0.10, 0.0)
+        self.ctrl.handle_event(
+            EditorEvent(
+                screen_pos=self.ctrl.view.world_to_screen(w_pos),
+                world_pos=w_pos,
+                is_move=True,
+            )
+        )
+        self.assertIsNotNone(self.ctrl.notch_preview)
+
+        cmds = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        # プレビューポリラインが出力されること
+        pv_polys = [c for c in cmds if c.kind == DrawCommandKind.POLYLINE and c.color == DEFAULT_THEME.notch_preview]
+        self.assertEqual(len(pv_polys), 1)
+        # 分割長 10.0 cm と 30.0 cm が表示され、プレビュー中セグメント（下辺）の元の 40.0 cm dimension_text は非表示となり上辺の1つのみ残ること
+        texts = [(c.text, c.color) for c in cmds if c.kind == DrawCommandKind.TEXT]
+        self.assertTrue(any(t == "10.0 cm" and col == DEFAULT_THEME.notch_preview_text for t, col in texts))
+        self.assertTrue(any(t == "30.0 cm" and col == DEFAULT_THEME.notch_preview_text for t, col in texts))
+        dim_40_count = sum(1 for t, col in texts if t == "40.0 cm" and col == DEFAULT_THEME.dimension_text)
+        self.assertEqual(dim_40_count, 1)
+
+        # show_lengths=False 時は通常 dimension_text は 0 件のままだが、プレビュー分割長は表示され続けること
+        self.ctrl.show_lengths = False
+        cmds_no_dim = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        dim_texts = [c for c in cmds_no_dim if c.kind == DrawCommandKind.TEXT and c.color == DEFAULT_THEME.dimension_text]
+        self.assertEqual(len(dim_texts), 0)
+        pv_texts = [c.text for c in cmds_no_dim if c.kind == DrawCommandKind.TEXT and c.color == DEFAULT_THEME.notch_preview_text]
+        self.assertIn("10.0 cm", pv_texts)
+        self.assertIn("30.0 cm", pv_texts)
+
+        # 中点 (x=0.20) にホバー時は中点スナップ色およびバッジが出力されること
+        self.ctrl.handle_event(
+            EditorEvent(
+                screen_pos=self.ctrl.view.world_to_screen((0.198, 0.0)),
+                world_pos=(0.198, 0.0),
+                is_move=True,
+            )
+        )
+        cmds_mid = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        mid_polys = [c for c in cmds_mid if c.kind == DrawCommandKind.POLYLINE and c.color == DEFAULT_THEME.notch_snap_midpoint]
+        self.assertEqual(len(mid_polys), 1)
+        mid_texts = [c.text for c in cmds_mid if c.kind == DrawCommandKind.TEXT and c.color == DEFAULT_THEME.notch_snap_midpoint]
+        self.assertTrue(any(t in ("Mid", "中点") for t in mid_texts))
+
+        # ノッチを確定した後、同じ場所へホバーすると既存強調リングが出力されること
+        self.ctrl.handle_event(
+            EditorEvent(
+                screen_pos=self.ctrl.view.world_to_screen((0.20, 0.0)),
+                world_pos=(0.20, 0.0),
+                is_press=True,
+                button="LEFT",
+            )
+        )
+        self.ctrl.handle_event(
+            EditorEvent(
+                screen_pos=self.ctrl.view.world_to_screen((0.2002, 0.0)),
+                world_pos=(0.2002, 0.0),
+                is_move=True,
+            )
+        )
+        cmds_ex = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        ex_rings = [
+            c for c in cmds_ex
+            if c.kind == DrawCommandKind.CIRCLE and c.color == DEFAULT_THEME.notch_selected and not c.filled
+        ]
+        self.assertEqual(len(ex_rings), 1)
+
+    def test_existing_notch_preview_suppresses_both_split_dimensions(self) -> None:
+        """EXISTING プレビュー時、左右両区間の通常 dimension_text が抑止され左右プレビュー長が対称描画されること."""
+        from taremin_cloth.pattern.editor import EditorEvent
+
+        self.doc.add_rectangle_piece((0.0, 0.0), (0.4, 0.2), name="Panel")
+        self.ctrl.set_active_tool("NOTCH")
+        # x=0.16 (0.40m 辺上の t=0.40 -> 16.0 cm / 24.0 cm) にノッチ作成
+        self.ctrl.handle_event(
+            EditorEvent(
+                screen_pos=self.ctrl.view.world_to_screen((0.16, 0.0)),
+                world_pos=(0.16, 0.0),
+                is_press=True,
+                button="LEFT",
+            )
+        )
+        # 作成済みノッチ上へホバーして EXISTING 状態にする
+        self.ctrl.handle_event(
+            EditorEvent(
+                screen_pos=self.ctrl.view.world_to_screen((0.1602, 0.0)),
+                world_pos=(0.1602, 0.0),
+                is_move=True,
+            )
+        )
+        self.assertIsNotNone(self.ctrl.notch_preview)
+        self.assertIsNotNone(self.ctrl.notch_preview.existing_notch_id)
+
+        self.ctrl.show_lengths = True
+        cmds = build_render_commands(self.doc, self.ctrl, screen_size=self.screen_size)
+        dim_texts = [c.text for c in cmds if c.kind == DrawCommandKind.TEXT and c.color == DEFAULT_THEME.dimension_text]
+        pv_texts = [c.text for c in cmds if c.kind == DrawCommandKind.TEXT and c.color == DEFAULT_THEME.notch_preview_text]
+
+        self.assertNotIn("16.0 cm", dim_texts)
+        self.assertNotIn("24.0 cm", dim_texts)
+        self.assertEqual(pv_texts.count("16.0 cm"), 1)
+        self.assertEqual(pv_texts.count("24.0 cm"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

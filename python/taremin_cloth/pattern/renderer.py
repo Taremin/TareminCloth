@@ -9,8 +9,9 @@ from enum import Enum
 from typing import Any, Optional
 
 from .cards import format_selection_card_lines
-from .document import Document, NodeKind, NotchKind, PathRole, SeamRouting
+from .document import Document, NodeKind, NotchKind, NotchSnapKind, PathRole, SeamRouting
 from .editor import EditorController
+from .session import NotchPreviewState
 from .geometry import (
     build_arc_table,
     evaluate_cubic,
@@ -48,6 +49,221 @@ class DrawCommand:
     text: str = ""
     font_size: int = 12
     image_path: str = ""
+
+
+def _compute_notch_shape_local(
+    ctrls: tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]],
+    t: float,
+    *,
+    kind: NotchKind,
+    depth: float,
+    width: float,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], list[tuple[float, float]]]:
+    """ノッチのローカル座標・接線・内向き法線・形状頂点列を算出する."""
+    c0, c1, c2, c3 = ctrls
+    clamped_t = max(0.0, min(1.0, t))
+    p_loc = evaluate_cubic(c0, c1, c2, c3, clamped_t)
+
+    dt = 0.001
+    if clamped_t + dt <= 1.0:
+        p_forward = evaluate_cubic(c0, c1, c2, c3, clamped_t + dt)
+        tx, ty = p_forward[0] - p_loc[0], p_forward[1] - p_loc[1]
+    else:
+        p_backward = evaluate_cubic(c0, c1, c2, c3, clamped_t - dt)
+        tx, ty = p_loc[0] - p_backward[0], p_loc[1] - p_backward[1]
+
+    t_len = math.hypot(tx, ty)
+    if t_len > 1e-6:
+        tx /= t_len
+        ty /= t_len
+    else:
+        tx, ty = 1.0, 0.0
+
+    # 反時計回り（CCW）外周における内向き法線: (-ty, tx)
+    nx, ny = -ty, tx
+    hw = width * 0.5
+
+    if kind == NotchKind.SLIT:
+        shape_loc = [p_loc, (p_loc[0] + nx * depth, p_loc[1] + ny * depth)]
+    elif kind == NotchKind.U:
+        shape_loc = [
+            (p_loc[0] - tx * hw, p_loc[1] - ty * hw),
+            (p_loc[0] - tx * hw + nx * depth, p_loc[1] - ty * hw + ny * depth),
+            (p_loc[0] + tx * hw + nx * depth, p_loc[1] + ty * hw + ny * depth),
+            (p_loc[0] + tx * hw, p_loc[1] + ty * hw),
+        ]
+    else:  # NotchKind.V
+        shape_loc = [
+            (p_loc[0] - tx * hw, p_loc[1] - ty * hw),
+            (p_loc[0] + nx * depth, p_loc[1] + ny * depth),
+            (p_loc[0] + tx * hw, p_loc[1] + ty * hw),
+        ]
+
+    return (p_loc, (tx, ty), (nx, ny), shape_loc)
+
+
+def _should_skip_dim_subsegment(
+    notch_pv: Optional[NotchPreviewState],
+    *,
+    is_pv_seg: bool,
+    t_start: float,
+    t_end: float,
+) -> bool:
+    """ノッチプレビューと重複する通常分割区間寸法テキストをスキップすべきか判定する."""
+    if not is_pv_seg or notch_pv is None:
+        return False
+    eps = 1e-4
+    if notch_pv.mode == "CREATE" and notch_pv.existing_notch_id is None:
+        return (
+            abs(t_start - notch_pv.left_t_range[0]) < eps
+            and abs(t_end - notch_pv.right_t_range[1]) < eps
+        )
+    # MOVE モードおよび EXISTING ハイライト時: プレビュー側が左右両区間長を描画するため両方抑止
+    match_left = (
+        abs(t_start - notch_pv.left_t_range[0]) < eps
+        and abs(t_end - notch_pv.left_t_range[1]) < eps
+    )
+    match_right = (
+        abs(t_start - notch_pv.right_t_range[0]) < eps
+        and abs(t_end - notch_pv.right_t_range[1]) < eps
+    )
+    return match_left or match_right
+
+
+def _append_notch_preview_commands(
+    commands: list[DrawCommand],
+    controller: EditorController,
+    *,
+    theme: ThemeColors,
+) -> None:
+    """ノッチ追加・移動中のプレビュー形状・スナップ種別・左右分割弧長テキストを描画する."""
+    pv = getattr(controller, "notch_preview", None)
+    if pv is None:
+        return
+
+    doc = controller.doc
+    view = controller.view
+    piece = doc.pieces.get(pv.piece_id)
+    if not piece:
+        return
+    path = piece.paths.get(pv.path_id)
+    if not path or len(path.nodes) < 2:
+        return
+
+    n_nodes = len(path.nodes)
+    num_segs = n_nodes if path.closed else n_nodes - 1
+    seg_idx = next((i for i in range(num_segs) if path.nodes[i].id == pv.segment_start_id), None)
+    if seg_idx is None:
+        return
+
+    ctrls = path.get_segment_controls(seg_idx)
+    table = build_arc_table(*ctrls)
+    p_loc, _, (nx, ny), shape_loc = _compute_notch_shape_local(
+        ctrls,
+        pv.t,
+        kind=pv.kind,
+        depth=pv.depth,
+        width=pv.width,
+    )
+
+    color_map = {
+        NotchSnapKind.MIDPOINT: theme.notch_snap_midpoint,
+        NotchSnapKind.CLIPBOARD: theme.notch_snap_reference,
+        NotchSnapKind.SEAM_PARTNER: theme.notch_snap_reference,
+        NotchSnapKind.EXISTING: theme.notch_selected,
+    }
+    accent_col = color_map.get(pv.snap_kind, theme.notch_preview)
+
+    s_base = view.world_to_screen(piece.transform.transform_point(p_loc))
+    s_tip = view.world_to_screen(
+        piece.transform.transform_point((p_loc[0] + nx * pv.depth, p_loc[1] + ny * pv.depth))
+    )
+
+    if pv.mode == "CREATE":
+        if pv.existing_notch_id is not None:
+            commands.append(DrawCommand(
+                kind=DrawCommandKind.CIRCLE,
+                color=theme.notch_selected,
+                points=[s_base],
+                radius=6.0,
+                filled=False,
+                width=2.0,
+            ))
+        else:
+            s_shape_pts = [view.world_to_screen(piece.transform.transform_point(pt)) for pt in shape_loc]
+            commands.append(DrawCommand(
+                kind=DrawCommandKind.POLYLINE,
+                color=accent_col,
+                points=s_shape_pts,
+                width=2.2,
+            ))
+            commands.append(DrawCommand(
+                kind=DrawCommandKind.CIRCLE,
+                color=accent_col,
+                points=[s_base],
+                radius=3.5,
+                filled=True,
+            ))
+    else:  # "MOVE"
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.CIRCLE,
+            color=accent_col,
+            points=[s_base],
+            radius=5.5,
+            filled=False,
+            width=2.0,
+        ))
+
+    # スナップ種別バッジ（基準点から外向きに14pxオフセット）
+    badge_text = ""
+    if pv.snap_kind == NotchSnapKind.EXISTING:
+        badge_text = trans("Select")
+    elif pv.snap_kind == NotchSnapKind.MIDPOINT:
+        badge_text = trans("Mid")
+    elif pv.snap_kind == NotchSnapKind.CLIPBOARD:
+        badge_text = f"{trans('Clip')} ({format_cm(pv.ref_length)})" if pv.ref_length is not None else trans("Clip")
+    elif pv.snap_kind == NotchSnapKind.SEAM_PARTNER:
+        badge_text = f"{trans('Seam')} ({format_cm(pv.ref_length)})" if pv.ref_length is not None else trans("Seam")
+    elif pv.snap_kind == NotchSnapKind.FREE:
+        badge_text = trans("Free")
+
+    if badge_text:
+        ox = s_base[0] - s_tip[0]
+        oy = s_base[1] - s_tip[1]
+        olen = math.hypot(ox, oy)
+        if olen > 1e-6:
+            ox /= olen
+            oy /= olen
+        else:
+            ox, oy = 0.0, 1.0
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.TEXT,
+            color=accent_col,
+            points=[(s_base[0] + ox * 14.0, s_base[1] + oy * 14.0)],
+            text=badge_text,
+            font_size=10,
+        ))
+
+    # 左右分割区間の実寸弧長テキスト
+    text_col = (
+        accent_col
+        if pv.snap_kind in (NotchSnapKind.MIDPOINT, NotchSnapKind.CLIPBOARD, NotchSnapKind.SEAM_PARTNER)
+        else theme.notch_preview_text
+    )
+    for t_range, sub_len in ((pv.left_t_range, pv.split_left_len), (pv.right_t_range, pv.split_right_len)):
+        if sub_len <= 0.0005:
+            continue
+        s0 = arc_length_at_t(table, t_range[0])
+        s1 = arc_length_at_t(table, t_range[1])
+        pt_mid, _ = point_at_arc_length(table, 0.5 * (s0 + s1))
+        s_mid = view.world_to_screen(piece.transform.transform_point(pt_mid))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.TEXT,
+            color=text_col,
+            points=[(s_mid[0] + 4.0, s_mid[1] + 4.0)],
+            text=format_cm(sub_len),
+            font_size=11,
+        ))
 
 
 def _append_transform_session_commands(
@@ -341,12 +557,27 @@ def build_render_commands(
                 ))
 
                 # 寸法線テキスト（Lキーでトグル、5mm以上のセグメント/部分区間に表示）
+                notch_pv = getattr(controller, "notch_preview", None)
+                is_pv_seg = (
+                    notch_pv is not None
+                    and not is_internal
+                    and notch_pv.piece_id == piece.id
+                    and notch_pv.path_id == path.id
+                    and notch_pv.segment_start_id == n0.id
+                )
                 if getattr(controller, "show_lengths", True) and table.total_length > 0.005:
                     bps = doc.get_segment_notch_breakpoints(piece.id, n0.id, path_id=path.id) if not is_internal else [0.0, 1.0]
                     if len(bps) > 2:
                         for k in range(len(bps) - 1):
                             t_start = bps[k]
                             t_end = bps[k + 1]
+                            if _should_skip_dim_subsegment(
+                                notch_pv,
+                                is_pv_seg=is_pv_seg,
+                                t_start=t_start,
+                                t_end=t_end,
+                            ):
+                                continue
                             s_start = arc_length_at_t(table, t_start)
                             s_end = arc_length_at_t(table, t_end)
                             sub_len = abs(s_end - s_start)
@@ -362,7 +593,7 @@ def build_render_commands(
                                     text=format_cm(sub_len),
                                     font_size=10,
                                 ))
-                    else:
+                    elif not is_pv_seg:
                         mid_pt, _ = point_at_arc_length(table, table.total_length * 0.5)
                         w_mid = piece.transform.transform_point(mid_pt)
                         s_mid = view.world_to_screen(w_mid)
@@ -457,47 +688,13 @@ def build_render_commands(
             n0 = path.nodes[i]
             if n0.id == notch.segment_start_id:
                 ctrls = path.get_segment_controls(i)
-                c0, c1, c2, c3 = ctrls
-                t = max(0.0, min(1.0, notch.t))
-                p_loc = evaluate_cubic(c0, c1, c2, c3, t)
-
-                # 微分により接線方向と外向き法線方向を計算
-                dt = 0.001
-                if t + dt <= 1.0:
-                    p_forward = evaluate_cubic(c0, c1, c2, c3, t + dt)
-                    tx, ty = p_forward[0] - p_loc[0], p_forward[1] - p_loc[1]
-                else:
-                    p_backward = evaluate_cubic(c0, c1, c2, c3, t - dt)
-                    tx, ty = p_loc[0] - p_backward[0], p_loc[1] - p_backward[1]
-
-                t_len = math.hypot(tx, ty)
-                if t_len > 1e-6:
-                    tx /= t_len
-                    ty /= t_len
-                else:
-                    tx, ty = 1.0, 0.0
-
-                # 反時計回り（CCW）外周における内向き法線: (-ty, tx)
-                nx, ny = -ty, tx
-
-                d = notch.depth
-                hw = notch.width * 0.5
-
-                if notch.kind == NotchKind.SLIT:
-                    shape_loc = [p_loc, (p_loc[0] + nx * d, p_loc[1] + ny * d)]
-                elif notch.kind == NotchKind.U:
-                    shape_loc = [
-                        (p_loc[0] - tx * hw, p_loc[1] - ty * hw),
-                        (p_loc[0] - tx * hw + nx * d, p_loc[1] - ty * hw + ny * d),
-                        (p_loc[0] + tx * hw + nx * d, p_loc[1] + ty * hw + ny * d),
-                        (p_loc[0] + tx * hw, p_loc[1] + ty * hw),
-                    ]
-                else:  # NotchKind.V
-                    shape_loc = [
-                        (p_loc[0] - tx * hw, p_loc[1] - ty * hw),
-                        (p_loc[0] + nx * d, p_loc[1] + ny * d),
-                        (p_loc[0] + tx * hw, p_loc[1] + ty * hw),
-                    ]
+                _, _, _, shape_loc = _compute_notch_shape_local(
+                    ctrls,
+                    notch.t,
+                    kind=notch.kind,
+                    depth=notch.depth,
+                    width=notch.width,
+                )
 
                 is_notch_sel = controller.selection.is_notch_selected(notch.id)
                 n_col = th.notch_selected if is_notch_sel else th.notch
@@ -509,6 +706,9 @@ def build_render_commands(
                     width=2.5 if is_notch_sel else 1.8,
                 ))
                 break
+
+    # 2.6 ノッチ追加・ドラッグ移動プレビューの描画
+    _append_notch_preview_commands(commands, controller, theme=th)
 
     # 3. 縫合線 (Seams) の描画（中心ではなく両端を線で結び、方向性を可視化）
     for seam in doc.seams.values():
