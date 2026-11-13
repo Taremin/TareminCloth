@@ -272,10 +272,10 @@ class TestPatternEditorHeadless(unittest.TestCase):
         ctrl.doc.seams[seam.id] = seam
         ctrl.selection.select_seam(seam.id)
 
-        # 1. カード情報に縫合方向と R キー案内が表示されること
+        # 1. カード情報に縫合方向と F キー案内が表示されること
         card_lines = format_selection_card_lines(ctrl.doc, ctrl.selection)
         self.assertTrue(any("Normal" in line or "正方向" in line for line in card_lines))
-        self.assertTrue(any("Press R to flip" in line or "Rキーで反転" in line for line in card_lines))
+        self.assertTrue(any("Press F to flip" in line or "Fキーで反転" in line for line in card_lines))
 
         # 2. 描画コマンド生成: 両端を結ぶ2本の主線と中央の薄い補助線、始点マーカー2個が生成されること
         cmds = build_render_commands(ctrl.doc, ctrl, screen_size=(800, 600))
@@ -283,8 +283,8 @@ class TestPatternEditorHeadless(unittest.TestCase):
         # 始点ペア、終点ペア、中央補助線
         self.assertGreaterEqual(len(seam_lines), 3)
 
-        # 3. R キー押下で縫合方向が反転すること (reverse: False -> True)
-        handled = ctrl.handle_event(EditorEvent(key="R"))
+        # 3. F キー押下で縫合方向が反転すること (reverse: False -> True)
+        handled = ctrl.handle_event(EditorEvent(key="F"))
         self.assertTrue(handled)
         self.assertTrue(seam.reverse)
 
@@ -292,12 +292,12 @@ class TestPatternEditorHeadless(unittest.TestCase):
         card_lines_rev = format_selection_card_lines(ctrl.doc, ctrl.selection)
         self.assertTrue(any("Reversed" in line or "反転" in line for line in card_lines_rev))
 
-        # F キーでも反転できること (reverse: True -> False)
+        # 再度 F キーでトグル (reverse: True -> False)
         ctrl.handle_event(EditorEvent(key="F"))
         self.assertFalse(ctrl.doc.seams[seam.id].reverse)
 
-        # もう一度 R を押すと元に戻ること (reverse: False -> True)
-        ctrl.handle_event(EditorEvent(key="R"))
+        # もう一度 F を押すと反転に戻ること (reverse: False -> True)
+        ctrl.handle_event(EditorEvent(key="F"))
         self.assertTrue(ctrl.doc.seams[seam.id].reverse)
 
         # Undo (Ctrl+Z) で反転が元に戻ること
@@ -570,9 +570,16 @@ class TestPatternEditorHeadless(unittest.TestCase):
         ctrl.handle_event(EditorEvent(screen_pos=(-100.0, -100.0), is_release=True, button="LEFT"))
         self.assertEqual(len(ctrl.selection.piece_ids), 0)
 
-        # 5. Rect の外周辺上 (上辺 x=0.13, y=0.24 -> screen (130, 240)) をクリックしても Rect を選択できること
+        # 5. Rect の外周辺上 (上辺 x=0.13, y=0.24 -> screen (130, 240)) をクリックすると外周辺のみ選択され、
+        #    ピース内部 (130, 140) をクリックすると Rect ピースを選択できること
         ctrl.handle_event(EditorEvent(screen_pos=(130.0, 240.0), is_press=True, button="LEFT"))
         ctrl.handle_event(EditorEvent(screen_pos=(130.0, 240.0), is_release=True, button="LEFT"))
+        self.assertEqual(len(ctrl.selection.edge_ranges), 1)
+        self.assertEqual(ctrl.selection.edge_ranges[0].piece_id, rect_id)
+        self.assertEqual(len(ctrl.selection.piece_ids), 0)
+
+        ctrl.handle_event(EditorEvent(screen_pos=(130.0, 140.0), is_press=True, button="LEFT"))
+        ctrl.handle_event(EditorEvent(screen_pos=(130.0, 140.0), is_release=True, button="LEFT"))
         self.assertEqual(ctrl.selection.piece_ids, {rect_id})
 
 

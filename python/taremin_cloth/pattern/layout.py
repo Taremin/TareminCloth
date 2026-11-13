@@ -199,6 +199,26 @@ def compute_hud_layout(
         "seam_routing": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
     }
 
+    # 複数頂点整列カード用ボタンフィールド (行4: top-92, 行6: top-128 に4等分配置)
+    align_gap = 4.0
+    align_inner_w = card_w - 16.0
+    align_btn_w = (align_inner_w - align_gap * 3.0) / 4.0
+    align_modes = ("min", "center", "avg", "max")
+    for idx, mode_key in enumerate(align_modes):
+        bx = info_card.x + 8.0 + idx * (align_btn_w + align_gap)
+        card_fields[f"align_x_{mode_key}"] = Rect2D(
+            x=bx,
+            y=(info_card.top - 92.0) - 5.0,
+            w=align_btn_w,
+            h=field_h,
+        )
+        card_fields[f"align_y_{mode_key}"] = Rect2D(
+            x=bx,
+            y=(info_card.top - 128.0) - 5.0,
+            w=align_btn_w,
+            h=field_h,
+        )
+
     compass_rect = Rect2D(
         x=info_card.x + 15.0,
         y=info_card.y + 12.0,

@@ -51,8 +51,8 @@ class TestPatternEdgeOperations(unittest.TestCase):
         er = ctrl.selection.get_active_edge_range()
         self.assertIsNotNone(er)
         self.assertEqual(er.piece_id, pid)
-        # 後方互換性およびドラッグ連携のため piece_ids にも登録されていること
-        self.assertIn(pid, ctrl.selection.piece_ids)
+        # 辺選択時は親ピース自体を piece_ids に混入させない（辺移動・誤削除防止）
+        self.assertNotIn(pid, ctrl.selection.piece_ids)
         self.assertEqual(ctrl.selection.active_piece_id, pid)
 
         # 描画コマンドの検証（POLYLINE 総数が4のまま、選択辺のみハイライト色・太線）
@@ -66,10 +66,14 @@ class TestPatternEdgeOperations(unittest.TestCase):
         ]
         self.assertEqual(len(selected_lines), 1)
 
-        # 辺を掴んだままのドラッグ移動（100.0 -> 150.0 px, +0.05m）
+        # 辺を掴んだままのドラッグ移動（100.0 -> 150.0 px, +0.05m）: 辺の両端頂点のみが移動し piece.transform は不変
         ctrl.handle_event(EditorEvent(screen_pos=(150.0, 0.0), is_move=True))
         ctrl.handle_event(EditorEvent(screen_pos=(150.0, 0.0), is_release=True))
-        self.assertAlmostEqual(piece.transform.tx, 0.05, places=5)
+        self.assertAlmostEqual(piece.transform.tx, 0.0, places=5)
+        self.assertAlmostEqual(outer.nodes[0].position[0], 0.05, places=5)
+        self.assertAlmostEqual(outer.nodes[1].position[0], 0.25, places=5)
+        self.assertAlmostEqual(outer.nodes[2].position[0], 0.2, places=5)
+        self.assertAlmostEqual(outer.nodes[3].position[0], 0.0, places=5)
 
     def test_subdivide_edge_w_key_and_double_click(self):
         """ベジェ曲線辺を実寸弧長50%で分割し、ダブルクリックでもノードが挿入されること."""

@@ -29,6 +29,7 @@ from .polygon import (
     point_in_polygon,
     has_self_intersection,
     segment_intersection,
+    segment_intersects_aabb,
     triangulate_polygon_2d,
 )
 from .transform import (
@@ -60,6 +61,7 @@ __all__ = [
     "point_in_polygon",
     "has_self_intersection",
     "segment_intersection",
+    "segment_intersects_aabb",
     "triangulate_polygon_2d",
     "Affine2D",
     "compute_bounding_box",

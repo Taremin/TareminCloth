@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from .document import (
     Document,
     EdgeRange,
+    Node,
+    Path,
     PathRole,
     Placement,
     SeamRouting,
@@ -19,6 +21,19 @@ from .history import HistoryManager
 from .ids import new_id
 from .session import SelectionState, SnapSettings, ViewTransform2D
 from .tools.base import BaseTool
+from .transform_ops import (
+    TransformModalSession,
+    align_selected_nodes as apply_node_alignment,
+    apply_rotation,
+    apply_scale,
+    apply_translation,
+    can_start_modal_transform,
+    capture_transform_snapshot,
+    finalize_scale_orientation,
+    find_nearest_snap_reference,
+    restore_snapshot,
+)
+from .units import m_to_cm, parse_length_input
 from ..i18n import trans
 from ..utils.logger import logger
 
@@ -69,6 +84,27 @@ KEY_CHAR_MAP: dict[str, str] = {
     "PLUS": "+",
     "NUMPAD_PLUS": "+",
 }
+
+
+def _extract_event_char(event: EditorEvent, *, allowed_chars: Optional[str] = None) -> Optional[str]:
+    """キーボード入力イベントから数値・単位入力用の1文字を抽出する."""
+    k = event.key.upper() if event.key else ""
+    char: Optional[str] = None
+    if event.unicode and (event.unicode.isalnum() or event.unicode in ".-+%"):
+        char = event.unicode
+    elif k in KEY_CHAR_MAP:
+        char = KEY_CHAR_MAP[k]
+    elif len(event.key) == 1 and (event.key.isalnum() or event.key in ".-+%"):
+        char = event.key
+    elif k.startswith("NUMPAD_") and len(k) == 8 and k[7].isdigit():
+        char = k[7]
+    elif k == "NUMPAD_PERIOD":
+        char = "."
+
+    if char is not None and allowed_chars is not None and char not in allowed_chars:
+        return None
+    return char
+
 
 NOTCH_CARD_FIELDS: tuple[str, ...] = ("notch_from_start", "notch_ratio")
 PIECE_CARD_FIELDS: tuple[str, ...] = (
@@ -136,6 +172,8 @@ class EditorController:
         self.request_close: bool = False
         self.editing_field: Optional[str] = None
         self.editing_buffer: str = ""
+        self.transform_session: Optional[TransformModalSession] = None
+        self._last_world_pos: Optional[tuple[float, float]] = None
 
         # クリップボードおよび形状・弧長転写設定
         self.edge_clipboard: Optional[dict[str, Any]] = None
@@ -183,6 +221,8 @@ class EditorController:
         if tool_name not in self.tools:
             return
         if self.active_tool_name != tool_name:
+            if self.transform_session is not None:
+                self._cancel_transform_session()
             curr_tool = self.tools.get(self.active_tool_name)
             if curr_tool:
                 curr_tool.cancel(self)
@@ -196,26 +236,94 @@ class EditorController:
         """現在アクティブなツールインスタンスを返す."""
         return self.tools.get(self.active_tool_name)
 
+    def _is_active_tool_busy(self) -> bool:
+        """現在アクティブなツールがドラッグ中または作図途中の状態か返す."""
+        tool = self.active_tool
+        if not tool:
+            return False
+        if (
+            getattr(tool, "is_dragging", False)
+            or getattr(tool, "is_box_selecting", False)
+            or getattr(tool, "is_drawing", False)
+            or getattr(tool, "is_cutting", False)
+        ):
+            return True
+        if getattr(tool, "points", None) or getattr(tool, "local_points", None):
+            return True
+        if int(getattr(tool, "step", 0)) > 0:
+            return True
+        return False
+
+    @property
+    def is_modal_input_active(self) -> bool:
+        """数値入力・モーダル変形・ドラッグ中など、ツール切替ホットキーやESC終了を抑止すべき状態か."""
+        return bool(
+            self.editing_field is not None
+            or self.picking_bone
+            or self.transform_session is not None
+            or self.sliding_field is not None
+            or self.is_dragging_compass
+            or self._is_active_tool_busy()
+        )
+
+    def _get_or_create_placement(self, piece_id: str) -> Placement:
+        """指定ピースの Placement を取得し、存在しない場合は生成して登録する."""
+        pl = self.doc.placements.get(piece_id)
+        if not pl:
+            pl = Placement(piece_id=piece_id)
+            self.doc.placements[piece_id] = pl
+        return pl
+
+    def _is_piece_card_mode(self) -> bool:
+        """ピース情報カード（単一・複数一括共通）を表示・操作すべき選択状態か判定する."""
+        return (
+            not self.selection.notch_ids
+            and not self.selection.seam_ids
+            and not self.selection.edge_ranges
+            and len(self.selection.piece_ids) >= 1
+        )
+
+    def _is_multi_node_align_mode(self) -> bool:
+        """複数頂点整列カードを表示・操作すべき選択状態か判定する."""
+        return (
+            not self.selection.notch_ids
+            and not self.selection.seam_ids
+            and not self.selection.edge_ranges
+            and not self.selection.piece_ids
+            and len(self.selection.node_ids) >= 2
+        )
+
     def handle_event(self, event: EditorEvent) -> bool:
         """入力イベントをアクティブツールまたはグローバルハンドラーへ配送する."""
         # Alt 押下中はグリッド/ノード吸着を一時無効化 (自由な微調整用)
         self._snap_bypass = bool(event.alt)
 
-        # ワールド座標・スクリーン座標の同期
+        # ワールド座標・スクリーン座標の同期（キー単体イベント時は直近カーソル位置を維持）
+        is_key_only = (
+            bool(event.key or event.unicode)
+            and not event.is_press
+            and not event.is_release
+            and not event.is_move
+        )
         if event.screen_pos == (0.0, 0.0) and event.world_pos != (0.0, 0.0):
             event.screen_pos = self.view.world_to_screen(event.world_pos)
+            self._last_world_pos = event.world_pos
+        elif is_key_only and event.screen_pos == (0.0, 0.0) and self._last_world_pos is not None:
+            event.world_pos = self._last_world_pos
+            event.screen_pos = self.view.world_to_screen(self._last_world_pos)
         else:
             event.world_pos = self.view.screen_to_world(event.screen_pos)
+            self._last_world_pos = event.world_pos
 
         # インライン数値入力モード中のキー入力優先処理
-        if self.editing_field is not None and (event.key or event.unicode):
+        if self.editing_field is not None and (event.key or event.unicode) and not event.is_release:
             k = event.key.upper()
-            if k == "ESCAPE":
+            if k in ("ESCAPE", "ESC"):
                 self.editing_field = None
                 self.editing_buffer = ""
                 self.is_dirty = True
                 return True
-            if k in ("ENTER", "NUMPAD_ENTER", "RET"):
+            if k in ("ENTER", "NUMPAD_ENTER", "RET", "RETURN"):
                 self._commit_inline_edit()
                 self.editing_field = None
                 self.editing_buffer = ""
@@ -225,22 +333,16 @@ class EditorController:
                 self.editing_buffer = self.editing_buffer[:-1]
                 self.is_dirty = True
                 return True
-            char = None
-            if event.unicode and (event.unicode.isalnum() or event.unicode in ".-+%"):
-                char = event.unicode
-            elif k in KEY_CHAR_MAP:
-                char = KEY_CHAR_MAP[k]
-            elif len(event.key) == 1 and (event.key.isalnum() or event.key in ".-+%"):
-                char = event.key
-            elif k.startswith("NUMPAD_") and len(k) == 8 and k[7].isdigit():
-                char = k[7]
-            elif k == "NUMPAD_PERIOD":
-                char = "."
+            char = _extract_event_char(event)
             if char is not None:
                 self.editing_buffer += char
                 self.is_dirty = True
                 return True
             return True
+
+        # モーダル変形（G / R / S）中の最優先イベント処理
+        if self.transform_session is not None:
+            return self._handle_transform_modal_event(event)
 
         # Pick Bone モード中の専用イベント処理（クリック確定・X/Delete解除・Esc/右クリック/Bキャンセル）
         if self.picking_bone:
@@ -249,19 +351,17 @@ class EditorController:
             if event.is_press:
                 if event.button == "LEFT":
                     if self.hovered_bone and self.selection.piece_ids:
-                        pid = next(iter(self.selection.piece_ids))
-                        pl = self.doc.placements.get(pid)
-                        if not pl:
-                            from .document import Placement
-                            pl = Placement(piece_id=pid)
-                            self.doc.placements[pid] = pl
-                        before_doc = self.doc.clone()
-                        pl.target_bone = self.hovered_bone
-                        self.history.record_change(
-                            description=f"Pick Target Bone ({self.hovered_bone})",
-                            before_doc=before_doc,
-                            after_doc=self.doc,
-                        )
+                        valid_pids = [pid for pid in self.selection.piece_ids if pid in self.doc.pieces]
+                        if valid_pids:
+                            before_doc = self.doc.clone()
+                            for pid in valid_pids:
+                                pl = self._get_or_create_placement(pid)
+                                pl.target_bone = self.hovered_bone
+                            self.history.record_change(
+                                description=f"Pick Target Bone ({self.hovered_bone})",
+                                before_doc=before_doc,
+                                after_doc=self.doc,
+                            )
                     self.picking_bone = False
                     self.hovered_bone = ""
                     self.is_dirty = True
@@ -271,7 +371,7 @@ class EditorController:
                     self.hovered_bone = ""
                     self.is_dirty = True
                     return True
-            if event.key:
+            if event.key and not event.is_release:
                 k = event.key.upper()
                 if k in ("ESCAPE", "ESC", "B"):
                     self.picking_bone = False
@@ -280,11 +380,16 @@ class EditorController:
                     return True
                 elif k in ("X", "DELETE"):
                     if self.selection.piece_ids:
-                        pid = next(iter(self.selection.piece_ids))
-                        pl = self.doc.placements.get(pid)
-                        if pl and pl.target_bone:
+                        has_bone = any(
+                            (pl := self.doc.placements.get(pid)) is not None and bool(pl.target_bone)
+                            for pid in self.selection.piece_ids
+                        )
+                        if has_bone:
                             before_doc = self.doc.clone()
-                            pl.target_bone = ""
+                            for pid in self.selection.piece_ids:
+                                pl = self.doc.placements.get(pid)
+                                if pl and pl.target_bone:
+                                    pl.target_bone = ""
                             self.history.record_change(
                                 description="Clear Target Bone",
                                 before_doc=before_doc,
@@ -296,8 +401,18 @@ class EditorController:
                     return True
             return True
 
-        # スライダー操作中のマウス移動・マウス解放処理
+        # スライダー操作中のマウス移動・マウス解放・キャンセル処理
         if self.sliding_field is not None:
+            if (event.is_press and event.button == "RIGHT") or (
+                event.key and not event.is_release and event.key.upper() in ("ESCAPE", "ESC")
+            ):
+                if self.slide_before_doc is not None:
+                    self.doc = self.slide_before_doc
+                self.sliding_field = None
+                self.is_slider_dragging = False
+                self.slide_before_doc = None
+                self.is_dirty = True
+                return True
             if event.is_move:
                 px, _ = event.screen_pos
                 dx = px - self.slide_start_pos[0]
@@ -305,10 +420,11 @@ class EditorController:
                     self.is_slider_dragging = True
 
                 if self.is_slider_dragging and self.selection.piece_ids:
-                    first_pid = next(iter(self.selection.piece_ids))
-                    pl = self.doc.placements.get(first_pid)
-                    if pl:
-                        shift_mod = 0.2 if event.shift else 1.0
+                    shift_mod = 0.2 if event.shift else 1.0
+                    for pid in self.selection.piece_ids:
+                        if pid not in self.doc.pieces:
+                            continue
+                        pl = self._get_or_create_placement(pid)
                         if self.sliding_field == "bone_t":
                             # 200px で 0.0〜1.0 (感度: 0.005)
                             new_val = self.slide_start_val + dx * 0.005 * shift_mod
@@ -325,7 +441,7 @@ class EditorController:
                             # 100px で 0.1m = 10cm (感度: 0.001)
                             new_val = self.slide_start_val + dx * 0.001 * shift_mod
                             pl.surface_offset = max(0.001, min(1.0, new_val))
-                        self.is_dirty = True
+                    self.is_dirty = True
                 return True
             elif event.is_release and event.button == "LEFT":
                 field = self.sliding_field
@@ -347,25 +463,32 @@ class EditorController:
                     return True
                 else:
                     # 3px以内の単発クリック -> インライン数値直接入力を開始
-                    if self.selection.piece_ids:
-                        first_pid = next(iter(self.selection.piece_ids))
-                        pl = self.doc.placements.get(first_pid)
-                        if pl:
-                            self.editing_field = field
-                            if field == "bone_t":
-                                self.editing_buffer = f"{int(pl.bone_t * 100)}"
-                            elif field == "bone_angle_deg":
-                                self.editing_buffer = f"{int(pl.bone_angle_deg)}"
-                            elif field == "pattern_up_angle_deg":
-                                self.editing_buffer = f"{int(round(pl.pattern_up_angle_deg))}"
-                            elif field == "surface_offset":
-                                from .units import m_to_cm
-                                self.editing_buffer = f"{m_to_cm(pl.surface_offset):.1f}"
-                            self.is_dirty = True
+                    first_pid = self.selection.get_active_piece_id()
+                    if first_pid and first_pid in self.doc.pieces:
+                        pl = self._get_or_create_placement(first_pid)
+                        self.editing_field = field
+                        if field == "bone_t":
+                            self.editing_buffer = f"{int(pl.bone_t * 100)}"
+                        elif field == "bone_angle_deg":
+                            self.editing_buffer = f"{int(pl.bone_angle_deg)}"
+                        elif field == "pattern_up_angle_deg":
+                            self.editing_buffer = f"{int(round(pl.pattern_up_angle_deg))}"
+                        elif field == "surface_offset":
+                            self.editing_buffer = f"{m_to_cm(pl.surface_offset):.1f}"
+                        self.is_dirty = True
                     return True
 
-        # コンパスドラッグ中のマウス移動・マウス解放処理
+        # コンパスドラッグ中のマウス移動・マウス解放・キャンセル処理
         if self.is_dragging_compass:
+            if (event.is_press and event.button == "RIGHT") or (
+                event.key and not event.is_release and event.key.upper() in ("ESCAPE", "ESC")
+            ):
+                self.is_dragging_compass = False
+                if self.drag_compass_before_doc is not None:
+                    self.doc = self.drag_compass_before_doc
+                    self.drag_compass_before_doc = None
+                self.is_dirty = True
+                return True
             if event.is_move:
                 from .layout import compute_hud_layout
                 layout = compute_hud_layout(
@@ -384,11 +507,11 @@ class EditorController:
                 if event.shift:
                     theta_deg = round(theta_deg / 15.0) * 15.0
                 if self.selection.piece_ids:
-                    first_pid = next(iter(self.selection.piece_ids))
-                    pl = self.doc.placements.get(first_pid)
-                    if pl:
-                        pl.bone_angle_deg = theta_deg
-                        self.is_dirty = True
+                    for pid in self.selection.piece_ids:
+                        if pid in self.doc.pieces:
+                            pl = self._get_or_create_placement(pid)
+                            pl.bone_angle_deg = theta_deg
+                    self.is_dirty = True
                 return True
             elif event.is_release and event.button == "LEFT":
                 self.is_dragging_compass = False
@@ -431,12 +554,7 @@ class EditorController:
                     self.set_active_tool(tool_name)
                     return True
 
-            is_piece_card_mode = (
-                not self.selection.notch_ids
-                and not self.selection.seam_ids
-                and not self.selection.edge_ranges
-                and len(self.selection.piece_ids) == 1
-            )
+            is_piece_card_mode = self._is_piece_card_mode()
 
             # コンパス領域クリック判定
             if is_piece_card_mode and layout.compass_rect.contains(px, py):
@@ -449,13 +567,10 @@ class EditorController:
                 theta_deg = math.degrees(math.atan2(dx, dy))
                 if event.shift:
                     theta_deg = round(theta_deg / 15.0) * 15.0
-                first_pid = next(iter(self.selection.piece_ids))
-                pl = self.doc.placements.get(first_pid)
-                if not pl:
-                    from .document import Placement
-                    pl = Placement(piece_id=first_pid)
-                    self.doc.placements[first_pid] = pl
-                pl.bone_angle_deg = theta_deg
+                for pid in self.selection.piece_ids:
+                    if pid in self.doc.pieces:
+                        pl = self._get_or_create_placement(pid)
+                        pl.bone_angle_deg = theta_deg
                 self.is_dirty = True
                 return True
 
@@ -481,14 +596,10 @@ class EditorController:
                             return True
 
             elif is_piece_card_mode and layout.info_card.contains(px, py):
-                first_pid = next(iter(self.selection.piece_ids))
-                p = self.doc.pieces.get(first_pid)
-                if p:
-                    pl = self.doc.placements.get(first_pid)
-                    if not pl:
-                        from .document import Placement
-                        pl = Placement(piece_id=first_pid)
-                        self.doc.placements[first_pid] = pl
+                first_pid = self.selection.get_active_piece_id()
+                p = self.doc.pieces.get(first_pid) if first_pid else None
+                if p and first_pid:
+                    pl = self._get_or_create_placement(first_pid)
 
                     for field_name in PIECE_CARD_FIELDS:
                         f_rect = layout.card_fields.get(field_name)
@@ -615,6 +726,14 @@ class EditorController:
                             self.is_dirty = True
                         return True
 
+            elif self._is_multi_node_align_mode() and layout.info_card.contains(px, py):
+                for axis_k in ("x", "y"):
+                    for mode_k in ("min", "center", "avg", "max"):
+                        f_rect = layout.card_fields.get(f"align_{axis_k}_{mode_k}")
+                        if f_rect and f_rect.contains(px, py):
+                            self.align_selected_nodes(axis=axis_k.upper(), mode=mode_k.upper())
+                            return True
+
             # HUD矩形領域内の誤作図防止ガード
             if (
                 layout.header_bar.contains(px, py)
@@ -719,60 +838,109 @@ class EditorController:
                     self.is_dirty = True
                     return True
 
-        # グローバルショートカット: 選択削除 (X または Delete)
-        if event.key.upper() in ("X", "DELETE"):
-            if self.delete_selected():
-                return True
+        # グローバルショートカット（キー押下時のみ反応、RELEASEは無視）
+        if event.key and not event.is_release:
+            k_up = event.key.upper()
 
-        # グローバルショートカット: 縫合反転 (R または F)
-        if not event.ctrl and not event.alt and event.key.upper() in ("R", "F"):
-            if self.flip_selected_seams():
-                return True
-
-        # グローバルショートカット: 寸法線トグル (L)
-        if not event.ctrl and not event.alt and event.key.upper() == "L":
-            self.show_lengths = not self.show_lengths
-            self.is_dirty = True
-            return True
-
-        # グローバルショートカット: 縫合ボーン巻付けトグル / ボーン選択モードトグル (B)
-        if not event.ctrl and not event.alt and event.key.upper() == "B":
-            if self.selection.seam_ids:
-                if self.toggle_selected_seams_routing():
+            # 選択削除 (X または Delete)
+            if k_up in ("X", "DELETE"):
+                if self.delete_selected():
                     return True
-            elif self.selection.piece_ids:
-                self.picking_bone = not self.picking_bone
+
+            # 縫合反転 (Fキーに一本化)
+            if not event.ctrl and not event.alt and k_up == "F":
+                if self.flip_selected_seams():
+                    return True
+
+            # モーダル変形開始 (G: 移動 / R: 回転 / S: 拡大縮小)
+            if not event.ctrl and not event.alt and not event.shift and k_up in ("G", "R", "S"):
+                if not self._is_active_tool_busy():
+                    mode_map = {"G": "MOVE", "R": "ROTATE", "S": "SCALE"}
+                    if self.start_modal_transform(mode=mode_map[k_up], cursor_world=event.world_pos):
+                        return True
+                    if self.status_message:
+                        return True
+
+            # 全選択 (A) / 全選択解除 (Alt+A)
+            if not event.ctrl and not event.shift and k_up == "A":
+                if event.alt:
+                    self.selection.clear_all()
+                    self.is_dirty = True
+                    return True
+                if (
+                    self.selection.node_ids
+                    and not self.selection.piece_ids
+                    and not self.selection.edge_ranges
+                ):
+                    target_pids = {
+                        pid
+                        for pid, piece in self.doc.pieces.items()
+                        if any(
+                            nd.id in self.selection.node_ids
+                            for path in piece.paths.values()
+                            for nd in path.nodes
+                        )
+                    }
+                    for pid in target_pids:
+                        piece = self.doc.pieces.get(pid)
+                        if not piece:
+                            continue
+                        for path in piece.paths.values():
+                            for nd in path.nodes:
+                                self.selection.select_node(pid, nd.id, add=True)
+                    self.is_dirty = True
+                    return True
+                self.selection.select_all_pieces(self.doc.pieces.keys())
                 self.is_dirty = True
                 return True
 
-        # グローバルショートカット: パターン上方向 ±90°回転 (T / Shift+T)
-        if not event.ctrl and not event.alt and event.key.upper() == "T":
-            if self.selection.piece_ids:
-                delta_deg = -90.0 if event.shift else 90.0
-                if self.rotate_selected_pieces_pattern_up(delta_deg=delta_deg):
-                    return True
-
-        # グローバルショートカット: 形状合わせ方モード切替 (O / Shift+O)
-        if not event.ctrl and not event.alt and event.key.upper() == "O":
-            if self.selection.edge_ranges or self.selection.seam_ids:
-                if event.shift:
-                    self.shape_match_apply_endpoint_offset = not self.shape_match_apply_endpoint_offset
-                    self.status_message = f"{trans('Apply End Offset')}: {trans('ON') if self.shape_match_apply_endpoint_offset else trans('OFF')}"
-                else:
-                    modes = ["SIMILAR", "LENGTH_ADJUST_BULGE", "LENGTH_MOVE_END"]
-                    cur_idx = modes.index(self.shape_match_mode) if self.shape_match_mode in modes else 0
-                    self.shape_match_mode = modes[(cur_idx + 1) % len(modes)]
-                    self.status_message = f"{trans('Match Mode')}: {self.shape_match_mode}"
+            # 寸法線トグル (L)
+            if not event.ctrl and not event.alt and k_up == "L":
+                self.show_lengths = not self.show_lengths
                 self.is_dirty = True
                 return True
+
+            # 縫合ボーン巻付けトグル / ボーン選択モードトグル (B)
+            if not event.ctrl and not event.alt and k_up == "B":
+                if self.selection.seam_ids:
+                    if self.toggle_selected_seams_routing():
+                        return True
+                elif self.selection.piece_ids:
+                    self.picking_bone = not self.picking_bone
+                    self.is_dirty = True
+                    return True
+
+            # パターン上方向 ±90°回転 (T / Shift+T)
+            if not event.ctrl and not event.alt and k_up == "T":
+                if self.selection.piece_ids:
+                    delta_deg = -90.0 if event.shift else 90.0
+                    if self.rotate_selected_pieces_pattern_up(delta_deg=delta_deg):
+                        return True
+
+            # 形状合わせ方モード切替 (O / Shift+O)
+            if not event.ctrl and not event.alt and k_up == "O":
+                if self.selection.edge_ranges or self.selection.seam_ids:
+                    if event.shift:
+                        self.shape_match_apply_endpoint_offset = not self.shape_match_apply_endpoint_offset
+                        self.status_message = f"{trans('Apply End Offset')}: {trans('ON') if self.shape_match_apply_endpoint_offset else trans('OFF')}"
+                    else:
+                        modes = ["SIMILAR", "LENGTH_ADJUST_BULGE", "LENGTH_MOVE_END"]
+                        cur_idx = modes.index(self.shape_match_mode) if self.shape_match_mode in modes else 0
+                        self.shape_match_mode = modes[(cur_idx + 1) % len(modes)]
+                        self.status_message = f"{trans('Match Mode')}: {self.shape_match_mode}"
+                    self.is_dirty = True
+                    return True
 
         tool = self.active_tool
         if not tool:
             return False
 
         consumed = False
-        if event.key:
+        if event.key and not event.is_release:
             consumed = tool.on_key_press(self, event)
+            if not consumed and event.key.upper() in ("ESCAPE", "ESC") and self._is_active_tool_busy():
+                tool.cancel(self)
+                consumed = True
         elif event.is_press:
             consumed = tool.on_mouse_down(self, event)
         elif event.is_move:
@@ -783,6 +951,320 @@ class EditorController:
         if consumed:
             self.is_dirty = True
         return consumed
+
+    def start_modal_transform(
+        self,
+        *,
+        mode: str,
+        cursor_world: tuple[float, float] = (0.0, 0.0),
+    ) -> bool:
+        """G (MOVE) / R (ROTATE) / S (SCALE) のモーダル変形セッションを開始する."""
+        mode_u = mode.upper()
+        if mode_u not in ("MOVE", "ROTATE", "SCALE"):
+            return False
+
+        ok, err_msg = can_start_modal_transform(self.doc, self.selection, mode=mode_u)
+        if not ok:
+            if err_msg:
+                self.status_message = trans(err_msg)
+                self.is_dirty = True
+            return False
+
+        if self.transform_session is not None:
+            self._cancel_transform_session()
+
+        snapshot = capture_transform_snapshot(self.doc, self.selection)
+        snap_ref = find_nearest_snap_reference(snapshot, cursor_world)
+        label_map = {
+            "MOVE": "Move Elements",
+            "ROTATE": "Rotate Elements",
+            "SCALE": "Scale Elements",
+        }
+        self.history.begin_transaction(self.doc, label=label_map[mode_u])
+        self.transform_session = TransformModalSession(
+            mode=mode_u,
+            snapshot=snapshot,
+            start_cursor_world=cursor_world,
+            current_cursor_world=cursor_world,
+            snap_reference_world=snap_ref,
+        )
+        self._update_transform_status_message(self.transform_session)
+        self.is_dirty = True
+        return True
+
+    def _handle_transform_modal_event(self, event: EditorEvent) -> bool:
+        """モーダル変形セッション実行中のイベントをすべて優先処理する."""
+        session = self.transform_session
+        if session is None:
+            return False
+
+        if event.is_move:
+            session.current_cursor_world = event.world_pos
+            if not session.numeric_buffer:
+                self._apply_cursor_transform(session, shift=bool(event.shift))
+            self._update_transform_status_message(session)
+            self.is_dirty = True
+            return True
+
+        if event.is_press:
+            if event.button == "LEFT":
+                self._commit_transform_session()
+                return True
+            if event.button == "RIGHT":
+                self._cancel_transform_session()
+                return True
+            return True
+
+        if event.is_release:
+            return True
+
+        if event.key or event.unicode:
+            k = event.key.upper()
+            if k in ("ENTER", "NUMPAD_ENTER", "RET", "RETURN"):
+                self._commit_transform_session()
+                return True
+            if k in ("ESCAPE", "ESC"):
+                self._cancel_transform_session()
+                return True
+            if k in ("BACK_SPACE", "BACKSPACE"):
+                if session.numeric_buffer:
+                    session.numeric_buffer = session.numeric_buffer[:-1]
+                    self._reapply_modal_transform(session, shift=bool(event.shift))
+                    self._update_transform_status_message(session)
+                    self.is_dirty = True
+                return True
+
+            if not event.ctrl and not event.alt:
+                if k == "X" and session.mode in ("MOVE", "SCALE"):
+                    session.axis_lock = None if session.axis_lock == "X" else "X"
+                    self._reapply_modal_transform(session, shift=bool(event.shift))
+                    self._update_transform_status_message(session)
+                    self.is_dirty = True
+                    return True
+                if k == "Y" and session.mode in ("MOVE", "SCALE"):
+                    session.axis_lock = None if session.axis_lock == "Y" else "Y"
+                    self._reapply_modal_transform(session, shift=bool(event.shift))
+                    self._update_transform_status_message(session)
+                    self.is_dirty = True
+                    return True
+                if (
+                    k == "N"
+                    and session.mode == "MOVE"
+                    and not session.numeric_buffer.lower().endswith("i")
+                    and not session.snapshot.piece_only_mode
+                    and session.snapshot.active_edge_normal is not None
+                ):
+                    order: list[Optional[str]] = (
+                        [None, "NORMAL", "NORMAL_ACTIVE"]
+                        if len(self.selection.edge_ranges) >= 2
+                        else [None, "NORMAL"]
+                    )
+                    cur = session.axis_lock if session.axis_lock in order else None
+                    session.axis_lock = order[(order.index(cur) + 1) % len(order)]
+                    self._reapply_modal_transform(session, shift=bool(event.shift))
+                    self._update_transform_status_message(session)
+                    self.is_dirty = True
+                    return True
+
+                char = _extract_event_char(event, allowed_chars="0123456789.-+%cminCMIN")
+                if char is not None:
+                    if char.isalpha():
+                        char = char.lower()
+                    session.numeric_buffer += char
+                    self._reapply_modal_transform(session, shift=bool(event.shift))
+                    self._update_transform_status_message(session)
+                    self.is_dirty = True
+                    return True
+        return True
+
+    def _reapply_modal_transform(self, session: TransformModalSession, *, shift: bool) -> None:
+        if session.numeric_buffer:
+            self._apply_numeric_transform(session)
+        else:
+            self._apply_cursor_transform(session, shift=shift)
+
+    def _apply_cursor_transform(self, session: TransformModalSession, *, shift: bool) -> None:
+        if session.mode == "MOVE":
+            delta = (
+                session.current_cursor_world[0] - session.start_cursor_world[0],
+                session.current_cursor_world[1] - session.start_cursor_world[1],
+            )
+            eff = apply_translation(
+                self.doc,
+                session.snapshot,
+                delta_world=delta,
+                view=self.view,
+                snap_settings=self.snap_settings,
+                snap_reference_world=session.snap_reference_world,
+                axis_lock=session.axis_lock,
+                clamp_ortho=shift,
+            )
+            session.current_delta = eff
+        elif session.mode == "ROTATE":
+            px, py = session.snapshot.pivot_world
+            v0x = session.start_cursor_world[0] - px
+            v0y = session.start_cursor_world[1] - py
+            v1x = session.current_cursor_world[0] - px
+            v1y = session.current_cursor_world[1] - py
+            if math.hypot(v0x, v0y) < 1e-6 or math.hypot(v1x, v1y) < 1e-6:
+                d_angle = 0.0
+            else:
+                a0 = math.atan2(v0y, v0x)
+                a1 = math.atan2(v1y, v1x)
+                d_angle = math.atan2(math.sin(a1 - a0), math.cos(a1 - a0))
+            if shift:
+                step = math.radians(5.0)
+                d_angle = round(d_angle / step) * step
+            apply_rotation(self.doc, session.snapshot, angle_rad=d_angle)
+            session.current_angle_rad = d_angle
+        elif session.mode == "SCALE":
+            px, py = session.snapshot.pivot_world
+            r0 = math.hypot(
+                session.start_cursor_world[0] - px,
+                session.start_cursor_world[1] - py,
+            )
+            r1 = math.hypot(
+                session.current_cursor_world[0] - px,
+                session.current_cursor_world[1] - py,
+            )
+            raw_s = 1.0 if r0 < 1e-5 else max(0.01, r1 / r0)
+            if shift:
+                raw_s = max(0.05, round(raw_s / 0.05) * 0.05)
+            sx = raw_s if session.axis_lock in (None, "X") else 1.0
+            sy = raw_s if session.axis_lock in (None, "Y") else 1.0
+            eff_sx, eff_sy = apply_scale(self.doc, session.snapshot, sx=sx, sy=sy)
+            session.current_scale = (eff_sx, eff_sy)
+
+    def _apply_numeric_transform(self, session: TransformModalSession) -> None:
+        buf = session.numeric_buffer.strip()
+        if not buf:
+            self._apply_cursor_transform(session, shift=False)
+            return
+
+        if session.mode == "MOVE":
+            if buf in ("-", "+", ".", "-.", "+."):
+                eff = apply_translation(
+                    self.doc,
+                    session.snapshot,
+                    delta_world=(0.0, 0.0),
+                    axis_lock=session.axis_lock,
+                )
+                session.current_delta = eff
+                return
+            try:
+                dist_m = parse_length_input(buf, default_unit="cm")
+            except ValueError:
+                return
+            if session.axis_lock == "X":
+                raw_delta = (dist_m, 0.0)
+            elif session.axis_lock == "Y":
+                raw_delta = (0.0, dist_m)
+            elif (
+                session.axis_lock in ("NORMAL", "NORMAL_ACTIVE")
+                and session.snapshot.active_edge_normal is not None
+            ):
+                nx, ny = session.snapshot.active_edge_normal
+                raw_delta = (nx * dist_m, ny * dist_m)
+            else:
+                cdx = session.current_cursor_world[0] - session.start_cursor_world[0]
+                cdy = session.current_cursor_world[1] - session.start_cursor_world[1]
+                clen = math.hypot(cdx, cdy)
+                ux, uy = (cdx / clen, cdy / clen) if clen > 1e-6 else (1.0, 0.0)
+                raw_delta = (ux * dist_m, uy * dist_m)
+            eff = apply_translation(
+                self.doc,
+                session.snapshot,
+                delta_world=raw_delta,
+                view=self.view,
+                snap_settings=None,
+                snap_reference_world=None,
+                axis_lock=session.axis_lock,
+                clamp_ortho=False,
+            )
+            session.current_delta = eff
+        elif session.mode == "ROTATE":
+            clean = buf.replace("°", "").replace("deg", "").strip()
+            if clean in ("", "-", "+", ".", "-.", "+."):
+                apply_rotation(self.doc, session.snapshot, angle_rad=0.0)
+                session.current_angle_rad = 0.0
+                return
+            try:
+                deg = float(clean)
+            except ValueError:
+                return
+            angle_rad = math.radians(deg)
+            apply_rotation(self.doc, session.snapshot, angle_rad=angle_rad)
+            session.current_angle_rad = angle_rad
+        elif session.mode == "SCALE":
+            is_pct = buf.endswith("%")
+            num_str = buf[:-1].strip() if is_pct else buf
+            if num_str in ("", "-", "+", ".", "-.", "+."):
+                return
+            try:
+                val = float(num_str)
+            except ValueError:
+                return
+            if is_pct:
+                val /= 100.0
+            sx = val if session.axis_lock in (None, "X") else 1.0
+            sy = val if session.axis_lock in (None, "Y") else 1.0
+            eff_sx, eff_sy = apply_scale(self.doc, session.snapshot, sx=sx, sy=sy)
+            session.current_scale = (eff_sx, eff_sy)
+
+    def _commit_transform_session(self) -> None:
+        session = self.transform_session
+        if session is None:
+            return
+        if session.mode == "SCALE":
+            sx, sy = session.current_scale
+            if abs(sx) <= 1.001e-4 or abs(sy) <= 1.001e-4:
+                self._cancel_transform_session()
+                self.status_message = trans("Scale cannot be zero")
+                self.is_dirty = True
+                return
+            finalize_scale_orientation(self.doc, session.snapshot, sx=sx, sy=sy)
+
+        self.transform_session = None
+        self.status_message = ""
+        self.history.commit_transaction(self.doc)
+        self.is_dirty = True
+
+    def _cancel_transform_session(self) -> None:
+        session = self.transform_session
+        if session is None:
+            return
+        self.transform_session = None
+        self.status_message = ""
+        restore_snapshot(self.doc, session.snapshot)
+        self.history.cancel_transaction(self.doc)
+        self.is_dirty = True
+
+    def _update_transform_status_message(self, session: TransformModalSession) -> None:
+        axis_map = {
+            "X": " [X]",
+            "Y": " [Y]",
+            "NORMAL": f" [{trans('Normal Offset')}]",
+            "NORMAL_ACTIVE": f" [{trans('Active Normal')}]",
+        }
+        axis_label = axis_map.get(session.axis_lock or "", "")
+        if session.mode == "MOVE":
+            if session.numeric_buffer:
+                self.status_message = f"{trans('Move')}{axis_label}: {session.numeric_buffer}"
+            else:
+                dx, dy = session.current_delta
+                self.status_message = f"{trans('Move')}{axis_label}: ({m_to_cm(dx):+.2f}, {m_to_cm(dy):+.2f}) cm"
+        elif session.mode == "ROTATE":
+            if session.numeric_buffer:
+                self.status_message = f"{trans('Rotate')}: {session.numeric_buffer}°"
+            else:
+                deg = math.degrees(session.current_angle_rad)
+                self.status_message = f"{trans('Rotate')}: {deg:+.1f}°"
+        elif session.mode == "SCALE":
+            if session.numeric_buffer:
+                self.status_message = f"{trans('Scale')}{axis_label}: {session.numeric_buffer}"
+            else:
+                sx, sy = session.current_scale
+                self.status_message = f"{trans('Scale')}{axis_label}: ({sx:.2f}, {sy:.2f})"
 
     def _commit_inline_edit(self) -> None:
         """インライン入力バッファの内容を選択中ピースまたはノッチへ適用する."""
@@ -1025,19 +1507,21 @@ class EditorController:
         return True
 
     def delete_selected(self) -> bool:
-        """現在選択中の要素（ノッチ、縫合、ノード、またはピース）を優先順位に従って削除し履歴に記録する.
-        
+        """現在選択中の要素（ノッチ、縫合、ノード、内部線、またはピース）を優先順位に従って削除し履歴に記録する.
+
         優先順位:
         1. ノッチが選択されている場合 -> ノッチのみを削除
         2. 縫合が選択されている場合 -> 縫合のみを削除
         3. ノードが選択されている場合 -> ノードのみを削除
-        4. 上記がなくピースが選択されている場合 -> ピース全体を削除
+        4. 辺が選択されている場合 -> 内部線のみ削除（外周辺は誤削除防止のため保護）
+        5. 上記がなくピースが選択されている場合 -> ピース全体を削除
         """
         if (
             not self.selection.piece_ids
             and not self.selection.node_ids
             and not self.selection.notch_ids
             and not self.selection.seam_ids
+            and not self.selection.edge_ranges
         ):
             return False
 
@@ -1127,7 +1611,121 @@ class EditorController:
                 self.is_dirty = True
                 return True
 
-        # 4. ピース削除（明示的にピースが選択されている場合のみ）
+        # 4. 辺削除（内部線のみ削除可、外周辺選択時は親ピースの誤削除を防止）
+        if self.selection.edge_ranges:
+            has_outer = False
+            internal_segs: dict[tuple[str, str], set[int]] = {}
+            for er in self.selection.edge_ranges:
+                piece = self.doc.pieces.get(er.piece_id)
+                if not piece:
+                    continue
+                path = piece.paths.get(er.path_id)
+                if not path:
+                    continue
+                if path.role == PathRole.OUTER:
+                    has_outer = True
+                    break
+                if path.role == PathRole.INTERNAL:
+                    res = path.resolve_edge_range(er)
+                    if res:
+                        seg_idx, _, _ = res
+                        internal_segs.setdefault((piece.id, path.id), set()).add(seg_idx)
+
+            if has_outer:
+                self.status_message = trans(
+                    "Outer boundary edges cannot be deleted (Delete nodes instead)"
+                )
+                self.is_dirty = True
+                return False
+
+            if internal_segs:
+                removed_seg_keys: set[tuple[str, str, str]] = set()
+                removed_path_keys: set[tuple[str, str]] = set()
+                for (pid, path_id), seg_indices in internal_segs.items():
+                    piece = self.doc.pieces.get(pid)
+                    if not piece:
+                        continue
+                    path = piece.paths.get(path_id)
+                    if not path:
+                        continue
+                    n_nodes = len(path.nodes)
+                    total_segs = n_nodes if path.closed else max(0, n_nodes - 1)
+                    for s_idx in seg_indices:
+                        if 0 <= s_idx < n_nodes:
+                            removed_seg_keys.add((pid, path_id, path.nodes[s_idx].id))
+
+                    if len(seg_indices) >= total_segs or n_nodes <= 2:
+                        del piece.paths[path_id]
+                        removed_path_keys.add((pid, path_id))
+                        modified = True
+                    else:
+                        kept_runs: list[list[Node]] = []
+                        cur_run: list[Node] = []
+                        for i in range(total_segs):
+                            if i not in seg_indices:
+                                if not cur_run:
+                                    cur_run.append(path.nodes[i])
+                                cur_run.append(path.nodes[(i + 1) % n_nodes])
+                            else:
+                                if len(cur_run) >= 2:
+                                    kept_runs.append(cur_run)
+                                cur_run = []
+                        if len(cur_run) >= 2:
+                            kept_runs.append(cur_run)
+
+                        del piece.paths[path_id]
+                        for r_idx, run_nodes in enumerate(kept_runs):
+                            target_id = path_id if r_idx == 0 else new_id()
+                            piece.paths[target_id] = Path(
+                                id=target_id,
+                                role=PathRole.INTERNAL,
+                                nodes=[
+                                    Node(
+                                        id=nd.id,
+                                        position=nd.position,
+                                        kind=nd.kind,
+                                        in_handle=nd.in_handle,
+                                        out_handle=nd.out_handle,
+                                    )
+                                    for nd in run_nodes
+                                ],
+                                closed=False,
+                            )
+                        modified = True
+
+                dead_notches = [
+                    nid
+                    for nid, n in self.doc.notches.items()
+                    if (n.piece_id, n.path_id) in removed_path_keys
+                    or (n.piece_id, n.path_id, n.segment_start_id) in removed_seg_keys
+                ]
+                for nid in dead_notches:
+                    del self.doc.notches[nid]
+
+                dead_seams = [
+                    sid
+                    for sid, s in self.doc.seams.items()
+                    if any(
+                        (s_er.piece_id, s_er.path_id) in removed_path_keys
+                        or (s_er.piece_id, s_er.path_id, s_er.start_node_id) in removed_seg_keys
+                        for s_er in s.iter_unique_edge_ranges()
+                    )
+                ]
+                for sid in dead_seams:
+                    del self.doc.seams[sid]
+
+                self.selection.edge_ranges.clear()
+                if modified:
+                    self.history.record_change(
+                        description="Delete Internal Edge",
+                        before_doc=before_doc,
+                        after_doc=self.doc,
+                    )
+                    self.is_dirty = True
+                    return True
+            return False
+
+        # 5. ピース削除（明示的にピースが選択されている場合のみ）
         if self.selection.piece_ids:
             for pid in list(self.selection.piece_ids):
                 if pid in self.doc.pieces:
@@ -1178,18 +1776,43 @@ class EditorController:
         return False
 
     def subdivide_selected_edge(self, *, ratio: float = 0.5) -> bool:
-        """選択中のアクティブな辺を実寸比率 ratio で分割し、新ノードを選択状態にする."""
-        er = self.selection.get_active_edge_range()
-        if not er:
+        """選択中の全辺を実寸比率 ratio で一括分割し、新挿入ノード群を選択状態にする."""
+        targets = list(self.selection.edge_ranges)
+        if not targets:
             return False
         before_doc = self.doc.clone()
-        new_node = self.doc.subdivide_edge(er, ratio=ratio)
-        if not new_node:
+        inserted: list[tuple[str, str]] = []
+        for er in targets:
+            new_node = self.doc.subdivide_edge(er, ratio=ratio)
+            if new_node:
+                inserted.append((er.piece_id, new_node.id))
+        if not inserted:
             return False
         self.selection.clear()
-        self.selection.select_node(er.piece_id, new_node.id)
+        for pid, nid in inserted:
+            self.selection.select_node(pid, nid, add=True)
+        desc = "Subdivide Edge" if len(inserted) == 1 else "Subdivide Edges"
         self.history.record_change(
-            description="Subdivide Edge",
+            description=desc,
+            before_doc=before_doc,
+            after_doc=self.doc,
+        )
+        self.is_dirty = True
+        return True
+
+    def subdivide_selected_edges(self, *, ratio: float = 0.5) -> bool:
+        """選択中の全辺を一括分割する (`subdivide_selected_edge` の複数対応エイリアス)."""
+        return self.subdivide_selected_edge(ratio=ratio)
+
+    def align_selected_nodes(self, *, axis: str, mode: str) -> bool:
+        """選択中の複数頂点をワールド座標 X / Y で整列し履歴に記録する."""
+        before_doc = self.doc.clone()
+        if not apply_node_alignment(self.doc, self.selection, axis=axis, mode=mode):
+            return False
+        axis_u = axis.upper()
+        mode_u = mode.upper()
+        self.history.record_change(
+            description=f"Align Nodes {axis_u} ({mode_u.title()})",
             before_doc=before_doc,
             after_doc=self.doc,
         )

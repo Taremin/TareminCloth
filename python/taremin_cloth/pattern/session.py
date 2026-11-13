@@ -114,6 +114,10 @@ class SelectionState:
         self.edge_ranges.clear()
         self.active_piece_id = None
 
+    def clear_all(self) -> None:
+        """すべての選択を解除する (`clear` の明示エイリアス)."""
+        self.clear()
+
     def select_piece(self, piece_id: str, *, add: bool = False) -> None:
         """ピースを選択する."""
         if not add:
@@ -153,8 +157,77 @@ class SelectionState:
         """ノッチが選択されているかどうか."""
         return notch_id in self.notch_ids
 
+    def has_any_selection(self) -> bool:
+        """いずれかの要素が選択されているかどうか."""
+        return bool(
+            self.piece_ids
+            or self.node_ids
+            or self.notch_ids
+            or self.seam_ids
+            or self.edge_ranges
+        )
+
+    def select_all_pieces(self, piece_ids: list[str] | set[str]) -> None:
+        """指定されたピースID群で選択を置き換える."""
+        self.clear()
+        self.piece_ids.update(piece_ids)
+        if self.piece_ids:
+            self.active_piece_id = next(iter(self.piece_ids))
+
+    def toggle_piece(self, piece_id: str) -> bool:
+        """ピースの選択状態をトグルし、追加された場合 True・解除された場合 False を返す."""
+        if piece_id in self.piece_ids:
+            self.piece_ids.remove(piece_id)
+            if self.active_piece_id == piece_id:
+                self.active_piece_id = next(iter(self.piece_ids), None)
+            return False
+        self.piece_ids.add(piece_id)
+        self.active_piece_id = piece_id
+        return True
+
+    def toggle_node(self, piece_id: str, node_id: str) -> bool:
+        """ノードの選択状態をトグルし、追加された場合 True・解除された場合 False を返す."""
+        if node_id in self.node_ids:
+            self.node_ids.remove(node_id)
+            return False
+        self.node_ids.add(node_id)
+        self.active_piece_id = piece_id
+        return True
+
+    def toggle_notch(self, piece_id: str, notch_id: str) -> bool:
+        """ノッチの選択状態をトグルし、追加された場合 True・解除された場合 False を返す."""
+        if notch_id in self.notch_ids:
+            self.notch_ids.remove(notch_id)
+            return False
+        self.notch_ids.add(notch_id)
+        self.active_piece_id = piece_id
+        return True
+
+    def toggle_seam(self, seam_id: str) -> bool:
+        """縫合の選択状態をトグルし、追加された場合 True・解除された場合 False を返す."""
+        if seam_id in self.seam_ids:
+            self.seam_ids.remove(seam_id)
+            return False
+        self.seam_ids.add(seam_id)
+        return True
+
+    def toggle_edge(self, edge_range: EdgeRange) -> bool:
+        """辺範囲の選択状態をトグルし、追加された場合 True・解除された場合 False を返す."""
+        target_pair = {edge_range.start_node_id, edge_range.end_node_id}
+        for i, er in enumerate(self.edge_ranges):
+            if (
+                er.piece_id == edge_range.piece_id
+                and er.path_id == edge_range.path_id
+                and {er.start_node_id, er.end_node_id} == target_pair
+            ):
+                self.edge_ranges.pop(i)
+                return False
+        self.edge_ranges.append(edge_range)
+        self.active_piece_id = edge_range.piece_id
+        return True
+
     def select_edge(self, edge_range: EdgeRange, *, add: bool = False) -> None:
-        """辺を選択する（後方互換およびドラッグ移動連携のため所属ピースも piece_ids に登録）."""
+        """辺を選択する（ピース本体は誤移動・誤削除防止のため piece_ids に含めない）."""
         if not add:
             self.clear()
         if not self.is_edge_selected(
@@ -164,7 +237,6 @@ class SelectionState:
             end_node_id=edge_range.end_node_id,
         ):
             self.edge_ranges.append(edge_range)
-        self.piece_ids.add(edge_range.piece_id)
         self.active_piece_id = edge_range.piece_id
 
     def is_edge_selected(
@@ -187,6 +259,14 @@ class SelectionState:
     def get_active_edge_range(self) -> Optional[EdgeRange]:
         """最後に選択されたアクティブな EdgeRange を返す."""
         return self.edge_ranges[-1] if self.edge_ranges else None
+
+    def get_active_piece_id(self) -> Optional[str]:
+        """選択中ピースから決定的な代表（アクティブ優先）ピースIDを返す."""
+        if not self.piece_ids:
+            return None
+        if self.active_piece_id and self.active_piece_id in self.piece_ids:
+            return self.active_piece_id
+        return sorted(self.piece_ids)[0]
 
 
 def compute_snap(

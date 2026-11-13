@@ -5,8 +5,17 @@ from __future__ import annotations
 
 from .document import Document, NodeKind, SeamRouting
 from .session import SelectionState
+from .transform_ops import summarize_multi_node_info
 from .units import format_cm
 from ..i18n import trans
+
+
+def _node_kind_label(kind: NodeKind) -> str:
+    if kind == NodeKind.SMOOTH:
+        return trans("Smooth")
+    if kind == NodeKind.AUTO:
+        return trans("Auto")
+    return trans("Corner")
 
 
 def format_selection_card_lines(
@@ -67,7 +76,7 @@ def format_selection_card_lines(
             lines.append(f"{trans('Mismatch')}: {int(round(mismatch * 100))}%")
             dir_str = trans("Reversed") if seam.reverse else trans("Normal")
             lines.append(f"{trans('Direction')}: {dir_str}")
-            lines.append(trans("Press R to flip"))
+            lines.append(trans("Press F to flip"))
             lines.append(f"[{trans('Match A -> B (Ctrl+M)')}]")
             lines.append(f"[{trans('Match B -> A (Ctrl+Shift+M)')}]")
             lines.append(f"{trans('Match Mode (O)')}: {mode_label}")
@@ -83,24 +92,31 @@ def format_selection_card_lines(
         if er:
             piece = doc.pieces.get(er.piece_id)
             path = piece.paths.get(er.path_id) if piece else None
-            len_m = doc.compute_edge_range_length(er)
-            is_curved = False
-            if path:
-                res = path.resolve_edge_range(er)
-                if res:
-                    seg_i = res[0]
-                    n_nodes = len(path.nodes)
-                    nd0 = path.nodes[seg_i]
-                    nd1 = path.nodes[(seg_i + 1) % n_nodes]
-                    is_curved = (
-                        nd0.kind != NodeKind.CORNER
-                        or nd1.kind != NodeKind.CORNER
-                        or nd0.out_handle is not None
-                        or nd1.in_handle is not None
-                    )
-            kind_str = trans("Curved") if is_curved else trans("Straight")
-            lines.append(f"{trans('Edge')}: {piece.name if piece else ''}")
-            lines.append(f"{trans('Length')}: {format_cm(len_m)} ({kind_str})")
+            n_edges = len(selection.edge_ranges)
+            if n_edges == 1:
+                len_m = doc.compute_edge_range_length(er)
+                is_curved = False
+                if path:
+                    res = path.resolve_edge_range(er)
+                    if res:
+                        seg_i = res[0]
+                        n_nodes = len(path.nodes)
+                        nd0 = path.nodes[seg_i]
+                        nd1 = path.nodes[(seg_i + 1) % n_nodes]
+                        is_curved = (
+                            nd0.kind != NodeKind.CORNER
+                            or nd1.kind != NodeKind.CORNER
+                            or nd0.out_handle is not None
+                            or nd1.in_handle is not None
+                        )
+                kind_str = trans("Curved") if is_curved else trans("Straight")
+                lines.append(f"{trans('Edge')}: {piece.name if piece else ''}")
+                lines.append(f"{trans('Length')}: {format_cm(len_m)} ({kind_str})")
+            else:
+                total_len_m = sum(doc.compute_edge_range_length(item) for item in selection.edge_ranges)
+                lines.append(f"{trans('Edges')}: {n_edges} {trans('selected')}")
+                lines.append(f"{trans('Total Length')}: {format_cm(total_len_m)}")
+
             lines.append(f"[{trans('Subdivide (W)')}]")
             lines.append(f"[{trans('Unfold (U)')}]")
             lines.append(f"[{trans('Mirror Dup (Shift+U)')}]")
@@ -115,7 +131,6 @@ def format_selection_card_lines(
             lines.append(f"{trans('Flip Curve')}: {trans('ON') if shape_match_flip_curvature else trans('OFF')}")
             lines.append(f"{trans('Ease')}: {ease_str}")
 
-            # 接続された縫合線の有無をチェックして案内
             has_connected_seam = any(
                 any(
                     s_er.piece_id == er.piece_id
@@ -129,7 +144,29 @@ def format_selection_card_lines(
                 lines.append(f"[{trans('Match Seam (Ctrl+M)')}]")
             return lines
 
-    if not selection.piece_ids:
+    # ピース非選択時のノード選択（1点 / 複数点）
+    if selection.node_ids and not selection.piece_ids:
+        nodes_info, (bbox_w, bbox_h) = summarize_multi_node_info(doc, selection)
+        if len(nodes_info) == 1:
+            piece, nd, w_pos = nodes_info[0]
+            lines.append(f"{trans('Node')}: {piece.name}")
+            lines.append(f"{trans('Pos')}: ({format_cm(w_pos[0])}, {format_cm(w_pos[1])})")
+            lines.append(f"{trans('Kind (C)')}: {_node_kind_label(nd.kind)}")
+            lines.append(trans("G: Move / X: Delete"))
+            return lines
+        if len(nodes_info) >= 2:
+            piece_names = {p.name for p, _, _ in nodes_info}
+            p_label = next(iter(piece_names)) if len(piece_names) == 1 else f"{len(piece_names)} {trans('pieces')}"
+            lines.append(f"{trans('Selected Nodes')}: {len(nodes_info)} ({p_label})")
+            lines.append(f"{trans('Size')}: {format_cm(bbox_w)} x {format_cm(bbox_h)}")
+            lines.append(trans("G: Move / R: Rotate / S: Scale"))
+            lines.append(f"{trans('Align X')}:")
+            lines.append("")  # 行4: Align X ボタン枠用スペース
+            lines.append(f"{trans('Align Y')}:")
+            lines.append("")  # 行6: Align Y ボタン枠用スペース
+            return lines
+
+    if not selection.has_any_selection():
         lines.append(trans("No Selection"))
         lines.append(trans("Click piece or node"))
         return lines
@@ -157,9 +194,40 @@ def format_selection_card_lines(
             lines.append(f"{trans('Pattern Up (T)')}: {int(round(up_angle_val))}°")
             if selection.node_ids:
                 lines.append(f"{trans('Selected Nodes')}: {len(selection.node_ids)}")
-    else:
-        lines.append(f"{trans('Selected Pieces')}: {len(selection.piece_ids)}")
-        if selection.node_ids:
-            lines.append(f"{trans('Selected Nodes')}: {len(selection.node_ids)}")
+    elif len(selection.piece_ids) > 1:
+        selected_pieces = [doc.pieces[pid] for pid in selection.piece_ids if pid in doc.pieces]
+        if selected_pieces:
+            total_nodes = sum(
+                len(p.paths[p.outer_path_id].nodes)
+                for p in selected_pieces
+                if p.outer_path_id in p.paths
+            )
+            mixed_lbl = trans("Mixed")
+
+            def fmt_uniform(values: list, formatter) -> str:
+                first = formatter(values[0])
+                return first if all(formatter(v) == first for v in values[1:]) else mixed_lbl
+
+            res_str = fmt_uniform([p.target_edge_length for p in selected_pieces], format_cm)
+            layer_str = fmt_uniform([p.layer_id for p in selected_pieces], str)
+            pls = [doc.placements.get(p.id) for p in selected_pieces]
+            bone_vals = [(pl.target_bone if (pl and pl.target_bone) else "") for pl in pls]
+            bone_str = fmt_uniform(bone_vals, lambda b: b if b else trans("None"))
+            bone_t_str = fmt_uniform([pl.bone_t if pl else 0.5 for pl in pls], lambda v: f"{int(v * 100)}%")
+            angle_str = fmt_uniform([pl.bone_angle_deg if pl else 0.0 for pl in pls], lambda v: f"{int(v)}°")
+            offset_str = fmt_uniform([pl.surface_offset if pl else 0.08 for pl in pls], format_cm)
+            up_str = fmt_uniform([pl.pattern_up_angle_deg if pl else 0.0 for pl in pls], lambda v: f"{int(round(v))}°")
+
+            lines.append(f"{trans('Pieces')}: {len(selected_pieces)} {trans('selected')}")
+            lines.append(f"{trans('Nodes')}: {total_nodes}")
+            lines.append(f"{trans('Resolution')}: {res_str}")
+            lines.append(f"{trans('Layer')}: {layer_str}")
+            lines.append(f"{trans('Bone')}: {bone_str}")
+            lines.append(f"{trans('Bone Pos')}: {bone_t_str}")
+            lines.append(f"{trans('Bone Angle')}: {angle_str}")
+            lines.append(f"{trans('Bone Offset')}: {offset_str}")
+            lines.append(f"{trans('Pattern Up (T)')}: {up_str}")
+            if selection.node_ids:
+                lines.append(f"{trans('Selected Nodes')}: {len(selection.node_ids)}")
 
     return lines

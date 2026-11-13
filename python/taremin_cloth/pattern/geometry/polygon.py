@@ -228,3 +228,46 @@ def triangulate_polygon_2d(points: Sequence[Vec2]) -> list[tuple[int, int, int]]
         triangles.append((indices[0], indices[1], indices[2]))
 
     return triangles
+
+
+def segment_intersects_aabb(
+    p0: Vec2,
+    p1: Vec2,
+    *,
+    box_min: Vec2,
+    box_max: Vec2,
+) -> bool:
+    """2D線分 p0-p1 が軸平行矩形 [box_min, box_max] と交差または内包されるか判定する."""
+    min_x, min_y = float(box_min[0]), float(box_min[1])
+    max_x, max_y = float(box_max[0]), float(box_max[1])
+    if min_x > max_x:
+        min_x, max_x = max_x, min_x
+    if min_y > max_y:
+        min_y, max_y = max_y, min_y
+
+    # AABB同士の高速枝刈り
+    seg_min_x = min(p0[0], p1[0])
+    seg_max_x = max(p0[0], p1[0])
+    seg_min_y = min(p0[1], p1[1])
+    seg_max_y = max(p0[1], p1[1])
+    if seg_max_x < min_x - 1e-9 or seg_min_x > max_x + 1e-9:
+        return False
+    if seg_max_y < min_y - 1e-9 or seg_min_y > max_y + 1e-9:
+        return False
+
+    # 端点が矩形内にある場合
+    if (min_x <= p0[0] <= max_x and min_y <= p0[1] <= max_y) or (
+        min_x <= p1[0] <= max_x and min_y <= p1[1] <= max_y
+    ):
+        return True
+
+    # 矩形4辺との交差判定
+    c00: Vec2 = (min_x, min_y)
+    c10: Vec2 = (max_x, min_y)
+    c11: Vec2 = (max_x, max_y)
+    c01: Vec2 = (min_x, max_y)
+    for e_a, e_b in ((c00, c10), (c10, c11), (c11, c01), (c01, c00)):
+        if segment_intersection(p0, p1, e_a, e_b) is not None:
+            return True
+    return False
+

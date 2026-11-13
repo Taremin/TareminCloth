@@ -417,32 +417,21 @@ class TAREMIN_OT_pattern_editor(Operator):
                 tag_redraw_view3d(context)
                 return {'RUNNING_MODAL'}
 
-        # ツール切替キーおよび寸法線トグル (keymap.resolve_tool_hotkey 委譲)
+        # ツール切替キーおよび寸法線トグル (keymap.resolve_tool_hotkey 委譲、数字キーのみ)
         if event.value == 'PRESS' and not event.ctrl and not event.alt and not event.shift:
-            if self.controller.editing_field is None and not self.controller.picking_bone:
-                # 縫合反転ショートカット (R / F): 縫合選択中またはSEWツール中はツール切替(RECTANGLE)より反転を優先
-                is_flip_key = event.type in ('R', 'F')
-                has_seam_context = bool(self.controller.selection.seam_ids) or (self.controller.active_tool_name == "SEW")
-                if is_flip_key and has_seam_context:
-                    pass  # ツール切替を行わず、後続の controller.handle_event に流す
-                else:
-                    tool_name = resolve_tool_hotkey(event.type)
-                    if tool_name and tool_name in self.controller.tools:
-                        self.controller.set_active_tool(tool_name)
-                        tag_redraw_view3d(context)
-                        return {'RUNNING_MODAL'}
-                    if event.type == 'L':
-                        self.controller.show_lengths = not self.controller.show_lengths
-                        tag_redraw_view3d(context)
-                        return {'RUNNING_MODAL'}
+            if not self.controller.is_modal_input_active:
+                tool_name = resolve_tool_hotkey(event.type)
+                if tool_name and tool_name in self.controller.tools:
+                    self.controller.set_active_tool(tool_name)
+                    tag_redraw_view3d(context)
+                    return {'RUNNING_MODAL'}
+                if event.type == 'L':
+                    self.controller.show_lengths = not self.controller.show_lengths
+                    tag_redraw_view3d(context)
+                    return {'RUNNING_MODAL'}
 
-        # 終了キー (ESC)
-        if event.type == 'ESC' and event.value == 'PRESS' and not self.controller.picking_bone:
-            if self.controller.editing_field is not None:
-                self.controller.editing_field = None
-                self.controller.editing_buffer = ""
-                tag_redraw_view3d(context)
-                return {'RUNNING_MODAL'}
+        # 終了キー (ESC: モーダル操作・ドラッグ・変形中は中断せず controller 側でキャンセルさせる)
+        if event.type == 'ESC' and event.value == 'PRESS' and not self.controller.is_modal_input_active:
             if self.controller.preview_points or self.controller.preview_seam_candidates:
                 tool = self.controller.active_tool
                 if tool:
@@ -458,8 +447,12 @@ class TAREMIN_OT_pattern_editor(Operator):
         is_release = (event.value == 'RELEASE' and is_mouse_button)
         is_move = (event.type == 'MOUSEMOVE')
         button = "LEFT" if event.type in ('LEFTMOUSE', 'SELECTMOUSE') else "RIGHT" if event.type in ('RIGHTMOUSE', 'ACTIONMOUSE') else "MIDDLE" if event.type == 'MIDDLEMOUSE' else ""
-        key = event.type if (event.value == 'PRESS' and not is_mouse_button) else ""
-        unicode_char = getattr(event, "unicode", "") or ""
+        if event.value == 'PRESS' and not is_mouse_button:
+            key = "ESCAPE" if event.type == 'ESC' else event.type
+            unicode_char = getattr(event, "unicode", "") or ""
+        else:
+            key = ""
+            unicode_char = ""
 
         ed_event = EditorEvent(
             screen_pos=(mx, my),

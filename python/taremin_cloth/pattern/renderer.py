@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from .cards import format_selection_card_lines
 from .document import Document, NodeKind, NotchKind, PathRole, SeamRouting
@@ -20,6 +20,7 @@ from .geometry import (
 from .layout import compute_hud_layout
 from .strings import get_tool_guide, get_tool_name
 from .theme import DEFAULT_THEME, ColorRGBA, ThemeColors
+from .transform_ops import summarize_multi_node_info
 from .units import format_cm
 from ..i18n import trans
 
@@ -47,6 +48,111 @@ class DrawCommand:
     text: str = ""
     font_size: int = 12
     image_path: str = ""
+
+
+def _append_transform_session_commands(
+    commands: list[DrawCommand],
+    controller: EditorController,
+    *,
+    sw: int,
+    sh: int,
+    theme: ThemeColors,
+) -> None:
+    """モーダル変形 (G / R / S) 中の軸/法線ガイドライン・ピボット・ラバーバンド線を描画する."""
+    session = getattr(controller, "transform_session", None)
+    if session is None:
+        return
+
+    view = controller.view
+    ref_world = session.snap_reference_world or session.snapshot.pivot_world
+    ref_scr = view.world_to_screen(ref_world)
+
+    if session.axis_lock == "X":
+        axis_x_col = getattr(theme, "origin_axis_x", (0.95, 0.35, 0.35, 0.8))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.LINE,
+            color=axis_x_col,
+            points=[(0.0, ref_scr[1]), (float(sw), ref_scr[1])],
+            width=1.5,
+        ))
+    elif session.axis_lock == "Y":
+        axis_y_col = getattr(theme, "origin_axis_y", (0.35, 0.90, 0.40, 0.8))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.LINE,
+            color=axis_y_col,
+            points=[(ref_scr[0], 0.0), (ref_scr[0], float(sh))],
+            width=1.5,
+        ))
+    elif session.axis_lock in ("NORMAL", "NORMAL_ACTIVE") and session.snapshot.active_edge_normal is not None:
+        nx, ny = session.snapshot.active_edge_normal
+        span_w = max(float(sw), float(sh), 800.0) / max(view.zoom, 1e-3)
+        p_neg = view.world_to_screen((ref_world[0] - nx * span_w, ref_world[1] - ny * span_w))
+        p_pos = view.world_to_screen((ref_world[0] + nx * span_w, ref_world[1] + ny * span_w))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.LINE,
+            color=(0.25, 0.88, 0.95, 0.85),
+            points=[p_neg, p_pos],
+            width=1.5,
+        ))
+
+    if session.mode in ("ROTATE", "SCALE"):
+        p_scr = view.world_to_screen(session.snapshot.pivot_world)
+        c_scr = view.world_to_screen(session.current_cursor_world)
+        accent_col = (1.0, 0.85, 0.25, 0.95)
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.CIRCLE,
+            color=accent_col,
+            points=[p_scr],
+            radius=5.0,
+            filled=True,
+        ))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.LINE,
+            color=(1.0, 0.85, 0.25, 0.75),
+            points=[p_scr, c_scr],
+            width=1.2,
+        ))
+
+
+def _append_align_buttons_commands(
+    commands: list[DrawCommand],
+    card_fields: dict[str, Any],
+    *,
+    theme: ThemeColors,
+) -> None:
+    """複数頂点整列カード用の [Min][Ctr][Avg][Max] ボタングループを描画する."""
+    mode_labels = (
+        ("min", "Min"),
+        ("center", "Ctr"),
+        ("avg", "Avg"),
+        ("max", "Max"),
+    )
+    for axis_k in ("x", "y"):
+        for mode_k, btn_text in mode_labels:
+            key = f"align_{axis_k}_{mode_k}"
+            f_rect = card_fields.get(key)
+            if not f_rect:
+                continue
+            commands.append(DrawCommand(
+                kind=DrawCommandKind.RECT,
+                color=(0.22, 0.25, 0.30, 0.90),
+                points=[(f_rect.x, f_rect.y), (f_rect.right, f_rect.top)],
+                filled=True,
+            ))
+            commands.append(DrawCommand(
+                kind=DrawCommandKind.RECT,
+                color=(0.38, 0.45, 0.55, 0.95),
+                points=[(f_rect.x, f_rect.y), (f_rect.right, f_rect.top)],
+                filled=False,
+                width=1.0,
+            ))
+            commands.append(DrawCommand(
+                kind=DrawCommandKind.TEXT,
+                color=theme.hud_text,
+                points=[(f_rect.x + 5.0, f_rect.y + 3.0)],
+                text=btn_text,
+                font_size=10,
+            ))
 
 
 def build_render_commands(
@@ -516,6 +622,9 @@ def build_render_commands(
                 width=1.5,
             ))
 
+    # 5.5 モーダル変形（G / R / S）中の軸・法線ガイドライン、ピボット、ラバーバンド描画
+    _append_transform_session_commands(commands, controller, sw=sw, sh=sh, theme=th)
+
     # 6. HUD UI 要素の描画
     layout = compute_hud_layout(
         sw,
@@ -595,7 +704,16 @@ def build_render_commands(
         points=[(layout.footer_bar.x, layout.footer_bar.y), (layout.footer_bar.right, layout.footer_bar.top)],
         filled=True,
     ))
-    if getattr(controller, "status_message", ""):
+    session = getattr(controller, "transform_session", None)
+    if session is not None and getattr(controller, "status_message", ""):
+        hint = (
+            trans("X/Y/N: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel")
+            if session.mode == "MOVE"
+            else trans("X/Y: Axis | Enter/LMB: Confirm | Esc/RMB: Cancel")
+        )
+        guide_text = f"{controller.status_message}  [{hint}]"
+        text_color = getattr(th, "hud_accent", th.hud_text)
+    elif getattr(controller, "status_message", ""):
         guide_text = controller.status_message
         text_color = getattr(th, "hud_accent", th.hud_text)
     elif controller.picking_bone:
@@ -686,10 +804,10 @@ def build_render_commands(
             not controller.selection.notch_ids
             and not controller.selection.seam_ids
             and not controller.selection.edge_ranges
-            and len(controller.selection.piece_ids) == 1
+            and len(controller.selection.piece_ids) >= 1
         ):
-            sel_pid = next(iter(controller.selection.piece_ids))
-            pl = doc.placements.get(sel_pid)
+            sel_pid = controller.selection.get_active_piece_id()
+            pl = doc.placements.get(sel_pid) if sel_pid else None
             if pl:
                 slider_ratios = {
                     "bone_t": max(0.0, min(1.0, pl.bone_t)),
@@ -719,6 +837,16 @@ def build_render_commands(
                         width=1.5,
                     ))
 
+        # 複数頂点整列カード時の X / Y 整列ボタングループ描画
+        if (
+            not controller.selection.notch_ids
+            and not controller.selection.seam_ids
+            and not controller.selection.edge_ranges
+            and not controller.selection.piece_ids
+            and len(summarize_multi_node_info(doc, controller.selection)[0]) >= 2
+        ):
+            _append_align_buttons_commands(commands, layout.card_fields, theme=th)
+
         y_cursor = layout.info_card.top - 20.0
         for line in card_lines:
             commands.append(DrawCommand(
@@ -735,10 +863,10 @@ def build_render_commands(
             not controller.selection.notch_ids
             and not controller.selection.seam_ids
             and not controller.selection.edge_ranges
-            and len(controller.selection.piece_ids) == 1
+            and len(controller.selection.piece_ids) >= 1
         ):
-            sel_pid = next(iter(controller.selection.piece_ids))
-            pl = doc.placements.get(sel_pid)
+            sel_pid = controller.selection.get_active_piece_id()
+            pl = doc.placements.get(sel_pid) if sel_pid else None
             if pl and layout.compass_rect:
                 c_rect = layout.compass_rect
                 cx = c_rect.x + c_rect.w * 0.5
