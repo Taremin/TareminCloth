@@ -1583,5 +1583,271 @@ mod tests {
         sim.step(1.0 / 60.0, 2);
         check_hash_entries(&sim, real_count, true, "algo=1 (algo=0後)");
     }
+
+    /// 内部エッジのみが中央で直交通過し、V-T衝突・境界エッジ衝突が起きない2パッチ屋根型メッシュを生成する。
+    /// - パッチ A (頂点 0..3): X軸沿いの尾根辺 [0, 1] が内部エッジ (z=0.0)、翼 [2, 3] は z=-0.5 へ退避
+    /// - パッチ B (頂点 4..7): Y軸沿いの尾根辺 [4, 5] が内部エッジ (z=z_b)、翼 [6, 7] は z=z_b+0.5 へ退避
+    fn make_orthogonal_internal_edge_roof_pair(z_b: f32, thickness: f32) -> ClothMesh {
+        let positions = vec![
+            // パッチ A (X軸沿い尾根)
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.3, -0.5],
+            [0.0, -0.3, -0.5],
+            // パッチ B (Y軸沿い尾根)
+            [0.0, -1.0, z_b],
+            [0.0, 1.0, z_b],
+            [0.3, 0.0, z_b + 0.5],
+            [-0.3, 0.0, z_b + 0.5],
+        ];
+        let edges = vec![
+            [0, 1], // index 0: パッチ A の内部エッジ
+            [1, 2],
+            [2, 0],
+            [0, 3],
+            [3, 1],
+            [4, 5], // index 5: パッチ B の内部エッジ
+            [5, 6],
+            [6, 4],
+            [4, 7],
+            [7, 5],
+        ];
+        let faces = vec![
+            [0, 1, 2],
+            [1, 0, 3],
+            [4, 5, 6],
+            [5, 4, 7],
+        ];
+        ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            thickness,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_internal_ee_ccd_blocking() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let thickness = 0.005;
+        let z_b = 0.008;
+        let mesh = make_orthogonal_internal_edge_roof_pair(z_b, thickness);
+        // 対象エッジ (0, 1) と (4, 5) がどちらも非境界（内部エッジ）であることを確認
+        let idx_a = mesh
+            .edges
+            .iter()
+            .position(|e| (e.v0.min(e.v1), e.v0.max(e.v1)) == (0, 1))
+            .expect("edge (0, 1) が存在すること");
+        let idx_b = mesh
+            .edges
+            .iter()
+            .position(|e| (e.v0.min(e.v1), e.v0.max(e.v1)) == (4, 5))
+            .expect("edge (4, 5) が存在すること");
+        assert_eq!((mesh.edge_boundary_bits[idx_a >> 5] >> (idx_a & 31)) & 1, 0, "edge (0, 1) は内部エッジであるべき");
+        assert_eq!((mesh.edge_boundary_bits[idx_b >> 5] >> (idx_b & 31)) & 1, 0, "edge (4, 5) は内部エッジであるべき");
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_enable_pair_cache(false);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        let positions = vec![
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.3, -0.5],
+            [0.0, -0.3, -0.5],
+            [0.0, -1.0, z_b],
+            [0.0, 1.0, z_b],
+            [0.3, 0.0, z_b + 0.5],
+            [-0.3, 0.0, z_b + 0.5],
+        ];
+        // パッチ B を 1 サブステップ (dt=1/60, substeps=1) で約 -0.020m 移動させ、
+        // 有効厚み 0.010m を完全に飛び越えた先 (z≈-0.012m) へトンネルさせる (G1 ゲート対象、かつ空間セル 27近傍内)
+        let velocities = vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.2],
+            [0.0, 0.0, -1.2],
+            [0.0, 0.0, -1.2],
+            [0.0, 0.0, -1.2],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+        sim.step(1.0 / 60.0, 1);
+
+        let verts = sim.read_vertices();
+        let z_mid_a = 0.5 * (verts[0].position[2] + verts[1].position[2]);
+        let z_mid_b = 0.5 * (verts[4].position[2] + verts[5].position[2]);
+        assert!(
+            z_mid_b >= z_mid_a - 1e-4,
+            "G1: 高速移動する内部エッジ B が A を貫通してはならない: z_mid_a={:.6}, z_mid_b={:.6}",
+            z_mid_a,
+            z_mid_b
+        );
+    }
+
+    #[test]
+    fn test_internal_ee_ccd_low_speed_close_crossover_blocking() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let thickness = 0.005; // eff_thick = 0.010, G1閾値 = 0.005
+        let z_b = 0.002;
+        let mesh = make_orthogonal_internal_edge_roof_pair(z_b, thickness);
+        let idx_a = mesh
+            .edges
+            .iter()
+            .position(|e| (e.v0.min(e.v1), e.v0.max(e.v1)) == (0, 1))
+            .unwrap();
+        let idx_b = mesh
+            .edges
+            .iter()
+            .position(|e| (e.v0.min(e.v1), e.v0.max(e.v1)) == (4, 5))
+            .unwrap();
+        assert_eq!((mesh.edge_boundary_bits[idx_a >> 5] >> (idx_a & 31)) & 1, 0);
+        assert_eq!((mesh.edge_boundary_bits[idx_b >> 5] >> (idx_b & 31)) & 1, 0);
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_enable_pair_cache(false);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        let positions = vec![
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.3, -0.5],
+            [0.0, -0.3, -0.5],
+            [0.0, -1.0, z_b],
+            [0.0, 1.0, z_b],
+            [0.3, 0.0, z_b + 0.5],
+            [-0.3, 0.0, z_b + 0.5],
+        ];
+        // 1 サブステップ移動量 -0.004m (< G1閾値 0.005m) だが z=+0.002 -> z=-0.002 へ符号反転交差する (G2 ゲート対象)
+        let velocities = vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -0.24],
+            [0.0, 0.0, -0.24],
+            [0.0, 0.0, -0.24],
+            [0.0, 0.0, -0.24],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+        sim.step(1.0 / 60.0, 1);
+
+        let verts = sim.read_vertices();
+        let z_mid_a = 0.5 * (verts[0].position[2] + verts[1].position[2]);
+        let z_mid_b = 0.5 * (verts[4].position[2] + verts[5].position[2]);
+        assert!(
+            z_mid_b > z_mid_a,
+            "G2: 低速近接クロスオーバー時に内部エッジ B が A の裏側へ確定押し出しされてはならない: z_mid_a={:.6}, z_mid_b={:.6}",
+            z_mid_a,
+            z_mid_b
+        );
+    }
+
+    #[test]
+    fn test_internal_ee_ccd_folded_hinge_no_self_excitation() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        // 中央列 (col=1) で 2 つ折りした 3列x3行 (9頂点) メッシュ：ヒンジ周辺エッジ間の発振がないことを確認
+        let mut positions = Vec::with_capacity(9);
+        let init_pos: Vec<[f32; 3]>;
+        for iy in 0..3 {
+            let y = iy as f32 * 0.05;
+            positions.push([0.0, y, 0.005]);  // col 0 (上折り返し側)
+            positions.push([0.05, y, 0.0]);   // col 1 (ヒンジ)
+            positions.push([0.0, y, -0.005]); // col 2 (下側)
+        }
+        init_pos = positions.clone();
+
+        let mut edges = Vec::new();
+        let mut faces = Vec::new();
+        for iy in 0..3 {
+            let base = iy * 3;
+            edges.push([base, base + 1]);
+            edges.push([base + 1, base + 2]);
+            if iy + 1 < 3 {
+                for ix in 0..3 {
+                    edges.push([base + ix, base + 3 + ix]);
+                }
+                for ix in 0..2 {
+                    let a = base + ix;
+                    let b = base + ix + 1;
+                    let c = base + 3 + ix + 1;
+                    let d = base + 3 + ix;
+                    faces.push([a, b, c]);
+                    faces.push([a, c, d]);
+                }
+            }
+        }
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.004, // eff_thick = 0.008 (ヒンジ側で接触あり・非貫通配置)
+            5000.0,
+            5000.0,
+            2500.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_enable_pair_cache(false);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        for _ in 0..20 {
+            sim.step(1.0 / 60.0, 5);
+        }
+
+        let verts = sim.read_vertices();
+        let mut max_disp = 0.0f32;
+        for (i, v) in verts.iter().enumerate() {
+            assert!(
+                v.position.iter().all(|c| c.is_finite()),
+                "折り畳みヒンジで NaN/Inf が発生: v[{}]={:?}",
+                i,
+                v.position
+            );
+            let dx = v.position[0] - init_pos[i][0];
+            let dy = v.position[1] - init_pos[i][1];
+            let dz = v.position[2] - init_pos[i][2];
+            max_disp = max_disp.max((dx * dx + dy * dy + dz * dz).sqrt());
+        }
+        assert!(
+            max_disp < 0.05,
+            "折り畳みヒンジで過大な自己発振変位が発生: max_disp={:.6}",
+            max_disp
+        );
+    }
 }
 

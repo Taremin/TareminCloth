@@ -295,8 +295,50 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let is_boundary_b = is_open_boundary_edge(edge_b_idx);
                     let is_boundary_pair = is_boundary_a || is_boundary_b;
 
-                    // 開放境界エッジペア限定の CCD 軌道最接近探索およびクロスオーバー遮断
-                    if (is_boundary_pair) {
+                    var run_ccd = is_boundary_pair;
+                    var has_cached_st1 = false;
+                    var st1_cached = vec2<f32>(0.0, 0.0);
+                    var pt1_a_cached = vec3<f32>(0.0);
+                    var pt1_b_cached = vec3<f32>(0.0);
+                    var delta1_cached = vec3<f32>(0.0);
+                    var dist_sq_ee_cached = 0.0;
+                    var eff_thick_cached = 0.0;
+
+                    if (!run_ccd) {
+                        // 内部エッジペアに対する早期枝切りおよび選択的 CCD ゲート (G1: 高相対速度, G2: 近接クロスオーバー)
+                        st1_cached = closest_points_segments(p_u0, p_u1, p_j, p_vj);
+                        pt1_a_cached = mix(p_u0, p_u1, st1_cached.x);
+                        pt1_b_cached = mix(p_j, p_vj, st1_cached.y);
+                        delta1_cached = pt1_a_cached - pt1_b_cached;
+                        dist_sq_ee_cached = dot(delta1_cached, delta1_cached);
+
+                        let thick_j_g = v_j.thickness;
+                        let thick_vj_g = v_vj.thickness;
+                        eff_thick_cached = mix(thick_u0, thick_u1, st1_cached.x) + mix(thick_j_g, thick_vj_g, st1_cached.y);
+                        let max_eff_thick_g = max_thick_a + max(thick_j_g, thick_vj_g);
+
+                        let dv_u0_g = p_u0 - p_u0_old;
+                        let dv_u1_g = p_u1 - p_u1_old;
+                        let dv_j_g = p_j - p_j_old;
+                        let dv_vj_g = p_vj - p_vj_old;
+                        let va_avg_g = 0.5 * (dv_u0_g + dv_u1_g);
+                        let vb_avg_g = 0.5 * (dv_j_g + dv_vj_g);
+                        let rel_disp_g = length(va_avg_g - vb_avg_g) + 0.5 * (length(dv_u1_g - dv_u0_g) + length(dv_vj_g - dv_j_g));
+
+                        let reach_bound_g = max_eff_thick_g + rel_disp_g;
+                        if (dist_sq_ee_cached > reach_bound_g * reach_bound_g) {
+                            continue;
+                        }
+
+                        has_cached_st1 = true;
+                        let delta0_g = mix(p_u0_old, p_u1_old, st1_cached.x) - mix(p_j_old, p_vj_old, st1_cached.y);
+                        let gate_g1 = rel_disp_g > eff_thick_cached * 0.5;
+                        let gate_g2 = dot(delta0_g, delta1_cached) <= 0.0;
+                        run_ccd = gate_g1 || gate_g2;
+                    }
+
+                    // 開放境界エッジおよびゲート通過内部エッジの CCD 軌道最接近探索およびクロスオーバー遮断
+                    if (run_ccd) {
                         // 粗サンプル（9点: tau = 0/8 .. 8/8）による最小距離と体積符号反転の探索
                         var min_sample_dist_sq = 1e20;
                         var min_k = 0u;
@@ -391,14 +433,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             }
                         }
 
-                        // 多層布 untangling
+                        // 多層布 untangling（対称・開始時点中点ベクトル基準）
                         var is_untangling_ccd = false;
-                        if (params.enable_normal_untangling != 0u && v_u0.layer_id > v_j.layer_id) {
-                            let n_j_raw = normals[j].xyz;
-                            let pa_star = mix(mix(p_u0_old, p_u0, tau_star), mix(p_u1_old, p_u1, tau_star), s_star);
-                            let pb_star = mix(mix(p_j_old, p_j, tau_star), mix(p_vj_old, p_vj, tau_star), t_star);
-                            let delta_star = pa_star - pb_star;
-                            is_untangling_ccd = (dot(n_j_raw, n_j_raw) > 0.25) && (dot(delta_star, n_j_raw) < 0.0);
+                        if (params.enable_normal_untangling != 0u && v_u0.layer_id != v_j.layer_id) {
+                            let delta0_u = ((p_u0_old + p_u1_old) - (p_j_old + p_vj_old)) * 0.5;
+                            if (v_u0.layer_id > v_j.layer_id) {
+                                let n_inner = normals[j].xyz;
+                                is_untangling_ccd = (dot(n_inner, n_inner) > 0.25) && (dot(delta0_u, n_inner) < 0.0);
+                            } else {
+                                let n_inner = normals[u0].xyz;
+                                is_untangling_ccd = (dot(n_inner, n_inner) > 0.25) && (dot(-delta0_u, n_inner) < 0.0);
+                            }
                         }
                         if (is_untangling_ccd) {
                             continue;
@@ -427,7 +472,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                             let is_crossover = (h_end <= 0.0) ||
                                                (dot(delta1, n0) <= 0.0) ||
-                                               (dist1 >= eff_thick_star && tau_star < 1.0);
+                                               (is_boundary_pair && dist1 >= eff_thick_star && tau_star < 1.0);
 
                             if (h_end < eff_thick_star && is_crossover) {
                                 // Step D: 運動量保存を満たす 100% ハード CCD 変位の分配
@@ -487,18 +532,33 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         }
                     }
 
-                    // 【早期枝切り】線分間最短距離の二乗判定（レジスタ演算のみで先に判定）
-                    let st = closest_points_segments(p_u0, p_u1, p_j, p_vj);
-                    let pt1 = p_u0 + st.x * (p_u1 - p_u0);
-                    let pt2 = p_j + st.y * (p_vj - p_j);
-                    let delta_ee = pt1 - pt2;
-                    let dist_sq_ee = dot(delta_ee, delta_ee);
+                    // 【早期枝切り】線分間最短距離の二乗判定（内部エッジで先行計算済みの場合は再利用）
+                    var st = vec2<f32>(0.0, 0.0);
+                    var pt1 = vec3<f32>(0.0);
+                    var pt2 = vec3<f32>(0.0);
+                    var delta_ee = vec3<f32>(0.0);
+                    var dist_sq_ee = 0.0;
+                    var effective_thick = 0.0;
+                    if (has_cached_st1) {
+                        st = st1_cached;
+                        pt1 = pt1_a_cached;
+                        pt2 = pt1_b_cached;
+                        delta_ee = delta1_cached;
+                        dist_sq_ee = dist_sq_ee_cached;
+                        effective_thick = eff_thick_cached;
+                    } else {
+                        st = closest_points_segments(p_u0, p_u1, p_j, p_vj);
+                        pt1 = p_u0 + st.x * (p_u1 - p_u0);
+                        pt2 = p_j + st.y * (p_vj - p_j);
+                        delta_ee = pt1 - pt2;
+                        dist_sq_ee = dot(delta_ee, delta_ee);
 
-                    let thick_j = v_j.thickness;
-                    let thick_vj = v_vj.thickness;
-                    let thick_a = mix(thick_u0, thick_u1, st.x);
-                    let thick_b = mix(thick_j, thick_vj, st.y);
-                    let effective_thick = thick_a + thick_b;
+                        let thick_j = v_j.thickness;
+                        let thick_vj = v_vj.thickness;
+                        let thick_a = mix(thick_u0, thick_u1, st.x);
+                        let thick_b = mix(thick_j, thick_vj, st.y);
+                        effective_thick = thick_a + thick_b;
+                    }
 
                     if (dist_sq_ee >= effective_thick * effective_thick || dist_sq_ee <= EPSILON * EPSILON) {
                         continue;
