@@ -241,14 +241,14 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
        - **低ステップ時自動協調モード (`auto_coupled_on_low_substeps`, 既定ON)**: 適応サブステップ等でサブステップ数が低くなった場合（$`\le 8`$）、Decoupledモードのままだと反復内の距離拘束収縮力に押し出しが負けて素体コライダーを貫通・滑落する現象を防ぐため、実効的にCoupled解決を自動強制するフェイルセーフオプション。
      - **自己衝突 (Self-Collision)**:
         - **Solve パス (V-T / V-V 特化: `self_collision.wgsl`)**: 頂点スレッド駆動による頂点空間ハッシュ近傍探索（`j >= params.num_vertices` の仮想・範囲外インデックス防御付き）および V-T（頂点対面）/ V-V（頂点対頂点）幾何接触解決。重厚なエッジ直積二重ループを新 E-E パスへ完全分離したことでレジスタ使用量と分岐待ち合わせが大幅削減され、従来の 78.4 ms から 15.7 ms 〜 22.7 ms（約 4〜5 倍高速）へ劇的に軽量化。
-          - **動的三角形との相対 V-T CCD**: 終点時刻 $\tau=1$ の相手三角形を静止基準とし、重心移動量 $\Delta T$ を考慮した相対始点 $\mathbf{p}_{\text{rel\_old}, i} = x_{\text{old}, i} + \Delta T$（符号整合性保証）から相対ベクトル $\mathbf{v}_{\text{rel}} = p_i - \mathbf{p}_{\text{rel\_old}, i}$ に対する Möller–Trumbore 交差判定を実施。衝突時刻 {\text{hit}}$ 手前の安全位置 $\mathbf{p}_{\text{safe}}$ への補正量を、自頂点だけでなく相手三角形3頂点へ重心座標重みと逆質量比に応じた 100% ハード CCD 変位としてアトミック分配（完全な運動量保存）。
+          - **動的三角形との相対 V-T CCD**: 終点時刻 $`\tau=1`$ の相手三角形を静止基準とし、重心移動量 $`\Delta T`$ を考慮した相対始点 $`\mathbf{p}_{\text{rel-old}, i} = x_{\text{old}, i} + \Delta T`$（符号整合性保証）から相対ベクトル $`\mathbf{v}_{\text{rel}} = p_i - \mathbf{p}_{\text{rel-old}, i}`$ に対する Möller–Trumbore 交差判定を実施。衝突時刻 $`t_{\text{hit}}`$ 手前の安全位置 $`\mathbf{p}_{\text{safe}}`$ への補正量を、自頂点だけでなく相手三角形3頂点へ重心座標重みと逆質量比に応じた 100% ハード CCD 変位としてアトミック分配（完全な運動量保存）。
         - **Solve EE パス (Edge-Centric E-E 特化: `self_collision_ee_direct.wgsl`)**: エッジ自身（メッシュの全エッジ $`N_e`$ 本）をスレッドとしてディスパッチする新アーキテクチャ。
           - **専用エッジ空間ハッシュによる多段アクセスの完全排除**: エッジ中点をキーとする `GpuEdgeSpatialHash` を直接走査することで、従来の「頂点セル $`\to`$ 頂点 $`\to`$ 隣接エッジリスト $`\to`$ 相手エッジ」という3段階の不規則メモリアクセスを撤廃し、「エッジセル $`\to`$ 相手エッジ」の1段階直接アクセスに単純化。E-E計算時間を 44.95 ms から 27.73 ms へ約 38.3% 高速化。
           - **エッジ中点 27 セル固定走査**: エッジ中点 $`p_{\text{mid}} = (p_{u0} + p_{u1}) / 2`$ の空間セルを中心とする定数 27 近傍（$`3 \times 3 \times 3`$）のみを均一走査。布メッシュのエッジ半長は自動算出セルサイズに幾何学的に収まるため、100% の幾何学的カバレッジを維持したままスレッド間のループ回数ばらつき（SIMT ダイバージェンス）を完全に排除。
           - **エッジ辞書順序制約 (Global Canonical Ordering)**: 各相手エッジ $`e_B = (j, v_j)`$ に対し $`(u_0 < j) \lor (u_0 = j \land u_1 < v_j)`$ を満たす場合のみ評価。これにより、全エッジペアの判定が GPU 全体で厳密に 1 回のみ行われ、重複計算が完全にゼロ化。
           - **AABB 先行枝切り (Topology Skip)**: 線分 AABB 重なり判定を CSR トポロジー二分探索（`is_topologically_near_folded` $`\times`$ 4回）の前に配置。空間的に離れた 99% 以上のペアに対する無駄なグローバルメモリアクセスを即座にバイパス。
-          - **動的折り畳み検出（Bridson 2002方式: レスト長比率による除外解除）と縫合跨ぎ真2ホップ展開レスト距離**: 初期レスト長バッファ（`two_hop_rest_lengths: array<f32>`）を参照し、現在の端点間距離が初期距離の 50% 未満（$`d < 0.5 L_0`$）に圧縮された場合、鋭角なΩ型シワ・折り畳みと判定して2ホップ除外を自動解除。深い座屈時のすり抜けを遮断。同一パネル内の直接接続エッジ（1ホップ）および縫合直近の縮約0〜1ホップペアは初期レスト長 $`L_0 = 0.0`$ を維持して1ホップ隣接クアッド同士の自爆反発・縫合膠着を完全防止しつつ、縮約グラフにおける真の2ホップ（`!orig_adj_lists[i].contains(&nbr)` を満たす2D布頂点同士）に対しては初期3D距離またはシーム共有辺の180度平坦展開長 $`L_0 = \sqrt{(s_a - s_b)^2 + (h_a + h_b)^2}`$・同一中継頂点まわりの初期2D距離を展開レスト距離として事前計算し設定。フード顔開口リムや裾スリットのように対向する開放境界エッジが正面から合掌した際、$d < 0.5 L_0$ を満たしてトポロジー除外が適切に解除され、E-E CCD / E-E 反発が正常に捕捉される。
-          - **開放境界・ストランドおよび選択的内部エッジ連続衝突判定（Boundary/Strand & Selective Internal E-E CCD）**: メッシュ初期化時（`mesh.rs`）に、所属三角形 1 枚の真の開放境界エッジおよび所属三角形 0 枚の 1D ストランド線分（引き紐等）をビットパック（`edge_boundary_bits: array<u32>`）として GPU に供給。自エッジ A の AABB を開始位置を含む掃引 AABB に拡張し、境界・ストランド関与ペア（`is_boundary_a || is_boundary_b`）は全数、内部エッジ同士は終了時最短距離 `st1_cached`（離散パスにもそのまま再利用）と並進除去済み相対変位上界 `rel_disp_g` に基づく非接触早期枝切り（`dist_sq_ee_cached > (max_eff_thick_g + rel_disp_g)^2`）後に **G1（`rel_disp_g > eff_thick_cached * 0.5`）または G2（`dot(delta0_g, delta1_cached) <= 0.0`）** を満たすペアに対してのみ軌道最接近探索（粗サンプル 9 点＋三分探索 6 回）を実施。多層布 Untangling 保護は開始時点の中点差ベクトルを用い両方向の `layer_id` で対称判定。開始時の分離法線 $\mathbf{n}_0$ を保持し、終了時射影高さ $h_{\text{end}} \le 0$・離散法線反転・境界限定のかすめ条件によるクロスオーバー検知時に、減衰なしの 100% ハード CCD 変位（`add_ccd_atomic`）を 4 端点へ運動量保存を満たす逆質量比で分配し、自由縁・内部エッジ・引き紐の貫通を遮断。
+          - **動的折り畳み検出（Bridson 2002方式: レスト長比率による除外解除）と縫合跨ぎ真2ホップ展開レスト距離**: 初期レスト長バッファ（`two_hop_rest_lengths: array<f32>`）を参照し、現在の端点間距離が初期距離の 50% 未満（$`d < 0.5 L_0`$）に圧縮された場合、鋭角なΩ型シワ・折り畳みと判定して2ホップ除外を自動解除。深い座屈時のすり抜けを遮断。同一パネル内の直接接続エッジ（1ホップ）および縫合直近の縮約0〜1ホップペアは初期レスト長 $`L_0 = 0.0`$ を維持して1ホップ隣接クアッド同士の自爆反発・縫合膠着を完全防止しつつ、縮約グラフにおける真の2ホップ（`!orig_adj_lists[i].contains(&nbr)` を満たす2D布頂点同士）に対しては初期3D距離またはシーム共有辺の180度平坦展開長 $`L_0 = \sqrt{(s_a - s_b)^2 + (h_a + h_b)^2}`$・同一中継頂点まわりの初期2D距離を展開レスト距離として事前計算し設定。フード顔開口リムや裾スリットのように対向する開放境界エッジが正面から合掌した際、$`d < 0.5 L_0`$ を満たしてトポロジー除外が適切に解除され、E-E CCD / E-E 反発が正常に捕捉される。
+          - **開放境界・ストランドおよび選択的内部エッジ連続衝突判定（Boundary/Strand & Selective Internal E-E CCD）**: メッシュ初期化時（`mesh.rs`）に、所属三角形 1 枚の真の開放境界エッジおよび所属三角形 0 枚の 1D ストランド線分（引き紐等）をビットパック（`edge_boundary_bits: array<u32>`）として GPU に供給。自エッジ A の AABB を開始位置を含む掃引 AABB に拡張し、境界・ストランド関与ペア（`is_boundary_a || is_boundary_b`）は全数、内部エッジ同士は終了時最短距離 `st1_cached`（離散パスにもそのまま再利用）と並進除去済み相対変位上界 `rel_disp_g` に基づく非接触早期枝切り（`dist_sq_ee_cached > (max_eff_thick_g + rel_disp_g)^2`）後に **G1（`rel_disp_g > eff_thick_cached * 0.5`）または G2（`dot(delta0_g, delta1_cached) <= 0.0`）** を満たすペアに対してのみ軌道最接近探索（粗サンプル 9 点＋三分探索 6 回）を実施。多層布 Untangling 保護は開始時点の中点差ベクトルを用い両方向の `layer_id` で対称判定。開始時の分離法線 $`\mathbf{n}_0`$ を保持し、終了時射影高さ $`h_{\text{end}} \le 0`$・離散法線反転・境界限定のかすめ条件によるクロスオーバー検知時に、減衰なしの 100% ハード CCD 変位（`add_ccd_atomic`）を 4 端点へ運動量保存を満たす逆質量比で分配し、自由縁・内部エッジ・引き紐の貫通を遮断。
           - **対称アトミック分配 (Coupled XPBD)**: 線分間最短距離が衝突閾値未満の場合、4 端点 $`(u_0, u_1, j, v_j)`$ へ質量比に応じた厳密な作用・反作用変位をアトミック加算。物理保存則（運動量保存・対称性）を 100% 保持。
         - **エッジ衝突間隔制御 (`self_collision_ee_substep_interval`, 既定 `1`)**: E-E（エッジ対エッジ）接触解決の実行頻度を制御（`0`: 完全無効 [速度最優先、約26.6 FPS]、`1`: 毎サブステップ実行 [完全精度・貫通防止、リアルタイム域達成]、`N >= 2`: Nサブステップ毎 [例: N=2 で 17.9 FPS]）。サブステップディスパッチ時に `solve_ee` パスの実行有無を直接分岐するためオーバーヘッドゼロ。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
@@ -1170,7 +1170,7 @@ graph TD
    - `Document.save_to_file` / `Document.load_from_file`: 外部 `.json` ファイルとの完全な可逆シリアライズ。
    - Blender 完全非依存であり、CLI やスタンドアロンテストで全操作をミリ秒で検証可能。
 2. **2D幾何演算 & 弧長サンプリング (`python/taremin_cloth/pattern/geometry/`)**:
-   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、de Casteljau アルゴリズムによる厳密 3次ベジェ曲線2分割（`split_cubic_bezier`）、部分区間 $[t_0, t_1]$ 抽出（`extract_sub_cubic`）、弦ベクトル基準の形状転写（`match_segment_shape`）、ニュートン・ラフソン法による端点固定膨らみ・終点移動弧長微調整（`adjust_segment_arc_length`）、累積弧長テーブル構築、最近点探索。
+   - `bezier.py`: 制御点生成、AUTO ハンドル動的算出、de Casteljau アルゴリズムによる厳密 3次ベジェ曲線2分割（`split_cubic_bezier`）、部分区間 $`[t_0, t_1]`$ 抽出（`extract_sub_cubic`）、弦ベクトル基準の形状転写（`match_segment_shape`）、ニュートン・ラフソン法による端点固定膨らみ・終点移動弧長微調整（`adjust_segment_arc_length`）、累積弧長テーブル構築、最近点探索。
    - `polygon.py`: Shoelace 符号付き面積、反時計回り (CCW) 正規化、耳刈り法（Ear-Clipping）による凹凸対応三角形化（`triangulate_polygon_2d`）、Winding Number 内外判定、自己交差検査、2線分交差（`segment_intersection`）、線分・AABB 交差判定（`segment_intersects_aabb`）。
    - `transform.py`: 2D アフィン変換（平行移動・回転・拡大縮小）、軸平行バウンディングボックス。
 3. **対話ツール体系 & ヒットテスト (`python/taremin_cloth/pattern/tools/`, `session.py`, `transform_ops.py`, `editor.py`, `keymap.py`)**:
@@ -1182,17 +1182,17 @@ graph TD
      - **全選択/削除/整列**: `A` / `Alt+A` で全ピース選択・全解除、`X` / `Delete` で選択ノード・ピース・内部線・縫合・ノッチ等を削除（外周辺のみの誤削除は拒否ガード）、情報カード内ボタンから複数頂点の X/Y 方向整列（`Min` / `Ctr` / `Avg` / `Max`）を実行可能。
    - **辺操作・対称化・反転・複製体系**:
      - **辺の分割（Subdivide Edge）**: 辺選択中に `W` キー押下で選択中の全辺（複数辺対応）を実寸弧長50%で一括分割。外周辺ダブルクリックまたは `Ctrl+クリック` による任意位置ノード挿入（ベジェ形状・周辺縫合完全維持）。
-     - **選択辺基準の対称展開（Unfold）**: 選択辺を対称軸として $2n-2$ 頂点の単一反時計回り（CCW）閉ループに対称展開（わ展開、`U` キー）。未選択時は中点X座標最小辺を自動判定。
+     - **選択辺基準の対称展開（Unfold）**: 選択辺を対称軸として $`2n-2`$ 頂点の単一反時計回り（CCW）閉ループに対称展開（わ展開、`U` キー）。未選択時は中点X座標最小辺を自動判定。
      - **選択辺基準の対称複製（Mirror Duplicate）**: 選択辺の法線外側 5cm 離間位置に対称ピースを生成し、対称軸同士を平行縫合（`reverse=True`）で自動接続（`Shift+U` キー）。
-     - **ピースの複製と反転**: ピース単体複製（`Ctrl+D` / `Shift+D` / `Ctrl+C` & `Ctrl+V`）、左右反転複製（`Ctrl+Shift+D`、`Front_L` $\to$ `Front_R` 自動命名）、単体左右反転（`M` キー）、単体上下反転（`Shift+M` キー）。閉パスの反時計回り（CCW）向きを維持するためノード順を自動反転。
+     - **ピースの複製と反転**: ピース単体複製（`Ctrl+D` / `Shift+D` / `Ctrl+C` & `Ctrl+V`）、左右反転複製（`Ctrl+Shift+D`、`Front_L` $`\to`$ `Front_R` 自動命名）、単体左右反転（`M` キー）、単体上下反転（`Shift+M` キー）。閉パスの反時計回り（CCW）向きを維持するためノード順を自動反転。
      - **縫合用の形状・長さコピー（Match Edge Shape & Seam Length）**:
        - *アプローチA（クリップボード）*: 辺選択中に Ctrl+C（または Ctrl+Shift+C）で形状・弧長コピー、対象辺を選択して Ctrl+V（または Ctrl+Shift+V）でペースト。ピース選択時はピース単位コピー＆ペーストに自動連動。
-       - *アプローチB（Seam同期）*: 辺選択中または Seam 選択中に Ctrl+M で瞬時に形状・弧長を同期（辺選択時は接続された Seam を自動特定して同期相手へ反映）。Seam 選択時は Ctrl+Shift+M で逆方向同期（B $\to$ A）。縫合の向き反転は `F` キー（`Flip Direction`）で実行。
+       - *アプローチB（Seam同期）*: 辺選択中または Seam 選択中に Ctrl+M で瞬時に形状・弧長を同期（辺選択時は接続された Seam を自動特定して同期相手へ反映）。Seam 選択時は Ctrl+Shift+M で逆方向同期（B $`\to`$ A）。縫合の向き反転は `F` キー（`Flip Direction`）で実行。
        - *合わせ方モード*: `SIMILAR`（相似拡大）、`LENGTH_ADJUST_BULGE`（端点固定・膨らみ調整）、`LENGTH_MOVE_END`（終点ノード移動伸張）。進行方向反転（`reverse`）、膨らみ反転（`flip_curvature`）、イセコミ量（`+0.5cm` / `+5mm` / `+5%` 等）のインライン編集に対応。
    - `RectangleTool` / `PolygonTool` / `EllipseTool`: 矩形、多角形、楕円（Ramanujan近似と4点ベジェ）作図。
    - `InternalLineTool`: ピース内部への折れ線・曲線描画（Rust CDT内部拘束線に自動連携）。
    - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。
-   - `CutTool`: 弧長サンプリング交差判定と `split_cubic_bezier` による曲線対応ピース2分割、および元の縫合・ノッチ（$t$ 比率再計算）・アンカー（内外判定振り分け）の自動引き継ぎ。
+   - `CutTool`: 弧長サンプリング交差判定と `split_cubic_bezier` による曲線対応ピース2分割、および元の縫合・ノッチ（$`t`$ 比率再計算）・アンカー（内外判定振り分け）の自動引き継ぎ。
    - `DartTool`: 曲線弧長位置サンプリング（`point_at_arc_length`）による正確な開口部2点算出と、三角スリット切り込み・自動縫合。
    - `SewTool`: 2辺クリックによる基本縫合、およびShift+クリック・Enter確定による鎖縫合（1対多、多対多）。
    - `keymap.py` & モーダル状態保護 (`ops/pattern.py`): ツール切替ショートカットを数字キー（`1`〜`9`）に統一。`EditorController.is_modal_input_active` によりモーダル変形・数値入力・ドラッグ操作中はツール切替や `L` / `ESC` のオペレーター終了をバイパス。
@@ -1223,16 +1223,16 @@ graph TD
 6. **3D配置プロキシ統合・ボーン追従配置 & 特許回避アーキテクチャ (`placement.py`, `migration.py`, `build_types.py`)**:
    - `Document.placements` と 3D ビューポート内プロキシオブジェクト（`Proxy_<name>`）の双方向トランスフォーム同期。
    - **3Dビューポート1:1実寸連動 (`sync_view2d_from_region_3d`)**: エディタ起動時に3Dビューカメラを正面正投影（Front Ortho）化し、カメラの投影スケール・原点と2Dキャンバスをピクセル単位で完全一致させ、中ボタンドラッグやホイールズームを双方向同期。
-   - **ボーン追従平面配置 (`compute_bone_aligned_frame`, `project_2d_points_to_bone_plane`)**: アーマチュアボーンの `head`-`tail` 軸に対し、位置比率 `bone_t`、軸周りロール角度 `bone_angle_deg`、オフセット `surface_offset` に基づき接線 $\mathbf{e}_x$・法線 $\mathbf{n}$・縦軸 $\mathbf{e}_z$ を算出。下向きボーン（腕・脚等）でもワールド $+Z$ との内積判定により型紙の上下逆転を自動防止。さらに `pattern_up_angle_deg`（`T` / `Shift+T` で ±90° 回転・HUD スライダー/数値編集可）により、ボーン周囲のロールとは独立して 2D 型紙上のどの方向を $\mathbf{e}_z$（上向き）に揃えるかを面内回転でき、横長矩形など任意向きの袖型紙に対応。
-   - **特許回避構造（縫合単位のボーン巻付け迂回中継点縫合: `SeamRouting.BONE_WRAP`）**: Marvelous Designer等の円筒バウンディングボリューム（Bounding Volumes）による「2Dメッシュ曲面プリベンド」（CLO社特許構成要件）を完全に回避するため、**型紙メッシュ自体は完全な平面のまま配置**し、縫合（`Seam.routing`）ごとに直接縫合 (`DIRECT`) とボーン巻付け (`BONE_WRAP`、縫合選択中 `B` キーまたはカードクリックで切替) を明示選択できる設計。`BONE_WRAP` 指定の縫合エッジのみが関与ピースのボーン裏側（$\pm 120^\circ$）の2つの中継点（Waypoints）を経由する構造（$\mathbf{v}_a \to \mathbf{w}_1 \to \mathbf{w}_2 \to \mathbf{v}_b$）を自動生成し（分岐頂点 `cloth_degree > 1` やボーン未解決時は `DIRECT` にフォールバック）、袖ぐり等の通常縫合と混在させても破綻なく円筒状に巻き付く。
+   - **ボーン追従平面配置 (`compute_bone_aligned_frame`, `project_2d_points_to_bone_plane`)**: アーマチュアボーンの `head`-`tail` 軸に対し、位置比率 `bone_t`、軸周りロール角度 `bone_angle_deg`、オフセット `surface_offset` に基づき接線 $`\mathbf{e}_x`$・法線 $`\mathbf{n}`$・縦軸 $`\mathbf{e}_z`$ を算出。下向きボーン（腕・脚等）でもワールド $+Z$ との内積判定により型紙の上下逆転を自動防止。さらに `pattern_up_angle_deg`（`T` / `Shift+T` で ±90° 回転・HUD スライダー/数値編集可）により、ボーン周囲のロールとは独立して 2D 型紙上のどの方向を $`\mathbf{e}_z`$（上向き）に揃えるかを面内回転でき、横長矩形など任意向きの袖型紙に対応。
+   - **特許回避構造（縫合単位のボーン巻付け迂回中継点縫合: `SeamRouting.BONE_WRAP`）**: Marvelous Designer等の円筒バウンディングボリューム（Bounding Volumes）による「2Dメッシュ曲面プリベンド」（CLO社特許構成要件）を完全に回避するため、**型紙メッシュ自体は完全な平面のまま配置**し、縫合（`Seam.routing`）ごとに直接縫合 (`DIRECT`) とボーン巻付け (`BONE_WRAP`、縫合選択中 `B` キーまたはカードクリックで切替) を明示選択できる設計。`BONE_WRAP` 指定の縫合エッジのみが関与ピースのボーン裏側（$`\pm 120^\circ`$）の2つの中継点（Waypoints）を経由する構造（$`\mathbf{v}_a \to \mathbf{w}_1 \to \mathbf{w}_2 \to \mathbf{v}_b`$）を自動生成し（分岐頂点 `cloth_degree > 1` やボーン未解決時は `DIRECT` にフォールバック）、袖ぐり等の通常縫合と混在させても破綻なく円筒状に巻き付く。
    - **HUD 角度コンパス・向きインジケーター**: 情報カード下部に円形コンパスを配備し、ボーン断面円、法線針、型紙平面バー、配置角度・上向き角度を表示（ドラッグ操作・Shiftで15度スナップ対応）。2Dキャンバスにはボーン設定済みピースの上向き方向矢印と `BONE_WRAP` 縫合の識別色・マークを、3Dビューには平面・上向き軸・実縫合辺に沿った迂回アーチプレビューを描画。
-   - **対称複製時のボーン自動反転 (`flip_bone_name_left_right`)**: `Shift+U`（対称複製）および左右反転実行時、`.L` $\leftrightarrow$ `.R`、`_L` $\leftrightarrow$ `_R`、`Left` $\leftrightarrow$ `Right` のボーン名を自動反転し、ロール角度 `bone_angle_deg` およびパターン上方向角度 `pattern_up_angle_deg` を正負反転（$-\theta, -\phi$）して即座にミラー配置。
+   - **対称複製時のボーン自動反転 (`flip_bone_name_left_right`)**: `Shift+U`（対称複製）および左右反転実行時、`.L` $`\leftrightarrow`$ `.R`、`_L` $`\leftrightarrow`$ `_R`、`Left` $`\leftrightarrow`$ `Right` のボーン名を自動反転し、ロール角度 `bone_angle_deg` およびパターン上方向角度 `pattern_up_angle_deg` を正負反転（$`-\theta, -\phi`$）して即座にミラー配置。
    - シーン内の既存 2D Curve 型紙オブジェクト（Bezier / Poly）を解析し、`Document` の Piece・Path・Node・Placement へ一括自動変換。
 7. **Rust 2D 幾何ユーティリティ & CDT / Botsch-Kobbelt 等方性リメッシュ (`crates/cloth_core/src/{geometry_2d.rs, pattern_remesh.rs}`)**:
    - `geometry_2d.rs` に共通 2D 幾何判定（符号付き面積、外周・穴ポリゴン内外判定、線分交差・厳密内部交差判定、厳密凸四角形・CCW 検証）を集約。
    - `spade` による Constrained Delaunay Triangulation (CDT) と重心 Winding Number 凹形状内外判定。
    - 境界頂点 `0..B` の完全不変保護（外周長・面積厳密保存）および内部拘束線（`internal_constraints`）の強制維持。
-   - エッジ分割・縮約・Delaunay flip・ラプラシアン平滑化によるスリバー三角形の完全解消（最小角 $\ge 18^\circ$）。
+   - エッジ分割・縮約・Delaunay flip・ラプラシアン平滑化によるスリバー三角形の完全解消（最小角 $`\ge 18^\circ`$）。
 8. **プロダクションQuadリメッシュ & 3D Barycentric 逆写像 (`crates/cloth_core/src/quad_remesh.rs`, `python/taremin_cloth/utils/quad_remesh_prep.py`)**:
    - 実験的機能フラグ `enable_quad_remesh`（プリファレンス > 実験的機能、既定無効）で UI およびオペレーター `poll()` をゲート制御。
    - Python 前処理 (`prepare_quad_remesh_islands`) による UV アイランド分割・半辺境界トレース（バタフライ頂点最小角分岐）・ネスト深度による外周/穴分類・縫い目トポロジー抽出。

@@ -18,6 +18,12 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Any
 
+# Windows (cp1252等) の非UTF-8標準出力環境での UnicodeEncodeError を防止する
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ADDON_DIR = REPO_ROOT / "python" / "taremin_cloth"
 TRANSLATIONS_DIR = ADDON_DIR / "translations"

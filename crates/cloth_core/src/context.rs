@@ -1,8 +1,11 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
 
 static GLOBAL_CONTEXT: RwLock<Option<Arc<GpuContext>>> = RwLock::new(None);
+
+/// 複数スレッドからの同時初期化・Device Lost 自動復旧による epoch 逆転と多重生成を防ぐ排他ロック
+static INIT_MUTEX: Mutex<()> = Mutex::new(());
 
 /// 最後に明示指定されたデバイス設定（Device Lost 後の同一設定での自動復旧に使用）
 static CURRENT_DEVICE_CONFIG: RwLock<(Option<String>, Option<usize>)> = RwLock::new((None, None));
@@ -108,11 +111,21 @@ impl GpuContext {
                 }
             }
         }
+        // ダブルチェックロックで複数スレッドによる同時初期化・古い epoch の上書きを防ぐ
+        let _init_guard = INIT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let read_lock = GLOBAL_CONTEXT.read().unwrap();
+            if let Some(ctx) = read_lock.as_ref() {
+                if !ctx.is_device_lost() {
+                    return Ok(Arc::clone(ctx));
+                }
+            }
+        }
         let (backend, device_index) = {
             let cfg = CURRENT_DEVICE_CONFIG.read().unwrap();
             (cfg.0.clone(), cfg.1)
         };
-        Self::init_or_reset(backend.as_deref(), device_index)
+        Self::init_or_reset_locked(backend.as_deref(), device_index)
     }
 
     /// このGPUコンテキストで Device Lost が検出済みかを返す
@@ -308,6 +321,14 @@ impl GpuContext {
         backend_str: Option<&str>,
         device_index: Option<usize>,
     ) -> Result<Arc<Self>, GpuContextError> {
+        let _init_guard = INIT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        Self::init_or_reset_locked(backend_str, device_index)
+    }
+
+    fn init_or_reset_locked(
+        backend_str: Option<&str>,
+        device_index: Option<usize>,
+    ) -> Result<Arc<Self>, GpuContextError> {
         pollster::block_on(Self::init_or_reset_async(backend_str, device_index))
     }
 
@@ -328,11 +349,19 @@ impl GpuContext {
             }
         }
         // 世代を先に進めて旧デバイス由来の共有パイプライン再利用を防止する
-        DEVICE_EPOCH.fetch_add(1, Ordering::SeqCst);
-        let ctx = Arc::new(Self::create_device_async(backend_str, device_index).await?);
+        let new_epoch = DEVICE_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut raw_ctx = Self::create_device_async(backend_str, device_index).await?;
+        raw_ctx.epoch = new_epoch;
+        let ctx = Arc::new(raw_ctx);
         {
             let mut write_lock = GLOBAL_CONTEXT.write().unwrap();
-            *write_lock = Some(Arc::clone(&ctx));
+            // 他の非同期呼び出しがより新しい世代を既に登録していた場合は上書きしない
+            let should_replace = write_lock
+                .as_ref()
+                .is_none_or(|cur| cur.is_device_lost() || cur.epoch < new_epoch);
+            if should_replace {
+                *write_lock = Some(Arc::clone(&ctx));
+            }
         }
         Ok(ctx)
     }
@@ -388,8 +417,13 @@ impl GpuContext {
 mod tests {
     use super::*;
 
+    /// 同一プロセスで並列実行される context テスト同士が GLOBAL_CONTEXT や
+    /// CURRENT_DEVICE_CONFIG を競合書き換えしないための直列化ロック
+    static CONTEXT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_gpu_context_creation() {
+        let _guard = CONTEXT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let context_result = GpuContext::get_or_init();
         match context_result {
             Ok(ctx) => {
@@ -422,6 +456,7 @@ mod tests {
 
     #[test]
     fn test_reinit_gpu_context() {
+        let _guard = CONTEXT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Windows は DX12、それ以外 (Linux / macOS) は PRIMARY (Vulkan / Metal)
         let backend = if cfg!(target_os = "windows") {
             Some("dx12")
@@ -446,6 +481,7 @@ mod tests {
 
     #[test]
     fn test_device_lost_marks_and_recovers() {
+        let _guard = CONTEXT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let first = match GpuContext::get_or_init() {
             Ok(ctx) => ctx,
             Err(GpuContextError::AdapterNotFound) => return,
