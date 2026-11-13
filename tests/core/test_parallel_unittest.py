@@ -259,6 +259,89 @@ class TestParallelUnittestExecution(unittest.TestCase):
             )
             self.assertEqual(rc, 0)
 
+    def test_bone_sdf_baker_classified_as_gpu_unit(self):
+        """bake_bone_sdf 呼び出しテストが GPU ユニットとして正しく分類されること"""
+        units = discover_test_units(
+            REPO_ROOT,
+            pattern="test_bone_sdf_baker.py",
+            granularity="file",
+            scope="standalone",
+        )
+        self.assertEqual(len(units), 1)
+        self.assertTrue(units[0].uses_gpu)
+        self.assertEqual(units[0].priority, 1)
+
+    def test_software_gpu_lane_runs_gpu_units_on_single_worker_and_retires_on_device_lost(self):
+        """Software GPU モードでは GPU ユニットを専任ワーカーで順次実行し、Device Lost 後は別プロセスへ交代すること"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pkg_dir = tmp_path / "lane_tests"
+            pkg_dir.mkdir()
+            (pkg_dir / "__init__.py").write_text("", encoding="utf-8")
+            log_file = tmp_path / "pids.log"
+
+            # GPU ユニット群 (1・2件目は同一ワーカー PID で実行され、Device Lost 後は別 PID へ交代)
+            (pkg_dir / "test_gpu_sim.py").write_text(
+                (
+                    "import os, unittest\n"
+                    "import taremin_cloth_core  # noqa: F401\n"
+                    f"LOG_PATH = {str(log_file)!r}\n"
+                    "class TestGpuFirst(unittest.TestCase):\n"
+                    "    def test_first(self):\n"
+                    "        with open(LOG_PATH, 'a', encoding='utf-8') as f:\n"
+                    "            f.write(f'gpu_1:{os.getpid()}\\n')\n"
+                    "        self.assertTrue(True)\n"
+                    "class TestGpuLost(unittest.TestCase):\n"
+                    "    def test_lost(self):\n"
+                    "        with open(LOG_PATH, 'a', encoding='utf-8') as f:\n"
+                    "            f.write(f'gpu_lost:{os.getpid()}\\n')\n"
+                    "        self.fail('Parent device is lost')\n"
+                    "class TestGpuRecover(unittest.TestCase):\n"
+                    "    def test_ok(self):\n"
+                    "        with open(LOG_PATH, 'a', encoding='utf-8') as f:\n"
+                    "            f.write(f'gpu_ok:{os.getpid()}\\n')\n"
+                    "        self.assertTrue(True)\n"
+                ),
+                encoding="utf-8",
+            )
+            (pkg_dir / "test_cpu_work.py").write_text(
+                (
+                    "import os, unittest\n"
+                    f"LOG_PATH = {str(log_file)!r}\n"
+                    "class TestCpuLane(unittest.TestCase):\n"
+                    "    def test_cpu(self):\n"
+                    "        with open(LOG_PATH, 'a', encoding='utf-8') as f:\n"
+                    "            f.write(f'cpu:{os.getpid()}\\n')\n"
+                    "        self.assertTrue(True)\n"
+                ),
+                encoding="utf-8",
+            )
+
+            rc = run_parallel_python_tests(
+                tmp_path,
+                test_roots=[pkg_dir],
+                workers=2,
+                granularity="method",
+                scope="all",
+                verbosity=0,
+                serialize_gpu=True,
+            )
+            self.assertEqual(rc, 1)
+            records = dict(
+                line.split(":", 1)
+                for line in log_file.read_text(encoding="utf-8").splitlines()
+                if ":" in line
+            )
+            self.assertIn("gpu_1", records)
+            self.assertIn("gpu_lost", records)
+            self.assertIn("gpu_ok", records)
+            self.assertIn("cpu", records)
+            # 同一専任 GPU ワーカーが連続処理すること
+            self.assertEqual(records["gpu_1"], records["gpu_lost"])
+            # Device Lost 発生後、後続の GPU ユニットは交代した別プロセス (PID) で実行されること
+            self.assertNotEqual(records["gpu_lost"], records["gpu_ok"])
+            self.assertNotEqual(records["gpu_1"], records["cpu"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,8 +1,11 @@
 use std::sync::{Arc, RwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use thiserror::Error;
 
 static GLOBAL_CONTEXT: RwLock<Option<Arc<GpuContext>>> = RwLock::new(None);
+
+/// 最後に明示指定されたデバイス設定（Device Lost 後の同一設定での自動復旧に使用）
+static CURRENT_DEVICE_CONFIG: RwLock<(Option<String>, Option<usize>)> = RwLock::new((None, None));
 
 /// GPUデバイス世代カウンタ。`init_or_reset` による差し替えのたびに加算され、
 /// プロセス全体の共有パイプラインキャッシュの無効化キーとして使用する。
@@ -49,6 +52,8 @@ pub struct GpuContext {
     /// 生成時点のデバイス世代 (`DEVICE_EPOCH` のスナップショット)。
     /// 共有パイプラインキャッシュのキーに使用する。
     pub epoch: u64,
+    /// Device Lost / 回復不能なGPUエラー発生フラグ（インスタンス固有）
+    device_lost: Arc<AtomicBool>,
 }
 
 fn format_backend(b: wgpu::Backend) -> String {
@@ -92,15 +97,32 @@ fn parse_backends(backend_str: Option<&str>) -> wgpu::Backends {
 }
 
 impl GpuContext {
-    /// プロセス内で共有されるグローバルな GPU Context を取得または初期化する
+    /// プロセス内で共有されるグローバルな GPU Context を取得または初期化する。
+    /// Device Lost 済みのコンテキストが保持されている場合は同一設定で自動再初期化する。
     pub fn get_or_init() -> Result<Arc<Self>, GpuContextError> {
         {
             let read_lock = GLOBAL_CONTEXT.read().unwrap();
             if let Some(ctx) = read_lock.as_ref() {
-                return Ok(Arc::clone(ctx));
+                if !ctx.is_device_lost() {
+                    return Ok(Arc::clone(ctx));
+                }
             }
         }
-        Self::init_or_reset(None, None)
+        let (backend, device_index) = {
+            let cfg = CURRENT_DEVICE_CONFIG.read().unwrap();
+            (cfg.0.clone(), cfg.1)
+        };
+        Self::init_or_reset(backend.as_deref(), device_index)
+    }
+
+    /// このGPUコンテキストで Device Lost が検出済みかを返す
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(Ordering::SeqCst)
+    }
+
+    /// このGPUコンテキストを Device Lost 状態として明示マークする（異常検知・テスト用）
+    pub fn mark_device_lost(&self) {
+        self.device_lost.store(true, Ordering::SeqCst);
     }
 
     /// 利用可能なGPUデバイスの一覧を取得する（指定バックエンド対応デバイスのみを走査）
@@ -242,12 +264,42 @@ impl GpuContext {
             )
             .await?;
 
+        let device_lost = Arc::new(AtomicBool::new(false));
+        let lost_flag_cb = Arc::clone(&device_lost);
+        device.set_device_lost_callback(move |reason, message| {
+            lost_flag_cb.store(true, Ordering::SeqCst);
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                eprintln!("[taremin_cloth] GPU Device Lost ({reason:?}): {message}");
+            }
+        });
+
+        let lost_flag_err = Arc::clone(&device_lost);
+        device.on_uncaptured_error(Box::new(move |error| {
+            let msg = error.to_string();
+            let is_lost_err = matches!(
+                error,
+                wgpu::Error::OutOfMemory { .. } | wgpu::Error::Internal { .. }
+            ) || msg.contains("Device is lost")
+                || msg.contains("Parent device is lost");
+
+            if is_lost_err || lost_flag_err.load(Ordering::SeqCst) {
+                let already_lost = lost_flag_err.swap(true, Ordering::SeqCst);
+                if !already_lost {
+                    eprintln!("[taremin_cloth] Uncaptured GPU error (marking device lost): {msg}");
+                }
+                return;
+            }
+            // 通常の Validation エラー（バグ）は従来通り即時検知させる
+            panic!("wgpu validation error: {error}");
+        }));
+
         Ok(Self {
             queue,
             device,
             adapter,
             instance,
             epoch: DEVICE_EPOCH.load(Ordering::SeqCst),
+            device_lost,
         })
     }
 
@@ -264,6 +316,17 @@ impl GpuContext {
         backend_str: Option<&str>,
         device_index: Option<usize>,
     ) -> Result<Arc<Self>, GpuContextError> {
+        {
+            let mut cfg = CURRENT_DEVICE_CONFIG.write().unwrap();
+            *cfg = (backend_str.map(str::to_string), device_index);
+        }
+        // Device Lost 状態の旧コンテキストが残っていれば先に破棄して資源を解放する
+        {
+            let mut write_lock = GLOBAL_CONTEXT.write().unwrap();
+            if write_lock.as_ref().is_some_and(|ctx| ctx.is_device_lost()) {
+                *write_lock = None;
+            }
+        }
         // 世代を先に進めて旧デバイス由来の共有パイプライン再利用を防止する
         DEVICE_EPOCH.fetch_add(1, Ordering::SeqCst);
         let ctx = Arc::new(Self::create_device_async(backend_str, device_index).await?);
@@ -379,5 +442,23 @@ mod tests {
                 panic!("GPU初期化テスト失敗: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_device_lost_marks_and_recovers() {
+        let first = match GpuContext::get_or_init() {
+            Ok(ctx) => ctx,
+            Err(GpuContextError::AdapterNotFound) => return,
+            Err(e) => panic!("GPU Context 取得失敗: {e}"),
+        };
+        assert!(!first.is_device_lost());
+        let old_epoch = first.epoch;
+
+        first.mark_device_lost();
+        assert!(first.is_device_lost());
+
+        let recovered = GpuContext::get_or_init().expect("Device Lost 後の自動再初期化に成功すべき");
+        assert!(!recovered.is_device_lost());
+        assert!(recovered.epoch > old_epoch, "再初期化後は DEVICE_EPOCH が更新されるべき");
     }
 }

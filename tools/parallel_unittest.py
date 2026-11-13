@@ -112,6 +112,7 @@ class TestUnit:
     priority: int
     weight: int
     requires_blender: bool
+    uses_gpu: bool = False
 
 
 @dataclass
@@ -179,8 +180,46 @@ def _is_blender_required_file(file_path: Path, text: str) -> bool:
 def _uses_gpu(text: str) -> bool:
     return any(
         kw in text
-        for kw in ("taremin_cloth_core", "ClothSimulator", "GpuSdfBaker", "MeshSdfBaker")
+        for kw in (
+            "taremin_cloth_core",
+            "ClothSimulator",
+            "ClothReplayer",
+            "GpuSdfBaker",
+            "MeshSdfBaker",
+            "bake_bone_sdf",
+            "bake_mesh_sdf",
+            "step_cloth_scene",
+            "replayer",
+        )
     )
+
+
+def _detect_software_gpu(*, python_exe: Optional[str] = None) -> bool:
+    """実行環境のアクティブGPUがソフトウェア実装 (WARP/Lavapipe等) かを判定する。"""
+    override = os.environ.get("TAREMIN_CLOTH_GPU_SERIALIZE", "").strip().lower()
+    if override in ("1", "true", "yes", "on"):
+        return True
+    if override in ("0", "false", "no", "off"):
+        return False
+
+    exe = python_exe or sys.executable
+    probe = (
+        "import json, taremin_cloth_core as c; "
+        "print(json.dumps(c.get_current_gpu_device()))"
+    )
+    try:
+        proc = subprocess.run(
+            [exe, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            info = json.loads(proc.stdout.strip().splitlines()[-1])
+            return str(info.get("device_type", "")).upper() == "CPU"
+    except Exception:
+        pass
+    return os.environ.get("CI", "").strip().lower() == "true"
 
 
 def _has_testcase_base(node: ast.ClassDef) -> bool:
@@ -266,10 +305,11 @@ def _extract_units_from_file(
     file_name = file_path.name
     file_size = len(text)
 
+    is_gpu_unit = _uses_gpu(text)
     if file_name in _HEAVY_INDEX:
         base_priority = 0
         base_weight = 1_000_000 - _HEAVY_INDEX[file_name] * 1000
-    elif _uses_gpu(text):
+    elif is_gpu_unit:
         base_priority = 1
         base_weight = file_size
     else:
@@ -284,6 +324,7 @@ def _extract_units_from_file(
                 priority=base_priority,
                 weight=base_weight,
                 requires_blender=requires_blender,
+                uses_gpu=is_gpu_unit,
             )
         ]
 
@@ -297,6 +338,7 @@ def _extract_units_from_file(
                 priority=base_priority,
                 weight=base_weight,
                 requires_blender=requires_blender,
+                uses_gpu=is_gpu_unit,
             )
         ]
 
@@ -324,6 +366,7 @@ def _extract_units_from_file(
                     priority=base_priority,
                     weight=base_weight,
                     requires_blender=requires_blender,
+                    uses_gpu=is_gpu_unit,
                 )
             )
             continue
@@ -340,6 +383,7 @@ def _extract_units_from_file(
                     priority=prio,
                     weight=per_method_weight,
                     requires_blender=requires_blender,
+                    uses_gpu=is_gpu_unit,
                 )
             )
 
@@ -351,6 +395,7 @@ def _extract_units_from_file(
                 priority=base_priority,
                 weight=base_weight,
                 requires_blender=requires_blender,
+                uses_gpu=is_gpu_unit,
             )
         ]
 
@@ -513,22 +558,79 @@ def _run_sequential_local(
 class _CoordinatorState:
     """テスト配布キューと進捗・実行中タスクを管理するスレッドセーフ状態"""
 
-    def __init__(self, units: Sequence[TestUnit]):
+    def __init__(
+        self,
+        units: Sequence[TestUnit],
+        *,
+        gpu_worker_ids: Optional[Sequence[str]] = None,
+    ):
         self._lock = threading.Lock()
         self._queue: List[TestUnit] = list(units)
         self._total = len(units)
         self._in_flight: Dict[str, Tuple[str, float]] = {}
         self._results: List[UnitResult] = []
         self._worker_busy: Dict[str, float] = {}
+        self._gpu_worker_bases: Optional[set[str]] = (
+            set(gpu_worker_ids) if gpu_worker_ids is not None else None
+        )
+        self._retire_requested: set[str] = set()
+
+    def _is_gpu_worker(self, worker_id: str) -> bool:
+        if self._gpu_worker_bases is None:
+            return True
+        base_wid = worker_id.split("_r", 1)[0]
+        return base_wid in self._gpu_worker_bases
 
     def pop_next(self, worker_id: str) -> Optional[str]:
         with self._lock:
             if not self._queue:
                 self._in_flight.pop(worker_id, None)
                 return None
-            unit = self._queue.pop(0)
+
+            idx: Optional[int] = None
+            if self._gpu_worker_bases is None:
+                idx = 0
+            elif self._is_gpu_worker(worker_id):
+                # 専任GPUワーカーはGPUテストを優先消化し、残余のCPUテストも最後に手伝う
+                for i, u in enumerate(self._queue):
+                    if u.uses_gpu:
+                        idx = i
+                        break
+                if idx is None:
+                    idx = 0
+            else:
+                # CPUワーカーはGPUテストを取得せずCPUテストのみを並行消化する
+                for i, u in enumerate(self._queue):
+                    if not u.uses_gpu:
+                        idx = i
+                        break
+
+            if idx is None:
+                self._in_flight.pop(worker_id, None)
+                return None
+
+            unit = self._queue.pop(idx)
             self._in_flight[worker_id] = (unit.target, time.monotonic())
             return unit.target
+
+    def request_worker_retire(self, worker_id: str) -> None:
+        with self._lock:
+            self._retire_requested.add(worker_id)
+
+    def consume_retire_request(self, worker_id: str) -> bool:
+        with self._lock:
+            if worker_id in self._retire_requested:
+                self._retire_requested.remove(worker_id)
+                return True
+            return False
+
+    def has_pending_work_for_worker(self, worker_id: str) -> bool:
+        with self._lock:
+            if not self._queue:
+                return False
+            if self._gpu_worker_bases is None or self._is_gpu_worker(worker_id):
+                return True
+            return any(not u.uses_gpu for u in self._queue)
 
     def record_result(self, result: UnitResult) -> Tuple[int, int]:
         with self._lock:
@@ -602,6 +704,21 @@ def _recv_json_line(conn: socket.socket) -> Dict[str, Any]:
     return json.loads(b"".join(chunks).decode("utf-8", errors="replace"))
 
 
+_FATAL_GPU_ERROR_MARKERS = (
+    "Parent device is lost",
+    "Device is lost",
+    "GetDeviceRemovedReason",
+    "0x887A0005",
+)
+
+
+def _has_fatal_gpu_error(result: UnitResult) -> bool:
+    if result.ok:
+        return False
+    blob = f"{result.error_summary}\n{result.output}"
+    return any(marker in blob for marker in _FATAL_GPU_ERROR_MARKERS)
+
+
 def _make_queue_server(
     state: _CoordinatorState,
     *,
@@ -632,9 +749,12 @@ def _make_queue_server(
                     output=str(req.get("output", "")),
                     error_summary=str(req.get("error_summary", "")),
                 )
+                retire = _has_fatal_gpu_error(res)
+                if retire:
+                    state.request_worker_retire(res.worker_id)
                 done_cnt, total_cnt = state.record_result(res)
                 on_result(res, done_cnt=done_cnt, total_cnt=total_cnt)
-                _send_json_line(self.request, {"ack": True})
+                _send_json_line(self.request, {"ack": True, "retire": retire})
 
     class _Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
@@ -684,7 +804,10 @@ def _worker_client_loop(
                     "error_summary": res.error_summary,
                 },
             )
-            _recv_json_line(sock)
+            ack = _recv_json_line(sock)
+        if ack.get("retire"):
+            # Device Lost 等の異常状態が後続テストへ連鎖しないようワーカープロセスを交代させる
+            break
     return 0
 
 
@@ -707,9 +830,10 @@ def _run_with_worker_pool(
     verbosity: int = 1,
     timeout_sec: float = 300.0,
     label: str = "ParallelTest",
+    gpu_worker_ids: Optional[Sequence[str]] = None,
 ) -> int:
     """キューサーバー + ワーカープロセス群を統括し並列実行する共通エンジン"""
-    state = _CoordinatorState(units)
+    state = _CoordinatorState(units, gpu_worker_ids=gpu_worker_ids)
     print_lock = threading.Lock()
     wall_t0 = time.perf_counter()
 
@@ -766,9 +890,9 @@ def _run_with_worker_pool(
             for idx in range(workers):
                 spawn_worker(f"w{idx + 1}", tmp_root)
 
-            # ワーカー監視ループ（異常終了とタイムアウトを検出）
+            # ワーカー監視ループ（異常終了・Device Lost引退・タイムアウトを検出）
             crash_restarts = 0
-            max_restarts = max(2, workers)
+            max_restarts = max(4, workers * 2)
             while procs:
                 finished_wids: List[str] = []
                 for wid, (proc, log_path, log_fp) in list(procs.items()):
@@ -776,6 +900,8 @@ def _run_with_worker_pool(
                     if rc is not None:
                         log_fp.close()
                         finished_wids.append(wid)
+                        retired = state.consume_retire_request(wid)
+                        base_wid = wid.split("_r", 1)[0]
                         if rc != 0:
                             tail = _tail_file(log_path)
                             aborted = state.mark_worker_aborted(
@@ -791,10 +917,20 @@ def _run_with_worker_pool(
                                     file=sys.stderr,
                                     flush=True,
                                 )
-                            if state.has_pending_work() and crash_restarts < max_restarts:
+                            if state.has_pending_work_for_worker(base_wid) and crash_restarts < max_restarts:
                                 crash_restarts += 1
-                                new_wid = f"{wid}_r{crash_restarts}"
+                                new_wid = f"{base_wid}_r{crash_restarts}"
                                 spawn_worker(new_wid, tmp_root)
+                        elif retired and state.has_pending_work_for_worker(base_wid) and crash_restarts < max_restarts:
+                            crash_restarts += 1
+                            new_wid = f"{base_wid}_r{crash_restarts}"
+                            with print_lock:
+                                print(
+                                    f"[{label}] [INFO] GPU異常後のワーカー {wid} を {new_wid} へ交代します",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            spawn_worker(new_wid, tmp_root)
                 for wid in finished_wids:
                     procs.pop(wid, None)
 
@@ -817,9 +953,10 @@ def _run_with_worker_pool(
                                 file=sys.stderr,
                                 flush=True,
                             )
-                        if state.has_pending_work() and crash_restarts < max_restarts:
+                        base_wid = wid.split("_r", 1)[0]
+                        if state.has_pending_work_for_worker(base_wid) and crash_restarts < max_restarts:
                             crash_restarts += 1
-                            spawn_worker(f"{wid}_r{crash_restarts}", tmp_root)
+                            spawn_worker(f"{base_wid}_r{crash_restarts}", tmp_root)
 
                 if procs:
                     time.sleep(0.05)
@@ -940,7 +1077,8 @@ def run_parallel_python_tests(
     granularity: str = "auto",
     scope: str = "standalone",
     verbosity: int = 1,
-    timeout_sec: float = 300.0,
+    timeout_sec: Optional[float] = None,
+    serialize_gpu: Optional[bool] = None,
 ) -> int:
     """Python スタンドアロンテストを常駐ワーカープールで並列実行する"""
     units = discover_test_units(
@@ -956,6 +1094,22 @@ def run_parallel_python_tests(
 
     eff_workers = resolve_worker_count(requested=workers, unit_count=len(units), default_cap=4)
     py_exe = str(python_exe) if python_exe else sys.executable
+
+    has_gpu_units = any(u.uses_gpu for u in units)
+    has_cpu_units = any(not u.uses_gpu for u in units)
+    if serialize_gpu is None:
+        is_sw_gpu = has_gpu_units and _detect_software_gpu(python_exe=py_exe)
+    else:
+        is_sw_gpu = serialize_gpu
+
+    eff_timeout = timeout_sec if timeout_sec is not None else (480.0 if is_sw_gpu else 300.0)
+    gpu_worker_ids: Optional[List[str]] = None
+    if is_sw_gpu and eff_workers > 1 and has_gpu_units:
+        if not has_cpu_units:
+            # GPUユニットのみの場合は1専任プロセスで順次実行しコンパイル共有と競合回避を図る
+            eff_workers = 1
+        else:
+            gpu_worker_ids = ["w1"]
 
     if eff_workers <= 1:
         # 単一ワーカー時: 指定 python_exe が自身ならインプロセス実行、別環境なら一時 targets.json 経由で実行
@@ -989,9 +1143,14 @@ def run_parallel_python_tests(
         ]
         return cmd, {}
 
+    lane_note = (
+        f", mode=software-gpu-lane(gpu=w1, cpu=w2..w{eff_workers}, timeout={eff_timeout:.0f}s)"
+        if gpu_worker_ids is not None
+        else f", timeout={eff_timeout:.0f}s"
+    )
     print(
         f"[ParallelTest] Python テスト実行開始: {len(units)} ユニット / "
-        f"{eff_workers} ワーカー (granularity={granularity}, scope={scope})"
+        f"{eff_workers} ワーカー (granularity={granularity}, scope={scope}{lane_note})"
     )
     return _run_with_worker_pool(
         units,
@@ -999,8 +1158,9 @@ def run_parallel_python_tests(
         build_worker_cmd=build_cmd,
         cwd=repo_root,
         verbosity=verbosity,
-        timeout_sec=timeout_sec,
+        timeout_sec=eff_timeout,
         label="PythonParallel",
+        gpu_worker_ids=gpu_worker_ids,
     )
 
 
@@ -1110,7 +1270,12 @@ def _parse_cli_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="タスク分割粒度",
     )
     parser.add_argument("--verbosity", "-v", type=int, default=1, help="出力詳細度 (1 or 2)")
-    parser.add_argument("--timeout", type=float, default=300.0, help="1ユニットあたりのタイムアウト秒数")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="1ユニットあたりのタイムアウト秒数 (既定: 通常300 / Software GPU時480)",
+    )
 
     # 内部ワーカー・バッチ実行用オプション
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)

@@ -122,8 +122,8 @@ GPUシミュレーション実行中におけるCPU同期待ち（リードバ�
   predict / distance / bending / sewing / pin / collision / update_vel / extract_positions。いずれも毎フレーム到達し得るため初回に生成する。
 - **遅延 (lazy) 15 本**:
   Atomic ソルバー対 (`solver_mode == 1` 時のみ) / PairCache 3 本 (`enable_pair_cache` 時のみ) / Edge 衝突 (`enable_edge_collision` 時のみ) / 自己衝突 3 本 + 空間ハッシュ 6 本 (`enable_self_collision` 時のみ)。`set_enable_*()` およびディスパッチ到達時に `ensure_*()` で生成するため、初回有効化のフレームに約 0.3〜3 秒の1回限りのヒッチが発生する。
-- **デバイス差し替え時の無効化**:
-  `set_gpu_device` (`GpuContext::init_or_reset`) でデバイス世代カウンタを進め、旧世代エントリを除去する。既存 sim は自前の `Arc` を保持するため動作継続し、新規 sim は新世代で構築される。
+- **デバイス差し替えおよび Device Lost 時の無効化・自動復旧**:
+  `set_gpu_device` (`GpuContext::init_or_reset`) でデバイス世代カウンタを進め、旧世代エントリを除去する。既存 sim は自前の `Arc` を保持するため動作継続し、新規 sim は新世代で構築される。また `create_device_async` では `set_device_lost_callback` / `on_uncaptured_error` によりインスタンス単位で `device_lost` 状態を追跡し、喪失後は `GpuContext::get_or_init()` 呼び出し時に直近のデバイス設定で自動再初期化して後続シミュレーションへの連鎖失敗を遮断する。
 - **計測 API**:
   `ClothSimulator.get_build_timings()` (生成時内訳) および `shared_pipeline_cache_info()` (キャッシュ診断) で起動時間を検証可能。Blender を起動せず `python -m taremin_cloth.log_tools` / `tests/core/test_pipeline_cache.py` で回帰計測する。
 

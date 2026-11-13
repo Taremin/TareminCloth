@@ -882,7 +882,9 @@ impl GpuClothSimulator {
 
         let slice = self.staging_buffer.slice(..buffer_size);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
 
         self.context.device.poll(wgpu::Maintain::Wait);
         pollster::block_on(receiver.receive()).unwrap().unwrap();
@@ -1017,7 +1019,9 @@ impl GpuClothSimulator {
 
             let slice = self.compact_staging_buffers[0].slice(..compact_size);
             let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-            slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+            slice.map_async(wgpu::MapMode::Read, move |v| {
+                let _ = sender.send(v);
+            });
 
             self.context.device.poll(wgpu::Maintain::Wait);
             pollster::block_on(receiver.receive()).unwrap().unwrap();
@@ -1048,7 +1052,9 @@ impl GpuClothSimulator {
 
             let slice = self.staging_buffer.slice(..buffer_size);
             let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-            slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+            slice.map_async(wgpu::MapMode::Read, move |v| {
+                let _ = sender.send(v);
+            });
 
             self.context.device.poll(wgpu::Maintain::Wait);
             pollster::block_on(receiver.receive()).unwrap().unwrap();
@@ -1115,7 +1121,9 @@ impl GpuClothSimulator {
 
         let slice = staging.slice(..size.max(4));
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
         self.context.device.poll(wgpu::Maintain::Wait);
         pollster::block_on(receiver.receive()).unwrap().unwrap();
 
@@ -1319,7 +1327,9 @@ impl GpuClothSimulator {
 
         let slice = self.buffered_staging_buffer.slice(..total_size);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
 
         self.context.device.poll(wgpu::Maintain::Wait);
         pollster::block_on(receiver.receive()).unwrap().unwrap();
