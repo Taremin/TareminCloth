@@ -220,9 +220,9 @@ class TestDemoScenes(unittest.TestCase):
         )
         sim.add_sphere_collider(center=[0.0, 0.0, 0.16], radius=0.14, friction=0.4, restitution=0.0)
 
-        # 3ステップ実行しただけで暴れ（エッジ伸び・トゲトゲ）が発生する
+        # 球体へ接触する F6 以降、実効剛性不足によりエッジ伸び破綻が発生する (F10 で max_strain > 1.30)
         out_pos = np.zeros(len(positions) * 3, dtype=np.float32)
-        for _ in range(3):
+        for _ in range(15):
             sim.step(dt=1.0 / 60.0, substeps=20)
 
         sim.get_positions(out_pos)

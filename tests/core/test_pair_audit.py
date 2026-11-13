@@ -117,6 +117,13 @@ class TestPairAudit(unittest.TestCase):
         self.assertGreaterEqual(rep["ee_coverage"], 0.9, f"EE coverage: {rep}")
         self.assertEqual(rep["vt_stale"], 0)
         self.assertEqual(rep["vt_dropped"], 0)
+        # E-E ペアキャッシュに重複エッジ組が含まれないこと
+        ee = np.asarray(ee_pairs, dtype=np.int64).reshape((-1, 4))
+        ee_norm = {
+            tuple(sorted((tuple(sorted((int(r[0]), int(r[1])))), tuple(sorted((int(r[2]), int(r[3])))))))
+            for r in ee
+        }
+        self.assertEqual(len(ee_norm), len(ee), "E-E ペアキャッシュに重複が存在します")
 
     def test_saturation_drops_reported(self):
         """上限超過時はドロップ数が報告されること"""

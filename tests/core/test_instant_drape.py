@@ -75,9 +75,10 @@ class TestInstantDrape(unittest.TestCase):
         np.testing.assert_allclose(out[8], positions[8], atol=1e-4)
 
         # 自由端頂点 (0, 1, 2) は重力でZが垂れ下がっていること
-        self.assertLess(out[0, 2], 1.0 - 0.05, f"Free vertex did not drape: z={out[0, 2]}")
-        self.assertLess(out[1, 2], 1.0 - 0.05, f"Free vertex did not drape: z={out[1, 2]}")
-        self.assertLess(out[2, 2], 1.0 - 0.05, f"Free vertex did not drape: z={out[2, 2]}")
+        # 理論自由落下量: 0.5 * 9.81 * (0.016 + 40/600)^2 ~= 0.0335m (z ~= 0.9665m)
+        self.assertLess(out[0, 2], 1.0 - 0.025, f"Free vertex did not drape: z={out[0, 2]}")
+        self.assertLess(out[1, 2], 1.0 - 0.025, f"Free vertex did not drape: z={out[1, 2]}")
+        self.assertLess(out[2, 2], 1.0 - 0.025, f"Free vertex did not drape: z={out[2, 2]}")
 
         print(f"[Instant Drape Test] 40 substeps completed in {elapsed_ms:.2f}ms (Z dropped to {out[0, 2]:.3f}m)")
 

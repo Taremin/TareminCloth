@@ -28,8 +28,8 @@ def areal_inv_masses(pos, faces, density):
 
 class TestGoldenRegression(unittest.TestCase):
     """
-    3160075（自然な挙動が保証されている安定版）の全フレーム物理状態と
-    完全一致・大域一致することを検証する自己完結型ゴールデンマスター・リグレッションテスト。
+    基準となる物理シミュレーション結果（golden_master/*.npz）の全フレーム物理状態と
+    短期厳密一致・全フレーム大域一致することを検証する自己完結型ゴールデンマスター・リグレッションテスト。
     外部ログファイルに依存せず、同梱の golden_master/*.npz データのみで決定論的に実行される。
     """
 
@@ -66,10 +66,10 @@ class TestGoldenRegression(unittest.TestCase):
 
             self.assertFalse(np.isnan(actual_pos).any(), f"Case 3 contains NaN at Frame {fi}")
 
-            # 短期一致 (Frame 1..3: GPU並列浮動小数点誤差の累積を考慮しつつ初期分岐を検知)
+            # 短期厳密一致 (Frame 1..10)
             diff = np.linalg.norm(actual_pos - golden_pos[fi], axis=1).max()
-            if fi <= 3:
-                self.assertLess(diff, 0.020, f"Case 3 short-term diverged at Frame {fi}: {diff*1000:.4f} mm")
+            if fi <= 10:
+                self.assertLess(diff, 0.001, f"Case 3 short-term diverged at Frame {fi}: {diff*1000:.4f} mm")
 
             # 大域重心一致 (全フレーム)
             center_diff = np.linalg.norm(actual_pos.mean(axis=0) - golden_pos[fi].mean(axis=0))
@@ -107,10 +107,10 @@ class TestGoldenRegression(unittest.TestCase):
 
             self.assertFalse(np.isnan(actual_pos).any(), f"Case 4 contains NaN at Frame {fi}")
 
-            # 短期一致 (Frame 1..3: 自己衝突多重折り畳み時のGPU並列丸め誤差の累積を考慮)
+            # 短期厳密一致 (Frame 1..5)
             diff = np.linalg.norm(actual_pos - golden_pos[fi], axis=1).max()
-            if fi <= 3:
-                self.assertLess(diff, 0.020, f"Case 4 short-term diverged at Frame {fi}: {diff*1000:.4f} mm")
+            if fi <= 5:
+                self.assertLess(diff, 0.005, f"Case 4 short-term diverged at Frame {fi}: {diff*1000:.4f} mm")
 
             # 大域重心一致
             center_diff = np.linalg.norm(actual_pos.mean(axis=0) - golden_pos[fi].mean(axis=0))

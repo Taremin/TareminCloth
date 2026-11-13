@@ -27,7 +27,7 @@ def areal_inv_masses(pos, faces, density):
 
 class TestSingleStepExact(unittest.TestCase):
     """
-    3160075 の計算結果と 1ステップ（1フレーム）で高精度一致（誤差 < 0.5mm）することを
+    基準フィクスチャ結果と 1ステップ（1フレーム）で高精度一致（誤差 < 10um）することを
     検証する厳密な Characterization Test。
     自己完結したフィクスチャデータのみを用いて決定論的に検証する。
     """
@@ -61,9 +61,9 @@ class TestSingleStepExact(unittest.TestCase):
         sim.get_positions(out)
         actual = out.reshape(-1, 3)
 
-        # 許容誤差: GPU並列浮動小数点誤差を考慮して 20mm 未満
+        # 許容誤差: 0.01mm (10um) 未満
         diff = np.linalg.norm(actual - pos_out_golden, axis=1).max()
-        self.assertLess(diff, 0.020, f"Case 3 Single-step Frame 1 diverged: diff = {diff*1000:.4f} mm")
+        self.assertLess(diff, 1e-5, f"Case 3 Single-step Frame 1 diverged: diff = {diff*1e6:.4f} um")
 
 if __name__ == '__main__':
     unittest.main()
