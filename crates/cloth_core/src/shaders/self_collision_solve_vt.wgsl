@@ -277,14 +277,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let tri_n_ccd = select(vec3<f32>(0.0, 1.0, 0.0), tri_cross_ccd / tri_len_ccd, tri_len_ccd > 1e-12);
         let h_old_raw = dot(rel_old_i - p_j, tri_n_ccd);
 
-        // 多層布Untangling（対称）: 貫通状態から正常側へ脱出中の通過をCCDが逆阻止しないように保護
+        // 表側復帰保護: 自由な外層頂点(!is_pinned_i)が裏側(h_old < 0)から表面(+tri_n方向)へ戻る軌道(動的背中合わせ山折りを除く)のみ通す
         var is_untangling_vt_ccd = false;
-        if (params.enable_normal_untangling != 0u && tri_len_ccd > 1e-12 && v_i.layer_id != v_j.layer_id) {
-            if (v_i.layer_id > v_j.layer_id) {
-                is_untangling_vt_ccd = (h_old_raw < 0.0);
-            } else {
-                is_untangling_vt_ccd = (h_old_raw > 0.0);
-            }
+        if (params.enable_normal_untangling != 0u && !is_pinned_i && tri_len_ccd > 1e-12 && v_i.layer_id > v_j.layer_id) {
+            let n_i_vt_ccd = normals[index].xyz;
+            let n_i_vt_ccd_len = length(n_i_vt_ccd);
+            let is_dynamic_b2b = (v_j.inv_mass > 0.0) && !tri_has_pin
+                && (n_i_vt_ccd_len > 0.5)
+                && (dot(n_i_vt_ccd, tri_n_ccd) <= 0.0)
+                && (dot(rel_old_i - p_j, n_i_vt_ccd) > 0.0);
+            let returning_front_ccd = (h_old_raw < 0.0) && (dot(move_vec, tri_n_ccd) > 0.0);
+            is_untangling_vt_ccd = !is_dynamic_b2b && returning_front_ccd;
         }
 
         if (!is_untangling_vt_ccd) {

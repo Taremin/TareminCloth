@@ -89,7 +89,7 @@ fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     atomicAdd(&accum[v_idx].pin_count, 1u);
 }
 
-fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
+fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>, count_ee: bool) {
     let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
     let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
     let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
@@ -108,10 +108,12 @@ fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
     } else if (iz < 0) {
         atomicMin(&accum[v_idx].ccd_neg_z, iz);
     }
-    // 高密度衝突時の協調減衰判定用に非ゼロ E-E CCD 書き込み回数を記録
-    let len_fixed = u32(clamp(length(disp) * FIXED_SCALE, 0.0, 2000000000.0));
-    if (len_fixed > 0u) {
-        atomicAdd(&accum[v_idx].ee_ccd_count, 1u);
+    // 高密度衝突時の協調減衰判定用に動的布同士の非ゼロ E-E CCD 書き込み回数を記録
+    if (count_ee) {
+        let len_fixed = u32(clamp(length(disp) * FIXED_SCALE, 0.0, 2000000000.0));
+        if (len_fixed > 0u) {
+            atomicAdd(&accum[v_idx].ee_ccd_count, 1u);
+        }
     }
 }
 
@@ -487,17 +489,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             }
                         }
 
-                        // 多層布 untangling（対称・開始時点中点ベクトル基準）
+                        // 多層布 untangling: 固定基準エッジまたは1Dストランド外層エッジが裏側から表側へ復帰する軌道のみCCD逆阻止を保護
                         var is_untangling_ccd = false;
                         if (params.enable_normal_untangling != 0u && v_u0.layer_id != v_j.layer_id) {
+                            let edge_a_fixed = (v_u0.inv_mass == 0.0) && (v_u1.inv_mass == 0.0);
+                            let edge_b_fixed = (v_j.inv_mass == 0.0) && (v_vj.inv_mass == 0.0);
                             let delta0_u = ((p_u0_old + p_u1_old) - (p_j_old + p_vj_old)) * 0.5;
-                            is_untangling_ccd = is_outer_edge_behind_inner(
-                                v_u0.layer_id,
-                                v_j.layer_id,
-                                u0,
-                                j,
-                                delta0_u,
-                            );
+                            let delta1_u = ((p_u0 + p_u1) - (p_j + p_vj)) * 0.5;
+                            let move_u = delta1_u - delta0_u;
+                            if (v_u0.layer_id > v_j.layer_id && !edge_a_fixed) {
+                                let n_inner = normals[j].xyz;
+                                let n_outer = normals[u0].xyz;
+                                let allow_ee_escape = edge_b_fixed || (dot(n_outer, n_outer) <= 0.25);
+                                is_untangling_ccd = allow_ee_escape && (dot(n_inner, n_inner) > 0.25) && (dot(delta0_u, n_inner) < 0.0) && (dot(move_u, n_inner) > 0.0);
+                            } else if (v_j.layer_id > v_u0.layer_id && !edge_b_fixed) {
+                                let n_inner = normals[u0].xyz;
+                                let n_outer = normals[j].xyz;
+                                let allow_ee_escape = edge_a_fixed || (dot(n_outer, n_outer) <= 0.25);
+                                is_untangling_ccd = allow_ee_escape && (dot(n_inner, n_inner) > 0.25) && (dot(-delta0_u, n_inner) < 0.0) && (dot(-move_u, n_inner) > 0.0);
+                            }
                         }
                         if (is_untangling_ccd) {
                             continue;
@@ -536,25 +546,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                     continue;
                                 }
 
+                                let edge_a_all_pin = (v_u0.inv_mass == 0.0) && (v_u1.inv_mass == 0.0);
+                                let edge_b_all_pin = (v_j.inv_mass == 0.0) && (v_vj.inv_mass == 0.0);
+                                let count_pin_ee = !(edge_a_all_pin || edge_b_all_pin);
                                 if (edge_b_has_pin) {
                                     let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
                                     if (v_u0.inv_mass > 0.0) {
                                         let col_disp_0 = n0 * (pen_ccd * (1.0 - s_star)) + edge_move * ((1.0 - s_star) * 0.5);
-                                        add_ccd_atomic(u0, col_disp_0);
+                                        add_ccd_atomic(u0, col_disp_0, count_pin_ee);
                                     }
                                     if (v_u1.inv_mass > 0.0) {
                                         let col_disp_1 = n0 * (pen_ccd * s_star) + edge_move * (s_star * 0.5);
-                                        add_ccd_atomic(u1, col_disp_1);
+                                        add_ccd_atomic(u1, col_disp_1, count_pin_ee);
                                     }
                                 } else if (edge_a_has_pin) {
                                     let edge_move = ((p_u0 - p_u0_old) + (p_u1 - p_u1_old)) * 0.5;
                                     if (v_j.inv_mass > 0.0) {
                                         let col_disp_j = -n0 * (pen_ccd * (1.0 - t_star)) + edge_move * ((1.0 - t_star) * 0.5);
-                                        add_ccd_atomic(j, col_disp_j);
+                                        add_ccd_atomic(j, col_disp_j, count_pin_ee);
                                     }
                                     if (v_vj.inv_mass > 0.0) {
                                         let col_disp_vj = -n0 * (pen_ccd * t_star) + edge_move * (t_star * 0.5);
-                                        add_ccd_atomic(vj, col_disp_vj);
+                                        add_ccd_atomic(vj, col_disp_vj, count_pin_ee);
                                     }
                                 } else {
                                     let w_u0 = v_u0.inv_mass;
@@ -568,16 +581,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                     if (w_tot > EPSILON) {
                                         let total_ccd = n0 * pen_ccd;
                                         if (w_u0 > 0.0) {
-                                            add_ccd_atomic(u0, total_ccd * ((1.0 - s_star) * w_u0 / w_tot));
+                                            add_ccd_atomic(u0, total_ccd * ((1.0 - s_star) * w_u0 / w_tot), true);
                                         }
                                         if (w_u1 > 0.0) {
-                                            add_ccd_atomic(u1, total_ccd * (s_star * w_u1 / w_tot));
+                                            add_ccd_atomic(u1, total_ccd * (s_star * w_u1 / w_tot), true);
                                         }
                                         if (w_j > 0.0) {
-                                            add_ccd_atomic(j, -total_ccd * ((1.0 - t_star) * w_j / w_tot));
+                                            add_ccd_atomic(j, -total_ccd * ((1.0 - t_star) * w_j / w_tot), true);
                                         }
                                         if (w_vj > 0.0) {
-                                            add_ccd_atomic(vj, -total_ccd * (t_star * w_vj / w_tot));
+                                            add_ccd_atomic(vj, -total_ccd * (t_star * w_vj / w_tot), true);
                                         }
                                     }
                                 }
