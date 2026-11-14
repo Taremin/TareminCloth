@@ -960,6 +960,14 @@ impl GpuClothSimulator {
             } else {
                 v.velocity = [0.0, 0.0, 0.0];
             }
+            // 動的変更済みの基準逆質量 (original_inv_masses) および動的ピンを尊重する
+            let orig_m = self.original_inv_masses.get(i).copied().unwrap_or(v.inv_mass);
+            v.inv_mass = if let Some(pin) = self.dynamic_pins.get(&(i as u32)) {
+                let clamped_w = if pin.weight.is_finite() { pin.weight.clamp(0.0, 1.0) } else { 0.0 };
+                orig_m * (1.0 - clamped_w)
+            } else {
+                orig_m
+            };
         }
 
         self.context.queue.write_buffer(

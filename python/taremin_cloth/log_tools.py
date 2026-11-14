@@ -953,39 +953,21 @@ def cmd_profile(args: argparse.Namespace) -> None:
     lookback = max(1, int(getattr(args, "lookback", 2) or 2))
     trace_out = getattr(args, "output", None)
 
+    rp = replayer.ClothReplayer(log_path)
+    frames = rp.get_frames_dict()
     if target_f is None:
-        frames_idx = [f["frame_index"] for f in replayer.iter_frames(log_path)]
+        frames_idx = rp.get_ordered_frame_indices()
         if not frames_idx:
             print("エラー: フレームが存在しません。")
             sys.exit(1)
         target_f = max(frames_idx)
     start_f = max(0, target_f - lookback)
 
-    frames = {}
-    for f in replayer.iter_frames(log_path):
-        idx = f["frame_index"]
-        if start_f <= idx <= target_f:
-            frames[idx] = f
-    if start_f not in frames or not replayer.frame_has_positions(frames[start_f]):
-        near = replayer.nearest_full_frame(log_path, start_f)
-        hint = f" (近傍フル: Frame {near})" if near is not None else ""
-        print(f"エラー: 開始フレーム {start_f} はスタブのため再現できません{hint}。")
-        sys.exit(1)
-
-    rp = replayer.ClothReplayer(log_path)
-    init_pos = np.array(frames[start_f]["positions"], dtype=np.float32).reshape((-1, 3))
-    init_vel = None
-    if "velocities" in frames[start_f] and len(frames[start_f]["velocities"]) > 0:
-        init_vel = np.array(frames[start_f]["velocities"], dtype=np.float32).reshape((-1, 3))
-    rp.create_simulator(init_pos)
-    rp.sim.set_positions_and_velocities(init_pos, init_vel)
-    rp.apply_config_at(start_f)
-    rp.apply_elastic_at(start_f)
-    rp.apply_sewing_at(start_f)
     try:
-        rp.apply_frame_bone(frames[start_f])
-    except Exception:
-        pass
+        init_pos, start_frame = rp.initialize_at_frame(start_f)
+    except ValueError as e:
+        print(f"エラー: {e}")
+        sys.exit(1)
 
     ok = False
     try:
@@ -997,7 +979,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
         print("TIMESTAMP_QUERY非対応のためGPU内訳は取得できません（壁時計のみ）。")
 
     out_pos = np.zeros(rp.num_vertices * 3, dtype=np.float32)
-    prev_fdata = frames.get(start_f)
+    prev_fdata = start_frame
     prev_replay_pos = init_pos.copy()
     wall_ms = []
     for f_idx in range(start_f + 1, target_f + 1):
@@ -1006,20 +988,9 @@ def cmd_profile(args: argparse.Namespace) -> None:
         fdata = frames[f_idx]
         dt = float(fdata.get("dt", 1.0 / 60.0))
         substeps = int(fdata.get("substeps", 10))
-        try:
-            iters = int(fdata.get("solver_iterations", 0))
-            if iters > 0 and hasattr(rp.sim, "set_solver_iterations"):
-                rp.sim.set_solver_iterations(iters)
-        except Exception:
-            pass
-        rp.apply_frame_inputs(fdata)
-        rp.apply_frame_config(fdata)
-        rp.apply_frame_elastic(fdata)
-        rp.apply_frame_bone(fdata)
-        if prev_fdata is not None:
-            rp.apply_frame_sewing(prev_fdata)
-        if not rp.apply_frame_priority(fdata):
-            rp._update_sewing_priority(prev_replay_pos)
+        rp.prepare_step(
+            fdata, prev_frame_data=prev_fdata, prev_positions=prev_replay_pos
+        )
         t0 = time.perf_counter()
         rp.sim.step(dt=dt, substeps=substeps)
         wall_ms.append((time.perf_counter() - t0) * 1000.0)

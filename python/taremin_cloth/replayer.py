@@ -6,7 +6,8 @@ Blender非依存の完全再現リプレイヤー (ClothReplayer)
 
 import gzip
 import json
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from collections import defaultdict
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple
 import numpy as np
 
 try:
@@ -81,11 +82,17 @@ def count_full_frames(log_path: str) -> Tuple[int, int]:
     return total, full
 
 
-def nearest_full_frame(log_path: str, target_frame_idx: int) -> Optional[int]:
+def nearest_full_frame(
+    log_path: str,
+    target_frame_idx: int,
+    *,
+    frames: Optional[Iterable[Dict[str, Any]]] = None,
+) -> Optional[int]:
     """指定番号に最も近いフル座標フレーム番号を返す (前方向優先)。"""
     best = None
     best_dist = None
-    for f in iter_frames(log_path):
+    source = frames if frames is not None else iter_frames(log_path)
+    for f in source:
         if not frame_has_positions(f):
             continue
         idx = int(f.get("frame_index", -1))
@@ -98,7 +105,13 @@ def nearest_full_frame(log_path: str, target_frame_idx: int) -> Optional[int]:
 
 
 @allow_positional
-def config_at_frame(log_path: str, metadata: Dict[str, Any], target_frame_idx: int) -> Optional[Dict[str, Any]]:
+def config_at_frame(
+    log_path: str,
+    metadata: Dict[str, Any],
+    target_frame_idx: int,
+    *,
+    frames: Optional[Iterable[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
     """指定フレーム時点の有効設定を返す (metadata.config + それ以前の最新param_deltas)。
 
     フレーム途中のNパネル変更を再現するための折り畳み。差分がなければ
@@ -109,7 +122,8 @@ def config_at_frame(log_path: str, metadata: Dict[str, Any], target_frame_idx: i
         return None
     current: Dict[str, Any] = dict(base)
     found = False
-    for f in iter_frames(log_path):
+    source = frames if frames is not None else iter_frames(log_path)
+    for f in source:
         idx = int(f.get("frame_index", -1))
         if idx > target_frame_idx:
             break
@@ -154,14 +168,18 @@ def apply_elastic_list(sim: Any, esc: Optional[List[Dict[str, Any]]]) -> bool:
 
 
 def elastic_at_frame(
-    log_path: str, target_frame_idx: int
+    log_path: str,
+    target_frame_idx: int,
+    *,
+    frames: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """指定フレーム時点で有効な辺スケール差分 (それ以前の最新) を返す。
 
     途中開始リプレイでも変更履歴を取りこぼさないための折り畳み。
     """
     latest: Optional[List[Dict[str, Any]]] = None
-    for f in iter_frames(log_path):
+    source = frames if frames is not None else iter_frames(log_path)
+    for f in source:
         idx = int(f.get("frame_index", -1))
         if idx > target_frame_idx:
             break
@@ -172,11 +190,15 @@ def elastic_at_frame(
 
 
 def sewing_at_frame(
-    log_path: str, target_frame_idx: int
+    log_path: str,
+    target_frame_idx: int,
+    *,
+    frames: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Optional[List[float]]:
     """指定フレーム時点で有効な縫合現在自然長 (それ以前の最新) を返す。"""
     latest: Optional[List[float]] = None
-    for f in iter_frames(log_path):
+    source = frames if frames is not None else iter_frames(log_path)
+    for f in source:
         idx = int(f.get("frame_index", -1))
         if idx > target_frame_idx:
             break
@@ -184,6 +206,51 @@ def sewing_at_frame(
         if isinstance(rests, list) and rests:
             latest = [float(v) for v in rests]
     return latest
+
+
+def apply_inv_mass_list(sim: Any, deltas: Optional[List[Dict[str, Any]]]) -> bool:
+    """頂点逆質量 (original_inv_masses) 差分リストをシミュレータに適用する。適用したらTrue。"""
+    if not deltas:
+        return False
+    setter = getattr(sim, "set_vertex_inv_masses", None)
+    if not callable(setter):
+        return False
+    try:
+        idx = np.ascontiguousarray(
+            np.array([int(d["vertex_idx"]) for d in deltas], dtype=np.uint32))
+        masses = np.ascontiguousarray(
+            np.array([float(d["inv_mass"]) for d in deltas], dtype=np.float32))
+        setter(idx, masses)
+        return True
+    except Exception:
+        return False
+
+
+@allow_positional
+def inv_masses_at_frame(
+    log_path: str,
+    metadata: Dict[str, Any],
+    target_frame_idx: int,
+    *,
+    frames: Optional[Iterable[Dict[str, Any]]] = None,
+) -> Optional[np.ndarray]:
+    """指定フレーム時点で有効な基準逆質量 (metadata.inv_masses + inv_mass_deltas折り畳み) を返す。"""
+    raw_base = metadata.get("inv_masses")
+    if not isinstance(raw_base, list) or len(raw_base) == 0:
+        return None
+    curr = np.array(raw_base, dtype=np.float32).copy()
+    source = frames if frames is not None else iter_frames(log_path)
+    for f in source:
+        idx = int(f.get("frame_index", -1))
+        if idx > target_frame_idx:
+            break
+        deltas = f.get("inv_mass_deltas")
+        if isinstance(deltas, list):
+            for d in deltas:
+                v_idx = int(d["vertex_idx"])
+                if 0 <= v_idx < len(curr):
+                    curr[v_idx] = float(d["inv_mass"])
+    return curr
 
 
 class ClothReplayer:
@@ -201,6 +268,16 @@ class ClothReplayer:
         self.edges = np.array(raw_edges, dtype=np.uint32)
         self.faces = np.array(self.metadata.get("faces", []), dtype=np.uint32)
         self.num_vertices = int(self.metadata.get("num_vertices", 0))
+        # 全フレーム1パスロード用キャッシュ (O(N^2)の再スキャンを回避)
+        self._frames_by_idx: Optional[Dict[int, Dict[str, Any]]] = None
+        self._ordered_indices: Optional[List[int]] = None
+        self._ordered_frames: Optional[List[Dict[str, Any]]] = None
+        self._has_inv_mass_deltas_field: Optional[bool] = None
+        # 旧ログ互換: inv_mass_deltas未記録時のWaypoint解放コントローラー
+        self._legacy_wp_seams: Optional[list] = None
+        self._legacy_wp_checked: bool = False
+        self._legacy_wp_mgr: Optional[Any] = None
+        self._pair_cache_override: Optional[bool] = None
 
     def create_simulator(self, initial_positions: np.ndarray) -> taremin_cloth_core.ClothSimulator:
         """メタデータに基づいてシミュレータインスタンスを完全パラメータで生成
@@ -480,17 +557,59 @@ class ClothReplayer:
         except Exception:
             return False
 
+    def reload_frames(self) -> None:
+        """ログの全フレームを1パス走査してインスタンス内キャッシュを再構築する。"""
+        by_idx: Dict[int, Dict[str, Any]] = {}
+        ordered_frames: List[Dict[str, Any]] = []
+        has_inv_field = False
+        for f in iter_frames(self.log_path):
+            idx = int(f.get("frame_index", -1))
+            if "inv_mass_deltas" in f:
+                has_inv_field = True
+            by_idx[idx] = f
+            ordered_frames.append(f)
+        ordered_frames.sort(key=lambda item: int(item.get("frame_index", -1)))
+        self._frames_by_idx = by_idx
+        self._ordered_frames = ordered_frames
+        self._ordered_indices = [int(f.get("frame_index", -1)) for f in ordered_frames]
+        self._has_inv_mass_deltas_field = has_inv_field
+
+    def _ensure_frames_loaded(self) -> None:
+        """初回のみログの全フレームを読み込んでキャッシュする。"""
+        if self._frames_by_idx is None:
+            self.reload_frames()
+
+    def get_frames_dict(self) -> Dict[int, Dict[str, Any]]:
+        """frame_index -> frame_data のキャッシュ済み辞書を返す。"""
+        self._ensure_frames_loaded()
+        return self._frames_by_idx or {}
+
+    def get_ordered_frames(self) -> List[Dict[str, Any]]:
+        """frame_index 昇順のキャッシュ済みフレームリストを返す。"""
+        self._ensure_frames_loaded()
+        return self._ordered_frames or []
+
+    def get_ordered_frame_indices(self) -> List[int]:
+        """昇順のフレーム番号リストを返す。"""
+        self._ensure_frames_loaded()
+        return self._ordered_indices or []
+
     def apply_elastic_at(self, frame_idx: int) -> bool:
         """指定フレーム時点で有効な辺スケール (変更履歴の折り畳み) を適用する。"""
         if self.sim is None:
             raise RuntimeError("Simulator is not initialized")
-        return apply_elastic_list(self.sim, elastic_at_frame(self.log_path, frame_idx))
+        self._ensure_frames_loaded()
+        return apply_elastic_list(
+            self.sim,
+            elastic_at_frame(self.log_path, frame_idx, frames=self._ordered_frames),
+        )
 
     def apply_sewing_at(self, frame_idx: int) -> bool:
         """指定フレーム時点で有効な縫合現在自然長を適用する。"""
         if self.sim is None:
             raise RuntimeError("Simulator is not initialized")
-        rests = sewing_at_frame(self.log_path, frame_idx)
+        self._ensure_frames_loaded()
+        rests = sewing_at_frame(self.log_path, frame_idx, frames=self._ordered_frames)
         if not rests:
             return False
         setter = getattr(self.sim, "set_sewing_current_rest_lengths", None)
@@ -506,9 +625,297 @@ class ClothReplayer:
         """指定フレーム時点の有効設定 (初期値+差分折り畳み) を適用する。"""
         if self.sim is None:
             raise RuntimeError("Simulator is not initialized")
+        self._ensure_frames_loaded()
         return apply_config_dict(
-            self.sim, config_at_frame(self.log_path, self.metadata, frame_idx)
+            self.sim,
+            config_at_frame(
+                self.log_path, self.metadata, frame_idx, frames=self._ordered_frames
+            ),
         )
+
+    def apply_frame_inv_masses(self, frame_data: Dict[str, Any]) -> bool:
+        """フレームに記録された基準逆質量差分 (inv_mass_deltas) を適用する。"""
+        if self.sim is None:
+            raise RuntimeError("Simulator is not initialized")
+        return apply_inv_mass_list(self.sim, frame_data.get("inv_mass_deltas"))
+
+    def apply_inv_masses_at(self, frame_idx: int) -> bool:
+        """指定フレーム時点で有効な基準逆質量 (変更履歴の折り畳み) を適用する。"""
+        if self.sim is None:
+            raise RuntimeError("Simulator is not initialized")
+        self._ensure_frames_loaded()
+        target = inv_masses_at_frame(
+            self.log_path, self.metadata, frame_idx, frames=self._ordered_frames
+        )
+        if target is None:
+            return False
+        setter = getattr(self.sim, "set_vertex_inv_masses", None)
+        getter = getattr(self.sim, "get_vertex_inv_masses", None)
+        if not callable(setter):
+            return False
+        try:
+            if callable(getter):
+                current = np.asarray(getter(), dtype=np.float32)
+                if len(current) == len(target):
+                    diff_idx = np.flatnonzero(current != target)
+                    if len(diff_idx) == 0:
+                        return False
+                    setter(
+                        np.ascontiguousarray(diff_idx, dtype=np.uint32),
+                        np.ascontiguousarray(target[diff_idx], dtype=np.float32),
+                    )
+                    return True
+            all_idx = np.arange(len(target), dtype=np.uint32)
+            setter(all_idx, np.ascontiguousarray(target, dtype=np.float32))
+            return True
+        except Exception:
+            return False
+
+    def _apply_pair_cache_override(self) -> None:
+        """指定がある場合、ペアキャッシュ設定の上書きを再適用する。"""
+        if (
+            self._pair_cache_override is not None
+            and self.sim is not None
+            and hasattr(self.sim, "set_enable_pair_cache")
+        ):
+            self.sim.set_enable_pair_cache(bool(self._pair_cache_override))
+
+    def _extract_legacy_waypoint_seams(self, *, fallback_pos: np.ndarray) -> list:
+        """旧ログ(inv_mass_deltas未記録)向けにメタデータからWaypointSeamを再抽出する。"""
+        if self._legacy_wp_checked:
+            return self._legacy_wp_seams or []
+        self._legacy_wp_checked = True
+        self._legacy_wp_seams = []
+
+        raw_sew = self.metadata.get("sewing_springs")
+        raw_inv = self.metadata.get("inv_masses")
+        if not raw_sew or not isinstance(raw_inv, list) or len(raw_inv) == 0:
+            return []
+
+        inv0 = np.asarray(raw_inv, dtype=np.float32)
+        if not np.any(inv0 == 0.0):
+            return []
+
+        raw_init = self.metadata.get("initial_positions")
+        if isinstance(raw_init, list) and len(raw_init) == len(inv0):
+            pos_ref = np.asarray(raw_init, dtype=np.float32).reshape((-1, 3))
+        else:
+            pos_ref = np.asarray(fallback_pos, dtype=np.float32).reshape((-1, 3))
+
+        try:
+            from .utils.mesh_extract import WaypointSeam
+        except ImportError:
+            try:
+                from taremin_cloth.utils.mesh_extract import WaypointSeam  # type: ignore
+            except ImportError:
+                return []
+
+        # 面頂点と通常辺(紐等)頂点を合わせた実体頂点集合を端点候補とする
+        body_verts: set[int] = set()
+        if self.faces.size > 0:
+            body_verts.update(int(v) for v in self.faces.ravel())
+        if self.edges.size > 0:
+            body_verts.update(int(v) for v in self.edges.ravel())
+
+        adj: Dict[int, set[int]] = defaultdict(set)
+        for pair in raw_sew:
+            a, b = int(pair[0]), int(pair[1])
+            if a != b:
+                adj[a].add(b)
+                adj[b].add(a)
+
+        visited: set[int] = set()
+        wp_seams = []
+        for start_v in adj:
+            if start_v in visited:
+                continue
+            comp = []
+            queue = [start_v]
+            visited.add(start_v)
+            while queue:
+                curr = queue.pop(0)
+                comp.append(curr)
+                for nb in adj[curr]:
+                    if nb not in visited:
+                        visited.add(nb)
+                        queue.append(nb)
+
+            endpoints = [x for x in comp if x in body_verts]
+            internal = [x for x in comp if x not in body_verts]
+            if (
+                internal
+                and len(endpoints) == 2
+                and all(0 <= m < len(inv0) and inv0[m] == 0.0 for m in internal)
+                and len(adj[endpoints[0]]) == 1
+                and len(adj[endpoints[1]]) == 1
+                and all(len(adj[m]) == 2 for m in internal)
+            ):
+                path = [endpoints[0]]
+                prev = None
+                curr = endpoints[0]
+                while curr != endpoints[1]:
+                    nxt = [n for n in adj[curr] if n != prev]
+                    if not nxt:
+                        break
+                    path.append(nxt[0])
+                    prev = curr
+                    curr = nxt[0]
+                if path[-1] == endpoints[1] and len(path) == len(comp) and len(path) >= 3:
+                    wp_indices = path[1:-1]
+                    wp_seams.append(
+                        WaypointSeam(
+                            vert_a=endpoints[0],
+                            vert_b=endpoints[1],
+                            waypoint_indices=wp_indices,
+                            waypoint_coords=pos_ref[wp_indices].astype(np.float32),
+                        )
+                    )
+
+        self._legacy_wp_seams = wp_seams
+        return wp_seams
+
+    def _reset_legacy_waypoint_manager(self, *, fallback_pos: np.ndarray) -> Optional[Any]:
+        """旧ログ向けの WaypointManager インスタンスを生成して返す。"""
+        wp_seams = self._extract_legacy_waypoint_seams(fallback_pos=fallback_pos)
+        if not wp_seams:
+            self._legacy_wp_mgr = None
+            return None
+        try:
+            from .engine.waypoint import WaypointManager
+        except ImportError:
+            try:
+                from taremin_cloth.engine.waypoint import WaypointManager  # type: ignore
+            except ImportError:
+                self._legacy_wp_mgr = None
+                return None
+
+        inv0 = np.asarray(self.metadata.get("inv_masses", []), dtype=np.float32)
+        thickness = float(self.metadata.get("thickness", 0.005))
+        mgr = WaypointManager(
+            waypoint_seams=wp_seams,
+            initial_inv_masses=inv0,
+            merge_dist=max(0.01, thickness * 2.0),
+            pass_dist=max(0.015, thickness * 3.0),
+        )
+        self._legacy_wp_mgr = mgr
+        return mgr
+
+    def _init_legacy_waypoint_at(self, frame_idx: int, *, fallback_pos: np.ndarray) -> None:
+        """旧ログで開始フレーム以前に解放済みのWaypoint状態をシミュレータへ反映する。"""
+        wp_mgr = self._reset_legacy_waypoint_manager(fallback_pos=fallback_pos)
+        if wp_mgr is None or not wp_mgr.has_active_seams:
+            return
+        frames = self._frames_by_idx or {}
+        for idx in (self._ordered_indices or []):
+            if idx >= frame_idx:
+                break
+            fdata = frames.get(idx)
+            if frame_has_positions(fdata):
+                pos = np.asarray(fdata["positions"], dtype=np.float32).reshape((-1, 3))
+                wp_mgr.update(pos, sim=self.sim)
+
+    def initialize_at_frame(
+        self,
+        frame_idx: int,
+        *,
+        force_enable_pair_cache: bool = False,
+        force_pair_cache: Optional[bool] = None,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """指定フルフレームの状態からシミュレータを構築・初期化し、(init_pos, frame_data) を返す。"""
+        self._ensure_frames_loaded()
+        frames = self._frames_by_idx or {}
+        if frame_idx not in frames:
+            raise ValueError(f"開始フレーム {frame_idx} がログに存在しません")
+
+        start_frame = frames[frame_idx]
+        if not frame_has_positions(start_frame):
+            near = nearest_full_frame(
+                self.log_path, frame_idx, frames=self._ordered_frames
+            )
+            hint = f" (近傍フル: Frame {near})" if near is not None else ""
+            raise ValueError(
+                f"開始フレーム {frame_idx} はスタブ (座標なし) のため再現できません{hint}。"
+                "フル保存フレームを開始点にするか、full_stride=1で記録してください"
+            )
+
+        init_pos = np.array(start_frame["positions"], dtype=np.float32).reshape((-1, 3))
+        raw_vel = start_frame.get("velocities")
+        init_vel = (
+            np.array(raw_vel, dtype=np.float32).reshape((-1, 3))
+            if isinstance(raw_vel, list) and len(raw_vel) > 0
+            else None
+        )
+
+        self.create_simulator(init_pos)
+        self.sim.set_positions_and_velocities(init_pos, init_vel)
+        # 開始時点までの変更を折り畳んで適用 (途中開始でも正確に復元)
+        self.apply_config_at(frame_idx)
+        self.apply_elastic_at(frame_idx)
+        self.apply_sewing_at(frame_idx)
+        if self._has_inv_mass_deltas_field:
+            self._legacy_wp_mgr = None
+            self.apply_inv_masses_at(frame_idx)
+        else:
+            self._init_legacy_waypoint_at(frame_idx, fallback_pos=init_pos)
+
+        if force_pair_cache is not None:
+            self._pair_cache_override = bool(force_pair_cache)
+        elif force_enable_pair_cache:
+            self._pair_cache_override = True
+        else:
+            self._pair_cache_override = None
+        self._apply_pair_cache_override()
+
+        try:
+            self.apply_frame_bone(start_frame)
+        except Exception:
+            pass
+        return init_pos, start_frame
+
+    def prepare_step(
+        self,
+        frame_data: Dict[str, Any],
+        *,
+        prev_frame_data: Optional[Dict[str, Any]] = None,
+        prev_positions: Optional[np.ndarray] = None,
+    ) -> None:
+        """次フレームへの1ステップ実行前に必要な全入力・状態差分をシミュレータへ適用する。"""
+        if self.sim is None:
+            raise RuntimeError("Simulator is not initialized")
+
+        # ステップ前に設定変更・上書き・ソルバ反復回数を反映
+        self.apply_frame_config(frame_data)
+        self._apply_pair_cache_override()
+        try:
+            iters = int(frame_data.get("solver_iterations", 0))
+            if iters > 0 and hasattr(self.sim, "set_solver_iterations"):
+                self.sim.set_solver_iterations(iters)
+        except Exception:
+            pass
+
+        # 外部入力(ピン・コライダー)・辺スケール・動的inv_massesを反映
+        self.apply_frame_inputs(frame_data)
+        self.apply_frame_elastic(frame_data)
+        if self._has_inv_mass_deltas_field:
+            self.apply_frame_inv_masses(frame_data)
+        elif self._legacy_wp_mgr is not None and self._legacy_wp_mgr.has_active_seams:
+            wp_pos = None
+            if frame_has_positions(prev_frame_data):
+                wp_pos = np.asarray(
+                    prev_frame_data["positions"], dtype=np.float32
+                ).reshape((-1, 3))
+            elif prev_positions is not None:
+                wp_pos = np.asarray(prev_positions, dtype=np.float32).reshape((-1, 3))
+            if wp_pos is not None:
+                self._legacy_wp_mgr.update(wp_pos, sim=self.sim)
+
+        self.apply_frame_bone(frame_data)
+        if prev_frame_data is not None:
+            self.apply_frame_sewing(prev_frame_data)
+
+        # 縫合優先モード: 記録状態を復元し、なければ直近座標で測定 (旧ログ近似)
+        if not self.apply_frame_priority(frame_data) and prev_positions is not None:
+            self._update_sewing_priority(prev_positions)
 
     def get_active_pairs(self) -> Dict[str, Any]:
         """現在のシミュレータ状態の収集ペアを読戻す (デバッグ専用)。
@@ -593,50 +1000,16 @@ class ClothReplayer:
             [{"frame_index": int, "max_diff": float, "compared": bool,
               "positions": np.ndarray}, ...]
         """
-        frames = {}
-        for f in iter_frames(self.log_path):
-            idx = f["frame_index"]
-            if start_frame_idx <= idx <= end_frame_idx:
-                frames[idx] = f
-
-        if start_frame_idx not in frames:
-            raise ValueError(f"開始フレーム {start_frame_idx} がログに存在しません")
-
-        # スパース記録では開始フレームにフル座標が必須
-        if not frame_has_positions(frames[start_frame_idx]):
-            near = nearest_full_frame(self.log_path, start_frame_idx)
-            hint = f" (近傍フル: Frame {near})" if near is not None else ""
-            raise ValueError(
-                f"開始フレーム {start_frame_idx} はスタブ (座標なし) のため再現できません{hint}。"
-                "フル保存フレームを開始点にするか、full_stride=1で記録してください"
-            )
-
-        # 開始フレームの頂点座標および速度でシミュレータを完全初期化
-        init_pos = np.array(frames[start_frame_idx]["positions"], dtype=np.float32).reshape((-1, 3))
-        init_vel = np.array(frames[start_frame_idx]["velocities"], dtype=np.float32).reshape((-1, 3)) if frame_has_positions(frames[start_frame_idx]) and "velocities" in frames[start_frame_idx] and len(frames[start_frame_idx]["velocities"]) > 0 else None
-        self.create_simulator(init_pos)
-        self.sim.set_positions_and_velocities(init_pos, init_vel)
-        # 開始時点までの設定変更を折り畳んで適用 (途中開始でも正確に)
-        self.apply_config_at(start_frame_idx)
-        self.apply_elastic_at(start_frame_idx)
-        self.apply_sewing_at(start_frame_idx)
-        if force_pair_cache is not None and hasattr(self.sim, "set_enable_pair_cache"):
-            self.sim.set_enable_pair_cache(bool(force_pair_cache))
-        elif force_enable_pair_cache and hasattr(self.sim, "set_enable_pair_cache"):
-            self.sim.set_enable_pair_cache(True)
-        # 開始フレームのボーン姿勢を反映 (BONE_SDF有効時のみ作用)
-        try:
-            start_frame = frames.get(start_frame_idx)
-            if start_frame is not None:
-                self.apply_frame_bone(start_frame)
-        except Exception:
-            pass
+        frames = self.get_frames_dict()
+        init_pos, start_frame = self.initialize_at_frame(
+            start_frame_idx,
+            force_enable_pair_cache=force_enable_pair_cache,
+            force_pair_cache=force_pair_cache,
+        )
 
         results = []
         out_pos = np.zeros(self.num_vertices * 3, dtype=np.float32)
-        # 縫合自然長はステップ中に進行する値のため、前フレーム記録値で進める
-        prev_fdata = frames.get(start_frame_idx)
-        # 直近確定座標 (縫合優先モードの結合率測定用。runnerのcoords相当)
+        prev_fdata = start_frame
         prev_replay_pos = init_pos.copy()
 
         for f_idx in range(start_frame_idx + 1, end_frame_idx + 1):
@@ -645,27 +1018,12 @@ class ClothReplayer:
             fdata = frames[f_idx]
             dt = float(fdata.get("dt", 1.0 / 60.0))
             substeps = int(fdata.get("substeps", 10))
-            # フレーム毎 solver_iterations を反映 (途中変更の再現)
-            try:
-                iters = int(fdata.get("solver_iterations", 0))
-                if iters > 0 and hasattr(self.sim, "set_solver_iterations"):
-                    self.sim.set_solver_iterations(iters)
-            except Exception:
-                pass
 
-            # 入力の適用とステップ実行
-            self.apply_frame_inputs(fdata)
-            self.apply_frame_config(fdata)
-            self.apply_frame_elastic(fdata)
-            self.apply_frame_bone(fdata)
-            if prev_fdata is not None:
-                self.apply_frame_sewing(prev_fdata)
-            # 縫合優先モード: 記録状態を復元し、なければ直近座標で測定 (旧ログ近似)
-            if not self.apply_frame_priority(fdata):
-                self._update_sewing_priority(prev_replay_pos)
+            self.prepare_step(
+                fdata, prev_frame_data=prev_fdata, prev_positions=prev_replay_pos
+            )
             self.sim.step(dt=dt, substeps=substeps)
 
-            # 座標読み出し
             self.sim.get_positions(out_pos)
             sim_pos = out_pos.reshape((-1, 3)).copy()
 
@@ -697,42 +1055,28 @@ class ClothReplayer:
         PairCache有効時はサブステップ毎の vt/ee カウントも取得します。
         """
         prev_idx = target_frame_idx - 1
-        f_prev = get_frame(self.log_path, prev_idx)
-        f_curr = get_frame(self.log_path, target_frame_idx)
+        frames = self.get_frames_dict()
+        f_prev = frames.get(prev_idx)
+        f_curr = frames.get(target_frame_idx)
         if f_prev is None or f_curr is None:
             raise ValueError(f"Frame {prev_idx} または {target_frame_idx} がログに存在しません")
         if not frame_has_positions(f_prev) or not frame_has_positions(f_curr):
-            near = nearest_full_frame(self.log_path, target_frame_idx)
+            near = nearest_full_frame(
+                self.log_path, target_frame_idx, frames=self._ordered_frames
+            )
             hint = f" (近傍フル: Frame {near})" if near is not None else ""
             raise ValueError(
                 f"trace_substepsには前後フレームのフル座標が必要です{hint}。"
                 "スタブ区間は full_stride=1 で再記録するかフル区間で実行してください"
             )
 
-        init_pos = np.array(f_prev["positions"], dtype=np.float32).reshape((-1, 3))
-        init_vel = np.array(f_prev["velocities"], dtype=np.float32).reshape((-1, 3)) if "velocities" in f_prev and len(f_prev.get("velocities", [])) > 0 else None
-        self.create_simulator(init_pos)
-        self.sim.set_positions_and_velocities(init_pos, init_vel)
-        self.apply_config_at(target_frame_idx)
-        self.apply_elastic_at(target_frame_idx)
-        self.apply_frame_inputs(f_curr)
-        self.apply_frame_elastic(f_curr)
-        self.apply_frame_bone(f_curr)
-        # 縫合自然長は進行値のため直前フレームの記録で進める
-        self.apply_sewing_at(prev_idx)
-        self._update_sewing_priority(init_pos)
-        # 記録状態があればラッチ復元が優先される (updater駆動は近似)
-        self.apply_frame_priority(f_curr)
-        try:
-            iters = int(f_curr.get("solver_iterations", 0))
-            if iters > 0 and hasattr(self.sim, "set_solver_iterations"):
-                self.sim.set_solver_iterations(iters)
-        except Exception:
-            pass
+        init_pos, _ = self.initialize_at_frame(prev_idx)
+        self.prepare_step(f_curr, prev_frame_data=f_prev, prev_positions=init_pos)
 
         dt = float(f_curr.get("dt", 1.0 / 60.0))
         substeps = int(f_curr.get("substeps", 10))
-        dt_sub = dt / float(substeps)
+        # Rust側 `dt_f32 / (substeps as f32)` とf32丸めを揃え、JSONパース由来の1ULP差を防ぐ
+        dt_sub = float(np.float32(dt) / np.float32(substeps)) if substeps > 0 else 0.0
 
         substep_traces = []
         out_pos = np.zeros(self.num_vertices * 3, dtype=np.float32)
@@ -785,46 +1129,15 @@ class ClothReplayer:
         戻り値: Hit時の {"frame_index": int, "reason": str, "positions": ndarray,
           "max_disp_mm": float, "max_diff": float, ...}、未Hit時はNone.
         """
-        frames: Dict[int, Dict[str, Any]] = {}
-        for f in iter_frames(self.log_path):
-            idx = int(f.get("frame_index", -1))
-            if start_frame_idx <= idx <= end_frame_idx:
-                frames[idx] = f
-        if start_frame_idx not in frames:
-            raise ValueError(f"開始フレーム {start_frame_idx} がログに存在しません")
-        if not frame_has_positions(frames[start_frame_idx]):
-            near = nearest_full_frame(self.log_path, start_frame_idx)
-            hint = f" (近傍フル: Frame {near})" if near is not None else ""
-            raise ValueError(
-                f"開始フレーム {start_frame_idx} はスタブ (座標なし) のため再現できません{hint}。"
-            )
-
-        init_pos = np.array(frames[start_frame_idx]["positions"], dtype=np.float32).reshape((-1, 3))
-        init_vel = (
-            np.array(frames[start_frame_idx]["velocities"], dtype=np.float32).reshape((-1, 3))
-            if "velocities" in frames[start_frame_idx] and len(frames[start_frame_idx].get("velocities", [])) > 0
-            else None
-        )
-        self.create_simulator(init_pos)
-        self.sim.set_positions_and_velocities(init_pos, init_vel)
-        self.apply_config_at(start_frame_idx)
-        self.apply_elastic_at(start_frame_idx)
-        self.apply_sewing_at(start_frame_idx)
-        try:
-            start_frame = frames.get(start_frame_idx)
-            if start_frame is not None:
-                self.apply_frame_bone(start_frame)
-        except Exception:
-            pass
+        frames = self.get_frames_dict()
+        init_pos, prev_fdata = self.initialize_at_frame(start_frame_idx)
 
         out_pos = np.zeros(self.num_vertices * 3, dtype=np.float32)
         prev_pos = init_pos.copy()
-        ordered = sorted(frames.keys())
-        # 縫合自然長は進行値のため、前フレーム記録値で進める
-        prev_fdata = frames.get(start_frame_idx)
+        ordered = self.get_ordered_frame_indices()
 
         for f_idx in ordered:
-            if f_idx <= start_frame_idx:
+            if f_idx <= start_frame_idx or f_idx > end_frame_idx:
                 continue
             if stride > 1 and ((f_idx - start_frame_idx) % stride != 0) and f_idx != end_frame_idx:
                 # stride間引き時は入力適用なしでスキップできないため、
@@ -835,20 +1148,9 @@ class ClothReplayer:
             fdata = frames[f_idx]
             dt = float(fdata.get("dt", 1.0 / 60.0))
             substeps = int(fdata.get("substeps", 10))
-            try:
-                iters = int(fdata.get("solver_iterations", 0))
-                if iters > 0 and hasattr(self.sim, "set_solver_iterations"):
-                    self.sim.set_solver_iterations(iters)
-            except Exception:
-                pass
-            self.apply_frame_inputs(fdata)
-            self.apply_frame_config(fdata)
-            self.apply_frame_elastic(fdata)
-            self.apply_frame_bone(fdata)
-            if prev_fdata is not None:
-                self.apply_frame_sewing(prev_fdata)
-            if not self.apply_frame_priority(fdata):
-                self._update_sewing_priority(prev_pos)
+            self.prepare_step(
+                fdata, prev_frame_data=prev_fdata, prev_positions=prev_pos
+            )
             self.sim.step(dt=dt, substeps=substeps)
             self.sim.get_positions(out_pos)
             sim_pos = out_pos.reshape((-1, 3)).copy()

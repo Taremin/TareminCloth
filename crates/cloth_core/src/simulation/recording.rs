@@ -245,6 +245,7 @@ impl GpuClothSimulator {
             self.current_bone_state(),
             sewing_rests,
             sewing_priority,
+            Some(&self.original_inv_masses),
             false,
         );
     }

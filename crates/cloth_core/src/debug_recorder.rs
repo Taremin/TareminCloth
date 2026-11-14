@@ -14,6 +14,13 @@ pub struct ElasticScaleRecord {
     pub scale: f32,
 }
 
+/// 動的ピン以外の基準逆質量 (original_inv_masses) 変更の記録 (vertex_idx -> inv_mass)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct InvMassRecord {
+    pub vertex_idx: u32,
+    pub inv_mass: f32,
+}
+
 /// BONE_SDFコライダーの静的記録 (メタデータに1回のみ)。
 /// テクスチャは base64 の Rg16Float 密パックバイト列。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -331,6 +338,10 @@ pub struct FrameRecord {
     /// 優先モード有効時のみ記録される。
     #[serde(default)]
     pub sewing_priority: Option<[f32; 4]>,
+    /// 動的ピン以外の基準逆質量 (original_inv_masses) 変更差分 (変更フレームのみ)。
+    /// None は「変更なし」(前フレームまたは metadata.inv_masses を維持) を意味する。
+    #[serde(default)]
+    pub inv_mass_deltas: Option<Vec<InvMassRecord>>,
 }
 
 /// JSONL 形式の 1 行を表すレコード
@@ -359,6 +370,7 @@ pub struct SimulationDebugRecorder {
     lookahead_left: u32,
     prev_positions: Vec<[f32; 3]>,
     prev_hash: u64,
+    prev_inv_masses: Vec<f32>,
 }
 
 impl Default for SimulationDebugRecorder {
@@ -381,6 +393,7 @@ impl SimulationDebugRecorder {
             lookahead_left: 0,
             prev_positions: Vec::new(),
             prev_hash: 0,
+            prev_inv_masses: Vec::new(),
         }
     }
 
@@ -428,6 +441,7 @@ impl SimulationDebugRecorder {
         if let Some(mf) = max_frames {
             self.max_frames = mf;
         }
+        self.prev_inv_masses = metadata.inv_masses.clone();
         self.metadata = Some(metadata);
         self.enabled = true;
     }
@@ -455,8 +469,39 @@ impl SimulationDebugRecorder {
     ) {
         self.record_frame_ext(
             dt, substeps, solver_iterations, positions, velocities, pins, colliders,
-            None, 0.0, None, None, None, None, None, false,
+            None, 0.0, None, None, None, None, None, None, false,
         );
+    }
+
+    /// 基準逆質量 (original_inv_masses) の前回記録値との差分を抽出する。
+    /// 変化があったフレームにのみ Some(...) を返し、基準バッファを更新する。
+    fn compute_inv_mass_deltas(&mut self, inv_masses: Option<&[f32]>) -> Option<Vec<InvMassRecord>> {
+        let curr = inv_masses?;
+        if curr.is_empty() {
+            return None;
+        }
+        if self.prev_inv_masses.len() != curr.len() {
+            self.prev_inv_masses = curr.to_vec();
+            return None;
+        }
+        let mut deltas = Vec::new();
+        for (i, (&c, &p)) in curr.iter().zip(self.prev_inv_masses.iter()).enumerate() {
+            let changed = c.to_bits() != p.to_bits() && !(c == 0.0 && p == 0.0);
+            if changed {
+                deltas.push(InvMassRecord {
+                    vertex_idx: i as u32,
+                    inv_mass: c,
+                });
+            }
+        }
+        if deltas.is_empty() {
+            None
+        } else {
+            for d in &deltas {
+                self.prev_inv_masses[d.vertex_idx as usize] = d.inv_mass;
+            }
+            Some(deltas)
+        }
     }
 
     /// - config: Some の場合ハッシュ化して stats.config_hash に格納し、前回と
@@ -465,6 +510,7 @@ impl SimulationDebugRecorder {
     /// - elastic: Some(空でない場合のみ保存、変更検出は呼出側の責務)
     /// - bone: BONE_SDF有効時は毎フレームの姿勢を保存 (CPUミラー、GPU転送なし)
     /// - sewing_rests: 縫合ありの場合は現在自然長の全配列 (進行値そのまま)
+    /// - inv_masses: Some(original_inv_masses) の場合は前回値との変化頂点のみ inv_mass_deltas に保存
     /// - スタブ化されても pins/colliders/dt/substeps/solver_iterations/stats は保持し、
     ///   positions/velocities のみ空にする (リプレイの入力連続性を保つため)
     #[allow(clippy::too_many_arguments)]
@@ -484,6 +530,7 @@ impl SimulationDebugRecorder {
         bone: Option<BoneFrameState>,
         sewing_rests: Option<Vec<f32>>,
         sewing_priority: Option<[f32; 4]>,
+        inv_masses: Option<&[f32]>,
         force_full: bool,
     ) {
         if !self.enabled || self.metadata.is_none() {
@@ -585,6 +632,7 @@ impl SimulationDebugRecorder {
             Some(v) if !v.is_empty() => Some(v),
             _ => None,
         };
+        let inv_mass_deltas = self.compute_inv_mass_deltas(inv_masses);
         let full = FrameRecord {
             frame_index,
             dt,
@@ -601,6 +649,7 @@ impl SimulationDebugRecorder {
             bone_transforms: bone.clone(),
             sewing_rest_lengths: sewing_rests.clone(),
             sewing_priority,
+            inv_mass_deltas: inv_mass_deltas.clone(),
         };
 
         let stride = self.options.full_stride.max(1);
@@ -635,6 +684,7 @@ impl SimulationDebugRecorder {
                 bone_transforms: full.bone_transforms.clone(),
                 sewing_rest_lengths: full.sewing_rest_lengths.clone(),
                 sewing_priority: full.sewing_priority,
+                inv_mass_deltas: full.inv_mass_deltas.clone(),
             };
             self.frames.push(stub);
             if self.options.ring_size > 0 {
@@ -728,6 +778,8 @@ impl SimulationDebugRecorder {
         self.lookahead_left = 0;
         self.prev_positions.clear();
         self.prev_hash = 0;
+        self.prev_inv_masses.clear();
+        self.prev_inv_masses.shrink_to_fit();
     }
 }
 
@@ -1044,12 +1096,12 @@ mod tests {
         let pos = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let mut cfg = SimConfig::default();
         // frame 0: 初回は差分なし (metadata.config が初期値)
-        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, Some(cfg.clone()), None, None, None, None, false);
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, Some(cfg.clone()), None, None, None, None, None, false);
         // frame 1: 同一設定は差分なし
-        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, Some(cfg.clone()), None, None, None, None, false);
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, Some(cfg.clone()), None, None, None, None, None, false);
         // frame 2: 変更時のみ差分あり
         cfg.solver_iterations = 9;
-        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, Some(cfg.clone()), None, None, None, None, false);
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, Some(cfg.clone()), None, None, None, None, None, false);
         // frame 3: 設定なし呼び出し (旧経路) は差分なし
         recorder.record_frame(0.016, 10, 2, &pos, &vel, &pins, &cols);
 
@@ -1074,12 +1126,58 @@ mod tests {
         let vel = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
         let pos = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let elastic = Some(vec![ElasticScaleRecord { edge_idx: 3, scale: 0.8 }]);
-        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, None, elastic, None, None, None, false);
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, None, elastic, None, None, None, None, false);
         recorder.record_frame(0.016, 10, 2, &pos, &vel, &pins, &cols);
         let stored = recorder.frames[0].elastic_scales.as_ref().unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].edge_idx, 3);
         assert!((stored[0].scale - 0.8).abs() < 1e-6);
         assert!(recorder.frames[1].elastic_scales.is_none());
+    }
+
+    #[test]
+    fn test_inv_mass_deltas_only_on_change_and_sparse() {
+        let mut recorder = SimulationDebugRecorder::new(100);
+        recorder.set_record_options(DebugRecordOptions {
+            full_stride: 3,
+            enable_triggers: false,
+            ..Default::default()
+        });
+        let mut meta = sparse_test_meta();
+        meta.inv_masses = vec![1.0, 0.0];
+        recorder.start_recording(meta, None);
+
+        let pins: Vec<PinRecord> = vec![];
+        let cols: Vec<ColliderRecord> = vec![];
+        let vel = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        let pos = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+
+        // frame 0 (full): メタデータから変化なし -> None
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, None, None, None, None, None, Some(&[1.0, 0.0]), false);
+        // frame 1 (stub): 頂点1のみ変更 -> スタブでも差分保持
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, None, None, None, None, None, Some(&[1.0, 2.5]), false);
+        // frame 2 (stub): 再び変化なし -> None
+        recorder.record_frame_ext(0.016, 10, 2, &pos, &vel, &pins, &cols, None, 0.0, None, None, None, None, None, Some(&[1.0, 2.5]), false);
+
+        assert!(recorder.frames[0].inv_mass_deltas.is_none());
+        assert!(recorder.frames[1].positions.is_empty());
+        let deltas = recorder.frames[1].inv_mass_deltas.as_ref().unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].vertex_idx, 1);
+        assert!((deltas[0].inv_mass - 2.5).abs() < 1e-6);
+        assert!(recorder.frames[2].inv_mass_deltas.is_none());
+    }
+
+    #[test]
+    fn test_frame_record_deserialize_legacy_without_inv_mass_deltas() {
+        let mut recorder = SimulationDebugRecorder::new(10);
+        recorder.start_recording(sparse_test_meta(), None);
+        let pos = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let vel = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        recorder.record_frame(0.016, 10, 2, &pos, &vel, &[], &[]);
+        let mut val = serde_json::to_value(&recorder.frames[0]).unwrap();
+        val.as_object_mut().unwrap().remove("inv_mass_deltas");
+        let parsed: FrameRecord = serde_json::from_value(val).unwrap();
+        assert!(parsed.inv_mass_deltas.is_none());
     }
 }

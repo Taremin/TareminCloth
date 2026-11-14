@@ -1886,5 +1886,57 @@ mod tests {
             max_disp
         );
     }
+
+    #[test]
+    fn test_set_positions_and_velocities_preserves_inv_masses_and_pins() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let mesh = make_quad_mesh();
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_vertex_inv_masses(&[0], &[0.5]);
+        sim.set_pin_target(1, [1.0, 0.0, 0.5], 0.75);
+
+        let positions = vec![
+            [0.0, 0.0, 0.6],
+            [1.0, 0.0, 0.6],
+            [1.0, 1.0, 0.6],
+            [0.0, 1.0, 0.6],
+        ];
+        let velocities = vec![[0.0; 3]; 4];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+
+        let verts = sim.read_vertices();
+        assert!((verts[0].inv_mass - 0.5).abs() < 1e-6);
+        assert!((verts[1].inv_mass - 0.25).abs() < 1e-6);
+        assert!((verts[2].inv_mass - 1.0).abs() < 1e-6);
+        assert!((verts[0].position[2] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_record_current_frame_captures_inv_mass_deltas() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let mesh = make_quad_mesh();
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.start_debug_recording("InvMassDeltaTest", Some(16));
+
+        sim.step(1.0 / 60.0, 2);
+        sim.set_vertex_inv_masses(&[2], &[3.0]);
+        sim.step(1.0 / 60.0, 2);
+        sim.step(1.0 / 60.0, 2);
+
+        let frames = &sim.debug_recorder.frames;
+        assert_eq!(frames.len(), 3);
+        assert!(frames[0].inv_mass_deltas.is_none());
+        let d1 = frames[1].inv_mass_deltas.as_ref().expect("frame 1 must record inv_mass_deltas");
+        assert_eq!(d1.len(), 1);
+        assert_eq!(d1[0].vertex_idx, 2);
+        assert!((d1[0].inv_mass - 3.0).abs() < 1e-6);
+        assert!(frames[2].inv_mass_deltas.is_none());
+    }
 }
 
