@@ -156,9 +156,9 @@ graph TD
            - **G1（高相対速度接近）**: `rel_disp_g > eff_thick_cached * 0.5`
            - **G2（低速近接クロスオーバー）**: `dot(delta0_g, delta1_cached) <= 0.0`（開始時点の近似分離ベクトル `delta0_g` は `st1_cached` のパラメータ流用により追加の線分最短距離探索なしで評価）
          - ゲートを通過したペアでは、レジスタ内積のみの粗サンプル（9 点: $`\tau = 0/8 .. 8/8`$）と 6 回三分探索（Ternary Search）により最接近時刻 $`\tau^* \in [0, 1]`$ および線分パラメータ $`(s^*, t^*)`$ を特定します。
-         - 多層布 Untangling 保護（`enable_normal_untangling != 0u && v_u0.layer_id != v_j.layer_id`）は、`layer_id` の大小双方を対称に判定し、開始時点の中点分離ベクトルと内側レイヤー法線の内積が負（裏側からの脱出中）なら CCD をスキップします。2 ホップ除外には既存の動的折り畳み判定 `is_topologically_near_folded_sq` を維持します。
+         - 多層布 Untangling 保護（`enable_normal_untangling != 0u && v_u0.layer_id != v_j.layer_id`）は、共通ヘルパー `is_outer_edge_behind_inner` を通じて CCD パス（開始時点の中点分離ベクトル基準）と離散パス（終了時の最短分離ベクトル `delta_ee` 基準）の双方で `layer_id` の大小に対して完全対称に判定し、内側レイヤーの裏側からの脱出中であれば逆押し出し・CCD ブロッキングをスキップします。2 ホップ除外には既存の動的折り畳み判定 `is_topologically_near_folded_sq` を維持します。
          - サブステップ開始時（$`\tau = 0`$）の離散最短ベクトルから正しい表側分離単位法線 $`\mathbf{n}_0 = \boldsymbol{\delta}_0 / \|\boldsymbol{\delta}_0\|`$ を保持し、終了時（$`\tau = 1`$）の相対ベクトル $`\boldsymbol{\delta}_{\text{end}}`$ の開始法線射影高さ $`h_{\text{end}} = \mathbf{n}_0 \cdot \boldsymbol{\delta}_{\text{end}}`$ を評価します。
-         - $`h_{\text{end}} \le 0`$（中心面クロスオーバー）、終了時離散法線の反転（$`\boldsymbol{\delta}_1 \cdot \mathbf{n}_0 \le 0`$）、または境界ペア限定のかすめ通過（`is_boundary_pair && dist1 >= eff_thick_star && tau_star < 1.0`）を検知した瞬間、必要な押し戻し深さ $`\text{pen}_{\text{ccd}} = \text{eff-thick} - h_{\text{end}}`$ を $`\mathbf{n}_0`$ 方向に沿って、**減衰なしの 100% ハード CCD 変位（`add_ccd_atomic`）** として 4 端点へ逆質量比で分配し、トンネリング・貫通を表側で遮断します（かすめ条件を境界ペアに限定し、内部エッジ摺動時の誤発火を抑制）。
+         - $`h_{\text{end}} \le 0`$（中心面クロスオーバー）、終了時離散法線の反転（$`\boldsymbol{\delta}_1 \cdot \mathbf{n}_0 \le 0`$）、または境界ペア限定のかすめ通過（`is_boundary_pair && dist1 >= eff_thick_star && tau_star < 1.0`）を検知した瞬間、必要な押し戻し深さ $`\text{pen}_{\text{ccd}} = \text{eff-thick} - h_{\text{end}}`$ を $`\mathbf{n}_0`$ 方向に沿って、**減衰なしの 100% ハード CCD 変位（`add_ccd_atomic`）** として 4 端点へ逆質量比で分配し、トンネリング・貫通を表側で遮断します（かすめ条件を境界ペアに限定し、内部エッジ摺動時の誤発火を抑制）。さらにピン留め相手との離散押し出しは `add_pin_disp_atomic` チャネルへ分離し、`add_ccd_atomic` 自体は軸別符号付き包絡線（`ccd_pos`/`ccd_neg` の `atomicMax`/`atomicMin`）で蓄積するため、複数同時ヒット時にも `ccd_count` 除算による阻止変位の希釈および同方向重複の過剰加算を起こしません。
          - **負荷実測と制約（AMD Radeon RX 9070 XT）**: 80k 頂点ベンチマークにおける 1 フレームあたりの時間差は `+0.17〜+0.29 ms`（+0.4〜+0.6%）、20k 折り畳み・5k 動的シナリオでの `sc_solve_ee` GPU 時間差は `+0.02〜+0.05 ms`（薄手条件 `t=0.002` では早期枝切りにより `-0.12 ms`）にとどまります。なお、エッジ空間ハッシュは中点座標に基づく周囲 27 セル固定走査および辞書順ペア所有権を用いているため、1 サブステップの相対移動が `cell_size` を大幅に超過する場合は探索範囲外となる制約を前提とします。
 
 ### 3.3 連続衝突判定 (CCD: Continuous Collision Detection)
@@ -170,9 +170,10 @@ graph TD
     （※過去実装に存在した $`x_{\text{old}, i} - \Delta T`$ の符号反転バグを是正し、三角形の追従運動方向へ頂点軌道を正確に相対投影）。
   - 相対移動ベクトル $`\mathbf{v}_{\text{rel}} = p_i - \mathbf{p}_{\text{rel-old}, i}`$ に対する Möller–Trumbore 交差判定により、衝突時刻 $`t_{\text{hit}} \in [0, 1]`$ および交差点の重心座標 $`(u, v, w)`$ を特定。
   - 安全マージン時刻 $`t_{\text{safe}} = \max(0, t_{\text{hit}} - 0.05)`$ における安全相対位置 $`\mathbf{p}_{\text{safe}} = \mathbf{p}_{\text{rel-old}, i} + t_{\text{safe}} \mathbf{v}_{\text{rel}}`$ を算出し、終点位置からの必要補正量 $`\Delta \mathbf{p}_{\text{ccd}} = \mathbf{p}_{\text{safe}} - p_i`$ を導出。
-- **作用・反作用の対称ハード変位分配 (Coupled Momentum Conservation)**:
+- **作用・反作用の対称ハード変位分配と多層布 Untangling 保護 (Coupled Momentum Conservation)**:
+  - 多層布（`enable_normal_untangling != 0u && v_i.layer_id != v_j.layer_id`）において、外層頂点が内層三角形の裏側から表側へ脱出中（`v_i.layer_id > v_j.layer_id && h_old_raw < 0.0`）、または内層頂点が外層三角形の表側に露出している状態から戻る途中（`v_i.layer_id < v_j.layer_id && h_old_raw > 0.0`）は、V-T CCD が貫通元の側へ逆阻止しないよう対称保護（`is_untangling_vt_ccd`）を行います（`self_collision.wgsl`, `self_collision_solve_vt.wgsl`）。
   - 導出された CCD 補正量 $`\Delta \mathbf{p}_{\text{ccd}}`$ は、離散接触ペナルティのような任意減衰を一切行わず **100% ハード変位** として適用されます。
-  - さらに、自頂点 $i$ だけを一方的に押し戻すのではなく、相手三角形の3頂点 $`(j, v0, v1)`$ に対しても重心座標重み $`(w, u, v)`$ および逆質量比に応じた等量・逆向きの力積を `add_ccd_atomic` で固定小数点アトミック加算分配します。これにより運動量保存則が完全に満たされ、動いている布面が突入頂点を撥ね返す、あるいは頂点が布面を正しく押し止める双方向の物理的調和が達成されます。
+  - さらに、自頂点 $i$ だけを一方的に押し戻すのではなく、相手三角形の3頂点 $`(j, v0, v1)`$ に対しても重心座標重み $`(w, u, v)`$ および逆質量比に応じた等量・逆向きの力積を `add_ccd_atomic`（正負符号別の軸別最大包絡線）で蓄積します。これにより運動量保存則と多重同時ヒット時の非希釈性を両立し、動いている布面が突入頂点を撥ね返す、あるいは頂点が布面を正しく押し止める双方向の物理的調和が達成されます。
 
 ### 3.4 SDF (Signed Distance Field) コライダーの設計
 - **ボーンSDF (Bone SDF)**:
@@ -199,10 +200,11 @@ graph TD
 - **物理的背景**:
   頂点 $`\mathbf{p}_i`$ が相手三角形 $`(\mathbf{p}_{j}, \mathbf{p}_{v0}, \mathbf{p}_{v1})`$ に衝突した際、$`\mathbf{p}_i`$ に加わった力積（変位 $`\Delta \mathbf{p}_i`$）と等量・反対向きの変位が、重心座標重み $`(1-u-v, u, v)`$ および質量比に応じて相手の3頂点にも分配されなければなりません（ニュートンの第3法則・運動量保存則）。
 - **実装された設計 (Taremin Cloth)**:
-  固定小数点（$`10^6`$ 倍スケール、分解能 $`1\mu\text{m}`$）の整数アトミック加算（`atomicAdd` on `atomic<i32>`）を用いた専用アキュムレータバッファ（`self_collision_accum_buffer`）を導入。
-  - **V-T（点対面）**: 点 $`i`$ から三角形 $`(j, v0, v1)`$ の最近傍点への分離変位 $`\Delta \mathbf{p}`$ を、自頂点へ $`+\Delta \mathbf{p} (w_i / w_{tot})`$、相手3頂点へ重心座標重みと質量比に応じて $`-\Delta \mathbf{p} (bary_k w_k / w_{tot})`$ でスレッドセーフにアトミック加算。
-  - **E-E（辺対辺）**: 2線分最短パラメータ $`(s, t)`$ に基づき、自エッジ2頂点に $`(1-s, s)`$、相手エッジ2頂点に $`-(1-t, t)`$ を質量比重みでアトミック加算。重複評価は動的エッジ間で $`index < j`$ により排除しつつ、ピン拘束頂点との接触も判定対象に反映。
-  - **Solve → Apply パイプライン分離**: `self_collision.wgsl` でアトミック加算された累積変位は、直後の `self_collision_apply.wgsl` で密度緩和・最大ステップクランプを適用して `prev_pos` に確定され、バッファをゼロクリア。
+  固定小数点（$`10^6`$ 倍スケール、分解能 $`1\mu\text{m}`$）の整数アトミック操作を用いた 3 チャネル構成のアキュムレータバッファ（`self_collision_accum_buffer` / `GpuSelfCollisionAccum`: 64 bytes/vert）を導入。
+  - **1. ペナルティ近接反発チャネル (`dx/dy/dz/count`, `atomicAdd`)**: 動的ペア間の幾何学的押し離し（V-V / V-T / E-E）を作用・反作用で蓄積。V-T は点 $`i`$ から三角形 $`(j, v0, v1)`$ へ質量比・重心座標重みで、E-E は 2 線分最短パラメータ $`(s, t)`$ と質量比重みでスレッドセーフに加算（E-E Direct はエッジ空間ハッシュ辞書順 $`u_0, u_1`$ で 1 回のみ評価）。
+  - **2. ピン固定相手離散接触チャネル (`pin_dx/pin_dy/pin_dz/pin_count`, `atomicAdd`)**: 相手がピン固定されている V-V / V-T / E-E の離散押し出しを専用チャネルへ分離し、平均化（`avg_pin = pin_total / pin_count`）によって真の CCD を希釈しない構成とした。
+  - **3. 真の CCD 正負符号別包絡線チャネル (`ccd_pos_x/y/z`, `ccd_neg_x/y/z`, `atomicMax`/`atomicMin`)**: V-T / E-E CCD のハード阻止変位のみを軸成分・符号別に最大/最小値で蓄積し、`ccd_count` による除算希釈と同方向重複時の過剰加算（N 倍跳ね）を同時に防止。
+  - **Solve → Apply パイプライン分離 (`self_collision_apply.wgsl`)**: ペナルティ変位は `sqrt(count)` 緩和・最大ステップクランプを適用し、ハード制約側は `hard_pos = max(ccd_pos, max(avg_pin, 0))` と `hard_neg = min(ccd_neg, min(avg_pin, 0))` により同方向重複跳ねを抑えつつ逆方向挟み込みを相殺統合し、`prev_pos` へ確定後にバッファをゼロクリアする。
 - **検証結果**:
   二重布対称性テスト（`test_self_collision_symmetry.py`）により、等質量布および異質量布（2:1）において、相対誤差 0.7% 台の運動量保存（対称反発）を実証済み。GPU並列競合によるメッシュ崩壊を起こすことなく、非対称なめり込みが抑制されていることを確認済み。
 
@@ -679,6 +681,29 @@ Taremin Cloth に配備された布素材プリセット（`BUILTIN_FABRIC_PRESE
   1. **分母下限保護 (Regularized Denominator)**: メッシュの平均エッジ長 {\\text{avg}}$`に基づき、分母を`$\\max(L_0, 0.5 L_{\\text{avg}})$ でクランプして極小エッジの特異点発散を 100% 遮断。
   2. **P95（95パーセンタイル）代表値抽出**: コライダー直撃等の局所外れ値を除外し、布全体の伸び・垂れ下がりを正確に表す P95 歪み率を毎フレーム非同期回収。
   3. **動的補正ループ**: 実測 P95 歪みが許容値 $`\\tau_{\\text{strain}} \\approx 0.8\\%`$ を超過した瞬間、目標総反復数 {\\text{target}}$ を最大 2.0 倍までブーストし、必要に応じてサブステップ数も引き上げ。静止時の低ステップ数（高FPS）と布剛性の維持を両立。
+
+---
+
+### 5.7 多重同時 CCD のチャネル分離・軸別符号付き包絡線合成の妥協点とトレードオフ
+- **本来の理想 (多点同時非貫通連立ソルバー)**:
+  複数の V-T / E-E CCD 衝突が同一頂点に同時発火した場合、本来はすべての非貫通線形相補性制約（LCP）や対数バリア制約を連立させ、すべての面・エッジの手前で止まる最小ノルム投影変位を厳密解として求めることが理想です。
+- **旧実装（単純平均 `total_ccd / ccd_count`）の破綻**:
+  1. ピン固定相手との離散押し出し（`tri_has_pin`, `edge_*_has_pin`, ピンV-V）が真の CCD と同じ `add_ccd_atomic` バッファを共用していたため、ピン離散接触が混在するだけで真の CCD 変位が `ccd_count` で割られて希釈されていました。
+  2. 2本以上のエッジや面へ同時に E-E / V-T CCD が発火した際も単純平均により必要阻止変位が目減りし、多重交差時に貫通を許容していました。
+  3. 逆に、単純平均による過剰希釈が偶然 V-T CCD 側（`self_collision.wgsl` / `self_collision_solve_vt.wgsl`）の多層布 Untangling 保護漏れによる裏抜け戻り妨害を薄めていた側面もあり、非希釈化に合わせて V-T CCD 側にも E-E CCD と同等の対称 Untangling 保護を導入する必要がありました。
+- **現在の妥協実装 (`GpuSelfCollisionAccum`: ピン離散チャネル分離 ＋ 軸別符号付き包絡線 ＋ V-T 非緩和 1.0 倍・E-E 高密度時協調減衰 / `vt10_ee_cnt4`)**:
+  - ピン固定相手との離散接触は独立平均チャネル（`pin_dx/y/z/count`）へ分離し、真の CCD（V-T / E-E）は座標軸ごとの正負符号別極値（`ccd_pos_x/y/z` の `atomicMax`, `ccd_neg_x/y/z` の `atomicMin`）で蓄積します。
+  - 実機シーン（`Pattern_Hood` のようなフード背面への高密度折り畳み操作）において、全衝突を非減衰のまま位置包絡へ適用すると、狭い領域へ多数の折り目・頂点が集中して高周波な押し戻しが連鎖し、一点凝縮および処理負荷増大（F69 で `3,068.19 ms/step`・最大セル頂点数 `1,718`）を引き起こすことが確認されました。
+  - これに対し、V-T CCD 側（`self_collision.wgsl` / `self_collision_solve_vt.wgsl`）の `VT_CCD_RELAXATION` は非緩和の `1.0` を維持したまま、E-E CCD 側（`self_collision_ee_direct.wgsl`）の非ゼロ書き込み回数 `ee_ccd_count` を記録し、`self_collision_apply.wgsl` にて `ee_ccd_count >= 4` の高密度折り畳み頂点に対してのみ `ccd_env = (ccd_pos + ccd_neg) * max(0.5, sqrt(3.0 / f32(ee_ccd_count)))` の協調減衰を適用します。
+  - `self_collision_apply.wgsl` では `hard_pos = max(max(ccd_env, 0), max(avg_pin, 0))` と `hard_neg = min(min(ccd_env, 0), min(avg_pin, 0))` により、同方向重複時の二重押し出しを抑止しつつ逆方向挟み込みを相殺統合します。
+- **トレードオフと既知の制約（選定根拠と追加検証結果）**:
+  - **V-T 0.5 倍緩和を撤回し 1.0 倍を維持した根拠**: 比較実験（Wave 1〜6、Waypoint 解放未復元状態の `Pattern_Hood`）では V-T 0.5 倍緩和（`vt05_ee_cnt4`: `sum = 20,307.6 ms`, `F134 = 146.79 ms`, 最大セル密度 `50`, `F134 inter = 8,157`）が一見低い指標を示したため一旦採用しました。しかし、後続の単発・実機検証により、V-T CCD 入力の一律 0.5 倍緩和は Direct モードおよび Pair Cache モードの双方で V-T 1 回あたりの阻止変位を半減させ、以下の裏抜け貫通を誘発することが判明したため `VT_CCD_RELAXATION = 1.0` に戻しました（なお E-E 全件 0.5 倍一律緩和 `uniform_relax_05` も `test_internal_ee_ccd` 4 件に失敗し不採用）。
+    1. **Direct 自由布 2 枚衝突（`vz = -1.2 m/s`, `substeps = 1`）**: `0.5` 倍では交差ペアが `f1=8, f5=6`（ギャップ `-27.28 mm`）発生し、`1.0` 倍では `f1=0, f5=0` を維持しました。
+    2. **Direct Grab 衝突（`substeps = 10`, 解放 1F 後 `r1`）**: `0.5` 倍では `minz = -10.1 mm`・貫通頂点 `4`・交差 `47` が残留し、`1.0` 倍では貫通頂点 `0` を維持しました。
+    3. **Pair Cache 5×5 パッチ落下（`substeps = 4, 8`）**: `0.5` 倍では交差 `78`（`s4`, `minz = -6.316 mm`）・`23`（`s8`）へ裏抜け、`1.0` 倍では `s4/s8` ともに交差 `0`（`minz = +0.607 mm`, `+13.611 mm`）を維持しました。
+    4. **実機 `Pattern_Hood`（Waypoint 解放を復元した Direct リプレイ F134・真上視点）**: `base_after_ii` が `14,780,762` 交差へ崩壊し、`0.5` 倍でフード上面と首周りの裏抜け（真上赤ピクセル `6,177` px）が増加したのに対し、`1.0` 倍は凝縮崩壊を回避しつつ真上赤ピクセルを `2,632` px に抑えました。
+  - **1.0 倍維持と協調減衰のトレードオフ**: V-T を `1.0` 倍に保つことで単発 V-T 衝突・パッチ落下の非貫通を優先する一方、多重折り畳み時の負荷は `0.5` 倍時より高くなります（Wave 1〜6 の Waypoint 未復元比較で `vt10_ee_cnt4` は `sum = 23,515.4 ms`, `F134 inter = 16,098`）。また、`ee_ccd_count >= 4` による減衰は高密度時の発散・凝縮を防ぐための経験則です。
+  - **包絡近似と将来課題**: 座標軸ごとの包絡線合成は 1 パス・アトミック競合フリー（$O(1)$ レジスタ負荷）で処理できますが、非直交の複数斜め CCD 法線が同時に重なった場合は各軸最大成分の組み合わせとなり厳密な最小ノルム共平面投影とは一致しない近似となります。将来より厳密な多点同時結合や経験定数なしの収束が求められる局面では、独立した反復接触投影ソルバーへの移行を検討します。
 
 ---
 

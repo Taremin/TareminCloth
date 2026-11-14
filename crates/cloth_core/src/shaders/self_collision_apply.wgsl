@@ -12,10 +12,18 @@ struct SelfCollisionAccum {
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
-    ccd_dx: atomic<i32>,
-    ccd_dy: atomic<i32>,
-    ccd_dz: atomic<i32>,
-    ccd_count: atomic<u32>,
+    pin_dx: atomic<i32>,
+    pin_dy: atomic<i32>,
+    pin_dz: atomic<i32>,
+    pin_count: atomic<u32>,
+    ccd_pos_x: atomic<i32>,
+    ccd_pos_y: atomic<i32>,
+    ccd_pos_z: atomic<i32>,
+    ccd_neg_x: atomic<i32>,
+    ccd_neg_y: atomic<i32>,
+    ccd_neg_z: atomic<i32>,
+    _pad0: u32,
+    ee_ccd_count: atomic<u32>,
 };
 
 struct SelfCollisionParams {
@@ -41,6 +49,10 @@ struct SelfCollisionParams {
 const FIXED_SCALE: f32 = 1000000.0;
 const INV_FIXED_SCALE: f32 = 1.0 / FIXED_SCALE;
 const EPSILON: f32 = 1e-7;
+// E-E CCD 高密度衝突時の協調減衰パラメータ（4件以上の同時衝突で 1/sqrt 則減衰、下限 0.5）
+const EE_CCD_DAMP_THRESHOLD: u32 = 4u;
+const EE_CCD_DAMP_NUMERATOR: f32 = 3.0;
+const EE_CCD_DAMP_MIN_SCALE: f32 = 0.5;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -90,26 +102,69 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         atomicStore(&accum[index].count, 0u);
     }
 
-    // 2. CCD (連続衝突判定 & 貫通阻止ハード制約): 減衰・クランプをかけずに100%確実に適用
-    let ccd_count = atomicLoad(&accum[index].ccd_count);
-    if (ccd_count > 0u) {
-        let raw_ccd_x = atomicLoad(&accum[index].ccd_dx);
-        let raw_ccd_y = atomicLoad(&accum[index].ccd_dy);
-        let raw_ccd_z = atomicLoad(&accum[index].ccd_dz);
+    // 2. ピン固定相手との離散接触 (非ピン頂点のみ): 真のCCDと独立チャネルで平均化し、希釈を防止
+    let pin_count = atomicLoad(&accum[index].pin_count);
+    var avg_pin = vec3<f32>(0.0);
+    if (pin_count > 0u) {
+        if (!is_pinned) {
+            let raw_px = atomicLoad(&accum[index].pin_dx);
+            let raw_py = atomicLoad(&accum[index].pin_dy);
+            let raw_pz = atomicLoad(&accum[index].pin_dz);
 
-        let total_ccd = vec3<f32>(
-            f32(raw_ccd_x),
-            f32(raw_ccd_y),
-            f32(raw_ccd_z)
+            avg_pin = vec3<f32>(
+                f32(raw_px),
+                f32(raw_py),
+                f32(raw_pz)
+            ) * INV_FIXED_SCALE / f32(pin_count);
+        }
+
+        atomicStore(&accum[index].pin_dx, 0);
+        atomicStore(&accum[index].pin_dy, 0);
+        atomicStore(&accum[index].pin_dz, 0);
+        atomicStore(&accum[index].pin_count, 0u);
+    }
+
+    // 3. 真の CCD (連続衝突判定 & 貫通阻止ハード制約): 軸別符号付き最大包絡線で希釈と過剰加算を同時防止
+    let raw_pos_x = atomicLoad(&accum[index].ccd_pos_x);
+    let raw_pos_y = atomicLoad(&accum[index].ccd_pos_y);
+    let raw_pos_z = atomicLoad(&accum[index].ccd_pos_z);
+    let raw_neg_x = atomicLoad(&accum[index].ccd_neg_x);
+    let raw_neg_y = atomicLoad(&accum[index].ccd_neg_y);
+    let raw_neg_z = atomicLoad(&accum[index].ccd_neg_z);
+
+    if (raw_pos_x != 0) { atomicStore(&accum[index].ccd_pos_x, 0); }
+    if (raw_pos_y != 0) { atomicStore(&accum[index].ccd_pos_y, 0); }
+    if (raw_pos_z != 0) { atomicStore(&accum[index].ccd_pos_z, 0); }
+    if (raw_neg_x != 0) { atomicStore(&accum[index].ccd_neg_x, 0); }
+    if (raw_neg_y != 0) { atomicStore(&accum[index].ccd_neg_y, 0); }
+    if (raw_neg_z != 0) { atomicStore(&accum[index].ccd_neg_z, 0); }
+    let ee_cnt = atomicLoad(&accum[index].ee_ccd_count);
+    if (ee_cnt != 0u) { atomicStore(&accum[index].ee_ccd_count, 0u); }
+
+    if (!is_pinned) {
+        let ccd_pos = vec3<f32>(
+            f32(raw_pos_x),
+            f32(raw_pos_y),
+            f32(raw_pos_z)
+        ) * INV_FIXED_SCALE;
+        let ccd_neg = vec3<f32>(
+            f32(raw_neg_x),
+            f32(raw_neg_y),
+            f32(raw_neg_z)
         ) * INV_FIXED_SCALE;
 
-        let avg_ccd = total_ccd / f32(ccd_count);
-        final_disp += avg_ccd;
+        // 同一頂点で E-E CCD が4件以上同時発火した高密度折り畳み時は、協調減衰で一点凝縮を抑止する
+        var ccd_env = ccd_pos + ccd_neg;
+        if (ee_cnt >= EE_CCD_DAMP_THRESHOLD) {
+            let scale = max(EE_CCD_DAMP_MIN_SCALE, sqrt(EE_CCD_DAMP_NUMERATOR / f32(ee_cnt)));
+            ccd_env = ccd_env * scale;
+        }
 
-        atomicStore(&accum[index].ccd_dx, 0);
-        atomicStore(&accum[index].ccd_dy, 0);
-        atomicStore(&accum[index].ccd_dz, 0);
-        atomicStore(&accum[index].ccd_count, 0u);
+        // 同方向のピン離散反発と真のCCDが重なった場合の2倍跳ねを防ぎつつ、
+        // 逆方向の押し合いは正負独立包絡で正しく釣り合わせる。
+        let hard_pos = max(max(ccd_env, vec3<f32>(0.0)), max(avg_pin, vec3<f32>(0.0)));
+        let hard_neg = min(min(ccd_env, vec3<f32>(0.0)), min(avg_pin, vec3<f32>(0.0)));
+        final_disp += hard_pos + hard_neg;
     }
 
     if (length(final_disp) > EPSILON) {

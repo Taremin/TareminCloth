@@ -1888,6 +1888,124 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_ee_ccd_concurrent_double_hit_no_dilution() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let thickness = 0.005;
+        let z_b = 0.008;
+        let positions = vec![
+            // パッチ A1 (y=-0.012 付近のX軸内部エッジ [0, 1])
+            [-0.02, -0.012, 0.0],
+            [0.02, -0.012, 0.0],
+            [0.0, -0.006, -0.02],
+            [0.0, -0.018, -0.02],
+            // パッチ A2 (y=+0.012 付近のX軸内部エッジ [4, 5])
+            [-0.02, 0.012, 0.0],
+            [0.02, 0.012, 0.0],
+            [0.0, 0.018, -0.02],
+            [0.0, 0.006, -0.02],
+            // パッチ B (Y軸内部エッジ [8, 9] が s=0.2 と s=0.8 で A1/A2 と同時交差)
+            [0.0, -0.02, z_b],
+            [0.0, 0.02, z_b],
+            [0.006, 0.0, z_b + 0.02],
+            [-0.006, 0.0, z_b + 0.02],
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0], [0, 3], [3, 1],
+            [4, 5], [5, 6], [6, 4], [4, 7], [7, 5],
+            [8, 9], [9, 10], [10, 8], [8, 11], [11, 9],
+        ];
+        let faces = vec![
+            [0, 1, 2], [1, 0, 3],
+            [4, 5, 6], [5, 4, 7],
+            [8, 9, 10], [9, 8, 11],
+        ];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, Some(&faces), None, None, None, None,
+            0, thickness, 10000.0, 10000.0, 5000.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_enable_pair_cache(false);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        let mut velocities = vec![[0.0, 0.0, 0.0]; 8];
+        velocities.extend(vec![[0.0, 0.0, -1.5]; 4]);
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+        sim.step(1.0 / 60.0, 1);
+
+        let verts = sim.read_vertices();
+        let z_a1 = 0.5 * (verts[0].position[2] + verts[1].position[2]);
+        let z_a2 = 0.5 * (verts[4].position[2] + verts[5].position[2]);
+        let z_b_mid = 0.5 * (verts[8].position[2] + verts[9].position[2]);
+        assert!(
+            z_b_mid >= z_a1 - 1e-4 && z_b_mid >= z_a2 - 1e-4,
+            "多重同時 E-E CCD で平均化希釈による貫通が起きてはならない: z_a1={:.6}, z_a2={:.6}, z_b={:.6}",
+            z_a1, z_a2, z_b_mid
+        );
+    }
+
+    #[test]
+    fn test_internal_ee_discrete_untangling_symmetry_across_rotation() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let thickness = 0.005;
+        let run_case = |rotate_x180: bool| -> f32 {
+            let z_b = -0.003;
+            let raw_positions = vec![
+                // 内層 (layer_id=0): X軸尾根 [0, 1], 法線は +Z
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.3, -0.5],
+                [0.0, -0.3, -0.5],
+                // 外層 (layer_id=1): Y軸尾根 [4, 5], 内層の裏側 z=-0.003
+                [0.0, -1.0, z_b],
+                [0.0, 1.0, z_b],
+                [0.3, 0.0, z_b + 0.5],
+                [-0.3, 0.0, z_b + 0.5],
+            ];
+            let positions: Vec<[f32; 3]> = raw_positions
+                .into_iter()
+                .map(|p| if rotate_x180 { [p[0], -p[1], -p[2]] } else { p })
+                .collect();
+            let edges = vec![
+                [0, 1], [1, 2], [2, 0], [0, 3], [3, 1],
+                [4, 5], [5, 6], [6, 4], [4, 7], [7, 5],
+            ];
+            let faces = vec![
+                [0, 1, 2], [1, 0, 3],
+                [4, 5, 6], [5, 4, 7],
+            ];
+            let layer_ids = [0, 0, 0, 0, 1, 1, 1, 1];
+            let mesh = ClothMesh::from_raw(
+                &positions, &edges, Some(&faces), None, None, Some(&layer_ids), None,
+                0, thickness, 10000.0, 10000.0, 5000.0, 0.0, 1.0, None, None,
+            );
+            let mut sim = GpuClothSimulator::new(ctx.clone(), mesh);
+            sim.set_enable_self_collision(true);
+            sim.set_enable_pair_cache(false);
+            sim.set_gravity(0.0, 0.0, 0.0);
+            sim.step(1.0 / 60.0, 1);
+
+            let verts = sim.read_vertices();
+            let z_outer = 0.5 * (verts[4].position[2] + verts[5].position[2]);
+            if rotate_x180 { -z_outer } else { z_outer }
+        };
+
+        let z_upright = run_case(false);
+        let z_rotated = run_case(true);
+        assert!(
+            (z_upright - z_rotated).abs() < 1e-5,
+            "180度剛体回転で離散 E-E untangling が非対称: z_upright={:.6}, z_rotated={:.6}",
+            z_upright, z_rotated
+        );
+    }
+
+    #[test]
     fn test_set_positions_and_velocities_preserves_inv_masses_and_pins() {
         let ctx = match get_test_context() {
             Some(c) => c,

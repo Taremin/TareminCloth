@@ -8,7 +8,8 @@ use cloth_core::mesh::{
 };
 use cloth_core::simulation::types::{
     CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
-    GpuSkinningVertex, GpuWrinkleProfileSample, NormalParams, PinParams, WrinkleFieldParams,
+    GpuSelfCollisionAccum, GpuSkinningVertex, GpuWrinkleProfileSample, NormalParams, PinParams,
+    WrinkleFieldParams,
 };
 use cloth_core::sdf_baker::{
     GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams, GpuHierFineParams,
@@ -550,6 +551,27 @@ fn test_rust_and_wgsl_struct_alignment() {
             check_member!(filename, s, SelfCollisionVvParams, _pad0);
             check_member!(filename, s, SelfCollisionVvParams, _pad1);
         }
+
+        if let Some(s) = structs.get("SelfCollisionAccum") {
+            *hit_counts.entry("SelfCollisionAccum").or_insert(0) += 1;
+            check_struct_size!(filename, s, GpuSelfCollisionAccum);
+            check_member!(filename, s, GpuSelfCollisionAccum, dx);
+            check_member!(filename, s, GpuSelfCollisionAccum, dy);
+            check_member!(filename, s, GpuSelfCollisionAccum, dz);
+            check_member!(filename, s, GpuSelfCollisionAccum, count);
+            check_member!(filename, s, GpuSelfCollisionAccum, pin_dx);
+            check_member!(filename, s, GpuSelfCollisionAccum, pin_dy);
+            check_member!(filename, s, GpuSelfCollisionAccum, pin_dz);
+            check_member!(filename, s, GpuSelfCollisionAccum, pin_count);
+            check_member!(filename, s, GpuSelfCollisionAccum, ccd_pos_x);
+            check_member!(filename, s, GpuSelfCollisionAccum, ccd_pos_y);
+            check_member!(filename, s, GpuSelfCollisionAccum, ccd_pos_z);
+            check_member!(filename, s, GpuSelfCollisionAccum, ccd_neg_x);
+            check_member!(filename, s, GpuSelfCollisionAccum, ccd_neg_y);
+            check_member!(filename, s, GpuSelfCollisionAccum, ccd_neg_z);
+            check_member!(filename, s, GpuSelfCollisionAccum, _pad0);
+            check_member!(filename, s, GpuSelfCollisionAccum, ee_ccd_count);
+        }
     }
 
     // 空振り (Vacuous Truth) 防止アサーション
@@ -559,6 +581,7 @@ fn test_rust_and_wgsl_struct_alignment() {
         "GpuVirtualVertexDef",
         "VirtualForwardParams",
         "SelfCollisionVvParams",
+        "SelfCollisionAccum",
     ] {
         assert!(
             hit_counts.get(required).copied().unwrap_or(0) > 0,
@@ -566,5 +589,10 @@ fn test_rust_and_wgsl_struct_alignment() {
             required
         );
     }
+    assert_eq!(
+        hit_counts.get("SelfCollisionAccum").copied().unwrap_or(0),
+        7,
+        "SelfCollisionAccum は全7つの自己衝突/エッジ衝突シェーダーで一致検証されるべき"
+    );
 }
 

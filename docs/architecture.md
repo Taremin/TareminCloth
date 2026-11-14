@@ -248,7 +248,7 @@ Taremin Cloth では、専用の独立ダブルバッファ（`adaptive_staging_
           - **エッジ辞書順序制約 (Global Canonical Ordering)**: 各相手エッジ $`e_B = (j, v_j)`$ に対し $`(u_0 < j) \lor (u_0 = j \land u_1 < v_j)`$ を満たす場合のみ評価。これにより、全エッジペアの判定が GPU 全体で厳密に 1 回のみ行われ、重複計算が完全にゼロ化。
           - **AABB 先行枝切り (Topology Skip)**: 線分 AABB 重なり判定を CSR トポロジー二分探索（`is_topologically_near_folded` $`\times`$ 4回）の前に配置。空間的に離れた 99% 以上のペアに対する無駄なグローバルメモリアクセスを即座にバイパス。
           - **動的折り畳み検出（Bridson 2002方式: レスト長比率による除外解除）と縫合跨ぎ真2ホップ展開レスト距離**: 初期レスト長バッファ（`two_hop_rest_lengths: array<f32>`）を参照し、現在の端点間距離が初期距離の 50% 未満（$`d < 0.5 L_0`$）に圧縮された場合、鋭角なΩ型シワ・折り畳みと判定して2ホップ除外を自動解除。深い座屈時のすり抜けを遮断。同一パネル内の直接接続エッジ（1ホップ）および縫合直近の縮約0〜1ホップペアは初期レスト長 $`L_0 = 0.0`$ を維持して1ホップ隣接クアッド同士の自爆反発・縫合膠着を完全防止しつつ、縮約グラフにおける真の2ホップ（`!orig_adj_lists[i].contains(&nbr)` を満たす2D布頂点同士）に対しては初期3D距離またはシーム共有辺の180度平坦展開長 $`L_0 = \sqrt{(s_a - s_b)^2 + (h_a + h_b)^2}`$・同一中継頂点まわりの初期2D距離を展開レスト距離として事前計算し設定。フード顔開口リムや裾スリットのように対向する開放境界エッジが正面から合掌した際、$`d < 0.5 L_0`$ を満たしてトポロジー除外が適切に解除され、E-E CCD / E-E 反発が正常に捕捉される。
-          - **開放境界・ストランドおよび選択的内部エッジ連続衝突判定（Boundary/Strand & Selective Internal E-E CCD）**: メッシュ初期化時（`mesh.rs`）に、所属三角形 1 枚の真の開放境界エッジおよび所属三角形 0 枚の 1D ストランド線分（引き紐等）をビットパック（`edge_boundary_bits: array<u32>`）として GPU に供給。自エッジ A の AABB を開始位置を含む掃引 AABB に拡張し、境界・ストランド関与ペア（`is_boundary_a || is_boundary_b`）は全数、内部エッジ同士は終了時最短距離 `st1_cached`（離散パスにもそのまま再利用）と並進除去済み相対変位上界 `rel_disp_g` に基づく非接触早期枝切り（`dist_sq_ee_cached > (max_eff_thick_g + rel_disp_g)^2`）後に **G1（`rel_disp_g > eff_thick_cached * 0.5`）または G2（`dot(delta0_g, delta1_cached) <= 0.0`）** を満たすペアに対してのみ軌道最接近探索（粗サンプル 9 点＋三分探索 6 回）を実施。多層布 Untangling 保護は開始時点の中点差ベクトルを用い両方向の `layer_id` で対称判定。開始時の分離法線 $`\mathbf{n}_0`$ を保持し、終了時射影高さ $`h_{\text{end}} \le 0`$・離散法線反転・境界限定のかすめ条件によるクロスオーバー検知時に、減衰なしの 100% ハード CCD 変位（`add_ccd_atomic`）を 4 端点へ運動量保存を満たす逆質量比で分配し、自由縁・内部エッジ・引き紐の貫通を遮断。
+          - **開放境界・ストランドおよび選択的内部エッジ連続衝突判定（Boundary/Strand & Selective Internal E-E CCD）**: メッシュ初期化時（`mesh.rs`）に、所属三角形 1 枚の真の開放境界エッジおよび所属三角形 0 枚の 1D ストランド線分（引き紐等）をビットパック（`edge_boundary_bits: array<u32>`）として GPU に供給。自エッジ A の AABB を開始位置を含む掃引 AABB に拡張し、境界・ストランド関与ペア（`is_boundary_a || is_boundary_b`）は全数、内部エッジ同士は終了時最短距離 `st1_cached`（離散パスにもそのまま再利用）と並進除去済み相対変位上界 `rel_disp_g` に基づく非接触早期枝切り（`dist_sq_ee_cached > (max_eff_thick_g + rel_disp_g)^2`）後に **G1（`rel_disp_g > eff_thick_cached * 0.5`）または G2（`dot(delta0_g, delta1_cached) <= 0.0`）** を満たすペアに対してのみ軌道最接近探索（粗サンプル 9 点＋三分探索 6 回）を実施。多層布 Untangling 保護は共通ヘルパー `is_outer_edge_behind_inner` を用いて CCD パス（開始時点中点差）と離散パス（終了時最短差）の双方で `layer_id` の大小に対して対称判定。開始時の分離法線 $`\mathbf{n}_0`$ を保持し、終了時射影高さ $`h_{\text{end}} \le 0`$・離散法線反転・境界限定のかすめ条件によるクロスオーバー検知時に、減衰なしの 100% ハード CCD 変位（`add_ccd_atomic`: 軸別符号付き包絡線へ `atomicMax`/`atomicMin` 蓄積）を 4 端点へ運動量保存を満たす逆質量比で分配し、自由縁・内部エッジ・引き紐の貫通を遮断（ピン相手の離散接触は独立チャネル `add_pin_disp_atomic` へ分離し CCD 希釈を防止）。
           - **対称アトミック分配 (Coupled XPBD)**: 線分間最短距離が衝突閾値未満の場合、4 端点 $`(u_0, u_1, j, v_j)`$ へ質量比に応じた厳密な作用・反作用変位をアトミック加算。物理保存則（運動量保存・対称性）を 100% 保持。
         - **エッジ衝突間隔制御 (`self_collision_ee_substep_interval`, 既定 `1`)**: E-E（エッジ対エッジ）接触解決の実行頻度を制御（`0`: 完全無効 [速度最優先、約26.6 FPS]、`1`: 毎サブステップ実行 [完全精度・貫通防止、リアルタイム域達成]、`N >= 2`: Nサブステップ毎 [例: N=2 で 17.9 FPS]）。サブステップディスパッチ時に `solve_ee` パスの実行有無を直接分岐するためオーバーヘッドゼロ。
         - **接触候補ペアキャッシュ (Active Pair Caching / I-Cloth 2018 方式, オプション `enable_pair_cache`)**:
@@ -482,12 +482,17 @@ pub struct WrinkleFieldParams {
     pub crest_window: f32,         // 山の径方向グラデーション窓 (m, 既定 0.020)
 }
 
-// 自己衝突・エッジ衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write, 32 bytes/vert)
-// WGSL: struct SelfCollisionAccum {
-//     dx: atomic<i32>, dy: atomic<i32>, dz: atomic<i32>, count: atomic<u32>,        // 近接反発ペナルティ変位
-//     ccd_dx: atomic<i32>, ccd_dy: atomic<i32>, ccd_dz: atomic<i32>, ccd_count: atomic<u32>, // CCDハード変位 (100%適用)
+// 自己衝突・エッジ衝突累積変位バッファ (GPU Storage Buffer: atomic<i32> / Read-Write, 64 bytes/vert)
+// Rust: GpuSelfCollisionAccum (`types.rs`) / WGSL: struct SelfCollisionAccum {
+//     dx: atomic<i32>, dy: atomic<i32>, dz: atomic<i32>, count: atomic<u32>,             // 近接反発ペナルティ変位 (sqrt(count)緩和適用)
+//     pin_dx: atomic<i32>, pin_dy: atomic<i32>, pin_dz: atomic<i32>, pin_count: atomic<u32>, // ピン固定相手との離散接触変位 (平均適用・CCDと独立)
+//     ccd_pos_x: atomic<i32>, ccd_pos_y: atomic<i32>, ccd_pos_z: atomic<i32>,            // 真のCCD 正方向包絡 (atomicMax・V-T入力は非緩和 1.0 倍)
+//     ccd_neg_x: atomic<i32>, ccd_neg_y: atomic<i32>, ccd_neg_z: atomic<i32>,            // 真のCCD 負方向包絡 (atomicMin・V-T入力は非緩和 1.0 倍)
+//     _pad0: u32, ee_ccd_count: atomic<u32>,                                             // E-E CCD 非ゼロ書き込み回数 (4件以上で協調減衰)
 // }
-// 固定小数点 10^6 スケール (1μm 分解能) により、データ競合なしに対称な作用・反作用（およびエッジ衝突変位）を蓄積
+// 固定小数点 10^6 スケール (1μm 分解能) によりデータ競合なしに蓄積し、self_collision_apply.wgsl で
+// ccd_env = ccd_pos + ccd_neg に対して ee_ccd_count >= 4 時に scale = max(0.5, sqrt(3.0 / ee_ccd_count)) を乗算後、
+// hard_pos = max(max(ccd_env, 0), max(avg_pin, 0)), hard_neg = min(min(ccd_env, 0), min(avg_pin, 0)) により統合適用する。
 
 // トポロジー2ホップ近傍バッファ (GPU Buffer: Read-Only)
 // - two_hop_offsets: array<u32, N + 1>          (CSR行開始インデックス)

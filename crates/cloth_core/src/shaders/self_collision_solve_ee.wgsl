@@ -36,10 +36,18 @@ struct SelfCollisionAccum {
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
-    ccd_dx: atomic<i32>,
-    ccd_dy: atomic<i32>,
-    ccd_dz: atomic<i32>,
-    ccd_count: atomic<u32>,
+    pin_dx: atomic<i32>,
+    pin_dy: atomic<i32>,
+    pin_dz: atomic<i32>,
+    pin_count: atomic<u32>,
+    ccd_pos_x: atomic<i32>,
+    ccd_pos_y: atomic<i32>,
+    ccd_pos_z: atomic<i32>,
+    ccd_neg_x: atomic<i32>,
+    ccd_neg_y: atomic<i32>,
+    ccd_neg_z: atomic<i32>,
+    _pad0: u32,
+    ee_ccd_count: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> vertices: array<GpuVertex>;
@@ -65,6 +73,19 @@ fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     atomicAdd(&accum[v_idx].count, 1u);
 }
 
+fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
+    if (v_idx >= params.num_vertices) {
+        return;
+    }
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    atomicAdd(&accum[v_idx].pin_dx, ix);
+    atomicAdd(&accum[v_idx].pin_dy, iy);
+    atomicAdd(&accum[v_idx].pin_dz, iz);
+    atomicAdd(&accum[v_idx].pin_count, 1u);
+}
+
 fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
     if (v_idx >= params.num_vertices) {
         return;
@@ -72,10 +93,26 @@ fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
     let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
     let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
     let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
-    atomicAdd(&accum[v_idx].ccd_dx, ix);
-    atomicAdd(&accum[v_idx].ccd_dy, iy);
-    atomicAdd(&accum[v_idx].ccd_dz, iz);
-    atomicAdd(&accum[v_idx].ccd_count, 1u);
+    if (ix > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_x, ix);
+    } else if (ix < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_x, ix);
+    }
+    if (iy > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_y, iy);
+    } else if (iy < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_y, iy);
+    }
+    if (iz > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_z, iz);
+    } else if (iz < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_z, iz);
+    }
+    // Direct 版との構造整合のため非ゼロ E-E CCD 書き込み回数を記録
+    let len_fixed = u32(clamp(length(disp) * FIXED_SCALE, 0.0, 2000000000.0));
+    if (len_fixed > 0u) {
+        atomicAdd(&accum[v_idx].ee_ccd_count, 1u);
+    }
 }
 
 
@@ -191,18 +228,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (edge_j_has_pin) {
             let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
             let col_disp = n_ee * (pen_ee * (1.0 - s)) + edge_move * (1.0 - s) * 0.5;
-            add_ccd_atomic(index, col_disp);
+            add_pin_disp_atomic(index, col_disp);
             if (v_ui.inv_mass > 0.0) {
                 let col_disp_ui = n_ee * (pen_ee * s) + edge_move * s * 0.5;
-                add_ccd_atomic(ui, col_disp_ui);
+                add_pin_disp_atomic(ui, col_disp_ui);
             }
         } else if (edge_i_has_pin) {
             let edge_move = ((p_i - x_old_i) + (p_ui - v_ui.position)) * 0.5;
             let col_disp = -n_ee * (pen_ee * (1.0 - t)) + edge_move * (1.0 - t) * 0.5;
-            add_ccd_atomic(j, col_disp);
+            add_pin_disp_atomic(j, col_disp);
             if (v_vj.inv_mass > 0.0) {
                 let col_disp_vj = -n_ee * (pen_ee * t) + edge_move * t * 0.5;
-                add_ccd_atomic(vj, col_disp_vj);
+                add_pin_disp_atomic(vj, col_disp_vj);
             }
         } else {
             let w_i = v_i.inv_mass;

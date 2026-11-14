@@ -38,10 +38,18 @@ struct SelfCollisionAccum {
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
-    ccd_dx: atomic<i32>,
-    ccd_dy: atomic<i32>,
-    ccd_dz: atomic<i32>,
-    ccd_count: atomic<u32>,
+    pin_dx: atomic<i32>,
+    pin_dy: atomic<i32>,
+    pin_dz: atomic<i32>,
+    pin_count: atomic<u32>,
+    ccd_pos_x: atomic<i32>,
+    ccd_pos_y: atomic<i32>,
+    ccd_pos_z: atomic<i32>,
+    ccd_neg_x: atomic<i32>,
+    ccd_neg_y: atomic<i32>,
+    ccd_neg_z: atomic<i32>,
+    _pad0: u32,
+    ee_ccd_count: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read_write> vertices: array<GpuVertex>;

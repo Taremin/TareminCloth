@@ -11,7 +11,8 @@ use crate::mesh::{
 use crate::spatial_hash::{GpuSpatialHash, GpuEdgeSpatialHash, GpuColliderEdgeSpatialHash};
 use super::pipeline_cache::{get_or_create_shared, SharedPipelines};
 use super::types::{
-    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, NormalParams, PinParams,
+    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuSelfCollisionAccum,
+    NormalParams, PinParams,
 };
 
 pub struct SimulationResources {
@@ -508,7 +509,8 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
-    let self_collision_accum_buffer_size = ((num_vertices as u64) * 32).max(64);
+    let self_collision_accum_buffer_size =
+        ((num_vertices as u64) * std::mem::size_of::<GpuSelfCollisionAccum>() as u64).max(64);
     let self_collision_accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Self Collision Accum Buffer"),
         size: self_collision_accum_buffer_size,

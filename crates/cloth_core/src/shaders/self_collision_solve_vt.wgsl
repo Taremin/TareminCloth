@@ -36,10 +36,18 @@ struct SelfCollisionAccum {
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
-    ccd_dx: atomic<i32>,
-    ccd_dy: atomic<i32>,
-    ccd_dz: atomic<i32>,
-    ccd_count: atomic<u32>,
+    pin_dx: atomic<i32>,
+    pin_dy: atomic<i32>,
+    pin_dz: atomic<i32>,
+    pin_count: atomic<u32>,
+    ccd_pos_x: atomic<i32>,
+    ccd_pos_y: atomic<i32>,
+    ccd_pos_z: atomic<i32>,
+    ccd_neg_x: atomic<i32>,
+    ccd_neg_y: atomic<i32>,
+    ccd_neg_z: atomic<i32>,
+    _pad0: u32,
+    ee_ccd_count: atomic<u32>,
 };
 
 struct ClosestBaryResult {
@@ -56,6 +64,8 @@ struct ClosestBaryResult {
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
+// V-T CCD 変位の倍率（1.0 = 非緩和。0.5 緩和では Direct/PairCache 双方で裏抜け貫通が増加するため厳密遮断を維持。詳細は docs/algorithms.md 5.7節）
+const VT_CCD_RELAXATION: f32 = 1.0;
 
 fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     if (v_idx >= params.num_vertices) {
@@ -70,17 +80,42 @@ fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     atomicAdd(&accum[v_idx].count, 1u);
 }
 
-fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
+fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     if (v_idx >= params.num_vertices) {
         return;
     }
     let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
     let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
     let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
-    atomicAdd(&accum[v_idx].ccd_dx, ix);
-    atomicAdd(&accum[v_idx].ccd_dy, iy);
-    atomicAdd(&accum[v_idx].ccd_dz, iz);
-    atomicAdd(&accum[v_idx].ccd_count, 1u);
+    atomicAdd(&accum[v_idx].pin_dx, ix);
+    atomicAdd(&accum[v_idx].pin_dy, iy);
+    atomicAdd(&accum[v_idx].pin_dz, iz);
+    atomicAdd(&accum[v_idx].pin_count, 1u);
+}
+
+fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
+    if (v_idx >= params.num_vertices) {
+        return;
+    }
+    let scaled_disp = disp * VT_CCD_RELAXATION;
+    let ix = i32(clamp(scaled_disp.x * FIXED_SCALE, -2e9, 2e9));
+    let iy = i32(clamp(scaled_disp.y * FIXED_SCALE, -2e9, 2e9));
+    let iz = i32(clamp(scaled_disp.z * FIXED_SCALE, -2e9, 2e9));
+    if (ix > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_x, ix);
+    } else if (ix < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_x, ix);
+    }
+    if (iy > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_y, iy);
+    } else if (iy < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_y, iy);
+    }
+    if (iz > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_z, iz);
+    } else if (iz < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_z, iz);
+    }
 }
 
 
@@ -241,49 +276,62 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let tri_len_ccd = length(tri_cross_ccd);
         let tri_n_ccd = select(vec3<f32>(0.0, 1.0, 0.0), tri_cross_ccd / tri_len_ccd, tri_len_ccd > 1e-12);
         let h_old_raw = dot(rel_old_i - p_j, tri_n_ccd);
-        let side_sign = select(dot(-move_vec, tri_n_ccd), h_old_raw, abs(h_old_raw) > 1e-6);
-        let n_side = select(-tri_n_ccd, tri_n_ccd, side_sign >= 0.0);
-        let h_old = max(dot(rel_old_i - hit_pt, n_side), 0.0);
-        let h_safe = max(h_old, effective_thick * 0.25);
-        let p_safe = hit_pt + n_side * h_safe;
-        let total_ccd = p_safe - p_i;
-        let pen_ccd_soft = max(0.0, effective_thick - h_safe);
 
-        if (tri_has_pin) {
-            if (!is_pinned_i) {
-                add_ccd_atomic(index, total_ccd + n_side * pen_ccd_soft);
+        // 多層布Untangling（対称）: 貫通状態から正常側へ脱出中の通過をCCDが逆阻止しないように保護
+        var is_untangling_vt_ccd = false;
+        if (params.enable_normal_untangling != 0u && tri_len_ccd > 1e-12 && v_i.layer_id != v_j.layer_id) {
+            if (v_i.layer_id > v_j.layer_id) {
+                is_untangling_vt_ccd = (h_old_raw < 0.0);
+            } else {
+                is_untangling_vt_ccd = (h_old_raw > 0.0);
             }
-        } else if (is_pinned_i) {
-            let bary_ccd = vec3<f32>(clamp(1.0 - ccd_hit.z - ccd_hit.w, 0.0, 1.0), clamp(ccd_hit.z, 0.0, 1.0), clamp(ccd_hit.w, 0.0, 1.0));
-            let w_j = v_j.inv_mass;
-            let w_v0 = v_v0.inv_mass;
-            let w_v1 = v_v1.inv_mass;
-            let w_tri = bary_ccd.x * bary_ccd.x * w_j + bary_ccd.y * bary_ccd.y * w_v0 + bary_ccd.z * bary_ccd.z * w_v1;
-            if (w_tri > EPSILON) {
-                let full_ccd = total_ccd + n_side * pen_ccd_soft;
-                if (w_j > 0.0) { add_ccd_atomic(j, -full_ccd * (bary_ccd.x * w_j / w_tri)); }
-                if (w_v0 > 0.0) { add_ccd_atomic(v0, -full_ccd * (bary_ccd.y * w_v0 / w_tri)); }
-                if (w_v1 > 0.0) { add_ccd_atomic(v1, -full_ccd * (bary_ccd.z * w_v1 / w_tri)); }
-            }
-        } else {
-            let bary_ccd = vec3<f32>(clamp(1.0 - ccd_hit.z - ccd_hit.w, 0.0, 1.0), clamp(ccd_hit.z, 0.0, 1.0), clamp(ccd_hit.w, 0.0, 1.0));
-            let w_i = v_i.inv_mass;
-            let w_j = v_j.inv_mass;
-            let w_v0 = v_v0.inv_mass;
-            let w_v1 = v_v1.inv_mass;
-            let w_tri = bary_ccd.x * bary_ccd.x * w_j + bary_ccd.y * bary_ccd.y * w_v0 + bary_ccd.z * bary_ccd.z * w_v1;
-            let w_tot = w_i + w_tri;
-            if (w_tot > EPSILON) {
-                add_ccd_atomic(index, total_ccd * (w_i / w_tot));
-                if (w_j > 0.0) { add_ccd_atomic(j, -total_ccd * (bary_ccd.x * w_j / w_tot)); }
-                if (w_v0 > 0.0) { add_ccd_atomic(v0, -total_ccd * (bary_ccd.y * w_v0 / w_tot)); }
-                if (w_v1 > 0.0) { add_ccd_atomic(v1, -total_ccd * (bary_ccd.z * w_v1 / w_tot)); }
-                if (pen_ccd_soft > EPSILON) {
-                    let total_pen_ccd = n_side * (pen_ccd_soft * 0.6);
-                    add_disp_atomic(index, total_pen_ccd * (w_i / w_tot));
-                    if (w_j > 0.0) { add_disp_atomic(j, -total_pen_ccd * (bary_ccd.x * w_j / w_tot)); }
-                    if (w_v0 > 0.0) { add_disp_atomic(v0, -total_pen_ccd * (bary_ccd.y * w_v0 / w_tot)); }
-                    if (w_v1 > 0.0) { add_disp_atomic(v1, -total_pen_ccd * (bary_ccd.z * w_v1 / w_tot)); }
+        }
+
+        if (!is_untangling_vt_ccd) {
+            let side_sign = select(dot(-move_vec, tri_n_ccd), h_old_raw, abs(h_old_raw) > 1e-6);
+            let n_side = select(-tri_n_ccd, tri_n_ccd, side_sign >= 0.0);
+            let h_old = max(dot(rel_old_i - hit_pt, n_side), 0.0);
+            let h_safe = max(h_old, effective_thick * 0.25);
+            let p_safe = hit_pt + n_side * h_safe;
+            let total_ccd = p_safe - p_i;
+            let pen_ccd_soft = max(0.0, effective_thick - h_safe);
+
+            if (tri_has_pin) {
+                if (!is_pinned_i) {
+                    add_ccd_atomic(index, total_ccd + n_side * pen_ccd_soft);
+                }
+            } else if (is_pinned_i) {
+                let bary_ccd = vec3<f32>(clamp(1.0 - ccd_hit.z - ccd_hit.w, 0.0, 1.0), clamp(ccd_hit.z, 0.0, 1.0), clamp(ccd_hit.w, 0.0, 1.0));
+                let w_j = v_j.inv_mass;
+                let w_v0 = v_v0.inv_mass;
+                let w_v1 = v_v1.inv_mass;
+                let w_tri = bary_ccd.x * bary_ccd.x * w_j + bary_ccd.y * bary_ccd.y * w_v0 + bary_ccd.z * bary_ccd.z * w_v1;
+                if (w_tri > EPSILON) {
+                    let full_ccd = total_ccd + n_side * pen_ccd_soft;
+                    if (w_j > 0.0) { add_ccd_atomic(j, -full_ccd * (bary_ccd.x * w_j / w_tri)); }
+                    if (w_v0 > 0.0) { add_ccd_atomic(v0, -full_ccd * (bary_ccd.y * w_v0 / w_tri)); }
+                    if (w_v1 > 0.0) { add_ccd_atomic(v1, -full_ccd * (bary_ccd.z * w_v1 / w_tri)); }
+                }
+            } else {
+                let bary_ccd = vec3<f32>(clamp(1.0 - ccd_hit.z - ccd_hit.w, 0.0, 1.0), clamp(ccd_hit.z, 0.0, 1.0), clamp(ccd_hit.w, 0.0, 1.0));
+                let w_i = v_i.inv_mass;
+                let w_j = v_j.inv_mass;
+                let w_v0 = v_v0.inv_mass;
+                let w_v1 = v_v1.inv_mass;
+                let w_tri = bary_ccd.x * bary_ccd.x * w_j + bary_ccd.y * bary_ccd.y * w_v0 + bary_ccd.z * bary_ccd.z * w_v1;
+                let w_tot = w_i + w_tri;
+                if (w_tot > EPSILON) {
+                    add_ccd_atomic(index, total_ccd * (w_i / w_tot));
+                    if (w_j > 0.0) { add_ccd_atomic(j, -total_ccd * (bary_ccd.x * w_j / w_tot)); }
+                    if (w_v0 > 0.0) { add_ccd_atomic(v0, -total_ccd * (bary_ccd.y * w_v0 / w_tot)); }
+                    if (w_v1 > 0.0) { add_ccd_atomic(v1, -total_ccd * (bary_ccd.z * w_v1 / w_tot)); }
+                    if (pen_ccd_soft > EPSILON) {
+                        let total_pen_ccd = n_side * (pen_ccd_soft * 0.6);
+                        add_disp_atomic(index, total_pen_ccd * (w_i / w_tot));
+                        if (w_j > 0.0) { add_disp_atomic(j, -total_pen_ccd * (bary_ccd.x * w_j / w_tot)); }
+                        if (w_v0 > 0.0) { add_disp_atomic(v0, -total_pen_ccd * (bary_ccd.y * w_v0 / w_tot)); }
+                        if (w_v1 > 0.0) { add_disp_atomic(v1, -total_pen_ccd * (bary_ccd.z * w_v1 / w_tot)); }
+                    }
                 }
             }
         }
@@ -307,7 +355,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let pen_vt = effective_thick - dist_vt;
             if (tri_has_pin) {
                 let col_disp = n_vt * pen_vt + tri_move * 0.5;
-                add_ccd_atomic(index, col_disp);
+                add_pin_disp_atomic(index, col_disp);
             } else {
                 let w_i = v_i.inv_mass;
                 let bary = res_vt.bary;

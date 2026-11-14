@@ -36,10 +36,18 @@ struct SelfCollisionAccum {
     dy: atomic<i32>,
     dz: atomic<i32>,
     count: atomic<u32>,
-    ccd_dx: atomic<i32>,
-    ccd_dy: atomic<i32>,
-    ccd_dz: atomic<i32>,
-    ccd_count: atomic<u32>,
+    pin_dx: atomic<i32>,
+    pin_dy: atomic<i32>,
+    pin_dz: atomic<i32>,
+    pin_count: atomic<u32>,
+    ccd_pos_x: atomic<i32>,
+    ccd_pos_y: atomic<i32>,
+    ccd_pos_z: atomic<i32>,
+    ccd_neg_x: atomic<i32>,
+    ccd_neg_y: atomic<i32>,
+    ccd_neg_z: atomic<i32>,
+    _pad0: u32,
+    ee_ccd_count: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> edges: array<GpuEdge>;
@@ -71,14 +79,60 @@ fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
     atomicAdd(&accum[v_idx].count, 1u);
 }
 
+fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    atomicAdd(&accum[v_idx].pin_dx, ix);
+    atomicAdd(&accum[v_idx].pin_dy, iy);
+    atomicAdd(&accum[v_idx].pin_dz, iz);
+    atomicAdd(&accum[v_idx].pin_count, 1u);
+}
+
 fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
     let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
     let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
     let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
-    atomicAdd(&accum[v_idx].ccd_dx, ix);
-    atomicAdd(&accum[v_idx].ccd_dy, iy);
-    atomicAdd(&accum[v_idx].ccd_dz, iz);
-    atomicAdd(&accum[v_idx].ccd_count, 1u);
+    if (ix > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_x, ix);
+    } else if (ix < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_x, ix);
+    }
+    if (iy > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_y, iy);
+    } else if (iy < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_y, iy);
+    }
+    if (iz > 0) {
+        atomicMax(&accum[v_idx].ccd_pos_z, iz);
+    } else if (iz < 0) {
+        atomicMin(&accum[v_idx].ccd_neg_z, iz);
+    }
+    // 高密度衝突時の協調減衰判定用に非ゼロ E-E CCD 書き込み回数を記録
+    let len_fixed = u32(clamp(length(disp) * FIXED_SCALE, 0.0, 2000000000.0));
+    if (len_fixed > 0u) {
+        atomicAdd(&accum[v_idx].ee_ccd_count, 1u);
+    }
+}
+
+// 多層布の表層エッジが内層エッジの裏側に入り込んでいるかをエッジ順序に対称判定する
+// delta_ab は Edge A -> Edge B 基準の分離ベクトル (pt_a - pt_b)
+fn is_outer_edge_behind_inner(
+    layer_a: u32,
+    layer_b: u32,
+    vert_a: u32,
+    vert_b: u32,
+    delta_ab: vec3<f32>,
+) -> bool {
+    if (layer_a == layer_b) {
+        return false;
+    }
+    if (layer_a > layer_b) {
+        let n_inner = normals[vert_b].xyz;
+        return (dot(n_inner, n_inner) > 0.25) && (dot(delta_ab, n_inner) < 0.0);
+    }
+    let n_inner = normals[vert_a].xyz;
+    return (dot(n_inner, n_inner) > 0.25) && (dot(-delta_ab, n_inner) < 0.0);
 }
 
 fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
@@ -437,13 +491,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         var is_untangling_ccd = false;
                         if (params.enable_normal_untangling != 0u && v_u0.layer_id != v_j.layer_id) {
                             let delta0_u = ((p_u0_old + p_u1_old) - (p_j_old + p_vj_old)) * 0.5;
-                            if (v_u0.layer_id > v_j.layer_id) {
-                                let n_inner = normals[j].xyz;
-                                is_untangling_ccd = (dot(n_inner, n_inner) > 0.25) && (dot(delta0_u, n_inner) < 0.0);
-                            } else {
-                                let n_inner = normals[u0].xyz;
-                                is_untangling_ccd = (dot(n_inner, n_inner) > 0.25) && (dot(-delta0_u, n_inner) < 0.0);
-                            }
+                            is_untangling_ccd = is_outer_edge_behind_inner(
+                                v_u0.layer_id,
+                                v_j.layer_id,
+                                u0,
+                                j,
+                                delta0_u,
+                            );
                         }
                         if (is_untangling_ccd) {
                             continue;
@@ -580,10 +634,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
                     // 単一レイヤー時は normals バッファへのグローバルメモリアクセスを完全スキップ
                     var is_untangling_ee = false;
-                    if (params.enable_normal_untangling != 0u && v_u0.layer_id > v_j.layer_id) {
-                        let n_j_raw = normals[j].xyz;
-                        let is_behind_ee = (dot(n_j_raw, n_j_raw) > 0.25) && (dot(delta_ee, n_j_raw) < 0.0);
-                        is_untangling_ee = is_behind_ee;
+                    if (params.enable_normal_untangling != 0u) {
+                        is_untangling_ee = is_outer_edge_behind_inner(
+                            v_u0.layer_id,
+                            v_j.layer_id,
+                            u0,
+                            j,
+                            delta_ee,
+                        );
                     }
 
                     if (!is_untangling_ee) {
@@ -603,22 +661,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
                             if (v_u0.inv_mass > 0.0) {
                                 let col_disp_0 = n_ee * (pen_ee * (1.0 - s)) + edge_move * (1.0 - s) * 0.5;
-                                add_ccd_atomic(u0, col_disp_0);
+                                add_pin_disp_atomic(u0, col_disp_0);
                             }
                             if (v_u1.inv_mass > 0.0) {
                                 let col_disp_1 = n_ee * (pen_ee * s) + edge_move * s * 0.5;
-                                add_ccd_atomic(u1, col_disp_1);
+                                add_pin_disp_atomic(u1, col_disp_1);
                             }
                         } else if (edge_a_has_pin) {
                             // 自エッジがピン -> 相手エッジ側を変位
                             let edge_move = ((p_u0 - p_u0_old) + (p_u1 - p_u1_old)) * 0.5;
                             if (v_j.inv_mass > 0.0) {
                                 let col_disp_j = -n_ee * (pen_ee * (1.0 - t)) + edge_move * (1.0 - t) * 0.5;
-                                add_ccd_atomic(j, col_disp_j);
+                                add_pin_disp_atomic(j, col_disp_j);
                             }
                             if (v_vj.inv_mass > 0.0) {
                                 let col_disp_vj = -n_ee * (pen_ee * t) + edge_move * t * 0.5;
-                                add_ccd_atomic(vj, col_disp_vj);
+                                add_pin_disp_atomic(vj, col_disp_vj);
                             }
                         } else {
                             // 両エッジ動的 -> Coupled XPBD 対称質量分配

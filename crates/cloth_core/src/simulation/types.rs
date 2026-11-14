@@ -141,4 +141,43 @@ impl Default for WrinkleFieldParams {
     }
 }
 
+/// 自己衝突アキュムレータバッファ（WGSL `SelfCollisionAccum` と 1:1 対応・64 bytes / vertex）
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuSelfCollisionAccum {
+    /// ペナルティ（近接離散反発）変位 X (固定小数点 i32)
+    pub dx: i32,
+    /// ペナルティ変位 Y (固定小数点 i32)
+    pub dy: i32,
+    /// ペナルティ変位 Z (固定小数点 i32)
+    pub dz: i32,
+    /// ペナルティ接触カウント
+    pub count: u32,
+    /// ピン固定相手との離散接触変位 X (固定小数点 i32)
+    pub pin_dx: i32,
+    /// ピン固定相手との離散接触変位 Y (固定小数点 i32)
+    pub pin_dy: i32,
+    /// ピン固定相手との離散接触変位 Z (固定小数点 i32)
+    pub pin_dz: i32,
+    /// ピン固定相手との離散接触カウント
+    pub pin_count: u32,
+    /// 真の CCD 正方向最大変位 X (固定小数点 i32, atomicMax)
+    pub ccd_pos_x: i32,
+    /// 真の CCD 正方向最大変位 Y (固定小数点 i32, atomicMax)
+    pub ccd_pos_y: i32,
+    /// 真の CCD 正方向最大変位 Z (固定小数点 i32, atomicMax)
+    pub ccd_pos_z: i32,
+    /// 真の CCD 負方向最小変位 X (固定小数点 i32, atomicMin)
+    pub ccd_neg_x: i32,
+    /// 真の CCD 負方向最小変位 Y (固定小数点 i32, atomicMin)
+    pub ccd_neg_y: i32,
+    /// 真の CCD 負方向最小変位 Z (固定小数点 i32, atomicMin)
+    pub ccd_neg_z: i32,
+    /// 16バイトアライメント調整用パディング
+    pub _pad0: u32,
+    /// E-E CCD 非ゼロ変位書き込みカウント（高密度衝突時の協調減衰判定用）
+    pub ee_ccd_count: u32,
+}
+
+
 
