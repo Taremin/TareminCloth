@@ -137,7 +137,7 @@ class NotchSnapTarget:
 
 @dataclass(frozen=True)
 class NotchSnapResult:
-    """ノッチスナップ解決および前後分割長算出の結果."""
+    """ノッチおよび辺分割スナップ解決・前後分割長算出の結果."""
     t: float
     kind: NotchSnapKind
     arc_s: float
@@ -148,6 +148,9 @@ class NotchSnapResult:
     split_right_len: float = 0.0
     left_t_range: tuple[float, float] = (0.0, 0.0)
     right_t_range: tuple[float, float] = (0.0, 1.0)
+
+
+EdgePointSnapResult = NotchSnapResult
 
 
 class AnchorKind(str, Enum):
@@ -1241,18 +1244,30 @@ class Document:
 
         return targets
 
-    def resolve_notch_snap(
+    def resolve_edge_point_snap(
         self,
         piece_id: str,
         start_node_id: str,
         *,
         raw_t: float,
+        mode: str = "NOTCH",
         path_id: Optional[str] = None,
         snap_enabled: bool = True,
         exclude_notch_id: Optional[str] = None,
         clipboard_length: Optional[float] = None,
+        snap_threshold_s: float = 0.008,
     ) -> NotchSnapResult:
-        """ノッチ配置・移動時のスナップ位置、スナップ種別、および分割後前後区間長を解決する."""
+        """辺上の点（ノッチ配置・移動、または辺分割）のスナップ位置、種別、左右分割長を解決する.
+
+        mode:
+            "NOTCH": 合印配置・移動用（既存ノッチ 1mm 未満は即既存選択へ切替、左右分割長は隣接ノッチ間）
+            "SPLIT": 辺分割用（既存ノッチを snap_threshold_s 内の候補に含め、左右分割長はセグメント全体基準）
+        """
+        mode_u = mode.upper()
+        if mode_u not in ("NOTCH", "SPLIT"):
+            raise ValueError(f"Unsupported edge point snap mode: {mode}")
+        is_split = (mode_u == "SPLIT")
+
         seg_info = self._resolve_segment_info(piece_id, start_node_id, path_id=path_id)
         if seg_info is None:
             clamped_t = max(0.001, min(0.999, raw_t))
@@ -1265,7 +1280,7 @@ class Document:
 
         _, _, _, actual_path_id, target_seg = seg_info
         tot_len = target_seg.total_length
-        if tot_len <= 0.002:
+        if tot_len <= 2.0 * _NOTCH_MIN_GAP_M:
             return NotchSnapResult(
                 t=0.5,
                 kind=NotchSnapKind.FREE if not snap_enabled else NotchSnapKind.MIDPOINT,
@@ -1282,11 +1297,15 @@ class Document:
             piece_id,
             start_node_id,
             path_id=actual_path_id,
-            exclude_notch_id=exclude_notch_id,
+            exclude_notch_id=None if is_split else exclude_notch_id,
         )
 
-        # ドラッグ移動時は対象ノッチの現在位置を基準に隣接他ノッチ間で移動範囲を制限
-        moving_notch = self.notches.get(exclude_notch_id) if exclude_notch_id else None
+        # 移動時のみ隣接他ノッチ間で制限、SPLIT または新規 NOTCH はセグメント両端 1mm 保護のみ
+        moving_notch = (
+            self.notches.get(exclude_notch_id)
+            if (not is_split and exclude_notch_id)
+            else None
+        )
         lower_s, upper_s = self._compute_notch_clamp_arc_bounds(
             target_seg,
             other_notches,
@@ -1297,7 +1316,7 @@ class Document:
         _, upper_bound_t = point_at_arc_length(target_seg, upper_s)
         _, edge_min_t = point_at_arc_length(target_seg, min_gap_s + _NOTCH_CLAMP_EPS_M)
         _, edge_max_t = point_at_arc_length(target_seg, tot_len - (min_gap_s + _NOTCH_CLAMP_EPS_M))
-        min_gap = max(0.001, edge_min_t, 1.0 - edge_max_t)
+        min_gap = max(1e-4, edge_min_t, 1.0 - edge_max_t)
 
         clamped_raw = max(min_gap, min(1.0 - min_gap, raw_t))
         cur_s = arc_length_at_t(target_seg, clamped_raw)
@@ -1307,19 +1326,23 @@ class Document:
             else:
                 cur_s = max(lower_s, min(upper_s, cur_s))
 
-        other_ts = [n.t for n in other_notches]
-        bps = merge_breakpoints_by_arc_length(target_seg, other_ts, min_arc_gap=min_gap_s)
-
-        # 現在のカーソルが入る隣接サブ区間 [s_prev, s_next] を取得
-        s_prev = 0.0
-        s_next = tot_len
-        for i in range(len(bps) - 1):
-            b0_s = arc_length_at_t(target_seg, bps[i])
-            b1_s = arc_length_at_t(target_seg, bps[i + 1])
-            if cur_s <= b1_s + 1e-6 or i == len(bps) - 2:
-                s_prev = b0_s
-                s_next = b1_s
-                break
+        if is_split:
+            bps = [0.0, 1.0]
+            s_prev = 0.0
+            s_next = tot_len
+        else:
+            other_ts = [n.t for n in other_notches]
+            bps = merge_breakpoints_by_arc_length(target_seg, other_ts, min_arc_gap=min_gap_s)
+            # 現在のカーソルが入る隣接サブ区間 [s_prev, s_next] を取得
+            s_prev = 0.0
+            s_next = tot_len
+            for i in range(len(bps) - 1):
+                b0_s = arc_length_at_t(target_seg, bps[i])
+                b1_s = arc_length_at_t(target_seg, bps[i + 1])
+                if cur_s <= b1_s + 1e-6 or i == len(bps) - 2:
+                    s_prev = b0_s
+                    s_next = b1_s
+                    break
 
         def _build_result(
             final_t: float,
@@ -1329,6 +1352,20 @@ class Document:
             ref_length: Optional[float] = None,
             existing_notch_id: Optional[str] = None,
         ) -> NotchSnapResult:
+            if is_split:
+                return NotchSnapResult(
+                    t=final_t,
+                    kind=kind,
+                    arc_s=final_s,
+                    total_length=tot_len,
+                    ref_length=ref_length,
+                    existing_notch_id=existing_notch_id,
+                    split_left_len=max(0.0, final_s),
+                    split_right_len=max(0.0, tot_len - final_s),
+                    left_t_range=(0.0, final_t),
+                    right_t_range=(final_t, 1.0),
+                )
+
             t_prev, t_next = _resolve_split_bounds(
                 bps,
                 final_t,
@@ -1349,8 +1386,8 @@ class Document:
                 right_t_range=(final_t, t_next),
             )
 
-        # 1. 新規追加時のみ: 生カーソル位置が既存ノッチから 1mm 未満なら既存ノッチ選択
-        if exclude_notch_id is None:
+        # 1. NOTCH 新規追加時のみ: 生カーソル位置が既存ノッチから 1mm 未満なら即既存ノッチ選択
+        if not is_split and exclude_notch_id is None:
             for ex in other_notches:
                 s_ex = arc_length_at_t(target_seg, ex.t)
                 if abs(s_ex - cur_s) < min_gap_s:
@@ -1367,15 +1404,14 @@ class Document:
             free_s = arc_length_at_t(target_seg, free_t)
             return _build_result(free_t, free_s, kind=NotchSnapKind.FREE)
 
-        # 2. 参照長（縫合相手ノッチ / クリップボード）スナップ判定 (閾値 8mm)
-        snap_threshold_s = 0.008
+        # 2. 参照長（縫合相手ノッチ / クリップボード）スナップ判定
         ref_targets = self.collect_notch_reference_targets(
             piece_id,
             start_node_id,
             path_id=actual_path_id,
             clipboard_length=clipboard_length,
             active_span_s=(s_prev, s_next),
-            exclude_notch_id=exclude_notch_id,
+            exclude_notch_id=None if is_split else exclude_notch_id,
         )
         best_ref: Optional[NotchSnapTarget] = None
         best_ref_diff = snap_threshold_s
@@ -1389,6 +1425,7 @@ class Document:
 
         chosen_kind = NotchSnapKind.STEP_1CM
         chosen_ref_len: Optional[float] = None
+        chosen_existing_id: Optional[str] = None
         if best_ref is not None:
             cand_s = max(lower_s, min(upper_s, best_ref.target_s))
             _, cand_t = point_at_arc_length(target_seg, cand_s)
@@ -1397,32 +1434,81 @@ class Document:
             chosen_kind = best_ref.kind
             chosen_ref_len = best_ref.ref_length
         else:
-            # 3. 中点 (t=0.5) スナップ判定 (閾値 8mm)
-            mid_s = arc_length_at_t(target_seg, 0.5)
-            if lower_s - 1e-6 <= mid_s <= upper_s + 1e-6 and abs(cur_s - mid_s) < snap_threshold_s:
-                chosen_t = 0.5
-                chosen_s = mid_s
-                chosen_kind = NotchSnapKind.MIDPOINT
-            else:
-                # 4. 1cm 刻みスナップ
-                snapped_s = round(cur_s / 0.01) * 0.01
-                if lower_s > upper_s:
-                    snapped_s = 0.5 * (lower_s + upper_s)
-                else:
-                    snapped_s = max(lower_s, min(upper_s, snapped_s))
-                _, s_cand_t = point_at_arc_length(target_seg, snapped_s)
-                chosen_t = _clamp_candidate_t(s_cand_t)
-                chosen_s = arc_length_at_t(target_seg, chosen_t)
-                chosen_kind = NotchSnapKind.STEP_1CM
+            # 2.5 SPLIT 時は既存ノッチ位置もスナップ候補に含める
+            best_existing: Optional[tuple[Notch, float, float]] = None
+            if is_split:
+                best_ex_diff = snap_threshold_s
+                for ex in other_notches:
+                    s_ex = arc_length_at_t(target_seg, ex.t)
+                    if s_ex < lower_s - 1e-6 or s_ex > upper_s + 1e-6:
+                        continue
+                    diff = abs(cur_s - s_ex)
+                    if diff < best_ex_diff:
+                        best_ex_diff = diff
+                        best_existing = (ex, s_ex, ex.t)
 
-        # スナップ後の位置が既存ノッチから 1mm 未満になった場合も重複抑止（新規追加時）
-        if exclude_notch_id is None:
+            if best_existing is not None:
+                ex_n, s_ex, t_ex = best_existing
+                chosen_t = t_ex
+                chosen_s = s_ex
+                chosen_kind = NotchSnapKind.EXISTING
+                chosen_existing_id = ex_n.id
+            else:
+                # 3. 中点 (t=0.5) スナップ判定
+                mid_s = arc_length_at_t(target_seg, 0.5)
+                if lower_s - 1e-6 <= mid_s <= upper_s + 1e-6 and abs(cur_s - mid_s) < snap_threshold_s:
+                    chosen_t = 0.5
+                    chosen_s = mid_s
+                    chosen_kind = NotchSnapKind.MIDPOINT
+                else:
+                    # 4. 1cm 刻みスナップ
+                    snapped_s = round(cur_s / 0.01) * 0.01
+                    if lower_s > upper_s:
+                        snapped_s = 0.5 * (lower_s + upper_s)
+                    else:
+                        snapped_s = max(lower_s, min(upper_s, snapped_s))
+                    _, s_cand_t = point_at_arc_length(target_seg, snapped_s)
+                    chosen_t = _clamp_candidate_t(s_cand_t)
+                    chosen_s = arc_length_at_t(target_seg, chosen_t)
+                    chosen_kind = NotchSnapKind.STEP_1CM
+
+        # NOTCH 新規追加時: スナップ後の位置が既存ノッチから 1mm 未満になった場合も重複抑止
+        if not is_split and exclude_notch_id is None:
             for ex in other_notches:
                 s_ex = arc_length_at_t(target_seg, ex.t)
                 if abs(s_ex - chosen_s) < min_gap_s:
                     return _build_result(ex.t, s_ex, kind=NotchSnapKind.EXISTING, existing_notch_id=ex.id)
 
-        return _build_result(chosen_t, chosen_s, kind=chosen_kind, ref_length=chosen_ref_len)
+        return _build_result(
+            chosen_t,
+            chosen_s,
+            kind=chosen_kind,
+            ref_length=chosen_ref_len,
+            existing_notch_id=chosen_existing_id,
+        )
+
+    def resolve_notch_snap(
+        self,
+        piece_id: str,
+        start_node_id: str,
+        *,
+        raw_t: float,
+        path_id: Optional[str] = None,
+        snap_enabled: bool = True,
+        exclude_notch_id: Optional[str] = None,
+        clipboard_length: Optional[float] = None,
+    ) -> NotchSnapResult:
+        """ノッチ配置・移動時のスナップ位置、スナップ種別、および分割後前後区間長を解決する."""
+        return self.resolve_edge_point_snap(
+            piece_id,
+            start_node_id,
+            raw_t=raw_t,
+            mode="NOTCH",
+            path_id=path_id,
+            snap_enabled=snap_enabled,
+            exclude_notch_id=exclude_notch_id,
+            clipboard_length=clipboard_length,
+        )
 
     def snap_notch_t(
         self,
@@ -1512,13 +1598,25 @@ class Document:
         if seg_idx < 0 or seg_idx >= num_segs:
             return None
 
-        t = max(0.01, min(0.99, float(t)))
+        ctrls = path.get_segment_controls(seg_idx)
+        seg_table = build_arc_table(*ctrls)
+        tot_len = seg_table.total_length
+        if tot_len <= 2.0 * _NOTCH_MIN_GAP_M:
+            return None
+
+        # 弧長 1mm 保護を優先しつつ、数値安全のためパラメータ端も制限
+        t = max(1e-4, min(1.0 - 1e-4, float(t)))
+        s_raw = arc_length_at_t(seg_table, t)
+        if s_raw < _NOTCH_MIN_GAP_M:
+            _, t = point_at_arc_length(seg_table, _NOTCH_MIN_GAP_M)
+        elif s_raw > tot_len - _NOTCH_MIN_GAP_M:
+            _, t = point_at_arc_length(seg_table, tot_len - _NOTCH_MIN_GAP_M)
+        t = max(1e-4, min(1.0 - 1e-4, t))
+
         orig_start_node = nodes[seg_idx]
         orig_end_node = nodes[(seg_idx + 1) % n_nodes]
         orig_start_id = orig_start_node.id
         orig_end_id = orig_end_node.id
-
-        ctrls = path.get_segment_controls(seg_idx)
         is_curved = (
             orig_start_node.kind != NodeKind.CORNER
             or orig_end_node.kind != NodeKind.CORNER

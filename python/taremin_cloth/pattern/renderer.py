@@ -11,7 +11,7 @@ from typing import Any, Optional
 from .cards import format_selection_card_lines
 from .document import Document, NodeKind, NotchKind, NotchSnapKind, PathRole, SeamRouting
 from .editor import EditorController
-from .session import NotchPreviewState
+from .session import EdgePointPreviewState, NotchPreviewState
 from .geometry import (
     build_arc_table,
     evaluate_cubic,
@@ -103,41 +103,45 @@ def _compute_notch_shape_local(
 
 
 def _should_skip_dim_subsegment(
-    notch_pv: Optional[NotchPreviewState],
+    edge_pv: Optional[EdgePointPreviewState],
     *,
     is_pv_seg: bool,
     t_start: float,
     t_end: float,
 ) -> bool:
-    """ノッチプレビューと重複する通常分割区間寸法テキストをスキップすべきか判定する."""
-    if not is_pv_seg or notch_pv is None:
+    """辺上プレビュー（ノッチ・分割）と重複する通常分割区間寸法テキストをスキップすべきか判定する."""
+    if not is_pv_seg or edge_pv is None:
         return False
+    if getattr(edge_pv, "target_kind", "NOTCH") == "SPLIT":
+        return True
     eps = 1e-4
-    if notch_pv.mode == "CREATE" and notch_pv.existing_notch_id is None:
+    if edge_pv.mode == "CREATE" and edge_pv.existing_notch_id is None:
         return (
-            abs(t_start - notch_pv.left_t_range[0]) < eps
-            and abs(t_end - notch_pv.right_t_range[1]) < eps
+            abs(t_start - edge_pv.left_t_range[0]) < eps
+            and abs(t_end - edge_pv.right_t_range[1]) < eps
         )
     # MOVE モードおよび EXISTING ハイライト時: プレビュー側が左右両区間長を描画するため両方抑止
     match_left = (
-        abs(t_start - notch_pv.left_t_range[0]) < eps
-        and abs(t_end - notch_pv.left_t_range[1]) < eps
+        abs(t_start - edge_pv.left_t_range[0]) < eps
+        and abs(t_end - edge_pv.left_t_range[1]) < eps
     )
     match_right = (
-        abs(t_start - notch_pv.right_t_range[0]) < eps
-        and abs(t_end - notch_pv.right_t_range[1]) < eps
+        abs(t_start - edge_pv.right_t_range[0]) < eps
+        and abs(t_end - edge_pv.right_t_range[1]) < eps
     )
     return match_left or match_right
 
 
-def _append_notch_preview_commands(
+def _append_edge_preview_commands(
     commands: list[DrawCommand],
     controller: EditorController,
     *,
     theme: ThemeColors,
 ) -> None:
-    """ノッチ追加・移動中のプレビュー形状・スナップ種別・左右分割弧長テキストを描画する."""
-    pv = getattr(controller, "notch_preview", None)
+    """ノッチ追加・移動および辺分割中のプレビュー形状・スナップ種別・左右分割弧長テキストを描画する."""
+    pv = getattr(controller, "edge_preview", None)
+    if pv is None:
+        pv = getattr(controller, "notch_preview", None)
     if pv is None:
         return
 
@@ -156,6 +160,7 @@ def _append_notch_preview_commands(
     if seg_idx is None:
         return
 
+    is_split_pv = (getattr(pv, "target_kind", "NOTCH") == "SPLIT")
     ctrls = path.get_segment_controls(seg_idx)
     table = build_arc_table(*ctrls)
     p_loc, _, (nx, ny), shape_loc = _compute_notch_shape_local(
@@ -170,16 +175,50 @@ def _append_notch_preview_commands(
         NotchSnapKind.MIDPOINT: theme.notch_snap_midpoint,
         NotchSnapKind.CLIPBOARD: theme.notch_snap_reference,
         NotchSnapKind.SEAM_PARTNER: theme.notch_snap_reference,
-        NotchSnapKind.EXISTING: theme.notch_selected,
+        NotchSnapKind.EXISTING: theme.notch if is_split_pv else theme.notch_selected,
     }
-    accent_col = color_map.get(pv.snap_kind, theme.notch_preview)
+    default_col = theme.split_preview if is_split_pv else theme.notch_preview
+    accent_col = color_map.get(pv.snap_kind, default_col)
 
     s_base = view.world_to_screen(piece.transform.transform_point(p_loc))
     s_tip = view.world_to_screen(
         piece.transform.transform_point((p_loc[0] + nx * pv.depth, p_loc[1] + ny * pv.depth))
     )
 
-    if pv.mode == "CREATE":
+    if is_split_pv:
+        # 辺に直交する法線方向ガイド線（±8px）＋頂点ドット＋強調リング
+        ndx = s_tip[0] - s_base[0]
+        ndy = s_tip[1] - s_base[1]
+        nlen = math.hypot(ndx, ndy)
+        if nlen > 1e-6:
+            unx, uny = ndx / nlen, ndy / nlen
+        else:
+            unx, uny = 0.0, 1.0
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.LINE,
+            color=accent_col,
+            points=[
+                (s_base[0] - unx * 8.0, s_base[1] - uny * 8.0),
+                (s_base[0] + unx * 8.0, s_base[1] + uny * 8.0),
+            ],
+            width=2.0,
+        ))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.CIRCLE,
+            color=accent_col,
+            points=[s_base],
+            radius=4.5,
+            filled=True,
+        ))
+        commands.append(DrawCommand(
+            kind=DrawCommandKind.CIRCLE,
+            color=accent_col,
+            points=[s_base],
+            radius=7.5,
+            filled=False,
+            width=1.8,
+        ))
+    elif pv.mode == "CREATE":
         if pv.existing_notch_id is not None:
             commands.append(DrawCommand(
                 kind=DrawCommandKind.CIRCLE,
@@ -217,7 +256,7 @@ def _append_notch_preview_commands(
     # スナップ種別バッジ（基準点から外向きに14pxオフセット）
     badge_text = ""
     if pv.snap_kind == NotchSnapKind.EXISTING:
-        badge_text = trans("Select")
+        badge_text = trans("Notch") if is_split_pv else trans("Select")
     elif pv.snap_kind == NotchSnapKind.MIDPOINT:
         badge_text = trans("Mid")
     elif pv.snap_kind == NotchSnapKind.CLIPBOARD:
@@ -557,13 +596,15 @@ def build_render_commands(
                 ))
 
                 # 寸法線テキスト（Lキーでトグル、5mm以上のセグメント/部分区間に表示）
-                notch_pv = getattr(controller, "notch_preview", None)
+                edge_pv = getattr(controller, "edge_preview", None)
+                if edge_pv is None:
+                    edge_pv = getattr(controller, "notch_preview", None)
                 is_pv_seg = (
-                    notch_pv is not None
-                    and not is_internal
-                    and notch_pv.piece_id == piece.id
-                    and notch_pv.path_id == path.id
-                    and notch_pv.segment_start_id == n0.id
+                    edge_pv is not None
+                    and edge_pv.piece_id == piece.id
+                    and edge_pv.path_id == path.id
+                    and edge_pv.segment_start_id == n0.id
+                    and (not is_internal or getattr(edge_pv, "target_kind", "NOTCH") == "SPLIT")
                 )
                 if getattr(controller, "show_lengths", True) and table.total_length > 0.005:
                     bps = doc.get_segment_notch_breakpoints(piece.id, n0.id, path_id=path.id) if not is_internal else [0.0, 1.0]
@@ -572,7 +613,7 @@ def build_render_commands(
                             t_start = bps[k]
                             t_end = bps[k + 1]
                             if _should_skip_dim_subsegment(
-                                notch_pv,
+                                edge_pv,
                                 is_pv_seg=is_pv_seg,
                                 t_start=t_start,
                                 t_end=t_end,
@@ -707,8 +748,8 @@ def build_render_commands(
                 ))
                 break
 
-    # 2.6 ノッチ追加・ドラッグ移動プレビューの描画
-    _append_notch_preview_commands(commands, controller, theme=th)
+    # 2.6 ノッチ追加・ドラッグ移動および辺分割プレビューの描画
+    _append_edge_preview_commands(commands, controller, theme=th)
 
     # 3. 縫合線 (Seams) の描画（中心ではなく両端を線で結び、方向性を可視化）
     for seam in doc.seams.values():
@@ -875,6 +916,7 @@ def build_render_commands(
         "SEW": "Sew",
         "CUT": "Cut",
         "DART": "Dart",
+        "SPLIT_EDGE": "Split",
     }
 
     for t_name, btn in layout.tool_buttons.items():

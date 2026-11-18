@@ -6,6 +6,7 @@ from .select import SelectTool
 from .draw import RectangleTool, PolygonTool, EllipseTool
 from .internal import InternalLineTool
 from .notch import NotchTool
+from .split import SplitEdgeTool
 from .cut import CutTool
 from .dart import DartTool
 from .sew import SewTool
@@ -18,6 +19,7 @@ __all__ = [
     "EllipseTool",
     "InternalLineTool",
     "NotchTool",
+    "SplitEdgeTool",
     "CutTool",
     "DartTool",
     "SewTool",

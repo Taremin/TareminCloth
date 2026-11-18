@@ -97,7 +97,7 @@ class SnapSettings:
 
 @dataclass(frozen=True)
 class NotchPreviewState:
-    """ノッチ追加・移動操作中の2Dキャンバスプレビュー状態."""
+    """ノッチ追加・移動および辺分割操作中の2Dキャンバスプレビュー状態."""
     mode: str  # "CREATE" | "MOVE"
     piece_id: str
     path_id: str
@@ -114,6 +114,7 @@ class NotchPreviewState:
     ref_length: Optional[float] = None
     existing_notch_id: Optional[str] = None
     snap_enabled: bool = True
+    target_kind: str = "NOTCH"  # "NOTCH" | "SPLIT"
 
     @classmethod
     def from_snap_result(
@@ -128,8 +129,9 @@ class NotchPreviewState:
         depth: float = 0.005,
         width: float = 0.004,
         snap_enabled: bool = True,
+        target_kind: str = "NOTCH",
     ) -> NotchPreviewState:
-        """NotchSnapResult からキャンバス描画用の NotchPreviewState を構築する."""
+        """NotchSnapResult からキャンバス描画用のプレビュー状態を構築する."""
         return cls(
             mode=mode,
             piece_id=piece_id,
@@ -147,7 +149,11 @@ class NotchPreviewState:
             ref_length=snap.ref_length,
             existing_notch_id=snap.existing_notch_id,
             snap_enabled=snap_enabled,
+            target_kind=target_kind,
         )
+
+
+EdgePointPreviewState = NotchPreviewState
 
 
 @dataclass

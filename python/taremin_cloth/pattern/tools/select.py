@@ -27,6 +27,11 @@ from ..transform_ops import (
 )
 from ...utils.logger import logger
 from .base import BaseTool
+from .split import (
+    build_split_preview_state,
+    execute_split_edge,
+    resolve_split_candidate_from_hit,
+)
 
 if TYPE_CHECKING:
     from ..editor import EditorController, EditorEvent
@@ -171,35 +176,25 @@ class SelectTool(BaseTool):
             event.ctrl
             and hit
             and hit.kind in (HitTargetKind.EDGE, HitTargetKind.INTERNAL_PATH)
-            and hit.segment_start_node_id
-            and hit.path_id
         ):
-            piece = controller.doc.pieces.get(hit.piece_id)
-            if piece:
-                path = piece.paths.get(hit.path_id)
-                if path:
-                    seg_idx = next(
-                        (i for i, n in enumerate(path.nodes) if n.id == hit.segment_start_node_id),
-                        None,
-                    )
-                    if seg_idx is not None:
-                        new_node = controller.doc.insert_node_on_segment(
-                            hit.piece_id,
-                            hit.path_id,
-                            seg_idx=seg_idx,
-                            t=max(0.01, min(0.99, hit.edge_t)),
-                        )
-                        if new_node is not None:
-                            controller.selection.select_node(piece.id, new_node.id)
-                            controller.history.record_change(
-                                description="Insert Node on Edge",
-                                before_doc=self.before_drag_doc,
-                                after_doc=controller.doc,
-                            )
-                            self.before_drag_doc = None
-                            self.drag_target = None
-                            controller.is_dirty = True
-                            return True
+            resolved = resolve_split_candidate_from_hit(
+                controller,
+                hit,
+                snap_enabled=not event.alt,
+            )
+            if resolved is not None:
+                seg_idx, snap_res = resolved
+                if execute_split_edge(
+                    controller,
+                    hit=hit,
+                    seg_idx=seg_idx,
+                    snap_res=snap_res,
+                    before_doc=self.before_drag_doc,
+                    description="Insert Node on Edge",
+                ):
+                    self.before_drag_doc = None
+                    self.drag_target = None
+                    return True
 
         if hit is None:
             if not event.shift:
@@ -222,38 +217,25 @@ class SelectTool(BaseTool):
                 same_seg and dt <= 0.35 and screen_dist <= 6.0
             )
             if is_dbl:
-                before_doc = controller.doc.clone()
-                t_val = max(0.01, min(0.99, float(hit.edge_t)))
-                p = controller.doc.pieces.get(hit.piece_id)
-                pth = p.paths.get(hit.path_id) if (p and hit.path_id) else None
-                seg_i = (
-                    next((i for i, nd in enumerate(pth.nodes) if nd.id == hit.segment_start_node_id), None)
-                    if pth
-                    else None
+                resolved = resolve_split_candidate_from_hit(
+                    controller,
+                    hit,
+                    snap_enabled=not event.alt,
                 )
-                new_node = (
-                    controller.doc.insert_node_on_segment(
-                        hit.piece_id,
-                        hit.path_id or "",
-                        seg_idx=seg_i,
-                        t=t_val,
-                    )
-                    if (seg_i is not None and hit.path_id)
-                    else None
-                )
-                if new_node:
-                    controller.selection.clear()
-                    controller.selection.select_node(hit.piece_id, new_node.id)
-                    controller.history.record_change(
+                if resolved is not None:
+                    seg_idx, snap_res = resolved
+                    if execute_split_edge(
+                        controller,
+                        hit=hit,
+                        seg_idx=seg_idx,
+                        snap_res=snap_res,
+                        clear_selection=True,
                         description="Insert Node on Edge",
-                        before_doc=before_doc,
-                        after_doc=controller.doc,
-                    )
-                    self._last_edge_click_time = 0.0
-                    self._last_edge_click_seg = None
-                    self._reset_drag_state()
-                    controller.is_dirty = True
-                    return True
+                    ):
+                        self._last_edge_click_time = 0.0
+                        self._last_edge_click_seg = None
+                        self._reset_drag_state()
+                        return True
 
         if hit.kind in (HitTargetKind.EDGE, HitTargetKind.INTERNAL_PATH) and hit.segment_start_node_id:
             self._last_edge_click_time = time.monotonic()
@@ -275,6 +257,8 @@ class SelectTool(BaseTool):
 
     def on_mouse_move(self, controller: EditorController, event: EditorEvent) -> bool:
         if self.is_box_selecting:
+            if controller.edge_preview is not None:
+                controller.edge_preview = None
             p0 = self.drag_start_world
             p1 = event.world_pos
             controller.preview_points = [
@@ -288,6 +272,38 @@ class SelectTool(BaseTool):
             return True
 
         if not self.is_dragging or self.drag_target is None:
+            prev_pv = controller.edge_preview
+            if event.ctrl:
+                r_node = controller.view.pixel_to_world_dist(12.0)
+                r_edge = controller.view.pixel_to_world_dist(8.0)
+                hover_hit = hit_test(
+                    controller.doc,
+                    event.world_pos,
+                    node_radius=r_node,
+                    edge_threshold=r_edge,
+                    selected_node_ids=controller.selection.node_ids,
+                    allowed_kinds={HitTargetKind.NODE, HitTargetKind.EDGE, HitTargetKind.INTERNAL_PATH},
+                )
+                resolved = resolve_split_candidate_from_hit(
+                    controller,
+                    hover_hit,
+                    snap_enabled=not event.alt,
+                )
+                if resolved is not None and hover_hit is not None:
+                    _, snap_res = resolved
+                    controller.edge_preview = build_split_preview_state(
+                        hover_hit,
+                        snap_res,
+                        snap_enabled=not event.alt,
+                    )
+                else:
+                    controller.edge_preview = None
+            else:
+                controller.edge_preview = None
+
+            if controller.edge_preview != prev_pv:
+                controller.is_dirty = True
+                return True
             return False
 
         dx = event.world_pos[0] - self.drag_start_world[0]

@@ -20,7 +20,7 @@ from .document import (
 )
 from .history import HistoryManager
 from .ids import new_id
-from .session import NotchPreviewState, SelectionState, SnapSettings, ViewTransform2D
+from .session import EdgePointPreviewState, NotchPreviewState, SelectionState, SnapSettings, ViewTransform2D
 from .tools.base import BaseTool
 from .transform_ops import (
     TransformModalSession,
@@ -148,6 +148,7 @@ class EditorController:
         view: Optional[ViewTransform2D] = None,
     ) -> None:
         self._snap_bypass: bool = False
+        self._last_ctrl_down: bool = False
         self.doc: Document = doc or Document.new()
         self.history: HistoryManager = HistoryManager()
         self.selection: SelectionState = SelectionState()
@@ -198,7 +199,7 @@ class EditorController:
         # プレビュー用一時幾何（描画系が参照）
         self.preview_points: list[tuple[float, float]] = []
         self.preview_seam_candidates: list[EdgeRange] = []
-        self.notch_preview: Optional[NotchPreviewState] = None
+        self.edge_preview: Optional[EdgePointPreviewState] = None
 
         # 既定ツールの初期登録
         from .tools import (
@@ -208,6 +209,7 @@ class EditorController:
             EllipseTool,
             InternalLineTool,
             NotchTool,
+            SplitEdgeTool,
             CutTool,
             DartTool,
             SewTool,
@@ -218,9 +220,19 @@ class EditorController:
         self.register_tool("ELLIPSE", EllipseTool())
         self.register_tool("INTERNAL_LINE", InternalLineTool())
         self.register_tool("NOTCH", NotchTool())
+        self.register_tool("SPLIT_EDGE", SplitEdgeTool())
         self.register_tool("CUT", CutTool())
         self.register_tool("DART", DartTool())
         self.register_tool("SEW", SewTool())
+
+    @property
+    def notch_preview(self) -> Optional[EdgePointPreviewState]:
+        """後方互換用のノッチ／辺上プレビュー状態プロパティ."""
+        return self.edge_preview
+
+    @notch_preview.setter
+    def notch_preview(self, value: Optional[EdgePointPreviewState]) -> None:
+        self.edge_preview = value
 
     def register_tool(self, name: str, tool: BaseTool) -> None:
         """ツールを登録する."""
@@ -253,8 +265,8 @@ class EditorController:
         return float(val) if isinstance(val, (int, float)) else None
 
     def _invalidate_notch_preview(self) -> None:
-        """ドキュメント変更等により古くなったノッチプレビュー状態を破棄する."""
-        self.notch_preview = None
+        """ドキュメント変更等により古くなった辺上プレビュー状態（ノッチ／分割）を破棄する."""
+        self.edge_preview = None
 
     def _record_doc_change(
         self,
@@ -262,7 +274,7 @@ class EditorController:
         description: str,
         before_doc: Document,
     ) -> bool:
-        """履歴へ変更を記録し、ドキュメント更新に伴うノッチプレビューを破棄する."""
+        """履歴へ変更を記録し、ドキュメント更新に伴う辺上プレビューを破棄する."""
         recorded = self.history.record_change(
             description=description,
             before_doc=before_doc,
@@ -277,8 +289,15 @@ class EditorController:
         if not tool or self._last_world_pos is None:
             return
         should_refresh = (
-            self.active_tool_name in ("NOTCH", "SEW")
-            or (self.active_tool_name == "SELECT" and getattr(tool, "is_dragging", False))
+            self.active_tool_name in ("NOTCH", "SEW", "SPLIT_EDGE")
+            or (
+                self.active_tool_name == "SELECT"
+                and (
+                    getattr(tool, "is_dragging", False)
+                    or bool(event.ctrl)
+                    or self.edge_preview is not None
+                )
+            )
         )
         if not should_refresh:
             return
@@ -422,6 +441,9 @@ class EditorController:
         prev_snap_bypass = self._snap_bypass
         self._snap_bypass = bool(event.alt)
         snap_bypass_changed = (prev_snap_bypass != self._snap_bypass)
+        prev_ctrl = self._last_ctrl_down
+        self._last_ctrl_down = bool(event.ctrl)
+        ctrl_changed = (prev_ctrl != self._last_ctrl_down)
 
         # ワールド座標・スクリーン座標の同期（キー・修飾状態イベント時は直近カーソル位置を維持）
         is_mouse_action = (
@@ -1134,9 +1156,9 @@ class EditorController:
         if consumed:
             self.is_dirty = True
 
-        # 修飾キー (Alt) 状態変化時はカーソルを動かさなくてもホバー/ドラッグプレビューを即時再評価する
+        # 修飾キー (Alt / Ctrl) 状態変化時はカーソルを動かさなくてもホバー/ドラッグプレビューを即時再評価する
         if (
-            snap_bypass_changed
+            (snap_bypass_changed or ctrl_changed)
             and not consumed
             and is_non_pointer_event
         ):

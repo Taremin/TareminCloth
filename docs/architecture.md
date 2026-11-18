@@ -1187,7 +1187,7 @@ graph TD
      - **モーダル変形 (`G`: 移動 / `R`: 回転 / `S`: 拡縮)**: ピボット基準の即時変形、`X` / `Y` 軸ロック（2状態・単一辺時は法線 `N` 含む3状態循環）、`Shift` スナップ（直交クランプ / 15° / 0.05倍率）、`parse_length_input` による単位付き直接数値入力（cm/mm/m 等）に対応。回転・拡縮時は `piece.transform.inverse_apply()` を用いてローカル座標（`Node.position` / 相対ハンドル / `Anchor.position`）を直接更新し、`build_garment_mesh_geometry` の3D衣装へ即時反映（負スケール確定時は閉パスの CCW 向きを自動補正し、ゼロ縮退はキャンセル保護）。
      - **全選択/削除/整列**: `A` / `Alt+A` で全ピース選択・全解除、`X` / `Delete` で選択ノード・ピース・内部線・縫合・ノッチ等を削除（外周辺のみの誤削除は拒否ガード）、情報カード内ボタンから複数頂点の X/Y 方向整列（`Min` / `Ctr` / `Avg` / `Max`）を実行可能。
    - **辺操作・対称化・反転・複製体系**:
-     - **辺の分割（Subdivide Edge）**: 辺選択中に `W` キー押下で選択中の全辺（複数辺対応）を実寸弧長50%で一括分割。外周辺ダブルクリックまたは `Ctrl+クリック` による任意位置ノード挿入（ベジェ形状・周辺縫合完全維持）。
+     - **辺の分割（Subdivide / Split Edge）**: 辺選択中に `W` キー押下で選択中の全辺（複数辺対応）を実寸弧長50%で一括分割。独立の `SplitEdgeTool`（`0` キー）または `SelectTool` の `Ctrl+クリック`・ダブルクリックにより、共通スナップ解決（`resolve_edge_point_snap(..., mode="SPLIT")`）および `insert_node_on_segment`（弧長 `1mm` 保護・ベジェ形状・周辺縫合 `CHAIN` 分割完全維持）を用いた任意位置ノード挿入が可能。`SelectTool` では `Ctrl` ホバー中にも分割プレビューを表示。
      - **選択辺基準の対称展開（Unfold）**: 選択辺を対称軸として $`2n-2`$ 頂点の単一反時計回り（CCW）閉ループに対称展開（わ展開、`U` キー）。未選択時は中点X座標最小辺を自動判定。
      - **選択辺基準の対称複製（Mirror Duplicate）**: 選択辺の法線外側 5cm 離間位置に対称ピースを生成し、対称軸同士を平行縫合（`reverse=True`）で自動接続（`Shift+U` キー）。
      - **ピースの複製と反転**: ピース単体複製（`Ctrl+D` / `Shift+D` / `Ctrl+C` & `Ctrl+V`）、左右反転複製（`Ctrl+Shift+D`、`Front_L` $`\to`$ `Front_R` 自動命名）、単体左右反転（`M` キー）、単体上下反転（`Shift+M` キー）。閉パスの反時計回り（CCW）向きを維持するためノード順を自動反転。
@@ -1197,18 +1197,21 @@ graph TD
        - *合わせ方モード*: `SIMILAR`（相似拡大）、`LENGTH_ADJUST_BULGE`（端点固定・膨らみ調整）、`LENGTH_MOVE_END`（終点ノード移動伸張）。進行方向反転（`reverse`）、膨らみ反転（`flip_curvature`）、イセコミ量（`+0.5cm` / `+5mm` / `+5%` 等）のインライン編集に対応。
    - `RectangleTool` / `PolygonTool` / `EllipseTool`: 矩形、多角形、楕円（Ramanujan近似と4点ベジェ）作図。
    - `InternalLineTool`: ピース内部への折れ線・曲線描画（Rust CDT内部拘束線に自動連携）。
-   - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。`resolve_notch_snap` によるスナップ解決（既存ノッチ `< 1mm` 重複抑止選択・`Seam` 接続相手ノッチ・クリップボード辺長・中点 50%・1cm刻み・`Alt` 自由配置）、ホバー位置プレビュー＆分割後前後実寸弧長表示、`Alt` トグル即時再評価に対応。
+   - `NotchTool` & `SplitEdgeTool`:
+     - `Document.resolve_edge_point_snap`（`mode="NOTCH"` / `"SPLIT"`、互換ラッパー `resolve_notch_snap`）による共通辺上スナップ解決（`Seam` 接続相手ノッチ・クリップボード辺長・中点 50%・1cm刻み・`Alt` 自由配置、ホバー位置プレビュー・分割後前後実寸弧長表示、`Alt`/`Ctrl` 修飾キー切替時の即時再評価）。
+     - `NotchTool`: 外周辺上への合印切り込み（V字・U字・スリット）配置。既存ノッチ `< 1mm` 近接時は既存ノッチ選択へ自動切替。
+     - `SplitEdgeTool`（`tools/split.py`）: 外周辺および内部線（`INTERNAL_PATH`）の任意位置分割・新規 `Node` 自動選択。既存ノッチ位置も `8mm` スナップ候補に含め、同位置で分割した場合はノッチを置換し別位置なら新セグメントへ自動再マッピングする。
    - `CutTool`: 弧長サンプリング交差判定と `split_cubic_bezier` による曲線対応ピース2分割、および元の縫合・ノッチ（$`t`$ 比率再計算）・アンカー（内外判定振り分け）の自動引き継ぎ。
    - `DartTool`: 曲線弧長位置サンプリング（`point_at_arc_length`）による正確な開口部2点算出と、三角スリット切り込み・自動縫合。
    - `SewTool`: 2辺クリックによる基本縫合、およびShift+クリック・Enter確定による鎖縫合（1対多、多対多）。
-   - `keymap.py` & モーダル状態保護 (`ops/pattern.py`): ツール切替ショートカットを数字キー（`1`〜`9`）に統一。`EditorController.is_modal_input_active` によりモーダル変形・数値入力・ドラッグ操作中はツール切替や `L` / `ESC` のオペレーター終了をバイパス。
+   - `keymap.py` & モーダル状態保護 (`ops/pattern.py`): ツール切替ショートカットを数字キー（`1`〜`9`, `0`：`DEFAULT_TOOL_HOTKEYS`、`0`=`SPLIT_EDGE`）に統一。`resolve_tool_hotkey` / `get_tool_hotkey_label` はオプション `hotkeys` 辞書引数を備え、将来の `0`〜`9` カスタム割り当てに対応。`EditorController.is_modal_input_active` によりモーダル変形・数値入力・ドラッグ操作中はツール切替や `L` / `ESC` のオペレーター終了をバイパス。
 4. **イミュータブル描画コマンド生成 & GPU描画 (`renderer.py`, `cards.py`, `canvas.py`, `layout.py`)**:
    - `build_render_commands`: ドキュメントとセッション状態から `DrawCommand`（`LINE`, `POLYLINE`, `POLYGON`, `CIRCLE`, `RECT`, `TEXT`, `IMAGE`）のリストを純粋関数として生成。
    - 5領域HUDレイアウト（ヘッダーバー、左ツールレール、下部アクションバー、右上情報カード、数値入力カード）。
    - 選択辺のハイライト表示（`POLYLINE` 総数を不変に保ちつつ選択セグメントのみ専用色・太線描画）およびモーダル変形中の軸ロックガイドライン・ピボット円・ラバーバンド線・操作ヒント表示。
    - 単一/複数要素対応情報カード（`cards.py`）: 未選択＋下絵設定時（ファイル名、表示トグル、不透明度スライダー、幅・Offset X/Y 数値編集、Clear ボタン）、頂点（1点座標編集 / 複数点サマリー＆X/Y 8方向整列ボタン）、辺（単一辺 Subdivide/Unfold/Mirror/Match、複数辺 Subdivide All）、縫合（Match A->B, Match B->A, Mode, Flip Direction (`F`), Flip Curvature, Ease, Mismatch常時表示）、ピース（単一および複数選択時の `Mixed` 表示・共通属性/配置一括更新・`active_piece_id` 基準スライダー/コンパス）。
    - ツールレールのクリックによるツール切替、下部「Build 3D」「Close」ボタンクリック、および情報カード内数値（解像度・レイヤーID・下絵幅/オフセット等）のインライン編集・cm単位解釈（`parse_length_input`）。
-   - 寸法線表示（Lキートグル）、ノッチ描画・ノッチプレビュー描画（`NotchPreviewState` に基づき、`NotchTool` ホバー時および `SelectTool` ノッチドラッグ移動時にスナップ種別バッジ・分割後前後区間長を表示し、重なる既存 `dimension_text` を抑止）、内部線描画、下絵画像（参考画像）に対応。下絵画像本体（`DrawCommandKind.IMAGE`）は背景グリッド線の背面に、境界枠線（`POLYLINE`）はグリッド前面に配置される。
+   - 寸法線表示（Lキートグル）、ノッチ描画・辺上プレビュー描画（`EdgePointPreviewState` / 後方互換 `NotchPreviewState` に基づき、`NotchTool` ホバー・`SelectTool` ノッチドラッグ・`SplitEdgeTool` 及び `SelectTool` `Ctrl` ホバー時に形状別マーカー（ノッチ形状 または 法線分割ガイド線＋円）、スナップ種別バッジ、分割後前後区間長を表示し、重なる既存 `dimension_text` を内部線含め抑止）、内部線描画、下絵画像（参考画像）に対応。下絵画像本体（`DrawCommandKind.IMAGE`）は背景グリッド線の背面に、境界枠線（`POLYLINE`）はグリッド前面に配置される。
    - `PatternCanvasRenderer`: Blender 3Dビューポートの `POST_PIXEL` コールバックで `gpu` / `blf` API を用いて高速描画。下絵画像は組み込みシェーダー `IMAGE_COLOR` と `gpu.texture.from_image` を用いてアルファブレンド描画し、`bpy.data.images` データブロック名キャッシュ・失敗パス負キャッシュ・`size <= 0` ガード・`clear_image_cache` による明示無効化を備える。
    - Blender統合・Nパネル連携（`ops/pattern.py`, `panels.py`, `utils/view3d.py`）: モーダル中はアクティブセッション（`get_active_pattern_editor_controller`）経由で参照画像の読込・表示切替（`toggle_reference_image`）・削除（`clear_reference_image`）・JSON入出力の変更を即時反映し、UIクローム領域（`UI`/`TOOLS`/`HEADER`）上のマウス操作は `is_mouse_over_viewport_chrome` により `PASS_THROUGH` してNパネルと併用可能。
 5. **非破壊3Dメッシュ統合ビルド (`build_types.py`, `build.py`)**:

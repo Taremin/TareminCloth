@@ -11,6 +11,7 @@ TOOL_NAMES: dict[str, str] = {
     "ELLIPSE": "Ellipse",
     "INTERNAL_LINE": "Internal Line",
     "NOTCH": "Notch",
+    "SPLIT_EDGE": "Split Edge",
     "CUT": "Cut",
     "DART": "Dart",
     "SEW": "Sew",
@@ -18,12 +19,13 @@ TOOL_NAMES: dict[str, str] = {
 
 # ツール別操作ガイド (英語マスターキー)
 TOOL_GUIDES: dict[str, str] = {
-    "SELECT": "Click: Select | Drag/G: Move | R: Rotate | S: Scale | A/Alt+A: All | W: Split | X: Delete",
+    "SELECT": "Click: Select | Drag/G: Move | R: Rotate | S: Scale | A/Alt+A: All | W/Ctrl+Click: Split | X: Delete",
     "RECTANGLE": "Drag opposite corners / Esc: Cancel",
     "POLYGON": "Click points / Click start or Enter to close / Esc: Cancel",
     "ELLIPSE": "Drag opposite corners / Esc: Cancel",
     "INTERNAL_LINE": "Click points / Enter: Confirm / Esc: Cancel",
     "NOTCH": "Click edge to add notch / Alt: Free pos / Esc: Cancel",
+    "SPLIT_EDGE": "Click edge to split / Alt: Free pos / Esc: Cancel",
     "CUT": "Drag cut line across boundary twice / Esc: Cancel",
     "DART": "Click edge, then click dart apex / Esc: Cancel",
     "SEW": "Click two edges to sew / Shift: Chain / Alt: Full edge / F: Flip / B: Bone Wrap",

@@ -15,6 +15,7 @@ TOOL_ORDER: tuple[str, ...] = (
     "SEW",
     "CUT",
     "DART",
+    "SPLIT_EDGE",
 )
 
 
