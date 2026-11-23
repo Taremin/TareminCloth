@@ -4,7 +4,7 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use cloth_core::config::SimConfig;
@@ -16,7 +16,7 @@ use crate::camera::OrbitCamera;
 use crate::coupled_mode::COUPLED_MODES;
 use crate::demo_scenes::DemoSceneType;
 use crate::mesh_render::MeshRenderer;
-use crate::protocol::{GuiCommand, GuiResponse, SceneInitData};
+use crate::protocol::{GuiCommand, GuiParamsUpdate, GuiResponse, SceneInitData};
 use crate::server::{MainThreadTask, TcpServerHandle};
 
 pub struct GuiApp {
@@ -104,6 +104,7 @@ pub struct GuiApp {
 
     // 縫合設定
     sewing_stiffness: f32,
+    sewing_shrink_speed: f32,
     enable_sewing_lock: bool,
     sewing_lock_distance: f32,
     sewing_priority_enabled: bool,
@@ -122,6 +123,7 @@ pub struct GuiApp {
     areal_density: f32,
 
     // マウス入力 & インタラクティブ操作 (Grab / Pin)
+    modifiers: ModifiersState,
     is_orbiting: bool,
     is_panning: bool,
     last_mouse_pos: (f32, f32),
@@ -204,8 +206,8 @@ impl GuiApp {
             substep_interval: 1,
             ee_substep_interval: 1,
             enable_normal_untangling: true,
-            relief_factor: 0.2,
-            max_displacement_ratio: 0.2,
+            relief_factor: 1.0,
+            max_displacement_ratio: 0.5,
             exclude_neighbors: true,
             self_collision_max_iterations: 128,
             enable_pair_cache: false,
@@ -220,6 +222,7 @@ impl GuiApp {
 
             // 縫合設定
             sewing_stiffness: 10000.0,
+            sewing_shrink_speed: 1.0,
             enable_sewing_lock: true,
             sewing_lock_distance: 0.02,
             sewing_priority_enabled: false,
@@ -237,6 +240,7 @@ impl GuiApp {
             strain_tolerance: 0.008,
             areal_density: 0.15,
 
+            modifiers: ModifiersState::empty(),
             is_orbiting: false,
             is_panning: false,
             last_mouse_pos: (0.0, 0.0),
@@ -293,6 +297,7 @@ impl GuiApp {
             edge_margin_scale: self.edge_margin_scale,
             edge_margin_offset: self.edge_margin_offset,
             sewing_stiffness: self.sewing_stiffness,
+            sewing_shrink_speed: self.sewing_shrink_speed,
             enable_sewing_lock: self.enable_sewing_lock,
             sewing_lock_distance: self.sewing_lock_distance,
             sewing_priority_enabled: self.sewing_priority_enabled,
@@ -309,6 +314,93 @@ impl GuiApp {
             enable_strain_adaptive: self.enable_strain_adaptive,
             strain_tolerance: self.strain_tolerance,
         }
+    }
+
+    /// SimConfig から全51 UIパラメータを同期する（export_sim_config の逆写像）
+    pub fn sync_ui_from_sim_config(&mut self, cfg: &SimConfig) {
+        self.gravity = cfg.gravity;
+        self.air_damping = cfg.damping;
+        self.tension_damping = cfg.tension_damping;
+        self.compression_damping = cfg.compression_damping;
+        self.shear_damping = cfg.shear_damping;
+        self.bending_damping = cfg.bending_damping;
+        self.tension_stiffness = cfg.tension_stiffness;
+        self.stiffness = cfg.tension_stiffness;
+        self.compression_stiffness = cfg.compression_stiffness;
+        self.shear_stiffness = cfg.shear_stiffness;
+        self.bending_stiffness = cfg.bending_stiffness;
+        self.solver_iterations = cfg.solver_iterations;
+        self.solver_mode = cfg.solver_mode;
+        self.workgroup_size = cfg.workgroup_size;
+        self.self_collision_enabled = cfg.enable_self_collision;
+        self.relief_factor = cfg.relief_factor;
+        self.max_displacement_ratio = cfg.max_displacement_ratio;
+        self.exclude_neighbors = cfg.exclude_neighbors;
+        self.enable_normal_untangling = cfg.enable_normal_untangling;
+        self.self_collision_max_iterations = cfg.self_collision_max_iterations;
+        self.coupled_mode = cfg.coupled_mode;
+        self.coupled_collider = cfg.coupled_collider;
+        self.post_relaxation_iters = cfg.post_relaxation_iters;
+        self.substep_interval = cfg.substep_interval;
+        self.ee_substep_interval = cfg.ee_substep_interval;
+        self.self_collision_algorithm = cfg.self_collision_algorithm;
+        self.enable_pair_cache = cfg.enable_pair_cache;
+        self.pair_margin_mode = cfg.pair_margin_mode;
+        self.pair_safety_margin = cfg.pair_safety_margin;
+        self.pair_horizon_scale = cfg.pair_horizon_scale;
+        self.pair_max_horizon = cfg.pair_max_horizon;
+        self.pair_max_pairs = cfg.pair_max_pairs;
+        self.enable_pair_final_fallback = cfg.enable_pair_final_fallback;
+        self.edge_collision_enabled = cfg.enable_edge_collision;
+        self.edge_margin_scale = cfg.edge_margin_scale;
+        self.edge_margin_offset = cfg.edge_margin_offset;
+        self.sewing_stiffness = cfg.sewing_stiffness;
+        self.sewing_shrink_speed = cfg.sewing_shrink_speed;
+        self.enable_sewing_lock = cfg.enable_sewing_lock;
+        self.sewing_lock_distance = cfg.sewing_lock_distance;
+        self.sewing_priority_enabled = cfg.sewing_priority_enabled;
+        self.sewing_priority_threshold = cfg.sewing_priority_threshold;
+        self.sewing_priority_merge_dist = cfg.sewing_priority_merge_dist;
+        self.sewing_priority_ramp_frames = cfg.sewing_priority_ramp_frames;
+        self.sewing_priority_max_frames = cfg.sewing_priority_max_frames;
+        self.areal_density = cfg.areal_density;
+        self.enable_adaptive_substep = cfg.enable_adaptive_substep;
+        self.min_substeps = cfg.min_substeps;
+        self.max_substeps = cfg.max_substeps;
+        self.auto_coupled_on_low_substeps = cfg.auto_coupled_on_low_substeps;
+        self.auto_compensate_iterations = cfg.auto_compensate_iterations;
+        self.enable_strain_adaptive = cfg.enable_strain_adaptive;
+        self.strain_tolerance = cfg.strain_tolerance;
+    }
+
+    /// GuiParamsUpdate を現在の UI 状態へ差分マージし、シミュレータへ反映する
+    pub fn apply_gui_params_update(&mut self, p: &GuiParamsUpdate) {
+        let mut cfg = self.export_sim_config();
+        p.apply_to_sim_config(&mut cfg);
+        if let Some(scale) = p.gravity_scale {
+            self.gravity_scale = scale;
+            cfg.gravity = [
+                self.base_gravity[0] * scale,
+                self.base_gravity[1] * scale,
+                self.base_gravity[2] * scale,
+            ];
+        } else if let Some(g) = p.gravity {
+            if self.gravity_scale > 1e-4 {
+                self.base_gravity = [
+                    g[0] / self.gravity_scale,
+                    g[1] / self.gravity_scale,
+                    g[2] / self.gravity_scale,
+                ];
+            }
+        }
+        if let Some(sub) = p.substeps {
+            self.substeps = sub;
+        }
+        if let Some(fps) = p.target_fps {
+            self.target_fps = fps;
+        }
+        self.sync_ui_from_sim_config(&cfg);
+        self.apply_current_config();
     }
 
     /// 現在の設定を物理シミュレータに一括反映する
@@ -455,7 +547,7 @@ impl GuiApp {
 
     fn init_scene_from_data(&mut self, data: SceneInitData) {
         log::info!("[App] Initializing scene for object: {} (verts: {})", data.object_name, data.positions.len());
-        let Some(ref context) = self.gpu_context else { return };
+        let Some(context) = self.gpu_context.clone() else { return };
 
         let faces_opt = if !data.faces.is_empty() { Some(data.faces.as_slice()) } else { None };
         let sew_opt = data.sewing_springs.as_deref();
@@ -489,47 +581,21 @@ impl GuiApp {
             data.shear_stiffness,
             data.bending_stiffness,
             data.sewing_shrink_speed,
-            None,
-            None,
+            Some(data.sewing_stiffness),
+            Some(data.enable_sewing_lock),
             data.enable_coarse_constraints,
         );
 
-
         let mut sim = GpuClothSimulator::with_options(
-            Arc::clone(context),
+            Arc::clone(&context),
             mesh,
             data.workgroup_size,
             data.solver_mode,
         );
 
-        // 剛性4種
-        sim.set_stiffness_all(
-            data.stiffness,
-            data.compression_stiffness,
-            data.shear_stiffness,
-            data.bending_stiffness,
-        );
-        self.stiffness = data.stiffness;
-        self.tension_stiffness = data.stiffness;
-        self.compression_stiffness = data.compression_stiffness;
-        self.shear_stiffness = data.shear_stiffness;
-        self.bending_stiffness = data.bending_stiffness;
-
-        // 減衰
-        sim.set_damping(data.air_damping);
-        sim.set_damping_all(
-            data.tension_damping,
-            data.compression_damping,
-            data.shear_damping,
-            data.bending_damping,
-        );
-        self.air_damping = data.air_damping;
-        self.tension_damping = data.tension_damping;
-        self.compression_damping = data.compression_damping;
-        self.shear_damping = data.shear_damping;
-        self.bending_damping = data.bending_damping;
-
-        // 重力
+        // 全物理パラメータを単一経路 (SceneInitData::to_sim_config) 経由で UI・GPU 両方へ一括同期
+        let cfg = data.to_sim_config();
+        self.sync_ui_from_sim_config(&cfg);
         self.gravity_scale = data.gravity_scale;
         if data.gravity_scale > 1e-4 {
             self.base_gravity = [
@@ -540,33 +606,7 @@ impl GuiApp {
         } else {
             self.base_gravity = [0.0, 0.0, -9.81];
         }
-        self.gravity = data.gravity;
-        sim.set_gravity(data.gravity[0], data.gravity[1], data.gravity[2]);
-
-        // 縫合優先モード (工程フェーズ制御)。無効時はコア側で恒等動作する。
-        sim.set_sewing_priority_options(
-            data.sewing_priority_enabled,
-            data.sewing_priority_threshold,
-            data.sewing_priority_merge_dist,
-            data.sewing_priority_ramp_frames,
-            data.sewing_priority_max_frames,
-        );
-        // 初期座標で初回測定し、1フレーム目から抑制を有効化する。
-        sim.update_sewing_priority_from_positions(&data.positions);
-
-        // ソルバー設定
-        sim.solver_iterations = data.solver_iterations;
-        sim.set_areal_density(data.areal_density);
-        self.solver_iterations = data.solver_iterations;
         self.substeps = data.substeps;
-        self.enable_adaptive_substep = data.enable_adaptive_substep;
-        self.min_substeps = data.min_substeps;
-        self.max_substeps = data.max_substeps;
-        sim.set_adaptive_substep_options(
-            data.enable_adaptive_substep,
-            data.min_substeps,
-            data.max_substeps,
-        );
         if let Some(fps) = data.fps {
             if fps > 0.0 {
                 self.scene_fps = fps;
@@ -574,47 +614,9 @@ impl GuiApp {
                 log::info!("[App] Synchronized simulation target FPS with Blender scene: {:.1} FPS", fps);
             }
         }
-
-        // 自己衝突オプション
-        if let Some(ref sc) = data.self_collision {
-            self.self_collision_enabled = sc.enabled;
-            self.self_collision_algorithm = sc.self_collision_algorithm;
-            self.edge_collision_enabled = sc.enable_edge_collision;
-            self.coupled_mode = sc.coupled_mode;
-            self.coupled_collider = sc.coupled_collider;
-            self.post_relaxation_iters = sc.post_relaxation_iters;
-            self.substep_interval = sc.substep_interval;
-            self.ee_substep_interval = sc.ee_substep_interval;
-            self.enable_normal_untangling = sc.enable_normal_untangling;
-            self.relief_factor = sc.relief_factor;
-            self.max_displacement_ratio = sc.max_displacement_ratio;
-            self.exclude_neighbors = sc.exclude_neighbors;
-            self.self_collision_max_iterations = sc.max_iterations;
-
-            sim.set_enable_self_collision(sc.enabled);
-            sim.set_self_collision_algorithm(sc.self_collision_algorithm);
-            sim.set_self_collision_options(
-                sc.relief_factor,
-                sc.max_displacement_ratio,
-                sc.exclude_neighbors,
-                sc.enable_normal_untangling,
-                sc.max_iterations,
-            );
-            sim.set_coupled_self_collision_options(sc.coupled_mode, sc.post_relaxation_iters);
-            sim.set_enable_edge_collision(sc.enable_edge_collision);
-            sim.set_edge_margin_scale(sc.edge_margin_scale);
-            sim.set_edge_margin_offset(sc.edge_margin_offset);
-            sim.set_enable_pair_cache(sc.enable_pair_cache);
-            sim.set_pair_cache_options(
-                sc.pair_cache_max_pairs,
-                sc.pair_cache_max_pairs,
-                sc.pair_cache_margin_mode,
-                sc.pair_cache_safety_margin,
-                sc.pair_cache_horizon_scale,
-                sc.pair_cache_max_horizon,
-            );
-            sim.set_enable_pair_cache_final_fallback(sc.enable_pair_cache_final_fallback);
-        }
+        sim.apply_config(&cfg);
+        // 初期座標で初回測定し、1フレーム目から縫合優先の重力制御を有効化する。
+        sim.update_sewing_priority_from_positions(&data.positions);
 
         // 伸縮グループ
         if let Some(ref eb) = data.elastic_bands {
@@ -774,11 +776,6 @@ impl GuiApp {
 
         // タイマーの微小な揺らぎ（16.5ms等）でステップがスキップされないよう2msの許容余裕を持たせる
         let step_threshold = (fixed_dt - 0.002).max(0.001);
-        // 縫合優先モード: 直近の既知座標で結合率を測定し、step 前にラッチ状態を更新する。
-        // cached_positions はオンデマンド読戻しの最新値であり、追加のGPU同期を発行しない。
-        if self.cached_positions.len() == sim.num_vertices as usize {
-            sim.update_sewing_priority_from_positions(&self.cached_positions);
-        }
         while self.time_accumulator >= step_threshold && steps_done < max_steps {
             sim.solver_iterations = self.solver_iterations;
             sim.step(fixed_dt, self.substeps);
@@ -802,6 +799,11 @@ impl GuiApp {
             self.physics_max_fps = if self.physics_frame_ms > 0.0 { 1000.0 / self.physics_frame_ms } else { 0.0 };
             self.sim_step_count += steps_done as u32;
 
+            // 縫合優先モードが有効かつ未完了（未ラッチ）の間は、GUI単体実行時もGPUから座標を読み戻して結合率を更新する
+            let need_priority_eval = sim.sewing_priority_enabled && sim.sewing_priority_scale() < 1.0;
+            let need_priority_readback = need_priority_eval && !sim.sewing_priority_state().0;
+            let mut readback_done = false;
+
             // サーバー共有状態の更新
             if let Ok(mut state) = self.server.shared_state.write() {
                 state.frame_seq = self.frame_seq;
@@ -810,9 +812,9 @@ impl GuiApp {
                 state.step_time_ms = self.physics_frame_ms;
                 state.is_running = self.is_running;
 
-                // Blenderから明示的に要求された時（またはユーザーがドラッグ・ピックした時）のみ座標をリードバック
-                // 不要な33msごとのGPU同期ブロッキング（ストール）を完全に排除して60FPSを死守
-                if state.needs_coords {
+                // Blenderからの要求時または縫合優先モードの未ラッチ測定時のみリードバック
+                if state.needs_coords || need_priority_readback {
+                    let sync_to_blender = state.needs_coords;
                     state.needs_coords = false;
                     let n_verts = sim.num_vertices as usize;
                     if self.cached_positions.len() != n_verts {
@@ -823,7 +825,27 @@ impl GuiApp {
                     for (i, chunk) in flat.chunks_exact(3).enumerate() {
                         self.cached_positions[i] = [chunk[0], chunk[1], chunk[2]];
                     }
-                    state.latest_coords = self.cached_positions.clone();
+                    if sync_to_blender {
+                        state.latest_coords = self.cached_positions.clone();
+                    }
+                    readback_done = true;
+                }
+            } else if need_priority_readback {
+                let n_verts = sim.num_vertices as usize;
+                if self.cached_positions.len() != n_verts {
+                    self.cached_positions.resize(n_verts, [0.0; 3]);
+                }
+                let mut flat = vec![0.0f32; n_verts * 3];
+                sim.get_positions_flat(&mut flat);
+                for (i, chunk) in flat.chunks_exact(3).enumerate() {
+                    self.cached_positions[i] = [chunk[0], chunk[1], chunk[2]];
+                }
+                readback_done = true;
+            }
+
+            if need_priority_eval {
+                if readback_done || self.cached_positions.len() == sim.num_vertices as usize {
+                    sim.update_sewing_priority_from_positions(&self.cached_positions);
                 }
             }
         }
@@ -997,6 +1019,24 @@ impl GuiApp {
                                 sim.update_sewing_priority_from_positions(&self.cached_positions);
                             }
                             sim.step(1.0 / 60.0, self.substeps);
+                            self.frame_seq += 1;
+
+                            let n_verts = sim.num_vertices as usize;
+                            if self.cached_positions.len() != n_verts {
+                                self.cached_positions.resize(n_verts, [0.0; 3]);
+                            }
+                            let mut flat = vec![0.0f32; n_verts * 3];
+                            sim.get_positions_flat(&mut flat);
+                            for (i, chunk) in flat.chunks_exact(3).enumerate() {
+                                self.cached_positions[i] = [chunk[0], chunk[1], chunk[2]];
+                            }
+                            if let Ok(mut state) = self.server.shared_state.write() {
+                                state.frame_seq = self.frame_seq;
+                                if state.needs_coords {
+                                    state.needs_coords = false;
+                                    state.latest_coords = self.cached_positions.clone();
+                                }
+                            }
                         }
                     }
                     if ui.button("🔄 Reset").on_hover_text("Reset cloth position to initial pose while keeping current parameters").clicked() {
@@ -1212,6 +1252,9 @@ impl GuiApp {
                 ui.separator();
                 egui::CollapsingHeader::new("Sewing").default_open(false).show(ui, |ui| {
                     if ui.add(egui::Slider::new(&mut self.sewing_stiffness, 1.0..=100000.0).logarithmic(true).text("Stiffness")).changed() {
+                        any_param_changed = true;
+                    }
+                    if ui.add(egui::Slider::new(&mut self.sewing_shrink_speed, 0.01..=10.0).text("Shrink Speed")).changed() {
                         any_param_changed = true;
                     }
                     if ui.checkbox(&mut self.enable_sewing_lock, "Sewing Lock").changed() {
@@ -1517,8 +1560,44 @@ impl GuiApp {
                         sim.solver_iterations = solver_iterations;
                         sim.step(dt, substeps);
                         self.frame_seq += 1;
+                        if sim.sewing_priority_enabled && sim.sewing_priority_scale() < 1.0 {
+                            let n_verts = sim.num_vertices as usize;
+                            if self.cached_positions.len() != n_verts {
+                                self.cached_positions.resize(n_verts, [0.0; 3]);
+                            }
+                            let mut flat = vec![0.0f32; n_verts * 3];
+                            sim.get_positions_flat(&mut flat);
+                            for (i, chunk) in flat.chunks_exact(3).enumerate() {
+                                self.cached_positions[i] = [chunk[0], chunk[1], chunk[2]];
+                            }
+                            sim.update_sewing_priority_from_positions(&self.cached_positions);
+                        }
                     }
                     let _ = respond_to.send(GuiResponse::Ack { message: "OK".to_string() });
+                }
+                MainThreadTask::ApplyPose { respond_to } => {
+                    let positions = if let Some(ref mut sim) = self.simulator {
+                        let n_verts = sim.num_vertices as usize;
+                        if self.cached_positions.len() != n_verts {
+                            self.cached_positions.resize(n_verts, [0.0; 3]);
+                        }
+                        let mut flat = vec![0.0f32; n_verts * 3];
+                        sim.get_positions_flat(&mut flat);
+                        for (i, chunk) in flat.chunks_exact(3).enumerate() {
+                            self.cached_positions[i] = [chunk[0], chunk[1], chunk[2]];
+                        }
+                        self.cached_positions.clone()
+                    } else {
+                        self.cached_positions.clone()
+                    };
+                    if let Ok(mut state) = self.server.shared_state.write() {
+                        state.latest_coords = positions.clone();
+                        state.applied_pose = Some(positions.clone());
+                    }
+                    let _ = respond_to.send(GuiResponse::AppliedPose {
+                        num_vertices: positions.len() as u32,
+                        positions,
+                    });
                 }
                 MainThreadTask::Command(cmd) => match cmd {
                     GuiCommand::Play => {
@@ -1531,82 +1610,15 @@ impl GuiApp {
                         if let Some(ref mut sim) = self.simulator {
                             sim.reset();
                             self.frame_seq = 0;
+                            self.cached_positions = self.initial_positions.clone();
+                            if let Ok(mut state) = self.server.shared_state.write() {
+                                state.latest_coords = self.initial_positions.clone();
+                                state.frame_seq = 0;
+                            }
                         }
                     }
                     GuiCommand::SetParams(p) => {
-                        if let Some(scale) = p.gravity_scale {
-                            self.gravity_scale = scale;
-                            self.gravity = [
-                                self.base_gravity[0] * scale,
-                                self.base_gravity[1] * scale,
-                                self.base_gravity[2] * scale,
-                            ];
-                        } else if let Some(g) = p.gravity {
-                            self.gravity = g;
-                            if self.gravity_scale > 1e-4 {
-                                self.base_gravity = [g[0] / self.gravity_scale, g[1] / self.gravity_scale, g[2] / self.gravity_scale];
-                            }
-                        }
-                        if let Some(air) = p.air_damping { self.air_damping = air; }
-                        if let Some(v) = p.tension_damping { self.tension_damping = v; }
-                        if let Some(v) = p.compression_damping { self.compression_damping = v; }
-                        if let Some(v) = p.shear_damping { self.shear_damping = v; }
-                        if let Some(v) = p.bending_damping { self.bending_damping = v; }
-                        if let Some(v) = p.tension_stiffness.or(p.stiffness) { self.tension_stiffness = v; self.stiffness = v; }
-                        if let Some(v) = p.compression_stiffness { self.compression_stiffness = v; }
-                        if let Some(v) = p.shear_stiffness { self.shear_stiffness = v; }
-                        if let Some(v) = p.bending_stiffness { self.bending_stiffness = v; }
-                        if let Some(sub) = p.substeps { self.substeps = sub; }
-                        if let Some(v) = p.enable_adaptive_substep { self.enable_adaptive_substep = v; }
-                        if let Some(v) = p.min_substeps { self.min_substeps = v; }
-                        if let Some(v) = p.max_substeps { self.max_substeps = v; }
-                        if let Some(iters) = p.solver_iterations { self.solver_iterations = iters; }
-                        if let Some(fps) = p.target_fps { self.target_fps = fps; }
-
-                        // 自己衝突
-                        if let Some(v) = p.enable_self_collision { self.self_collision_enabled = v; }
-                        if let Some(v) = p.self_collision_algorithm { self.self_collision_algorithm = v; }
-                        if let Some(v) = p.enable_edge_collision { self.edge_collision_enabled = v; }
-                        if let Some(v) = p.coupled_mode { self.coupled_mode = v; }
-                        if let Some(v) = p.coupled_collider { self.coupled_collider = v; }
-                        if let Some(v) = p.post_relaxation_iters { self.post_relaxation_iters = v; }
-                        if let Some(v) = p.substep_interval { self.substep_interval = v; }
-                        if let Some(v) = p.ee_substep_interval { self.ee_substep_interval = v; }
-                        if let Some(v) = p.enable_normal_untangling { self.enable_normal_untangling = v; }
-                        if let Some(v) = p.relief_factor { self.relief_factor = v; }
-                        if let Some(v) = p.max_displacement_ratio { self.max_displacement_ratio = v; }
-                        if let Some(v) = p.exclude_neighbors { self.exclude_neighbors = v; }
-                        if let Some(v) = p.self_collision_max_iterations { self.self_collision_max_iterations = v; }
-                        if let Some(v) = p.enable_pair_cache { self.enable_pair_cache = v; }
-                        if let Some(v) = p.pair_margin_mode { self.pair_margin_mode = v; }
-                        if let Some(v) = p.pair_safety_margin { self.pair_safety_margin = v; }
-                        if let Some(v) = p.pair_horizon_scale { self.pair_horizon_scale = v; }
-                        if let Some(v) = p.pair_max_horizon { self.pair_max_horizon = v; }
-                        if let Some(v) = p.pair_max_pairs { self.pair_max_pairs = v; }
-                        if let Some(v) = p.enable_pair_final_fallback { self.enable_pair_final_fallback = v; }
-                        if let Some(v) = p.edge_margin_scale { self.edge_margin_scale = v; }
-                        if let Some(v) = p.edge_margin_offset { self.edge_margin_offset = v; }
-
-                        // 縫合
-                        if let Some(v) = p.sewing_stiffness { self.sewing_stiffness = v; }
-                        if let Some(v) = p.enable_sewing_lock { self.enable_sewing_lock = v; }
-                        if let Some(v) = p.sewing_lock_distance { self.sewing_lock_distance = v; }
-                        if let Some(v) = p.sewing_priority_enabled { self.sewing_priority_enabled = v; }
-                        if let Some(v) = p.sewing_priority_threshold { self.sewing_priority_threshold = v; }
-                        if let Some(v) = p.sewing_priority_merge_dist { self.sewing_priority_merge_dist = v; }
-                        if let Some(v) = p.sewing_priority_ramp_frames { self.sewing_priority_ramp_frames = v; }
-                        if let Some(v) = p.sewing_priority_max_frames { self.sewing_priority_max_frames = v; }
-
-                        // ソルバー & ひずみ適応 & 密度
-                        if let Some(v) = p.solver_mode { self.solver_mode = v; }
-                        if let Some(v) = p.workgroup_size { self.workgroup_size = v; }
-                        if let Some(v) = p.auto_coupled_on_low_substeps { self.auto_coupled_on_low_substeps = v; }
-                        if let Some(v) = p.auto_compensate_iterations { self.auto_compensate_iterations = v; }
-                        if let Some(v) = p.enable_strain_adaptive { self.enable_strain_adaptive = v; }
-                        if let Some(v) = p.strain_tolerance { self.strain_tolerance = v; }
-                        if let Some(v) = p.areal_density { self.areal_density = v; }
-
-                        self.apply_current_config();
+                        self.apply_gui_params_update(&p);
                     }
                     GuiCommand::UpdateColliders { colliders, mesh_triangles } => {
                         if let Some(ref mut sim) = self.simulator {
@@ -1694,6 +1706,9 @@ impl ApplicationHandler for GuiApp {
                     self.depth_texture = Some(create_depth_texture(&gpu_context.device, config.width, config.height));
                 }
             }
+            WindowEvent::ModifiersChanged(new_mods) => {
+                self.modifiers = new_mods.state();
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 match button {
                     MouseButton::Left => {
@@ -1749,7 +1764,20 @@ impl ApplicationHandler for GuiApp {
                         }
                     }
                     MouseButton::Right | MouseButton::Middle => {
-                        self.is_orbiting = state == ElementState::Pressed;
+                        if state == ElementState::Pressed {
+                            if !self.egui_ctx.is_pointer_over_area() {
+                                if self.modifiers.shift_key() {
+                                    self.is_panning = true;
+                                    self.is_orbiting = false;
+                                } else {
+                                    self.is_orbiting = true;
+                                    self.is_panning = false;
+                                }
+                            }
+                        } else if state == ElementState::Released {
+                            self.is_orbiting = false;
+                            self.is_panning = false;
+                        }
                     }
                     _ => {}
                 }
@@ -1993,5 +2021,106 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
 impl Drop for GuiApp {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::GuiSelfCollisionData;
+
+    #[test]
+    fn sync_ui_and_params_update_preserve_all_sim_config_fields() {
+        let init_data = SceneInitData {
+            object_name: "TestGarment".to_string(),
+            positions: vec![[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]],
+            faces: vec![[0, 1, 2]],
+            edges: vec![[0, 1], [1, 2], [2, 0]],
+            sewing_springs: Some(vec![[0, 1]]),
+            inv_masses: vec![0.0, 1.0, 1.0],
+            layer_ids: None,
+            layer_id: 2,
+            thickness: 0.008,
+            areal_density: 0.35,
+            enable_coarse_constraints: true,
+            stiffness: 2500.0,
+            compression_stiffness: 1800.0,
+            shear_stiffness: 900.0,
+            bending_stiffness: 15.0,
+            air_damping: 0.25,
+            tension_damping: 3.5,
+            compression_damping: 4.5,
+            shear_damping: 2.25,
+            bending_damping: 0.75,
+            gravity: [0.0, 0.0, -4.905],
+            gravity_scale: 0.5,
+            sewing_shrink_speed: 0.42,
+            sewing_stiffness: 25000.0,
+            enable_sewing_lock: false,
+            sewing_lock_distance: 0.035,
+            sewing_priority_enabled: true,
+            sewing_priority_threshold: 0.85,
+            sewing_priority_merge_dist: 0.007,
+            sewing_priority_ramp_frames: 6,
+            sewing_priority_max_frames: 300,
+            workgroup_size: 64,
+            solver_mode: 1,
+            solver_iterations: 7,
+            substeps: 24,
+            enable_adaptive_substep: true,
+            min_substeps: 6,
+            max_substeps: 48,
+            auto_coupled_on_low_substeps: false,
+            auto_compensate_iterations: false,
+            enable_strain_adaptive: false,
+            strain_tolerance: 0.012,
+            self_collision: Some(GuiSelfCollisionData {
+                enabled: true,
+                coupled_mode: 3,
+                post_relaxation_iters: 4,
+                relief_factor: 0.65,
+                max_displacement_ratio: 0.35,
+                exclude_neighbors: false,
+                enable_normal_untangling: false,
+                max_iterations: 192,
+                substep_interval: 3,
+                enable_edge_collision: true,
+                edge_margin_scale: 1.5,
+                edge_margin_offset: 0.002,
+                enable_pair_cache: true,
+                pair_cache_margin_mode: 0,
+                pair_cache_safety_margin: 0.009,
+                pair_cache_horizon_scale: 1.8,
+                pair_cache_max_horizon: 0.035,
+                pair_cache_max_pairs: 16384,
+                enable_pair_cache_final_fallback: false,
+                self_collision_algorithm: 1,
+                coupled_collider: true,
+                ee_substep_interval: 2,
+            }),
+            bone_sdf: None,
+            colliders: Vec::new(),
+            mesh_triangles: Vec::new(),
+            elastic_bands: None,
+            fps: Some(30.0),
+            voxels: Vec::new(),
+            extra_lines: Vec::new(),
+        };
+
+        let expected_cfg = init_data.to_sim_config();
+        let mut app = GuiApp::new(TcpServerHandle::new_dummy_for_test(), DemoSceneType::None);
+        app.sync_ui_from_sim_config(&expected_cfg);
+        assert_eq!(app.export_sim_config(), expected_cfg);
+
+        // 単一スライダー更新を模した GuiParamsUpdate 適用後も他の全50パラメータが破壊されないこと
+        let update = GuiParamsUpdate {
+            bending_stiffness: Some(42.0),
+            ..Default::default()
+        };
+        app.apply_gui_params_update(&update);
+        let after = app.export_sim_config();
+        let mut expected_after = expected_cfg.clone();
+        expected_after.bending_stiffness = 42.0;
+        assert_eq!(after, expected_after);
     }
 }

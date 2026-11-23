@@ -901,4 +901,72 @@ fn generate_capsule_mesh(
 ) {
     generate_sphere_mesh(a, radius, 8, 12, vertices, indices);
     generate_sphere_mesh(b, radius, 8, 12, vertices, indices);
+
+    let va = glam::Vec3::from_array(a);
+    let vb = glam::Vec3::from_array(b);
+    let axis = vb - va;
+    let len = axis.length();
+    if len <= 1e-5 || radius <= 1e-6 {
+        return;
+    }
+
+    let dir = axis / len;
+    let ref_up = if dir.z.abs() < 0.99 { glam::Vec3::Z } else { glam::Vec3::X };
+    let u = dir.cross(ref_up).normalize();
+    let v = dir.cross(u).normalize();
+
+    let segments = 12u32;
+    let base_idx = vertices.len() as u32;
+    for s in 0..=segments {
+        let theta = (s as f32 / segments as f32) * std::f32::consts::TAU;
+        let radial = (u * theta.cos() + v * theta.sin()) * radius;
+        vertices.push((va + radial).to_array());
+        vertices.push((vb + radial).to_array());
+    }
+    for s in 0..segments {
+        let i0 = base_idx + s * 2;
+        let i1 = i0 + 1;
+        let i2 = i0 + 2;
+        let i3 = i0 + 3;
+        indices.push(i0);
+        indices.push(i2);
+        indices.push(i1);
+
+        indices.push(i2);
+        indices.push(i3);
+        indices.push(i1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_capsule_mesh_includes_cylinder_body() {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        generate_capsule_mesh(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            0.2,
+            &mut vertices,
+            &mut indices,
+        );
+        assert!(indices.len() % 3 == 0 && !indices.is_empty());
+
+        // 円柱胴体が生成されていれば、a側 (z≈0) と b側 (z≈1) を跨ぐ側面三角形が存在する
+        let mut body_tris = 0usize;
+        for tri in indices.chunks_exact(3) {
+            let p0 = vertices[tri[0] as usize];
+            let p1 = vertices[tri[1] as usize];
+            let p2 = vertices[tri[2] as usize];
+            let min_z = p0[2].min(p1[2]).min(p2[2]);
+            let max_z = p0[2].max(p1[2]).max(p2[2]);
+            if min_z < 0.1 && max_z > 0.9 {
+                body_tris += 1;
+            }
+        }
+        assert_eq!(body_tris, 24, "Expected 24 cylinder body triangles (12 quads)");
+    }
 }

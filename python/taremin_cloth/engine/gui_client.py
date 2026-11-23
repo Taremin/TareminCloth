@@ -265,6 +265,7 @@ class ClothGuiClient:
         self._last_render_fps = 0.0
         self._last_step_ms = 0.0
         self._last_sent_params = None
+        self._recv_buf = bytearray()
 
     @property
     def render_fps(self) -> float:
@@ -291,6 +292,7 @@ class ClothGuiClient:
             sock.setblocking(False)
             self.sock = sock
             self._is_connected = True
+            self._recv_buf.clear()
             logger.info(f"[GuiClient] Connected to Taremin Cloth GUI at {self.host}:{self.port}")
             return True
         except Exception as e:
@@ -308,17 +310,35 @@ class ClothGuiClient:
         self.sock = None
         self._is_connected = False
         self._last_sent_params = None
+        self._recv_buf.clear()
         logger.info("[GuiClient] Disconnected")
 
-    def _send_packet(self, data_dict: Dict[str, Any]) -> bool:
-        """4バイト長さプレフィックス付きJSONパケットを送信する"""
+    def _send_packet(self, data_dict: Dict[str, Any], *, timeout: float = 15.0) -> bool:
+        """4バイト長さプレフィックス付きJSONパケットを送信する（非ブロッキング部分送信・リトライ対応）"""
         if not self.is_connected or not self.sock:
             return False
 
         try:
             payload = json.dumps(data_dict, default=_json_numpy_default).encode("utf-8")
             header = struct.pack(">I", len(payload))
-            self.sock.sendall(header + payload)
+            packet = header + payload
+            view = memoryview(packet)
+            total = len(packet)
+            sent = 0
+            deadline = time.perf_counter() + float(timeout)
+
+            while sent < total:
+                try:
+                    n = self.sock.send(view[sent:])
+                    if n == 0:
+                        raise ConnectionResetError("Socket closed during send")
+                    sent += n
+                except (BlockingIOError, InterruptedError):
+                    if time.perf_counter() > deadline:
+                        logger.error(f"[GuiClient] Send timeout after {timeout}s ({sent}/{total} bytes)")
+                        self.disconnect()
+                        return False
+                    time.sleep(0.001)
             return True
         except Exception as e:
             logger.error(f"[GuiClient] Send error: {e}")
@@ -326,50 +346,49 @@ class ClothGuiClient:
             return False
 
     def _recv_packet(self, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
-        """パケットを1つ受信する（ノンブロッキング対応）"""
+        """パケットを1つ受信する（ノンブロッキング対応・タイムアウト時の読みかけデータ保持）"""
         if not self.is_connected or not self.sock:
             return None
 
-        start_time = time.perf_counter()
-        header_buf = b""
+        max_packet_bytes = 128 * 1024 * 1024
+        deadline = time.perf_counter() + float(timeout)
 
-        while len(header_buf) < 4:
-            try:
-                chunk = self.sock.recv(4 - len(header_buf))
-                if not chunk:
+        def _fill_until(target_len: int) -> bool:
+            while len(self._recv_buf) < target_len:
+                try:
+                    need = max(4096, min(target_len - len(self._recv_buf), 65536))
+                    chunk = self.sock.recv(need)
+                    if not chunk:
+                        self.disconnect()
+                        return False
+                    self._recv_buf.extend(chunk)
+                except (BlockingIOError, InterruptedError):
+                    if time.perf_counter() > deadline:
+                        return False
+                    time.sleep(0.001)
+                except Exception as e:
+                    logger.error(f"[GuiClient] Recv error: {e}")
                     self.disconnect()
-                    return None
-                header_buf += chunk
-            except BlockingIOError:
-                if time.perf_counter() - start_time > timeout:
-                    return None
-                time.sleep(0.001)
-            except Exception as e:
-                logger.error(f"[GuiClient] Recv header error: {e}")
-                self.disconnect()
-                return None
+                    return False
+            return True
 
-        length = struct.unpack(">I", header_buf)[0]
-        payload_buf = b""
+        if not _fill_until(4):
+            return None
 
-        while len(payload_buf) < length:
-            try:
-                chunk = self.sock.recv(min(length - len(payload_buf), 65536))
-                if not chunk:
-                    self.disconnect()
-                    return None
-                payload_buf += chunk
-            except BlockingIOError:
-                if time.perf_counter() - start_time > timeout:
-                    return None
-                time.sleep(0.001)
-            except Exception as e:
-                logger.error(f"[GuiClient] Recv payload error: {e}")
-                self.disconnect()
-                return None
+        length = struct.unpack_from(">I", self._recv_buf, 0)[0]
+        if length > max_packet_bytes:
+            logger.error(f"[GuiClient] Rejecting oversized IPC packet: {length} bytes")
+            self.disconnect()
+            return None
+
+        if not _fill_until(4 + length):
+            return None
+
+        payload_bytes = bytes(self._recv_buf[4:4 + length])
+        del self._recv_buf[:4 + length]
 
         try:
-            return json.loads(payload_buf.decode("utf-8"))
+            return json.loads(payload_bytes.decode("utf-8"))
         except Exception as e:
             logger.error(f"[GuiClient] JSON parse error: {e}")
             return None
@@ -472,7 +491,7 @@ class ClothGuiClient:
         if not self._send_packet(data):
             return False
 
-        resp = self._recv_packet(timeout=10.0)
+        resp = self._recv_packet(timeout=30.0)
         return resp is not None and resp.get("type") == "Ack"
 
     def send_update_colliders(self, scene=None) -> bool:
@@ -644,6 +663,7 @@ class ClothGuiClient:
             "enable_strain_adaptive": bool(cfg.get("enable_strain_adaptive", True)),
             "strain_tolerance": float(cfg.get("strain_tolerance", 0.008)),
             "sewing_stiffness": float(cfg.get("sewing_stiffness", 10000.0)),
+            "sewing_shrink_speed": float(cfg.get("sewing_shrink_speed", 1.0)),
             "enable_sewing_lock": bool(cfg.get("enable_sewing_lock", True)),
             "areal_density": float(cfg.get("areal_density", 0.15)),
         }
@@ -720,8 +740,8 @@ class ClothGuiClient:
 
         start = time.perf_counter()
         resp = None
-        while time.perf_counter() - start < 2.0:
-            resp = self._recv_packet(timeout=0.2)
+        while time.perf_counter() - start < 5.0:
+            resp = self._recv_packet(timeout=0.5)
             if resp and resp.get("type") == "AppliedPose":
                 break
 

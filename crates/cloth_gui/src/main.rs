@@ -109,6 +109,9 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
     let mut simulator: Option<GpuClothSimulator> = None;
     let mut is_running = false;
     let mut frame_seq = 0u64;
+    let mut current_substeps: u32 = 15;
+    let mut current_dt: f32 = 1.0 / 60.0;
+    let mut last_coords: Vec<[f32; 3]> = Vec::new();
 
     loop {
         // コマンド/タスク処理
@@ -149,6 +152,14 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
 
                     // 全シミュレーションパラメータ、コライダー、ボーンSDFの登録
                     apply_simulation_parameters(&mut sim, &data);
+                    sim.update_sewing_priority_from_positions(&data.positions);
+                    current_substeps = data.substeps.max(1);
+                    if let Some(fps) = data.fps {
+                        if fps > 0.0 {
+                            current_dt = 1.0 / fps;
+                        }
+                    }
+                    last_coords = data.positions.clone();
 
                     simulator = Some(sim);
                     is_running = true;
@@ -168,14 +179,40 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                         sim.solver_iterations = solver_iterations;
                         sim.step(dt, substeps);
                         frame_seq += 1;
+                        let mut coords = vec![0.0f32; sim.num_vertices as usize * 3];
+                        sim.get_positions_flat(&mut coords);
+                        let coords_vec: Vec<[f32; 3]> = coords.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                        if sim.sewing_priority_enabled && sim.sewing_priority_scale() < 1.0 {
+                            sim.update_sewing_priority_from_positions(&coords_vec);
+                        }
+                        last_coords = coords_vec.clone();
                         if let Ok(mut state) = server.shared_state.write() {
                             state.frame_seq = frame_seq;
-                            let mut coords = vec![0.0f32; sim.num_vertices as usize * 3];
-                            sim.get_positions_flat(&mut coords);
-                            state.latest_coords = coords.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                            state.latest_coords = coords_vec;
                         }
                     }
                     let _ = respond_to.send(protocol::GuiResponse::Ack { message: "OK".to_string() });
+                }
+                server::MainThreadTask::ApplyPose { respond_to } => {
+                    let positions: Vec<[f32; 3]> = if let Some(ref mut sim) = simulator {
+                        let mut coords = vec![0.0f32; sim.num_vertices as usize * 3];
+                        sim.get_positions_flat(&mut coords);
+                        let vec3s: Vec<[f32; 3]> = coords.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                        last_coords = vec3s.clone();
+                        vec3s
+                    } else if let Ok(state) = server.shared_state.read() {
+                        state.latest_coords.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    if let Ok(mut state) = server.shared_state.write() {
+                        state.latest_coords = positions.clone();
+                        state.applied_pose = Some(positions.clone());
+                    }
+                    let _ = respond_to.send(protocol::GuiResponse::AppliedPose {
+                        num_vertices: positions.len() as u32,
+                        positions,
+                    });
                 }
                 server::MainThreadTask::Command(cmd) => match cmd {
                     GuiCommand::Play => is_running = true,
@@ -217,6 +254,14 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                         }
                     }
                     GuiCommand::SetParams(p) => {
+                        if let Some(sub) = p.substeps {
+                            current_substeps = sub.max(1);
+                        }
+                        if let Some(fps) = p.target_fps {
+                            if fps > 0.0 {
+                                current_dt = 1.0 / fps;
+                            }
+                        }
                         if let Some(ref mut sim) = simulator {
                             let mut cfg = sim.export_config();
                             p.apply_to_sim_config(&mut cfg);
@@ -236,9 +281,23 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
         if is_running {
             if let Some(ref mut sim) = simulator {
                 let t0 = std::time::Instant::now();
-                sim.step(1.0 / 60.0, 15);
+                sim.step(current_dt, current_substeps);
                 let elapsed = t0.elapsed().as_secs_f32();
                 frame_seq += 1;
+
+                let need_priority = sim.sewing_priority_enabled && sim.sewing_priority_scale() < 1.0;
+                let need_priority_readback = need_priority && !sim.sewing_priority_state().0;
+                let is_conn = server.shared_state.read().map(|s| s.is_connected).unwrap_or(false);
+
+                if is_conn || need_priority_readback {
+                    let mut coords = vec![0.0f32; sim.num_vertices as usize * 3];
+                    sim.get_positions_flat(&mut coords);
+                    last_coords = coords.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                }
+
+                if need_priority && last_coords.len() == sim.num_vertices as usize {
+                    sim.update_sewing_priority_from_positions(&last_coords);
+                }
 
                 if let Ok(mut state) = server.shared_state.write() {
                     state.frame_seq = frame_seq;
@@ -246,9 +305,7 @@ fn run_headless_loop(server: TcpServerHandle) -> Result<(), Box<dyn std::error::
                     state.physics_fps = if elapsed > 0.0 { 1.0 / elapsed } else { 0.0 };
 
                     if state.is_connected {
-                        let mut coords = vec![0.0f32; sim.num_vertices as usize * 3];
-                        sim.get_positions_flat(&mut coords);
-                        state.latest_coords = coords.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                        state.latest_coords = last_coords.clone();
                     }
                 }
             }

@@ -360,6 +360,8 @@ pub struct GuiParamsUpdate {
     #[serde(default)]
     pub sewing_stiffness: Option<f32>,
     #[serde(default)]
+    pub sewing_shrink_speed: Option<f32>,
+    #[serde(default)]
     pub enable_sewing_lock: Option<bool>,
     #[serde(default)]
     pub areal_density: Option<f32>,
@@ -383,6 +385,7 @@ impl SceneInitData {
         cfg.solver_mode = self.solver_mode;
         cfg.workgroup_size = self.workgroup_size;
         cfg.sewing_stiffness = self.sewing_stiffness;
+        cfg.sewing_shrink_speed = self.sewing_shrink_speed;
         cfg.enable_sewing_lock = self.enable_sewing_lock;
         cfg.sewing_lock_distance = self.sewing_lock_distance;
         cfg.areal_density = self.areal_density;
@@ -468,6 +471,7 @@ impl GuiParamsUpdate {
         if let Some(v) = self.pair_max_pairs { cfg.pair_max_pairs = v; }
         if let Some(v) = self.enable_pair_final_fallback { cfg.enable_pair_final_fallback = v; }
         if let Some(v) = self.sewing_stiffness { cfg.sewing_stiffness = v; }
+        if let Some(v) = self.sewing_shrink_speed { cfg.sewing_shrink_speed = v; }
         if let Some(v) = self.enable_sewing_lock { cfg.enable_sewing_lock = v; }
         if let Some(v) = self.sewing_lock_distance { cfg.sewing_lock_distance = v; }
         if let Some(v) = self.sewing_priority_enabled { cfg.sewing_priority_enabled = v; }

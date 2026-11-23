@@ -179,6 +179,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
     _last_rendered_seq = 0
     _frame_times = []
     _last_frame_time = 0.0
+    _target_obj_name = ""
 
     def modal(self, context, event):
         global _gui_preview_running, _last_blender_preview_fps, _last_gui_physics_fps
@@ -198,7 +199,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
                 self.cancel(context)
                 return {'CANCELLED'}
 
-            obj = context.active_object
+            obj = bpy.data.objects.get(self._target_obj_name) if self._target_obj_name else None
             if not obj or not getattr(obj, "taremin_cloth", None) or not obj.taremin_cloth.is_cloth:
                 self.cancel(context)
                 return {'CANCELLED'}
@@ -254,6 +255,12 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
             self.report({'WARNING'}, "GUIサーバーに接続されていません")
             return {'CANCELLED'}
 
+        obj = getattr(context, "active_object", None)
+        if not obj or getattr(obj, "type", None) != 'MESH' or not getattr(obj, "taremin_cloth", None) or not obj.taremin_cloth.is_cloth:
+            self.report({'WARNING'}, "有効な布オブジェクトが選択されていません")
+            return {'CANCELLED'}
+
+        self._target_obj_name = obj.name
         self._stop_requested = False
         self._last_rendered_seq = 0
         self._last_frame_time = time.perf_counter()
@@ -273,6 +280,7 @@ class TAREMIN_CLOTH_OT_gui_preview(bpy.types.Operator):
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
+        self._target_obj_name = ""
         _gui_preview_running = False
         _gui_preview_instance = None
         logger.info("[GuiOp] GUI Live Preview Modal Operator stopped")
