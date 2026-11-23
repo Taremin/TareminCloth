@@ -41,6 +41,8 @@ from .engine.runner import (
     step_cloth_object,
     step_cloth_scene,
     cloth_frame_handler,
+    on_load_pre,
+    on_undo_post,
     bake_cloth_simulation,
 )
 from .ops import (
@@ -111,16 +113,30 @@ def register():
         bpy.utils.register_class(cls)
     register_pattern_editor_handlers()
     handlers = getattr(getattr(bpy, "app", None), "handlers", None)
-    if handlers and hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
-        if cloth_frame_handler not in handlers.frame_change_post:
-            handlers.frame_change_post.append(cloth_frame_handler)
+    if handlers:
+        if hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
+            if cloth_frame_handler not in handlers.frame_change_post:
+                handlers.frame_change_post.append(cloth_frame_handler)
+        if hasattr(handlers, "load_pre") and handlers.load_pre is not None:
+            if on_load_pre not in handlers.load_pre:
+                handlers.load_pre.append(on_load_pre)
+        if hasattr(handlers, "undo_post") and handlers.undo_post is not None:
+            if on_undo_post not in handlers.undo_post:
+                handlers.undo_post.append(on_undo_post)
 
 
 def unregister():
     handlers = getattr(getattr(bpy, "app", None), "handlers", None)
-    if handlers and hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
-        if cloth_frame_handler in handlers.frame_change_post:
-            handlers.frame_change_post.remove(cloth_frame_handler)
+    if handlers:
+        if hasattr(handlers, "undo_post") and handlers.undo_post is not None:
+            if on_undo_post in handlers.undo_post:
+                handlers.undo_post.remove(on_undo_post)
+        if hasattr(handlers, "load_pre") and handlers.load_pre is not None:
+            if on_load_pre in handlers.load_pre:
+                handlers.load_pre.remove(on_load_pre)
+        if hasattr(handlers, "frame_change_post") and handlers.frame_change_post is not None:
+            if cloth_frame_handler in handlers.frame_change_post:
+                handlers.frame_change_post.remove(cloth_frame_handler)
     unregister_pattern_editor_handlers()
     clear_simulators()
     for cls in reversed(classes):

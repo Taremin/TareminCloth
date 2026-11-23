@@ -116,14 +116,80 @@ class WrinkleFieldParams:
     num_samples: int = 64                                        # プロファイル角度解像度
 
 
-def build_orthonormal_basis(axis: Sequence[float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """軸ベクトルから正規直交基底 (axis, normal, binormal) を構築します。"""
+def _extract_mat3(mat: Any) -> Optional[np.ndarray]:
+    """3x3または4x4行列から有限実数の左上3x3部分を抽出する（モック・不正型はNone）。"""
+    if mat is None:
+        return None
+    cls_mod = getattr(type(mat), "__module__", "")
+    if cls_mod.startswith("unittest.mock"):
+        return None
+    try:
+        rows = [[mat[i][j] for j in range(3)] for i in range(3)]
+        for row in rows:
+            for val in row:
+                if isinstance(val, bool) or not isinstance(val, (int, float, np.floating, np.integer)):
+                    return None
+        arr = np.array(rows, dtype=np.float32)
+        if not np.all(np.isfinite(arr)):
+            return None
+        return arr
+    except Exception:
+        return None
+
+
+def resolve_pose_bone_normal_hint(arm_obj: Any, pose_bone: Any) -> Optional[np.ndarray]:
+    """PoseBoneのワールド変換行列からボーン軸に直交するローカルX基準方向を抽出する。
+
+    ボーン軸の符号反転（X=±0.9付近）での90度不連続フリップおよびRoll未追従を防ぐため、
+    Blender PoseBone.matrix（Y軸がhead→tail）のローカルX列（縮退時はZ列）を返す。
+    モックや行列情報を持たない環境ではNoneを返す。
+    """
+    pb_mat = _extract_mat3(getattr(pose_bone, "matrix", None))
+    if pb_mat is None:
+        return None
+    w_mat = _extract_mat3(getattr(arm_obj, "matrix_world", None))
+    rot = (w_mat @ pb_mat) if w_mat is not None else pb_mat
+
+    for col_idx in (0, 2):
+        vec = rot[:, col_idx].astype(np.float32)
+        norm = float(np.linalg.norm(vec))
+        if norm > 1e-6:
+            return (vec / norm).astype(np.float32)
+    return None
+
+
+def build_orthonormal_basis(
+    axis: Sequence[float],
+    *,
+    normal_hint: Optional[Sequence[float]] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """軸ベクトルから正規直交基底 (axis, normal, binormal) を構築します。
+
+    normal_hint が指定された場合は軸との直交射影を優先して基準方向を決定し、
+    ボーンRoll回転への追従と閾値跨ぎの90度フリップを防止します。
+    """
     a = np.array(axis, dtype=np.float32)
-    len_a = np.linalg.norm(a)
+    len_a = float(np.linalg.norm(a))
     if len_a < 1e-7:
         a = np.array([0.0, 0.0, 1.0], dtype=np.float32)
     else:
-        a = a / len_a
+        a = (a / len_a).astype(np.float32)
+
+    if normal_hint is not None:
+        try:
+            h = np.asarray(normal_hint, dtype=np.float32).reshape(-1)
+            if h.size >= 3 and np.all(np.isfinite(h[:3])):
+                h3 = h[:3]
+                n_proj = h3 - float(np.dot(h3, a)) * a
+                n_len = float(np.linalg.norm(n_proj))
+                if n_len > 1e-5:
+                    n = (n_proj / n_len).astype(np.float32)
+                    bn = np.cross(a, n)
+                    bn_len = float(np.linalg.norm(bn))
+                    if bn_len > 1e-6:
+                        return a, n, (bn / bn_len).astype(np.float32)
+        except Exception:
+            pass
 
     # 軸と平行でないベクトルを探す
     if abs(a[0]) < 0.9:
@@ -132,9 +198,9 @@ def build_orthonormal_basis(axis: Sequence[float]) -> Tuple[np.ndarray, np.ndarr
         ref = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
     n = np.cross(a, ref)
-    n = n / np.linalg.norm(n)
+    n = (n / np.linalg.norm(n)).astype(np.float32)
     bn = np.cross(a, n)
-    bn = bn / np.linalg.norm(bn)
+    bn = (bn / np.linalg.norm(bn)).astype(np.float32)
     return a, n, bn
 
 
@@ -153,14 +219,7 @@ def project_points_to_cylindrical(
     """
     pts = np.ascontiguousarray(points, dtype=np.float32)
     orig = np.array(origin, dtype=np.float32)
-    a, n, bn = build_orthonormal_basis(axis)
-    if normal is not None:
-        n_custom = np.array(normal, dtype=np.float32)
-        n_proj = n_custom - np.dot(n_custom, a) * a
-        if np.linalg.norm(n_proj) > 1e-6:
-            n = n_proj / np.linalg.norm(n_proj)
-            bn = np.cross(a, n)
-            bn = bn / np.linalg.norm(bn)
+    a, n, bn = build_orthonormal_basis(axis, normal_hint=normal)
 
     diff = pts - orig
     z = np.dot(diff, a)

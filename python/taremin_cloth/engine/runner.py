@@ -9,18 +9,21 @@ import numpy as np
 from typing import Optional
 from .cache import (
     _simulators,
+    _simulator_topology_signatures,
     _timeline_frame_cache,
+    _timeline_curve_cache,
     _buffered_start_frames,
     _waypoint_managers,
     set_seam_cluster_map,
     get_seam_cluster_map,
     cache_rest_positions,
     restore_rest_positions,
+    clear_simulator_for_object,
     clear_simulators,
     clear_timeline_cache,
     check_and_update_params_signature,
 )
-from .collider import sync_colliders
+from .collider import sync_colliders, clear_collider_cache
 from .params import sync_cloth_parameters, sync_attachment_pins
 from .simconfig import resolve_self_collision_algorithm
 from .profiling import format_profile_table
@@ -239,6 +242,16 @@ def finalize_simulator_init(obj, sim, state, *, scene=None):
         )
 
     _simulators[obj.name] = (sim, coords)
+    mesh = getattr(obj, "data", None)
+    if mesh is not None and getattr(mesh, "vertices", None) is not None:
+        edges_attr = getattr(mesh, "edges", ())
+        polys_attr = getattr(mesh, "polygons", ())
+        _simulator_topology_signatures[obj.name] = (
+            len(mesh.vertices),
+            len(edges_attr) if edges_attr is not None else 0,
+            len(polys_attr) if polys_attr is not None else 0,
+            int(state.get("n_verts", len(coords) // 3)),
+        )
     n_faces = len(faces_2d) if faces_2d is not None else 0
     logger.debug(f"[Simulator] Initialized ClothSimulator for '{obj.name}' (verts={len(pos_2d)}, faces={n_faces})")
     return sim, coords
@@ -247,7 +260,24 @@ def finalize_simulator_init(obj, sim, state, *, scene=None):
 def get_or_create_simulator(obj):
     """オブジェクトに対応するClothSimulatorインスタンスを取得または生成する"""
     if obj.name in _simulators:
-        return _simulators[obj.name]
+        expected_sig = _simulator_topology_signatures.get(obj.name)
+        mesh = getattr(obj, "data", None)
+        if expected_sig is not None and mesh is not None and getattr(mesh, "vertices", None) is not None:
+            edges_attr = getattr(mesh, "edges", ())
+            polys_attr = getattr(mesh, "polygons", ())
+            cur_topo = (
+                len(mesh.vertices),
+                len(edges_attr) if edges_attr is not None else 0,
+                len(polys_attr) if polys_attr is not None else 0,
+            )
+            if cur_topo != expected_sig[:3]:
+                logger.info(
+                    f"[Simulator] Mesh topology changed for '{obj.name}' "
+                    f"({expected_sig[:3]} -> {cur_topo}). Recreating simulator."
+                )
+                clear_simulator_for_object(obj.name)
+        if obj.name in _simulators:
+            return _simulators[obj.name]
 
     state = begin_simulator_init(obj)
     sim = create_simulator_from_state(obj, state)
@@ -402,9 +432,31 @@ def _has_collider_armature_moved(col_o) -> bool:
     return False
 
 
+def _to_local_coords_2d(target_obj, world_coords_2d: np.ndarray) -> np.ndarray:
+    """ワールド座標配列 [N, 3] を対象オブジェクトのローカル座標配列 [N, 3] へ変換する"""
+    if target_obj is not None and hasattr(target_obj, "matrix_world"):
+        try:
+            mat_world = target_obj.matrix_world
+            if hasattr(mat_world, "inverted"):
+                inv_mat = np.array([list(row) for row in mat_world.inverted()], dtype=np.float32)
+            else:
+                inv_mat = np.linalg.inv(np.array(mat_world, dtype=np.float32).reshape((4, 4)))
+            if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
+                return ((world_coords_2d @ inv_mat[:3, :3].T) + inv_mat[:3, 3]).astype(np.float32)
+        except (ValueError, TypeError, AttributeError, np.linalg.LinAlgError):
+            pass
+    return np.asarray(world_coords_2d, dtype=np.float32).copy()
+
+
 def _apply_coords_to_mesh(obj, coords):
     """計算済み座標配列をBlenderメッシュ頂点および紐Curveに適用する（単位行列時はゼロコピー直書き）。"""
     n_mesh_verts = len(obj.data.vertices)
+    if len(coords) < n_mesh_verts * 3:
+        logger.warning(
+            f"[Runner] Vertex count mismatch in _apply_coords_to_mesh for '{obj.name}': "
+            f"coords_len={len(coords)}, expected>={n_mesh_verts * 3}"
+        )
+        return
     total_verts = len(coords) // 3
     mesh_coords = coords[:n_mesh_verts * 3]
 
@@ -706,11 +758,30 @@ def flush_all_async_simulations(*, update_mesh: bool = True) -> int:
 
 def _persistent(func):
     """Blender環境では@persistentを適用し、スタンドアロンテスト環境では透過するデコレータ"""
-    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    app = getattr(bpy, "app", None)
+    if not isinstance(getattr(app, "version", None), tuple):
+        return func
+    handlers = getattr(app, "handlers", None)
     persistent_fn = getattr(handlers, "persistent", None)
     if callable(persistent_fn):
         return persistent_fn(func)
     return func
+
+
+def _restore_cached_curves_for_frame(obj_name: str, frame: int) -> None:
+    """タイムラインキャッシュに保存された紐カーブ制御点を復元する"""
+    curve_frame_map = _timeline_curve_cache.get(obj_name)
+    if not curve_frame_map or frame not in curve_frame_map:
+        return
+    curve_entries = curve_frame_map[frame]
+    if not curve_entries:
+        return
+    from ..utils.curve_extract import apply_coords_to_curve
+    data_objs = getattr(getattr(bpy, "data", None), "objects", None)
+    for c_name, c_local in curve_entries:
+        curve_obj = data_objs.get(c_name) if data_objs is not None else None
+        if curve_obj is not None:
+            apply_coords_to_curve(curve_obj, c_local, is_world_coords=False)
 
 
 @_persistent
@@ -725,7 +796,7 @@ def cloth_frame_handler(scene):
     # 各布オブジェクトのパラメータ変更チェック (ベイク済みの場合は変更があればキャッシュ無効化)
     for obj in scene.objects:
         if obj.type == 'MESH' and hasattr(obj, "taremin_cloth") and obj.taremin_cloth.is_cloth and getattr(obj.taremin_cloth, "enabled", True):
-            check_and_update_params_signature(obj)
+            check_and_update_params_signature(obj, scene=scene)
 
     # 各布オブジェクトのキャッシュ参照およびメッシュ適用
     for obj in scene.objects:
@@ -738,12 +809,67 @@ def cloth_frame_handler(scene):
                 cached_coords = obj_cache[current_frame]
                 obj.data.vertices.foreach_set("co", cached_coords)
                 obj.data.update()
+                _restore_cached_curves_for_frame(obj.name, current_frame)
                 obj["_taremin_cloth_is_deformed"] = (current_frame != scene.frame_start)
             else:
                 # 2. 未ベイク時またはキャッシュ範囲外:
                 # シミュレーション変形中であれば初期レスト形状へ安全に戻す
                 if obj.get("_taremin_cloth_is_deformed", False):
                     restore_rest_positions(obj, clear_timeline=False)
+
+
+@_persistent
+def on_load_pre(_dummy=None):
+    """シーン再読み込み・新規ファイル前にインタラクティブモード停止と全GPU/描画キャッシュを破棄する"""
+    try:
+        from ..ops.interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+    except Exception:
+        pass
+    try:
+        clear_simulators()
+    except Exception as e:
+        logger.warning(f"[Lifecycle] on_load_pre clear_simulators failed: {e}")
+    try:
+        from ..utils import drawing
+        drawing.clear_overlay_caches()
+    except Exception:
+        pass
+
+
+@_persistent
+def on_undo_post(_dummy=None):
+    """Undo/Redo 実行後に無効化されたオブジェクト参照やトポロジー不整合キャッシュを破棄する"""
+    try:
+        clear_collider_cache()
+    except Exception:
+        pass
+    try:
+        from ..utils import drawing
+        drawing.clear_overlay_caches()
+    except Exception:
+        pass
+    try:
+        data_objs = getattr(getattr(bpy, "data", None), "objects", None)
+        for obj_name in list(_simulators.keys()):
+            obj = data_objs.get(obj_name) if data_objs is not None else None
+            if obj is None:
+                clear_simulator_for_object(obj_name)
+                continue
+            expected_sig = _simulator_topology_signatures.get(obj_name)
+            mesh = getattr(obj, "data", None)
+            if expected_sig is not None and mesh is not None and getattr(mesh, "vertices", None) is not None:
+                edges_attr = getattr(mesh, "edges", ())
+                polys_attr = getattr(mesh, "polygons", ())
+                cur_topo = (
+                    len(mesh.vertices),
+                    len(edges_attr) if edges_attr is not None else 0,
+                    len(polys_attr) if polys_attr is not None else 0,
+                )
+                if cur_topo != expected_sig[:3]:
+                    clear_simulator_for_object(obj_name)
+    except Exception as e:
+        logger.warning(f"[Lifecycle] on_undo_post cleanup failed: {e}")
 
 
 def bake_init_simulation(scene, *, start_frame=None, end_frame=None):
@@ -777,6 +903,22 @@ def bake_init_simulation(scene, *, start_frame=None, end_frame=None):
         init_co = np.empty(n_v * 3, dtype=np.float32)
         obj.data.vertices.foreach_get("co", init_co)
         obj_cache[start_f] = init_co.copy()
+
+        string_parts = getattr(getattr(obj, "taremin_cloth", None), "string_parts", None)
+        if string_parts:
+            from ..utils.curve_extract import extract_curve_polyline
+            init_curves = []
+            for sp in string_parts:
+                if not getattr(sp, "enabled", True):
+                    continue
+                curve_obj = getattr(sp, "curve_object", None)
+                if curve_obj is not None:
+                    c_local, _, _ = extract_curve_polyline(curve_obj, apply_world_matrix=False)
+                    if len(c_local) > 0:
+                        init_curves.append((curve_obj.name, c_local.astype(np.float32)))
+            if init_curves:
+                _timeline_curve_cache.setdefault(obj.name, {})[start_f] = init_curves
+
         obj["_taremin_cloth_is_deformed"] = False
 
     fps = scene.render.fps
@@ -800,11 +942,77 @@ def bake_init_simulation(scene, *, start_frame=None, end_frame=None):
     }
 
 
+@allow_positional
+def _store_baked_frame_coords(obj, frame: int, coords: np.ndarray) -> None:
+    """1フレーム分の計算済みワールド座標をローカル座標へ変換してタイムラインキャッシュに格納する"""
+    n_mesh_verts = len(obj.data.vertices)
+    mesh_coords = coords[:n_mesh_verts * 3]
+    pos_world_mesh = mesh_coords.reshape(-1, 3)
+    local_coords = _to_local_coords_2d(obj, pos_world_mesh).flatten()
+    _timeline_frame_cache.setdefault(obj.name, {})[frame] = local_coords
+    obj["_taremin_cloth_is_deformed"] = True
+
+    total_verts = len(coords) // 3
+    if total_verts > n_mesh_verts:
+        from .cache import get_curve_parts_runtime
+        curve_parts = get_curve_parts_runtime(obj.name)
+        if curve_parts:
+            coords_2d = coords.reshape(-1, 3)
+            frame_curves = []
+            data_objs = getattr(getattr(bpy, "data", None), "objects", None)
+            for c_part in curve_parts:
+                v_start = c_part.vertex_offset
+                v_end = v_start + c_part.vertex_count
+                if v_end <= total_verts:
+                    c_world = coords_2d[v_start:v_end]
+                    c_obj = data_objs.get(c_part.curve_obj_name) if data_objs is not None else None
+                    c_local = _to_local_coords_2d(c_obj, c_world) if c_obj is not None else c_world.copy()
+                    frame_curves.append((c_part.curve_obj_name, c_local))
+            if frame_curves:
+                _timeline_curve_cache.setdefault(obj.name, {})[frame] = frame_curves
+
+
+@allow_positional
+def _flush_buffered_bake_for_object(bake_ctx, obj, sim, coords: np.ndarray) -> int:
+    """GPUリングバッファに蓄積された複数フレーム座標を一括回収してタイムラインキャッシュへ格納する"""
+    buffered_map = bake_ctx.get("buffered_frames") if bake_ctx else None
+    if not buffered_map:
+        return 0
+    pending_frames = buffered_map.get(obj.name)
+    if not pending_frames:
+        return 0
+
+    n_pending = len(pending_frames)
+    total_floats = len(coords)
+    if total_floats == 0 or not hasattr(sim, "fetch_buffered_positions"):
+        pending_frames.clear()
+        _buffered_start_frames.pop(obj.name, None)
+        return 0
+
+    batch_buf = np.empty(n_pending * total_floats, dtype=np.float32)
+    fetched = int(sim.fetch_buffered_positions(batch_buf))
+    actual_n = min(n_pending, fetched)
+    for i in range(actual_n):
+        f_num = pending_frames[i]
+        f_coords = batch_buf[i * total_floats : (i + 1) * total_floats]
+        _store_baked_frame_coords(obj, f_num, f_coords)
+
+    if actual_n > 0:
+        last_slice = batch_buf[(actual_n - 1) * total_floats : actual_n * total_floats]
+        coords[:] = last_slice
+        _apply_coords_to_mesh(obj, coords)
+
+    pending_frames.clear()
+    _buffered_start_frames.pop(obj.name, None)
+    return actual_n
+
+
 def bake_step_frame(bake_ctx, frame):
     """指定フレームのシミュレーション計算を1ステップ実行し、キャッシュに保存する"""
     scene = bake_ctx["scene"]
     cloth_objs = bake_ctx["cloth_objs"]
     start_f = bake_ctx["start_frame"]
+    end_f = bake_ctx["end_frame"]
     dt = bake_ctx["dt"]
 
     scene.frame_set(frame)
@@ -830,33 +1038,67 @@ def bake_step_frame(bake_ctx, frame):
     except Exception:
         depsgraph = None
 
+    buffered_map = bake_ctx.setdefault("buffered_frames", {})
+
     for obj in cloth_objs:
         sim, coords = get_or_create_simulator(obj)
         settings = obj.taremin_cloth
-        sim, coords = step_cloth_object(
-            obj,
-            scene,
-            dt=dt,
-            depsgraph=depsgraph,
-            force_sync_colliders=any_collider_deformed,
-            update_mesh=True,
-            substeps=None,
-            solver_iterations=settings.solver_iterations,
+
+        enable_buf = (
+            bool(getattr(settings, "enable_frame_buffering", False))
+            and hasattr(sim, "step_buffered")
+            and hasattr(sim, "fetch_buffered_positions")
         )
-        local_coords = None
-        if hasattr(obj, "matrix_world"):
-            try:
-                inv_mat = np.array(obj.matrix_world.inverted(), dtype=np.float32)
-                if inv_mat.ndim == 2 and inv_mat.shape == (4, 4):
-                    pos_world = coords.reshape(-1, 3)
-                    local_coords = ((pos_world @ inv_mat[:3, :3].T) + inv_mat[:3, 3]).flatten()
-            except (ValueError, TypeError, AttributeError):
-                local_coords = None
-        if local_coords is not None:
-            _timeline_frame_cache[obj.name][frame] = local_coords
+        try:
+            buf_size = max(2, min(8, int(getattr(settings, "frame_buffer_size", 2) or 2)))
+        except (TypeError, ValueError):
+            buf_size = 2
+
+        wp_mgr = _waypoint_managers.get(obj.name)
+        has_active_wp = bool(wp_mgr and wp_mgr.has_active_seams)
+        sew_prio_unlatched = bool(
+            getattr(settings, "enable_sewing_priority", False)
+            and hasattr(sim, "is_sewing_priority_active")
+            and sim.is_sewing_priority_active()
+        )
+        needs_immediate_cpu_coords = has_active_wp or sew_prio_unlatched
+
+        if enable_buf and not needs_immediate_cpu_coords:
+            sync_colliders(sim, scene, depsgraph=depsgraph, force=any_collider_deformed, cloth_obj=obj)
+            sync_cloth_parameters(sim, obj, scene=scene)
+            sync_attachment_pins(sim, obj, scene=scene)
+
+            actual_substeps = (
+                None
+                if bool(getattr(settings, "enable_adaptive_substep", False))
+                else getattr(settings, "substeps", None)
+            )
+            actual_iters = getattr(settings, "solver_iterations", 1)
+
+            pending_list = buffered_map.setdefault(obj.name, [])
+            if not pending_list:
+                _buffered_start_frames[obj.name] = frame
+            sim.step_buffered(dt=dt, substeps=actual_substeps, solver_iterations=actual_iters)
+            pending_list.append(frame)
+
+            if len(pending_list) >= buf_size or frame >= end_f:
+                _flush_buffered_bake_for_object(bake_ctx, obj, sim, coords)
         else:
-            _timeline_frame_cache[obj.name][frame] = coords.copy()
-        obj["_taremin_cloth_is_deformed"] = True
+            # バッファリング中の未回収フレームがあれば先にフラッシュしてから通常ステップへ移行
+            if buffered_map.get(obj.name):
+                _flush_buffered_bake_for_object(bake_ctx, obj, sim, coords)
+
+            sim, coords = step_cloth_object(
+                obj,
+                scene,
+                dt=dt,
+                depsgraph=depsgraph,
+                force_sync_colliders=any_collider_deformed,
+                update_mesh=True,
+                substeps=None,
+                solver_iterations=settings.solver_iterations,
+            )
+            _store_baked_frame_coords(obj, frame, coords)
 
     bake_ctx["baked_count"] += 1
     return bake_ctx["baked_count"]
@@ -867,9 +1109,14 @@ def bake_finalize_simulation(bake_ctx):
     flush_all_async_simulations(update_mesh=False)
     if not bake_ctx:
         return
+    cloth_objs = bake_ctx["cloth_objs"]
+    buffered_map = bake_ctx.get("buffered_frames") or {}
+    for obj in cloth_objs:
+        if buffered_map.get(obj.name) and obj.name in _simulators:
+            sim, coords = _simulators[obj.name]
+            _flush_buffered_bake_for_object(bake_ctx, obj, sim, coords)
     scene = bake_ctx["scene"]
     start_f = bake_ctx["start_frame"]
-    cloth_objs = bake_ctx["cloth_objs"]
 
     scene.frame_set(start_f)
     for obj in cloth_objs:
@@ -877,6 +1124,7 @@ def bake_finalize_simulation(bake_ctx):
         if init_coords is not None:
             obj.data.vertices.foreach_set("co", init_coords)
             obj.data.update()
+            _restore_cached_curves_for_frame(obj.name, start_f)
             obj["_taremin_cloth_is_deformed"] = False
 
     logger.info(f"[Bake] Completed simulation bake: {bake_ctx['baked_count']} frames cached.")
@@ -898,13 +1146,25 @@ def bake_cloth_simulation(scene, *, start_frame=None, end_frame=None, progress_c
         if progress_callback:
             progress_callback(1, total_steps + 1)
 
+        cancelled = False
         for frame in range(start_f + 1, end_f + 1):
             if cancel_check and cancel_check():
                 logger.info(f"[Bake] Cancelled by user at frame {frame}")
+                cancelled = True
                 break
             bake_step_frame(bake_ctx, frame)
             if progress_callback:
                 progress_callback(bake_ctx["baked_count"], total_steps + 1)
+
+        if cancelled:
+            flush_all_async_simulations(update_mesh=False)
+            from .cache import free_scene_bake
+            free_scene_bake(scene)
+            try:
+                scene.frame_set(start_f)
+            except Exception:
+                pass
+            return 0
 
         bake_finalize_simulation(bake_ctx)
         return bake_ctx["baked_count"]

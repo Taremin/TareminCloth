@@ -8,6 +8,7 @@ import os
 import re
 import time
 from datetime import datetime
+from typing import Optional
 import bpy
 import mathutils
 from ..properties import IntProperty, StringProperty
@@ -16,6 +17,7 @@ from ..engine.cache import (
     _simulators,
     cache_rest_positions,
     clear_simulator_for_object,
+    clear_attachment_pin_cache,
 )
 from ..engine.runner import (
     get_or_create_simulator,
@@ -25,6 +27,7 @@ from ..engine.runner import (
     step_cloth_scene,
     step_cloth_object,
     restore_fast_playback,
+    flush_async_simulation,
     _apply_coords_to_mesh,
 )
 from ..preferences import get_preferences
@@ -34,7 +37,13 @@ from ..utils.view3d import tag_redraw_view3d
 from ..engine.sewing_priority import sim_phase, phase_text
 from .. import i18n
 from ..brush import create_tools, active_tool_name, get_brush_hud_info
-from ..brush.base import BrushContext, RadialController, init_brush_circle_at, nudge_brush_radius
+from ..brush.base import (
+    BrushContext,
+    RadialController,
+    init_brush_circle_at,
+    nudge_brush_radius,
+    pick_target_vertex_index,
+)
 
 _interactive_running = False
 _interactive_operator_instance = None
@@ -51,6 +60,41 @@ def get_last_benchmark_summary():
     """直近のインタラクティブモードのFPSサンプリング計測結果を取得する"""
     global _last_benchmark_summary
     return _last_benchmark_summary
+
+
+def ensure_pin_vertex_group(obj):
+    """オブジェクトのピン頂点グループを取得する。未設定・未作成時は 'Pin' を作成して設定する。"""
+    settings = obj.taremin_cloth
+    vg_name = settings.pin_vertex_group or "Pin"
+    vg = obj.vertex_groups.get(vg_name)
+    if not vg:
+        vg = obj.vertex_groups.new(name="Pin")
+        settings.pin_vertex_group = "Pin"
+    return vg
+
+
+def compute_interactive_step_limit(
+    *,
+    realtime_sync: bool,
+    max_steps: int,
+    ema_step_ms: Optional[float],
+    fixed_dt: float = 1.0 / 60.0,
+) -> int:
+    """実測 1 ステップ実行時間に基づき、Spiral of Death を防ぎつつ 1 描画フレームの最大ステップ数を決定する。"""
+    if not realtime_sync:
+        return 1
+    try:
+        max_steps_int = max(1, min(8, int(max_steps)))
+    except (TypeError, ValueError):
+        max_steps_int = 4
+    if ema_step_ms is None or ema_step_ms <= 0.0:
+        # 初回ステップは実行コスト未計測のため 1 ステップに抑え、重いシーンの起動直後フリーズを防ぐ
+        return 1
+    budget_ms = max(fixed_dt * 1000.0, 1.0)
+    if ema_step_ms >= budget_ms * 0.85:
+        return 1
+    affordable = max(1, int(budget_ms // ema_step_ms))
+    return min(max_steps_int, affordable)
 
 
 def stop_interactive_if_running():
@@ -997,6 +1041,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
     _radial = None
     _anim_frame_counter = 0
     _accumulator = 0.0
+    _ema_step_ms = None
     _isolated_areas = []
     _saved_selection = []
     _saved_active = None
@@ -1064,13 +1109,15 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
 
         realtime_sync = getattr(settings, "interactive_realtime_sync", True) if settings else True
         max_steps = getattr(settings, "interactive_max_steps", 4) if settings else 4
-
-        # インタラクティブモードでは1描画フレームにつき最大1ステップに制限し、
-        # 重いシーンで2ステップ連続実行されてFPSが半減し続けるスパイラル（Spiral of Death）を防止する。
-        step_limit = 1
+        step_limit = compute_interactive_step_limit(
+            realtime_sync=realtime_sync,
+            max_steps=max_steps,
+            ema_step_ms=getattr(self, "_ema_step_ms", None),
+            fixed_dt=FIXED_DT,
+        )
         if realtime_sync:
             self._accumulator += delta_time
-            self._accumulator = min(self._accumulator, FIXED_DT * 1.5)
+            self._accumulator = min(self._accumulator, FIXED_DT * (step_limit + 0.5))
         else:
             self._accumulator = FIXED_DT
 
@@ -1097,6 +1144,10 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             self._anim_frame_counter += 1
             t_step_total = (time.perf_counter() - t0) * 1000.0
 
+            per_step_ms = t_step_total / max(1, step_count)
+            prev_ema = getattr(self, "_ema_step_ms", None)
+            self._ema_step_ms = per_step_ms if prev_ema is None else (prev_ema * 0.7 + per_step_ms * 0.3)
+
             # 3Dビューポートの再描画要求
             tag_redraw_view3d(context)
 
@@ -1119,7 +1170,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 if hud.get("tool") == 'GRAB':
                     guide_line1_suffix = f"[E] {i18n.trans('Range Grab')} / {i18n.trans('Smooth')}"
                 else:
-                    guide_line1_suffix = "[E] switch [F]radius [Shift+F]strength"
+                    guide_line1_suffix = i18n.trans("[E] switch [F]radius [Shift+F]strength")
                 # line2: ツール状態（r/s/falloff、調整中強調）
                 parts = [f"{i18n.trans('Tool: %s') % label}"]
                 _r = hud.get("radius")
@@ -1203,15 +1254,35 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         act = context.active_object
         if act and act.type == 'CURVE' and (hasattr(act, "taremin_wrinkle") or "wrinkle_type" in act):
             curves = [act]
-        elif target_col:
-            curves = [o for o in target_col.objects if o.type == 'CURVE']
+        else:
+            sel_curves = [
+                o for o in (getattr(context, "selected_objects", None) or [])
+                if getattr(o, "type", None) == 'CURVE'
+                and (hasattr(o, "taremin_wrinkle") or "wrinkle_type" in o)
+            ]
+            if sel_curves:
+                curves = sel_curves
+            elif target_col:
+                curves = [o for o in target_col.objects if o.type == 'CURVE']
 
         if not curves:
             return False
 
+        # 複数ボーンのカーブが混在している場合は、設定ボーン（未一致時は先頭カーブのボーン）
+        # のカーブ群のみに絞り込み、他ボーンのカーブまで1本へ吸い寄せられるのを防ぐ。
+        pref_bone = str(getattr(settings, "wrinkle_bone_name", "") or "") if settings else ""
+        if len(curves) > 1:
+            matched = [c for c in curves if (c.get("wrinkle_target_bone", "") or "") == pref_bone] if pref_bone else []
+            if matched:
+                curves = matched
+            else:
+                lead_bone = str(curves[0].get("wrinkle_target_bone", "") or "")
+                if lead_bone:
+                    curves = [c for c in curves if (c.get("wrinkle_target_bone", "") or "") == lead_bone]
+
         first_obj = curves[0]
         arm_name = first_obj.get("wrinkle_armature", "")
-        bone_name = first_obj.get("wrinkle_target_bone", "")
+        bone_name = first_obj.get("wrinkle_target_bone", "") or pref_bone
         arm_obj = bpy.data.objects.get(arm_name)
         if not arm_obj or arm_obj.type != 'ARMATURE':
             arm_obj = getattr(settings, "wrinkle_armature", None) if settings else None
@@ -1233,16 +1304,32 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._slide_scale_radius = float(first_obj.get("wrinkle_scale_radius", 1.0))
         self._slide_base_scale_radius = float(self._slide_scale_radius)
         self._slide_influence_radius = float(first_obj.get("wrinkle_influence_radius", 0.03))
+        self._slide_base_influence_radius = float(self._slide_influence_radius)
         self._slide_strength = float(first_obj.get("wrinkle_strength", 1.0))
+        self._slide_base_strength = float(self._slide_strength)
         self._slide_init_x = event.mouse_x
 
         self._slide_initial_points = []
+        self._slide_curve_orig_props = []
         for c_obj in curves:
             pts = []
             for sp in c_obj.data.splines:
                 for p in sp.points:
                     pts.append(list(p.co[:3]))
             self._slide_initial_points.append(np.array(pts, dtype=np.float32))
+            tw = getattr(c_obj, "taremin_wrinkle", None)
+            self._slide_curve_orig_props.append({
+                "has_t_param": "wrinkle_t_param" in c_obj,
+                "wrinkle_t_param": c_obj.get("wrinkle_t_param"),
+                "has_scale_radius": "wrinkle_scale_radius" in c_obj,
+                "wrinkle_scale_radius": c_obj.get("wrinkle_scale_radius"),
+                "has_influence_radius": "wrinkle_influence_radius" in c_obj,
+                "wrinkle_influence_radius": c_obj.get("wrinkle_influence_radius"),
+                "has_strength": "wrinkle_strength" in c_obj,
+                "wrinkle_strength": c_obj.get("wrinkle_strength"),
+                "tw_influence_radius": float(tw.influence_radius) if tw is not None and hasattr(tw, "influence_radius") else None,
+                "tw_strength": float(tw.strength) if tw is not None and hasattr(tw, "strength") else None,
+            })
 
         self._wrinkle_sliding = True
         return True
@@ -1280,9 +1367,42 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                         p_idx += 1
 
     def _restore_interactive_wrinkle_curves(self):
-        """シワスライドキャンセル時に初期位置を復元"""
-        for obj, pts in zip(self._sliding_curves, self._slide_initial_points):
-            obj["wrinkle_t_param"] = float(self._slide_base_t)
+        """シワスライドキャンセル時に初期位置および初期パラメータを復元"""
+        self._slide_current_t = self._slide_base_t
+        self._slide_scale_radius = self._slide_base_scale_radius
+        self._slide_influence_radius = getattr(self, "_slide_base_influence_radius", 0.03)
+        self._slide_strength = getattr(self, "_slide_base_strength", 1.0)
+        orig_props = getattr(self, "_slide_curve_orig_props", [])
+        for idx, (obj, pts) in enumerate(zip(self._sliding_curves, self._slide_initial_points)):
+            saved = orig_props[idx] if idx < len(orig_props) else None
+            if saved is not None:
+                for key, has_key in (
+                    ("wrinkle_t_param", "has_t_param"),
+                    ("wrinkle_scale_radius", "has_scale_radius"),
+                    ("wrinkle_influence_radius", "has_influence_radius"),
+                    ("wrinkle_strength", "has_strength"),
+                ):
+                    if saved.get(has_key):
+                        obj[key] = saved[key]
+                    elif key in obj:
+                        try:
+                            del obj[key]
+                        except Exception:
+                            pass
+                tw = getattr(obj, "taremin_wrinkle", None)
+                if tw is not None:
+                    try:
+                        if saved.get("tw_influence_radius") is not None:
+                            tw.influence_radius = float(saved["tw_influence_radius"])
+                        if saved.get("tw_strength") is not None:
+                            tw.strength = float(saved["tw_strength"])
+                    except Exception:
+                        pass
+            else:
+                obj["wrinkle_t_param"] = float(self._slide_base_t)
+                obj["wrinkle_scale_radius"] = float(self._slide_base_scale_radius)
+                obj["wrinkle_influence_radius"] = float(self._slide_influence_radius)
+                obj["wrinkle_strength"] = float(self._slide_strength)
             p_idx = 0
             for sp in obj.data.splines:
                 for p in sp.points:
@@ -1301,6 +1421,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._fps_counter = FPSCounter(ema_alpha=0.15)
         self._anim_frame_counter = 0
         self._accumulator = 0.0
+        self._ema_step_ms = None
         self._last_step_time = time.perf_counter()
         self._perf_samples = []
         self._isolated_areas = []
@@ -1324,7 +1445,10 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         self._slide_scale_radius = 1.0
         self._slide_base_scale_radius = 1.0
         self._slide_influence_radius = 0.03
+        self._slide_base_influence_radius = 0.03
         self._slide_strength = 1.0
+        self._slide_base_strength = 1.0
+        self._slide_curve_orig_props = []
         drawing.clear_interactive_fps_info()
         drawing.clear_init_overlay_info()
 
@@ -1693,6 +1817,11 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             self.cancel(context)
             return {'CANCELLED'}
 
+        if getattr(cloth_obj, "mode", 'OBJECT') != 'OBJECT':
+            self.report({'WARNING'}, i18n.trans("Exited interactive simulation because object mode changed."))
+            self.cancel(context)
+            return {'CANCELLED'}
+
         obj = cloth_obj
         sim, coords = get_or_create_simulator(obj)
 
@@ -1726,7 +1855,7 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 self._wrinkle_sliding = False
                 self._update_interactive_wrinkle_curves()
                 tag_redraw_view3d(context)
-                self.report({'INFO'}, i18n.trans(f"Confirmed wrinkle slide at t={self._slide_current_t:.3f}."))
+                self.report({'INFO'}, i18n.trans("Confirmed wrinkle slide at t=%.3f.") % self._slide_current_t)
                 return {'RUNNING_MODAL'}
 
             elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
@@ -1741,6 +1870,14 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         if event.type == 'TIMER':
             self.step_simulation(context)
             return {'PASS_THROUGH'}
+
+        # インタラクティブ実行中の意図しない Undo (Ctrl+Z) およびモード切替 (Tab) をブロック
+        if event.value == 'PRESS' and (
+            (event.type == 'Z' and (event.ctrl or event.oskey))
+            or event.type == 'TAB'
+        ):
+            logger.debug(f"[Interactive] Blocked shortcut during interactive simulation: {event.type}")
+            return {'RUNNING_MODAL'}
 
         elif event.type == 'LEFTMOUSE':
             if event.value == 'PRESS':
@@ -1896,37 +2033,32 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
             # Pキーで掴んでいる頂点（またはカーソル下の頂点）をピン留め／解除（トグル）
             _sg = self._brush_tools.get('GRAB')
             target_v_idx = _sg.grabbed_vert if _sg is not None else None
-            if target_v_idx is None:
-                # ドラッグしていない場合はマウスカーソル直下の頂点を探索
-                region = context.region
-                rv3d = context.region_data
-                if region and rv3d:
-                    mouse_pos = (event.mouse_region_x, event.mouse_region_y)
-                    pos_2d = coords.reshape((-1, 3))
-                    best_dist = float('inf')
-                    for i, p in enumerate(pos_2d):
-                        world_p = mathutils.Vector(p)
-                        screen_co = view3d_utils.location_3d_to_region_2d(region, rv3d, world_p)
-                        if screen_co:
-                            dist = (screen_co.x - mouse_pos[0]) ** 2 + (screen_co.y - mouse_pos[1]) ** 2
-                            if dist < best_dist and dist < 2500:
-                                best_dist = dist
-                                target_v_idx = i
-
+            target_verts = []
             if target_v_idx is not None:
-                settings = obj.taremin_cloth
-                vg_name = settings.pin_vertex_group or "Pin"
-                vg = obj.vertex_groups.get(vg_name)
-                if not vg:
-                    vg = obj.vertex_groups.new(name="Pin")
-                    settings.pin_vertex_group = "Pin"
+                cluster = list(getattr(_sg, "grabbed_cluster", None) or [])
+                target_verts = list(dict.fromkeys([int(target_v_idx)] + [int(v) for v in cluster]))
+            else:
+                # ドラッグしていない場合は視線レイキャスト優先でカーソル直下の頂点を探索
+                picked_idx, _, _ = pick_target_vertex_index(
+                    context,
+                    obj,
+                    coords=coords,
+                    mouse_pos=(event.mouse_region_x, event.mouse_region_y),
+                )
+                if picked_idx is not None:
+                    target_v_idx = int(picked_idx)
+                    target_verts = [target_v_idx]
+
+            if target_v_idx is not None and target_verts:
+                vg = ensure_pin_vertex_group(obj)
+                vg_name = vg.name
 
                 n_mesh_verts = len(obj.data.vertices)
-                is_mesh_vert = (0 <= target_v_idx < n_mesh_verts)
+                is_rep_mesh_vert = (0 <= target_v_idx < n_mesh_verts)
 
-                # すでにピン留めされているか判定
-                is_pinned = (target_v_idx in self._pinned_verts)
-                if not is_pinned and is_mesh_vert:
+                # すでにピン留めされているか判定（代表頂点またはクラスタ内いずれか）
+                is_pinned = any(v in self._pinned_verts for v in target_verts)
+                if not is_pinned and is_rep_mesh_vert:
                     try:
                         w = vg.weight(target_v_idx)
                         if w > 0.0:
@@ -1934,33 +2066,49 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                     except RuntimeError:
                         is_pinned = False
 
+                pos_2d = coords.reshape((-1, 3))
+                extra_cnt = len(target_verts) - 1
                 if is_pinned:
                     # ピン解除 (Unpin)
-                    if is_mesh_vert:
+                    mesh_targets = [v for v in target_verts if 0 <= v < n_mesh_verts]
+                    if mesh_targets:
                         try:
-                            vg.remove([target_v_idx])
+                            vg.remove(mesh_targets)
                         except RuntimeError:
                             pass
-                    self._pinned_verts.discard(target_v_idx)
-                    # ドラッグ中でなければ物理ピンも解除
-                    if _sg is None or _sg.grabbed_vert != target_v_idx:
-                        sim.release_pin(target_v_idx)
-                    self.report({'INFO'}, i18n.trans("Unpinned vertex #%d") % target_v_idx)
+                    for v in target_verts:
+                        self._pinned_verts.discard(v)
+                        # ドラッグ中のグラブ頂点群でなければ物理ピンも解除
+                        is_active_grab = _sg is not None and (
+                            v == _sg.grabbed_vert or v in getattr(_sg, "grabbed_cluster", [])
+                        )
+                        if not is_active_grab:
+                            sim.release_pin(v)
+                    if extra_cnt > 0:
+                        self.report({'INFO'}, i18n.trans("Unpinned vertex #%d (+%d cluster)") % (target_v_idx, extra_cnt))
+                    else:
+                        self.report({'INFO'}, i18n.trans("Unpinned vertex #%d") % target_v_idx)
                 else:
                     # ピン留め (Pin: 紐頂点の場合は頂点グループ操作をスキップしランタイムピンのみ設定)
-                    if is_mesh_vert:
-                        vg.add([target_v_idx], 1.0, 'REPLACE')
-                    self._pinned_verts.add(target_v_idx)
-                    # 現在のワールド目標位置（または頂点現在位置）で固定
+                    mesh_targets = [v for v in target_verts if 0 <= v < n_mesh_verts]
+                    if mesh_targets:
+                        vg.add(mesh_targets, 1.0, 'REPLACE')
                     _grab_cur = getattr(_sg, "grab_current_target_world", None) if _sg is not None else None
-                    if _sg is not None and _sg.grabbed_vert == target_v_idx and _grab_cur is not None:
-                        t_pos = _grab_cur
+                    for v in target_verts:
+                        self._pinned_verts.add(v)
+                        if _sg is not None and _sg.grabbed_vert == v and _grab_cur is not None:
+                            t_pos = _grab_cur
+                        else:
+                            p = pos_2d[v]
+                            t_pos = mathutils.Vector((p[0], p[1], p[2]))
+                        sim.set_pin(v, [t_pos.x, t_pos.y, t_pos.z], 1.0)
+                    if extra_cnt > 0:
+                        self.report({'INFO'}, i18n.trans("Pinned vertex #%d (+%d cluster)") % (target_v_idx, extra_cnt))
                     else:
-                        p = coords.reshape((-1, 3))[target_v_idx]
-                        t_pos = mathutils.Vector((p[0], p[1], p[2]))
-                    sim.set_pin(target_v_idx, [t_pos.x, t_pos.y, t_pos.z], 1.0)
-                    self.report({'INFO'}, i18n.trans("Pinned vertex #%d") % target_v_idx)
+                        self.report({'INFO'}, i18n.trans("Pinned vertex #%d") % target_v_idx)
 
+                drawing.clear_pin_cache()
+                clear_attachment_pin_cache(obj_name=obj.name)
                 if context.area:
                     context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
@@ -2081,15 +2229,25 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
                 pass
             self._cursor_wait_set = False
 
+        cloth_name = getattr(self, "_cloth_obj_name", "")
+        data_objs = getattr(getattr(bpy, "data", None), "objects", None)
+        obj = data_objs.get(cloth_name) if (cloth_name and data_objs is not None) else None
+        if obj is None:
+            obj = getattr(context, "active_object", None)
+
         try:
-            obj = context.active_object
-            sim = _simulators[obj.name][0] if obj is not None and obj.name in _simulators else None
-            if sim is not None:
-                for tool in self._brush_tools.values():
-                    try:
-                        tool.abort(sim, self._pinned_verts)
-                    except Exception:
-                        pass
+            if obj is not None and obj.name in _simulators:
+                try:
+                    flush_async_simulation(obj, update_mesh=True)
+                except Exception:
+                    pass
+                sim = _simulators[obj.name][0]
+                if sim is not None:
+                    for tool in self._brush_tools.values():
+                        try:
+                            tool.abort(sim, self._pinned_verts)
+                        except Exception:
+                            pass
         except Exception:
             pass
         self._brush_dragging = None
@@ -2107,7 +2265,6 @@ class TAREMIN_CLOTH_OT_interactive(bpy.types.Operator):
         # デバッグ状態記録のファイル保存とクリーンアップ
         # (巨大ファイルの誤出力防止のため、対話UI時は確認ダイアログを挟む。
         #  ヘッドレス/バックグラウンド時は従来通り自動保存する)
-        obj = context.active_object
         if obj and obj.name in _simulators:
             sim, _ = _simulators[obj.name]
             if sim and hasattr(sim, "is_debug_recording") and sim.is_debug_recording():

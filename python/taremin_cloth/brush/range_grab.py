@@ -132,9 +132,10 @@ class RangeGrabTool(BaseBrushTool):
     def abort(self, sim, pinned_verts):
         self.dragging = False
         self.active_region.release_temp_pins(sim)
+        pinned_set = set(pinned_verts) if pinned_verts else set()
         if self.grab:
             for v_idx in list(self.grab.keys()):
-                if v_idx not in pinned_verts:
+                if v_idx not in pinned_set:
                     try:
                         sim.release_pin(v_idx)
                     except Exception:
@@ -167,15 +168,19 @@ class RangeGrabTool(BaseBrushTool):
                 weights = np.asarray(weights)[keep]
             except Exception:
                 pass
+        pinned_verts = set(getattr(getattr(ctx, "op", None), "_pinned_verts", set()) or set())
         grab = {}
         pin_idx, pin_w = select_grab_pins(found, weights)
         for v_idx, w in zip(pin_idx, pin_w):
-            p = pos_2d[v_idx]
+            v_int = int(v_idx)
+            if v_int in pinned_verts:
+                continue
+            p = pos_2d[v_int]
             init = mathutils.Vector((p[0], p[1], p[2]))
-            grab[v_idx] = (init, float(w))
+            grab[v_int] = (init, float(w))
             # ウェイトは減衰値そのまま: 中心は完全固定、裾野はソフト追従。
             # 全頂点を 1.0 固定すると裾野が運動学的壁となり周囲へ伝播しない。
-            sim.set_pin(v_idx, [init.x, init.y, init.z], float(w))
+            sim.set_pin(v_int, [init.x, init.y, init.z], float(w))
 
         # 縫合クラスタパートナーの同期補完:
         # デプスフィルタ等で脱落した対向側の結合済み縫合端点や中継点を同一ウェイトでグラブ対象に含める。
@@ -186,11 +191,12 @@ class RangeGrabTool(BaseBrushTool):
         for v_idx, (init, w) in list(grab.items()):
             partners = get_connected_seam_partners(obj.name, v_idx, pos_2d, threshold)
             for p_idx in partners:
-                if p_idx < len(pos_2d) and p_idx not in grab and p_idx not in cluster_additions:
-                    p_pos = pos_2d[p_idx]
+                p_int = int(p_idx)
+                if p_int < len(pos_2d) and p_int not in grab and p_int not in cluster_additions and p_int not in pinned_verts:
+                    p_pos = pos_2d[p_int]
                     p_init = mathutils.Vector((p_pos[0], p_pos[1], p_pos[2]))
-                    cluster_additions[p_idx] = (p_init, float(w))
-                    sim.set_pin(p_idx, [p_init.x, p_init.y, p_init.z], float(w))
+                    cluster_additions[p_int] = (p_init, float(w))
+                    sim.set_pin(p_int, [p_init.x, p_init.y, p_init.z], float(w))
         grab.update(cluster_additions)
         self.grab = grab
         # 単一グラブと同一のビュー平面方式でドラッグする
@@ -216,7 +222,7 @@ class RangeGrabTool(BaseBrushTool):
         self._prev_hit = _copy_vec(self.initial_plane_hit)
         if brush_opt(ctx.brush, "use_active_region", False):
             scale = float(brush_opt(ctx.brush, "active_region_scale", 2.5))
-            all_exclude = set(grab.keys())
+            all_exclude = set(grab.keys()) | pinned_verts
             self.active_region.freeze_inactive_region(
                 sim, pos_2d, res["center"], radius, active_scale=scale, exclude_pins=all_exclude
             )
@@ -289,9 +295,10 @@ class RangeGrabTool(BaseBrushTool):
 
     def _release(self, ctx, pinned_verts):
         """ピン留めされていない頂点を物理へ戻す"""
+        pinned_set = set(pinned_verts) if pinned_verts else set()
         if self.grab:
             for v_idx in list(self.grab.keys()):
-                if v_idx not in pinned_verts:
+                if v_idx not in pinned_set:
                     try:
                         ctx.sim.release_pin(v_idx)
                     except Exception:

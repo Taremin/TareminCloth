@@ -263,6 +263,21 @@ def get_all_presets(category: str) -> dict[str, dict]:
     return result
 
 
+def _get_export_keys_for_category(category: str) -> list[str]:
+    """カテゴリ別にカスタムプリセットへ保存すべき全プロパティ名リストを返す"""
+    if category == 'fabric':
+        return sorted(CLOTH_FABRIC_PROPERTIES - {"last_fabric_preset"})
+    if category == 'simulation':
+        return sorted(CLOTH_SIMULATION_PROPERTIES - {"last_simulation_preset"})
+    if category == 'collider':
+        return sorted((COLLIDER_RESET_PROPERTIES - {"last_collider_preset"}) | {"collider_type"})
+    info = CATEGORY_MAP.get(category)
+    if not info or not info.get('builtin'):
+        return []
+    sample_builtin = next(iter(info['builtin'].values()))
+    return sorted(sample_builtin.keys())
+
+
 def extract_properties_for_category(obj: bpy.types.Object, category: str) -> dict:
     """オブジェクトからカテゴリに対応するプロパティ値を抽出"""
     info = CATEGORY_MAP.get(category)
@@ -272,12 +287,17 @@ def extract_properties_for_category(obj: bpy.types.Object, category: str) -> dic
     settings = getattr(obj, target_attr, None)
     if not settings:
         return {}
-    sample_builtin = next(iter(info['builtin'].values()))
-    keys = sample_builtin.keys()
     data = {}
-    for k in keys:
+    for k in _get_export_keys_for_category(category):
         if hasattr(settings, k):
-            data[k] = getattr(settings, k)
+            val = getattr(settings, k)
+            if isinstance(val, (bool, int, float, str)):
+                data[k] = val
+            elif hasattr(val, "__iter__") and not isinstance(val, (dict, bytes)):
+                try:
+                    data[k] = [float(x) for x in val]
+                except (TypeError, ValueError):
+                    pass
     return data
 
 
@@ -290,7 +310,12 @@ def apply_preset_values(obj: bpy.types.Object, category: str, *, values: dict):
     settings = getattr(obj, target_attr, None)
     if not settings:
         return
-    for k, v in values.items():
+    # update コールバックを持つ区分プロパティを先に反映し、後続の数値上書きが潰されないようにする
+    sorted_items = sorted(
+        values.items(),
+        key=lambda kv: (0 if kv[0] in ("self_collision_purpose", "collider_type") else 1, kv[0]),
+    )
+    for k, v in sorted_items:
         if hasattr(settings, k):
             try:
                 setattr(settings, k, v)
@@ -487,18 +512,34 @@ class TAREMIN_CLOTH_OT_delete_preset(Operator):
 
 def reset_properties_to_defaults(prop_group: bpy.types.PropertyGroup, prop_names: set[str]):
     """プロパティグループ内の指定プロパティをRNA定義のデフォルト値へ復帰"""
+    preserve_thickness = ("thickness" not in prop_names) and hasattr(prop_group, "thickness")
+    orig_thickness = getattr(prop_group, "thickness", None) if preserve_thickness else None
+
     rna_props = prop_group.bl_rna.properties
-    for name in prop_names:
+    ordered_names = sorted(
+        prop_names,
+        key=lambda n: (0 if n in ("self_collision_purpose", "collider_type") else 1, n),
+    )
+    for name in ordered_names:
         if name in rna_props:
             prop = rna_props[name]
             if prop.type in {'POINTER', 'COLLECTION'}:
                 continue
-            default_val = getattr(prop, "default", None)
+            default_arr = getattr(prop, "default_array", None) if getattr(prop, "is_array", False) else None
+            default_val = default_arr if default_arr is not None else getattr(prop, "default", None)
             if default_val is not None:
                 try:
                     setattr(prop_group, name, default_val)
                 except Exception as e:
                     print(f"[TareminCloth] プロパティリセット失敗 ({name}): {e}")
+
+    # self_collision_purpose 等の update コールバックがスコープ外の thickness を書き換えた場合に復元
+    if preserve_thickness and orig_thickness is not None:
+        try:
+            if getattr(prop_group, "thickness", None) != orig_thickness:
+                setattr(prop_group, "thickness", orig_thickness)
+        except Exception:
+            pass
 
 
 CLOTH_FABRIC_PROPERTIES = {
@@ -549,7 +590,8 @@ COLLIDER_RESET_PROPERTIES = {
     "blend_k", "sdf_update_mode", "sdf_dynamic_update_interval", "sdf_cache_enabled",
     "enable_joint_mesh", "joint_weight_threshold", "joint_rotation_threshold",
     "mesh_sdf_voxel_size", "mesh_sdf_margin", "mesh_sdf_max_vram_mb",
-    "mesh_sdf_auto_scale", "mesh_sdf_cache_enabled", "last_collider_preset",
+    "mesh_sdf_auto_scale", "mesh_sdf_cache_enabled", "close_open_boundaries",
+    "last_collider_preset",
 }
 
 
@@ -593,8 +635,8 @@ class TAREMIN_CLOTH_OT_reset_cloth_settings(Operator):
 
         # キャッシュの無効化と再同期通知
         try:
-            from .engine.runner import clear_cloth_simulator
-            clear_cloth_simulator(obj.name)
+            from .engine.cache import clear_simulator_for_object
+            clear_simulator_for_object(obj.name)
         except Exception:
             pass
 
@@ -954,7 +996,7 @@ class TAREMIN_CLOTH_MT_config_presets(Menu):
     def draw(self, context):
         layout = self.layout
         layout.label(text=i18n.trans("Built-in Presets"), icon='PHYSICS')
-        for name in BUILTIN_CONFIG_PRESETS.keys():
+        for name in PRIMARY_BUILTIN_CONFIG_PRESETS:
             op = layout.operator("taremin_cloth.apply_config_preset", text=i18n.trans(name))
             op.preset_name = name
 

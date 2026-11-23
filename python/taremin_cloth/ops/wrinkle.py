@@ -21,7 +21,11 @@ from ..properties import (
     FloatProperty,
     StringProperty,
 )
-from ..engine.wrinkle_field import WrinkleCurveItem
+from ..engine.wrinkle_field import (
+    WrinkleCurveItem,
+    build_orthonormal_basis,
+    resolve_pose_bone_normal_hint,
+)
 from ..engine.wrinkle_preset import (
     WrinklePreset,
     get_builtin_presets,
@@ -100,7 +104,10 @@ def _find_or_create_collection(context, *, name: str = COLLECTION_NAME) -> bpy.t
     return col
 
 
-def _extract_bone_chain_data(armature_obj: bpy.types.Object, start_bone_name: str) -> List[Tuple[str, List[float], List[float], Tuple[float, float]]]:
+def _extract_bone_chain_data(
+    armature_obj: bpy.types.Object,
+    start_bone_name: str,
+) -> List[Tuple[str, List[float], List[float], Tuple[float, float], Optional[np.ndarray]]]:
     """
     アーマチュアから指定ボーンを含むボーンチェーンのワールド幾何データを抽出。
     親ボーンから子ボーンへと辿り、一連のボーンリストを返す。
@@ -146,7 +153,8 @@ def _extract_bone_chain_data(armature_obj: bpy.types.Object, start_bone_name: st
             r_h = float(pb.length * 0.15)
         if r_t <= 1e-4:
             r_t = float(pb.length * 0.12)
-        bones_data.append((pb.name, h_w, t_w, (r_h, r_t)))
+        normal_hint = resolve_pose_bone_normal_hint(armature_obj, pb)
+        bones_data.append((pb.name, h_w, t_w, (r_h, r_t), normal_hint))
 
     return bones_data
 
@@ -552,7 +560,7 @@ class TAREMIN_CLOTH_OT_add_wrinkle_preset(Operator):
         _auto_setup_cloth_wrinkle_settings(context, col, armature, bone_name)
 
         tag_redraw_view3d(context)
-        self.report({'INFO'}, i18n.trans(f"Added {len(created_objs)} wrinkle curves for bone '{bone_name}'."))
+        self.report({'INFO'}, i18n.trans("Added %d wrinkle curves for bone '%s'.") % (len(created_objs), bone_name))
 
         # 8. スライドモーダルの自動起動 (ボーン選択フェイズから対話的に開始)
         if self.start_modal_slide and created_objs:
@@ -689,7 +697,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
 
         self._chain = BoneChain.from_bones(bones_data)
         self._target_bone_name = bone_name
-        self._chain_bones_coords = [(head, tail, b_name) for b_name, head, tail, rads in bones_data]
+        self._chain_bones_coords = [(entry[1], entry[2], entry[0]) for entry in bones_data]
 
         # 初期パラメータの取得
         self._base_t = float(first_obj.get("wrinkle_t_param", 0.5))
@@ -749,7 +757,7 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
         new_chain = BoneChain.from_bones(bones_data)
         self._chain = new_chain
         self._target_bone_name = new_bone_name
-        self._chain_bones_coords = [(head, tail, b_name) for b_name, head, tail, rads in bones_data]
+        self._chain_bones_coords = [(entry[1], entry[2], entry[0]) for entry in bones_data]
 
         for obj in self._target_curves:
             obj["wrinkle_target_bone"] = new_bone_name
@@ -976,7 +984,6 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
             if modal_curves_data:
                 try:
                     import numpy as _np
-                    from ..engine.wrinkle_field import build_orthonormal_basis
                     # カーブはチェーン上の current_t に存在するため、描画座標系も
                     # 同一チェーン評価位置にする (固定ボーン座標系では屈曲時に垂直化する)。
                     chain_ev = None
@@ -1012,7 +1019,14 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                         if b_head is not None:
                             axis_raw = b_tail - b_head
                             if float(_np.linalg.norm(axis_raw)) >= 1e-6:
-                                axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                pb = None
+                                if self._armature_obj and getattr(self._armature_obj, "pose", None):
+                                    try:
+                                        pb = self._armature_obj.pose.bones.get(self._target_bone_name)
+                                    except Exception:
+                                        pb = None
+                                hint = resolve_pose_bone_normal_hint(self._armature_obj, pb) if pb else None
+                                axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw, normal_hint=hint)
                                 meshes = build_wrinkle_influence_meshes(
                                     modal_curves_data, b_head, axis_n, n_vec, b_rad,
                                 )
@@ -1030,10 +1044,16 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
 
         if self._phase == 'PICK_BONE':
             line1 = i18n.trans("[LMB] Select Bone  |  [RMB/Esc] Cancel")
-            line2 = i18n.trans(f"Phase 1: Hover over bone to pick -> Target: [{self._target_bone_name}]")
+            line2 = i18n.trans("Phase 1: Hover over bone to pick -> Target: [%s]") % self._target_bone_name
         else:
             line1 = i18n.trans("[LMB/Enter] Confirm  [RMB/Esc] Cancel  [Wheel] Radius  [Shift+Wheel] Influence  [B] Change Bone")
-            line2 = f"Phase 2: Bone [{self._target_bone_name}] | Slide t={self._current_t:.3f} | Radius={self._scale_radius:.2f}x | Inf={self._influence_radius*1000.0:.1f}mm | Str={self._strength:.2f}"
+            line2 = i18n.trans("Phase 2: Bone [%s] | Slide t=%.3f | Radius=%.2fx | Inf=%.1fmm | Str=%.2f") % (
+                self._target_bone_name,
+                self._current_t,
+                self._scale_radius,
+                self._influence_radius * 1000.0,
+                self._strength,
+            )
 
         draw_wrinkle_slide_hud(region, line1, line2)
 
@@ -1145,13 +1165,16 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
                 if event.type == 'LEFTMOUSE':
                     self._press_tracker.on_press_event(event)
                 tag_redraw_view3d(context)
-                self._report({'INFO'}, i18n.trans(f"Bone '{self._target_bone_name}' selected. Drag mouse to slide."))
+                self._report({'INFO'}, i18n.trans("Bone '%s' selected. Drag mouse to slide.") % self._target_bone_name)
                 return {'RUNNING_MODAL'}
 
             elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
-                # ボーン選択中にキャンセル (初期位置を復元して維持)
+                # ボーン選択中にキャンセル (新規追加時はゴミカーブを削除、既存調整時は初期位置を復元)
                 self._cleanup(context)
-                self._restore_initial_geometry()
+                if self._is_new_addition:
+                    self._delete_target_curves(context)
+                else:
+                    self._restore_initial_geometry()
                 tag_redraw_view3d(context)
                 self._report({'INFO'}, i18n.trans("Cancelled wrinkle bone picking."))
                 return {'CANCELLED'}
@@ -1205,13 +1228,16 @@ class TAREMIN_CLOTH_OT_slide_wrinkle_curves(Operator):
             col = bpy.data.collections.get(COLLECTION_NAME)
             if col:
                 _auto_setup_cloth_wrinkle_settings(context, col, self._armature_obj, self._target_bone_name)
-            self._report({'INFO'}, i18n.trans(f"Confirmed wrinkle slide at t={self._current_t:.3f} on bone '{self._target_bone_name}'."))
+            self._report({'INFO'}, i18n.trans("Confirmed wrinkle slide at t=%.3f on bone '%s'.") % (self._current_t, self._target_bone_name))
             return {'FINISHED'}
 
-        # 5. キャンセル操作 (RMB または Esc: スライド前の位置を復元して維持)
+        # 5. キャンセル操作 (RMB または Esc: 新規追加時は削除、既存調整時は初期位置を復元)
         elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
             self._cleanup(context)
-            self._restore_initial_geometry()
+            if self._is_new_addition:
+                self._delete_target_curves(context)
+            else:
+                self._restore_initial_geometry()
             tag_redraw_view3d(context)
             self._report({'INFO'}, i18n.trans("Cancelled wrinkle slide."))
             return {'CANCELLED'}
@@ -1264,18 +1290,40 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
         if _require_experimental_enabled(self):
             return {'CANCELLED'}
         curves_to_save: List[WrinkleCurveItem] = []
+        curve_types_to_save: List[str] = []
         arm_name = ""
 
-        # 選択中のカーブオブジェクトから点列を収集
+        # 選択中のカーブオブジェクトから点列とカーブ種別を収集
         for obj in context.selected_objects:
             if obj.type != 'CURVE':
                 continue
-            w_type = obj.get("wrinkle_type", "crest")
-            w_str = float(obj.get("wrinkle_strength", 1.0))
-            w_inf = float(obj.get("wrinkle_influence_radius", 0.03))
-            w_target_r = obj.get("wrinkle_target_radius", None)
-            if w_target_r is not None:
-                w_target_r = float(w_target_r)
+            tw = getattr(obj, "taremin_wrinkle", None)
+            tw_type = getattr(tw, "curve_type", None) if tw is not None else None
+            if isinstance(tw_type, str) and tw_type.lower() in ("crest", "root", "ridge", "valley"):
+                w_type = tw_type.lower()
+            else:
+                w_type = str(obj.get("wrinkle_type", "crest") or "crest").lower()
+
+            tw_str = getattr(tw, "strength", None) if tw is not None else None
+            if isinstance(tw_str, (int, float)) and not isinstance(tw_str, bool):
+                w_str = float(tw_str)
+            else:
+                w_str = float(obj.get("wrinkle_strength", 1.0))
+
+            tw_inf = getattr(tw, "influence_radius", None) if tw is not None else None
+            if isinstance(tw_inf, (int, float)) and not isinstance(tw_inf, bool):
+                w_inf = float(tw_inf)
+            else:
+                w_inf = float(obj.get("wrinkle_influence_radius", 0.03))
+
+            tw_tr = getattr(tw, "target_radius", None) if tw is not None else None
+            if isinstance(tw_tr, (int, float)) and not isinstance(tw_tr, bool) and float(tw_tr) > 0.0:
+                w_target_r = float(tw_tr)
+            else:
+                w_target_r = obj.get("wrinkle_target_radius", None)
+                if w_target_r is not None:
+                    w_target_r = float(w_target_r)
+
             if not arm_name:
                 arm_name = obj.get("wrinkle_armature", "")
 
@@ -1289,6 +1337,7 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
                         influence_radius=w_inf,
                         target_radius=w_target_r,
                     ))
+                    curve_types_to_save.append(w_type)
 
         if not curves_to_save:
             self.report({'ERROR'}, i18n.trans("No valid curve points selected to save."))
@@ -1303,7 +1352,7 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
                     break
 
         if not arm_obj or not arm_obj.pose or not self.bone_name or self.bone_name not in arm_obj.pose.bones:
-            self.report({'ERROR'}, f"Reference bone '{self.bone_name}' not found.")
+            self.report({'ERROR'}, i18n.trans("Reference bone '%s' not found.") % self.bone_name)
             return {'CANCELLED'}
 
         pb = arm_obj.pose.bones[self.bone_name]
@@ -1317,20 +1366,120 @@ class TAREMIN_CLOTH_OT_save_wrinkle_preset(Operator):
             float(getattr(pb.bone, "tail_radius", 0.0) or 0.0),
             float(getattr(pb, "length", 0.0) or 0.0),
         )
+        normal_hint = resolve_pose_bone_normal_hint(arm_obj, pb)
 
-        # 正規化プリセットの生成
+        # 正規化プリセットの生成 (curve_types とボーンロール基準法線を引き渡す)
         preset = normalize_curves_to_preset(
             curves=curves_to_save,
+            curve_types=curve_types_to_save,
             bone_head=h_w,
             bone_tail=t_w,
             bone_radius=r_w,
+            normal=normal_hint,
             preset_name=self.preset_name,
             category=self.category,
             description=self.description,
         )
 
         saved_path = save_preset_to_json(preset)
-        self.report({'INFO'}, i18n.trans(f"Saved wrinkle preset '{self.preset_name}' to {saved_path}."))
+        self.report({'INFO'}, i18n.trans("Saved wrinkle preset '%s' to %s.") % (self.preset_name, saved_path))
+        return {'FINISHED'}
+
+
+def _remove_curve_object(obj: Any) -> bool:
+    """単一カーブオブジェクトと未使用データブロックを安全に削除する。"""
+    if obj is None or getattr(obj, "type", None) != 'CURVE':
+        return False
+    curve_data = getattr(obj, "data", None)
+    try:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    except Exception:
+        return False
+    if curve_data is not None and getattr(curve_data, "users", 0) == 0:
+        try:
+            bpy.data.curves.remove(curve_data)
+        except Exception:
+            pass
+    return True
+
+
+class TAREMIN_CLOTH_OT_remove_wrinkle_curve(Operator):
+    """指定またはアクティブなシワガイドカーブを削除する"""
+    bl_idname = "taremin_cloth.remove_wrinkle_curve"
+    bl_label = "Remove Wrinkle Curve"
+    bl_description = "Remove the specified or active wrinkle guide curve"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    curve_name: StringProperty(
+        name="Curve Name",
+        description="Name of the wrinkle curve object to remove",
+        default="",
+    )
+
+    def execute(self, context):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
+        target = None
+        if self.curve_name:
+            target = bpy.data.objects.get(self.curve_name)
+        if target is None:
+            act = getattr(context, "active_object", None)
+            if act is not None and getattr(act, "type", None) == 'CURVE':
+                target = act
+        if target is None or getattr(target, "type", None) != 'CURVE':
+            self.report({'WARNING'}, i18n.trans("No wrinkle curve selected to remove."))
+            return {'CANCELLED'}
+
+        removed_name = getattr(target, "name", self.curve_name)
+        if not _remove_curve_object(target):
+            return {'CANCELLED'}
+
+        try:
+            from ..engine.params import clear_wrinkle_signature_cache
+            clear_wrinkle_signature_cache(None)
+        except Exception:
+            pass
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Removed wrinkle curve '%s'.") % removed_name)
+        return {'FINISHED'}
+
+
+class TAREMIN_CLOTH_OT_clear_wrinkle_curves(Operator):
+    """コレクション内の全シワガイドカーブを削除する"""
+    bl_idname = "taremin_cloth.clear_wrinkle_curves"
+    bl_label = "Clear All Wrinkle Curves"
+    bl_description = "Remove all wrinkle guide curves in the collection"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        self._exec_context = context
+        if _require_experimental_enabled(self):
+            return {'CANCELLED'}
+        target_col = None
+        act = getattr(context, "active_object", None)
+        tc = getattr(act, "taremin_cloth", None) if act is not None else None
+        if tc is not None and getattr(tc, "wrinkle_collection", None) is not None:
+            target_col = tc.wrinkle_collection
+        if target_col is None:
+            target_col = bpy.data.collections.get(COLLECTION_NAME)
+        if target_col is None:
+            return {'CANCELLED'}
+
+        targets = [o for o in list(getattr(target_col, "objects", [])) if getattr(o, "type", None) == 'CURVE']
+        removed = sum(1 for o in targets if _remove_curve_object(o))
+        if removed == 0:
+            return {'CANCELLED'}
+
+        try:
+            from ..engine.params import clear_wrinkle_signature_cache
+            clear_wrinkle_signature_cache(None)
+        except Exception:
+            pass
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Cleared %d wrinkle curves.") % removed)
         return {'FINISHED'}
 
 
@@ -1338,4 +1487,6 @@ OPERATOR_CLASSES = (
     TAREMIN_CLOTH_OT_add_wrinkle_preset,
     TAREMIN_CLOTH_OT_slide_wrinkle_curves,
     TAREMIN_CLOTH_OT_save_wrinkle_preset,
+    TAREMIN_CLOTH_OT_remove_wrinkle_curve,
+    TAREMIN_CLOTH_OT_clear_wrinkle_curves,
 )

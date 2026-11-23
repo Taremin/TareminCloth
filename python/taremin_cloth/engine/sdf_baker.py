@@ -6,6 +6,7 @@ taremin_cloth ボーン局所SDFベーカー (SDF Baker)
 """
 
 import os
+import tempfile
 import time
 import hashlib
 import numpy as np
@@ -340,6 +341,15 @@ def is_major_joint_pair(b1: str, b2: str) -> bool:
 is_limb_joint_pair = is_major_joint_pair
 
 
+def _joint_weight_threshold_to_min_blend(joint_weight_threshold: float) -> float:
+    """最大ボーンウェイト閾値 (0.5〜0.99) から関節ブレンド抽出用の最小第2ウェイトを算出する。"""
+    try:
+        t = float(joint_weight_threshold)
+    except (TypeError, ValueError):
+        t = 0.85
+    return min(0.49, max(0.01, 1.0 - t))
+
+
 @allow_positional
 def extract_major_joint_mesh_indices(
     mesh_verts: np.ndarray,
@@ -591,13 +601,14 @@ def bake_bone_sdf_from_data(
     joint_face_indices = np.empty(0, dtype=np.int32)
     joint_faces_by_pair: Dict[Tuple[str, str], np.ndarray] = {}
     if enable_joint_mesh:
+        min_blend_w = _joint_weight_threshold_to_min_blend(joint_weight_threshold)
         if bone_parent_map:
             joint_face_indices, joint_faces_by_pair = extract_hierarchy_joint_mesh_indices(
                 mesh_verts=mesh_verts,
                 mesh_tris=mesh_tris,
                 bone_weights=bone_weights,
                 bone_parent_map=bone_parent_map,
-                min_blend_weight=0.05,
+                min_blend_weight=min_blend_w,
             )
             logger.info(
                 f"[SDF Baker] ハイブリッドモード有効 (親子階層方式): {len(joint_face_indices)} / {len(mesh_tris)} 面 "
@@ -608,7 +619,7 @@ def bake_bone_sdf_from_data(
                 mesh_verts=mesh_verts,
                 mesh_tris=mesh_tris,
                 bone_weights=bone_weights,
-                min_blend_weight=0.06,
+                min_blend_weight=min_blend_w,
             )
             logger.info(
                 f"[SDF Baker] ハイブリッドモード有効 (主要関節フォールバック): {len(joint_face_indices)} / {len(mesh_tris)} 面の関節三角形を抽出 (のりしろ: any1)"
@@ -694,11 +705,12 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
         return None
     try:
         # Windowsではnpzハンドルを開いたまま削除できないため、先に全量コピーして閉じる
-        with np.load(cache_path, allow_pickle=True) as data:
+        # セキュリティ上の理由により allow_pickle=False を強制する
+        with np.load(cache_path, allow_pickle=False) as data:
             tex_bytes = data["texture_bytes"].tobytes()
             w, h, d = int(data["width"]), int(data["height"]), int(data["depth"])
             bone_infos = np.array(data["bone_infos"])
-            bone_names = list(data["bone_names"])
+            bone_names = [str(name) for name in data["bone_names"].tolist()]
             bind_matrices = np.array(data["bind_matrices"])
             joint_face_indices = (
                 np.array(data["joint_face_indices"])
@@ -739,13 +751,19 @@ def load_cached_sdf(cache_key: str) -> Optional[BoneSdfBakeResult]:
             joint_faces_by_pair=joint_faces_by_pair,
         )
     except Exception as e:
-        logger.warning(f"[SDF Baker] キャッシュ読込失敗: {e}")
+        logger.warning(f"[SDF Baker] キャッシュ読込失敗（破損ファイルを削除して再構築します）: {e}")
+        try:
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+        except Exception as rm_err:
+            logger.warning(f"[SDF Baker] 破損キャッシュの削除に失敗しました: {rm_err}")
         return None
 
 
 def save_cached_sdf(cache_key: str, result: BoneSdfBakeResult):
     """SDFベイク結果をディスクキャッシュに保存する。
     健全性検査に失敗した結果（全零テクスチャ等）は保存せずERRORログを出す。
+    pickle 不要の数値/Unicode配列のみを一時ファイル経由でアトミック保存する。
     """
     ok, reason = check_sdf_texture_integrity(
         result.texture_bytes, result.width, result.height, result.depth
@@ -756,34 +774,60 @@ def save_cached_sdf(cache_key: str, result: BoneSdfBakeResult):
             f"(key={cache_key}, {reason})"
         )
         return
-    cache_path = os.path.join(get_cache_dir(), f"{cache_key}.npz")
+    cache_dir = get_cache_dir()
+    cache_path = os.path.join(cache_dir, f"{cache_key}.npz")
+    tmp_path = None
     try:
         pairs = list(result.joint_faces_by_pair.keys())
-        pair_keys = np.array([f"{p}:::{c}" for p, c in pairs])
+        pair_keys = (
+            np.array([f"{p}:::{c}" for p, c in pairs], dtype=str)
+            if pairs
+            else np.empty(0, dtype="<U1")
+        )
         pair_lens = np.array([len(result.joint_faces_by_pair[k]) for k in pairs], dtype=np.int32)
         pair_data = (
             np.concatenate([result.joint_faces_by_pair[k] for k in pairs])
             if pairs
             else np.empty(0, dtype=np.int32)
         )
-
-        np.savez_compressed(
-            cache_path,
-            texture_bytes=np.frombuffer(result.texture_bytes, dtype=np.uint8),
-            width=result.width,
-            height=result.height,
-            depth=result.depth,
-            bone_infos=result.bone_infos,
-            bone_names=np.array(result.bone_names),
-            bind_matrices=result.bind_matrices,
-            joint_face_indices=result.joint_face_indices,
-            pair_keys=pair_keys,
-            pair_lens=pair_lens,
-            pair_data=pair_data,
+        bone_names_arr = (
+            np.array([str(n) for n in result.bone_names], dtype=str)
+            if result.bone_names
+            else np.empty(0, dtype="<U1")
         )
+
+        with tempfile.NamedTemporaryFile(
+            dir=cache_dir,
+            prefix=f"{cache_key}.",
+            suffix=".tmp.npz",
+            delete=False,
+        ) as tmp_file:
+            tmp_path = tmp_file.name
+            np.savez_compressed(
+                tmp_file,
+                texture_bytes=np.frombuffer(result.texture_bytes, dtype=np.uint8),
+                width=result.width,
+                height=result.height,
+                depth=result.depth,
+                bone_infos=result.bone_infos,
+                bone_names=bone_names_arr,
+                bind_matrices=result.bind_matrices,
+                joint_face_indices=result.joint_face_indices,
+                pair_keys=pair_keys,
+                pair_lens=pair_lens,
+                pair_data=pair_data,
+            )
+
+        os.replace(tmp_path, cache_path)
+        tmp_path = None
         logger.info(f"[SDF Baker] キャッシュ保存完了: {cache_path}")
     except Exception as e:
         logger.warning(f"[SDF Baker] キャッシュ保存失敗: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
 
 
 def clear_all_cached_sdf() -> int:
@@ -996,12 +1040,13 @@ def get_or_bake_bone_sdf_for_object(obj, col_settings, *, force_rebake: bool = F
             )
             # 3Dテクスチャはキャッシュを即座に復元しつつ、関節面は最新の親子階層ロジックを適用
             if enable_joint_mesh:
+                min_blend_w = _joint_weight_threshold_to_min_blend(joint_weight_threshold)
                 cached.joint_face_indices, cached.joint_faces_by_pair = extract_hierarchy_joint_mesh_indices(
                     mesh_verts=mesh_verts,
                     mesh_tris=mesh_tris,
                     bone_weights=bone_weights,
                     bone_parent_map=bone_parent_map,
-                    min_blend_weight=0.05,
+                    min_blend_weight=min_blend_w,
                 )
             logger.info(
                 f"[SDF Baker] キャッシュからSDFを即座に復元しました: {cache_key} "

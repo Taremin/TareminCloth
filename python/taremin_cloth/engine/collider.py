@@ -7,6 +7,10 @@ Blenderシーン内のコライダーオブジェクト（Sphere, Plane, Capsule
 import math
 import bpy
 import numpy as np
+try:
+    import mathutils
+except ImportError:
+    mathutils = None
 from ..utils.args_guard import allow_positional
 from ..utils.logger import logger
 from ..utils.validation import close_open_boundary_loops_numpy
@@ -24,7 +28,9 @@ from .sdf_baker import (
 _collider_cache = {}
 _bone_sdf_cache = {}
 _bone_sdf_signatures = {}
+_bone_sdf_multi_warned = set()
 _scene_mesh_collider_cache = {}
+MAX_SCENE_MESH_CACHE_ENTRIES = 64
 _bone_pose_signatures = {}
 # コライダーおよびボーンSDFの移動量追跡キャッシュ（CFL適応サブステップの外部変位通知用）
 # clear_collider_cache()（設定変更時のみ）では消去せず、シミュレータ破棄時のみ消去する。
@@ -79,19 +85,210 @@ def cleanup_collider_eval_mesh(eval_obj, disabled_mods):
 
 
 def clear_collider_cache():
-    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures, _scene_mesh_collider_cache, _bone_pose_signatures
-    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures
+    global _collider_cache, _bone_sdf_cache, _bone_sdf_signatures, _bone_sdf_multi_warned
+    global _scene_mesh_collider_cache, _bone_pose_signatures
     _collider_cache.clear()
     _bone_sdf_cache.clear()
     _scene_mesh_collider_cache.clear()
     _bone_pose_signatures.clear()
     _bone_sdf_signatures.clear()
+    _bone_sdf_multi_warned.clear()
     _last_sync_info.clear()
     try:
         from .runner import clear_collider_armature_cache
         clear_collider_armature_cache()
     except Exception:
         pass
+
+
+def _resolve_scene_object(name_or_obj, scene):
+    """オブジェクト名（または後方互換のためオブジェクト本体）から生存中のシーンオブジェクトを解決する。"""
+    if name_or_obj is None:
+        return None
+    if not isinstance(name_or_obj, str):
+        return name_or_obj
+    data_objs = getattr(getattr(bpy, "data", None), "objects", None)
+    if data_objs is not None and hasattr(data_objs, "get"):
+        found = data_objs.get(name_or_obj)
+        if found is not None:
+            return found
+    for obj in getattr(scene, "objects", []):
+        if getattr(obj, "name", None) == name_or_obj:
+            return obj
+    return None
+
+
+def _extract_world_scale(col_obj, world_mat):
+    """ワールド変換行列（またはオブジェクト）から各軸スケール絶対値を取得する。"""
+    if hasattr(world_mat, "to_scale"):
+        try:
+            s = world_mat.to_scale()
+            return (abs(float(s[0])), abs(float(s[1])), abs(float(s[2])))
+        except Exception:
+            pass
+    try:
+        mat_np = np.asarray(world_mat, dtype=np.float64)
+        if mat_np.ndim == 2 and mat_np.shape[0] >= 3 and mat_np.shape[1] >= 3:
+            sx = float(np.linalg.norm(mat_np[:3, 0]))
+            sy = float(np.linalg.norm(mat_np[:3, 1]))
+            sz = float(np.linalg.norm(mat_np[:3, 2]))
+            return (sx, sy, sz)
+    except Exception:
+        pass
+    obj_scale = getattr(col_obj, "scale", (1.0, 1.0, 1.0))
+    try:
+        return (abs(float(obj_scale[0])), abs(float(obj_scale[1])), abs(float(obj_scale[2])))
+    except Exception:
+        return (1.0, 1.0, 1.0)
+
+
+def _extract_primitive_collider_data(col_obj, col_settings):
+    """解析コライダー (SPHERE/PLANE/CAPSULE) のワールド座標・法線・端点・半径を共通算出する。"""
+    world_mat = col_obj.matrix_world
+    if hasattr(world_mat, "translation"):
+        loc = world_mat.translation
+        loc_xyz = [float(loc[0]), float(loc[1]), float(loc[2])]
+    else:
+        mat_np = np.asarray(world_mat, dtype=np.float64)
+        loc_xyz = [float(mat_np[0, 3]), float(mat_np[1, 3]), float(mat_np[2, 3])]
+
+    restitution = float(getattr(col_settings, "restitution", 0.0))
+    friction = float(getattr(col_settings, "friction", 0.5))
+    ctype = col_settings.collider_type
+
+    if ctype == 'SPHERE':
+        sx, sy, sz = _extract_world_scale(col_obj, world_mat)
+        radius = float(col_settings.radius) * max(sx, sy, sz, 1e-6)
+        return {
+            "collider_type": 0,
+            "friction": friction,
+            "restitution": restitution,
+            "point_a": loc_xyz,
+            "radius": radius,
+            "point_b": [0.0, 0.0, 0.0],
+        }
+
+    if ctype == 'PLANE':
+        normal = [0.0, 0.0, 1.0]
+        converted = False
+        if mathutils is not None and hasattr(world_mat, "to_3x3"):
+            try:
+                mat3 = world_mat.to_3x3()
+                if hasattr(mat3, "inverted_safe"):
+                    n_vec = (mat3.inverted_safe().transposed() @ mathutils.Vector((0.0, 0.0, 1.0))).normalized()
+                else:
+                    n_vec = (mat3 @ mathutils.Vector((0.0, 0.0, 1.0))).normalized()
+                if getattr(n_vec, "length", 0.0) > 1e-8:
+                    normal = [float(n_vec.x), float(n_vec.y), float(n_vec.z)]
+                    converted = True
+            except Exception:
+                converted = False
+        if not converted:
+            try:
+                mat3_np = np.asarray(world_mat, dtype=np.float64)[:3, :3]
+                inv_t = np.linalg.pinv(mat3_np).T
+                n_np = inv_t @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                n_len = float(np.linalg.norm(n_np))
+                if n_len > 1e-8:
+                    normal = [float(x) for x in (n_np / n_len)]
+            except Exception:
+                pass
+        return {
+            "collider_type": 2,
+            "friction": friction,
+            "restitution": restitution,
+            "point_a": loc_xyz,
+            "radius": 0.0,
+            "point_b": normal,
+        }
+
+    if ctype == 'CAPSULE':
+        base_r = float(col_settings.radius)
+        sx, sy, _sz = _extract_world_scale(col_obj, world_mat)
+        world_radius = base_r * max(sx, sy, 1e-6)
+        pt_a = None
+        pt_b = None
+        if mathutils is not None:
+            try:
+                va = world_mat @ mathutils.Vector((0.0, 0.0, -base_r))
+                vb = world_mat @ mathutils.Vector((0.0, 0.0, base_r))
+                pt_a = [float(va[0]), float(va[1]), float(va[2])]
+                pt_b = [float(vb[0]), float(vb[1]), float(vb[2])]
+            except Exception:
+                pt_a = None
+        if pt_a is None or pt_b is None:
+            try:
+                mat4 = np.asarray(world_mat, dtype=np.float64)
+                pa_h = mat4 @ np.array([0.0, 0.0, -base_r, 1.0], dtype=np.float64)
+                pb_h = mat4 @ np.array([0.0, 0.0, base_r, 1.0], dtype=np.float64)
+                pt_a = [float(pa_h[0]), float(pa_h[1]), float(pa_h[2])]
+                pt_b = [float(pb_h[0]), float(pb_h[1]), float(pb_h[2])]
+            except Exception:
+                pt_a = [loc_xyz[0], loc_xyz[1], loc_xyz[2] - base_r]
+                pt_b = [loc_xyz[0], loc_xyz[1], loc_xyz[2] + base_r]
+        return {
+            "collider_type": 1,
+            "friction": friction,
+            "restitution": restitution,
+            "point_a": pt_a,
+            "radius": world_radius,
+            "point_b": pt_b,
+        }
+
+    return None
+
+
+def _extract_active_joint_mesh_triangles(obj, col_settings, *, arm_mod, bake_res, depsgraph):
+    """BONE_SDF (STATIC) ハイブリッドモード用に関節部の動的アクティブ三角形を抽出する。"""
+    if not getattr(col_settings, "enable_joint_mesh", True) or bake_res is None:
+        return None, None, None
+    if len(getattr(bake_res, "joint_face_indices", ())) == 0:
+        return None, None, None
+
+    rot_threshold_deg = float(getattr(col_settings, "joint_rotation_threshold", 2.0))
+    rot_threshold_rad = math.radians(rot_threshold_deg)
+
+    active_indices = None
+    if rot_threshold_deg <= 0.0 or not bake_res.joint_faces_by_pair:
+        active_indices = bake_res.joint_face_indices
+    else:
+        arm_obj = getattr(arm_mod, "object", None)
+        active_pair_faces = []
+        if arm_obj and getattr(arm_obj, "pose", None):
+            for (_p_name, c_name), p_faces in bake_res.joint_faces_by_pair.items():
+                pb_c = arm_obj.pose.bones.get(c_name)
+                if not pb_c:
+                    continue
+                delta_angle = 0.0
+                rot_mode = pb_c.rotation_mode
+                if rot_mode == 'QUATERNION':
+                    q = pb_c.rotation_quaternion
+                    delta_angle = 2.0 * math.acos(min(abs(float(q[0])), 1.0))
+                elif rot_mode == 'AXIS_ANGLE':
+                    delta_angle = abs(float(pb_c.rotation_axis_angle[0]))
+                else:
+                    e = pb_c.rotation_euler
+                    delta_angle = math.sqrt(float(e.x)**2 + float(e.y)**2 + float(e.z)**2)
+
+                if delta_angle >= rot_threshold_rad:
+                    active_pair_faces.append(p_faces)
+
+        if active_pair_faces:
+            active_indices = np.unique(np.concatenate(active_pair_faces))
+        else:
+            active_indices = np.empty(0, dtype=np.int32)
+
+    if active_indices is None or len(active_indices) == 0:
+        return None, None, None
+
+    mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
+    try:
+        target_obj = eval_obj if eval_obj else obj
+        return _extract_mesh_collider_triangles(
+            mesh, target_obj, col_settings, triangle_indices=active_indices
+        )
+    finally:
+        cleanup_collider_eval_mesh(eval_obj, disabled_mods)
 
 
 def clear_collider_motion_cache(*, sim=None):
@@ -208,50 +405,14 @@ def extract_all_scene_colliders(*, scene=None, depsgraph=None):
         if not col_settings or not getattr(col_settings, "is_collider", False) or not getattr(col_settings, "enabled", True):
             continue
 
-        world_mat = obj.matrix_world
-        loc = world_mat.translation
-        restitution = float(getattr(col_settings, "restitution", 0.0))
-        friction = float(getattr(col_settings, "friction", 0.5))
-
-        if col_settings.collider_type == 'SPHERE':
-            radius = float(col_settings.radius * max(obj.scale))
-            analytic_colliders.append({
-                "collider_type": 0,
-                "friction": friction,
-                "restitution": restitution,
-                "point_a": [float(loc.x), float(loc.y), float(loc.z)],
-                "radius": radius,
-                "point_b": [0.0, 0.0, 0.0],
-            })
-        elif col_settings.collider_type == 'PLANE':
-            normal = [0.0, 0.0, 1.0]
-            if hasattr(bpy.types, "mathutils"):
-                norm_vec = world_mat.to_3x3() @ bpy.types.mathutils.Vector((0.0, 0.0, 1.0))
-                normal = [float(norm_vec.x), float(norm_vec.y), float(norm_vec.z)]
-            analytic_colliders.append({
-                "collider_type": 2,
-                "friction": friction,
-                "restitution": restitution,
-                "point_a": [float(loc.x), float(loc.y), float(loc.z)],
-                "radius": 0.0,
-                "point_b": normal,
-            })
-        elif col_settings.collider_type == 'CAPSULE':
-            radius = float(col_settings.radius)
-            pt_a = [float(loc.x), float(loc.y), float(loc.z - radius)]
-            pt_b = [float(loc.x), float(loc.y), float(loc.z + radius)]
-            analytic_colliders.append({
-                "collider_type": 1,
-                "friction": friction,
-                "restitution": restitution,
-                "point_a": pt_a,
-                "radius": radius,
-                "point_b": pt_b,
-            })
+        if col_settings.collider_type in ('SPHERE', 'PLANE', 'CAPSULE'):
+            pdata = _extract_primitive_collider_data(obj, col_settings)
+            if pdata is not None:
+                analytic_colliders.append(pdata)
         elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
             cur_friction = float(col_settings.friction)
             cur_thickness = float(col_settings.thickness)
-            cur_restitution = float(restitution)
+            cur_restitution = float(getattr(col_settings, "restitution", 0.0))
             is_single = bool(getattr(col_settings, "single_sided", True))
             is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
             cur_flags = 0.0
@@ -292,53 +453,17 @@ def extract_all_scene_colliders(*, scene=None, depsgraph=None):
                 continue
 
             # ハイブリッドモード: 関節部メッシュ三角形を抽出してメッシュコライダーに追加（動的アクティブ化対応）
-            if getattr(col_settings, "enable_joint_mesh", True) and len(bake_res.joint_face_indices) > 0:
-                rot_threshold_deg = float(getattr(col_settings, "joint_rotation_threshold", 2.0))
-                rot_threshold_rad = math.radians(rot_threshold_deg)
-
-                active_indices = None
-                if rot_threshold_deg <= 0.0 or not bake_res.joint_faces_by_pair:
-                    active_indices = bake_res.joint_face_indices
-                else:
-                    arm_obj = arm_mod.object
-                    active_pair_faces = []
-                    if arm_obj and arm_obj.pose:
-                        for (p_name, c_name), p_faces in bake_res.joint_faces_by_pair.items():
-                            pb_c = arm_obj.pose.bones.get(c_name)
-                            if not pb_c:
-                                continue
-                            delta_angle = 0.0
-                            rot_mode = pb_c.rotation_mode
-                            if rot_mode == 'QUATERNION':
-                                q = pb_c.rotation_quaternion
-                                delta_angle = 2.0 * math.acos(min(abs(float(q[0])), 1.0))
-                            elif rot_mode == 'AXIS_ANGLE':
-                                delta_angle = abs(float(pb_c.rotation_axis_angle[0]))
-                            else:
-                                e = pb_c.rotation_euler
-                                delta_angle = math.sqrt(float(e.x)**2 + float(e.y)**2 + float(e.z)**2)
-
-                            if delta_angle >= rot_threshold_rad:
-                                active_pair_faces.append(p_faces)
-
-                    if active_pair_faces:
-                        active_indices = np.unique(np.concatenate(active_pair_faces))
-                    else:
-                        active_indices = np.empty(0, dtype=np.int32)
-
-                if active_indices is not None and len(active_indices) > 0:
-                    mesh, eval_obj, disabled_mods = get_collider_eval_mesh(obj, depsgraph)
-                    try:
-                        target_obj = eval_obj if eval_obj else obj
-                        tri_coords, attr_block, dict_list = _extract_mesh_collider_triangles(
-                            mesh, target_obj, col_settings, triangle_indices=active_indices
-                        )
-                        if tri_coords is not None:
-                            all_mesh_triangles.append(tri_coords)
-                            all_mesh_attributes.append(attr_block)
-                            mesh_triangles_data.extend(dict_list)
-                    finally:
-                        cleanup_collider_eval_mesh(eval_obj, disabled_mods)
+            tri_coords, attr_block, dict_list = _extract_active_joint_mesh_triangles(
+                obj,
+                col_settings,
+                arm_mod=arm_mod,
+                bake_res=bake_res,
+                depsgraph=depsgraph,
+            )
+            if tri_coords is not None:
+                all_mesh_triangles.append(tri_coords)
+                all_mesh_attributes.append(attr_block)
+                mesh_triangles_data.extend(dict_list)
 
     return {
         "analytic_colliders": analytic_colliders,
@@ -420,15 +545,19 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                 mat_tuple,
                 v_len,
                 round(col_settings.friction, 3),
+                round(getattr(col_settings, "restitution", 0.0), 3),
                 round(col_settings.radius, 4),
                 round(col_settings.thickness, 4),
                 bool(getattr(col_settings, "single_sided", True)),
                 bool(getattr(col_settings, "enable_single_sided_recovery", True)),
+                str(getattr(col_settings, "sdf_update_mode", "STATIC")),
+                str(getattr(col_settings, "sdf_resolution", "64")),
                 round(getattr(col_settings, "sdf_margin", 0.2), 3),
                 round(getattr(col_settings, "weight_threshold", 0.02), 4),
                 round(getattr(col_settings, "blend_k", 0.05), 4),
                 bool(getattr(col_settings, "enable_joint_mesh", True)),
                 round(getattr(col_settings, "joint_weight_threshold", 0.85), 2),
+                round(getattr(col_settings, "joint_rotation_threshold", 2.0), 3),
                 round(getattr(col_settings, "mesh_sdf_voxel_size", 0.004), 4),
                 round(getattr(col_settings, "mesh_sdf_margin", 0.02), 4),
                 int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
@@ -446,7 +575,7 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
         sim.clear_colliders()
         scene_cache_key = (getattr(scene, "name", ""), getattr(scene, "frame_current", 0), state_key)
         cached_mesh_data = _scene_mesh_collider_cache.get(scene_cache_key)
-        use_cached_mesh = cached_mesh_data is not None
+        use_cached_mesh = (cached_mesh_data is not None) and (not force) and (not has_active_anim)
         if use_cached_mesh:
             all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin = cached_mesh_data
         else:
@@ -455,33 +584,40 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
             has_cluster_culling = False
             max_sweep_margin = 0.05
         sdf_sources = []
+        sdf_assigned = False
 
         for obj, col_settings in collider_objs:
-            world_mat = obj.matrix_world
-            loc = world_mat.translation
-            restitution = getattr(col_settings, "restitution", 0.0)
-
-            if col_settings.collider_type == 'SPHERE':
-                sim.add_sphere_collider(
-                    [loc.x, loc.y, loc.z],
-                    col_settings.radius * max(obj.scale),
-                    col_settings.friction,
-                    restitution,
-                )
-            elif col_settings.collider_type == 'PLANE':
-                normal = world_mat.to_3x3() @ bpy.types.mathutils.Vector((0.0, 0.0, 1.0)) if hasattr(bpy.types, "mathutils") else [0.0, 0.0, 1.0]
-                norm_vec = [normal[0], normal[1], normal[2]]
-                sim.add_plane_collider([loc.x, loc.y, loc.z], norm_vec, col_settings.friction, restitution)
-            elif col_settings.collider_type == 'CAPSULE':
-                pt_a = [loc.x, loc.y, loc.z - col_settings.radius]
-                pt_b = [loc.x, loc.y, loc.z + col_settings.radius]
-                sim.add_capsule_collider(pt_a, pt_b, col_settings.radius, col_settings.friction, restitution)
+            if col_settings.collider_type in ('SPHERE', 'PLANE', 'CAPSULE'):
+                pdata = _extract_primitive_collider_data(obj, col_settings)
+                if pdata is not None:
+                    if pdata["collider_type"] == 0:
+                        sim.add_sphere_collider(
+                            pdata["point_a"],
+                            pdata["radius"],
+                            pdata["friction"],
+                            pdata["restitution"],
+                        )
+                    elif pdata["collider_type"] == 2:
+                        sim.add_plane_collider(
+                            pdata["point_a"],
+                            pdata["point_b"],
+                            pdata["friction"],
+                            pdata["restitution"],
+                        )
+                    elif pdata["collider_type"] == 1:
+                        sim.add_capsule_collider(
+                            pdata["point_a"],
+                            pdata["point_b"],
+                            pdata["radius"],
+                            pdata["friction"],
+                            pdata["restitution"],
+                        )
             elif col_settings.collider_type == 'MESH' and obj.type == 'MESH':
                 if use_cached_mesh:
                     continue
                 cur_friction = float(col_settings.friction)
                 cur_thickness = float(col_settings.thickness)
-                cur_restitution = float(restitution)
+                cur_restitution = float(getattr(col_settings, "restitution", 0.0))
                 is_single = bool(getattr(col_settings, "single_sided", True))
                 is_recovery = bool(getattr(col_settings, "enable_single_sided_recovery", True))
                 cur_flags = 0.0
@@ -528,8 +664,15 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                     cleanup_collider_eval_mesh(eval_obj, disabled_mods)
 
             elif col_settings.collider_type == 'BONE_SDF':
+                if sdf_assigned:
+                    warn_key = (sim_id, obj.name, "BONE_SDF")
+                    if warn_key not in _bone_sdf_multi_warned:
+                        _bone_sdf_multi_warned.add(warn_key)
+                        logger.warning(f"[Collider Sync] 1シミュレータにつきSDFコライダーは1件のみ有効です。'{obj.name}' (BONE_SDF) をスキップします。")
+                    continue
+
                 arm_mod = get_armature_modifier(obj)
-                if not arm_mod:
+                if not arm_mod or not getattr(arm_mod, "object", None):
                     logger.warning(f"[Collider Sync] '{obj.name}' にArmatureモディファイアがありません。BONE_SDFをスキップします。")
                     continue
 
@@ -576,13 +719,14 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                                 update_interval,
                             )
                             _bone_sdf_cache[sim_id] = (
-                                arm_mod.object,
+                                arm_mod.object.name,
                                 bake_res,
                                 'DYNAMIC_GPU',
                                 dyn_data.get("bone_dependency_map", []),
                                 None,
                             )
                             _bone_sdf_signatures[sim_id] = current_bone_sig
+                            sdf_assigned = True
                             logger.info(f"[Collider Sync] フルGPU動的SDFコライダーを初期化/更新しました (interval={update_interval})")
                         else:
                             sim.set_bone_sdf_colliders(
@@ -592,8 +736,9 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                                 bake_res.texture_bytes,
                                 bake_res.bone_infos,
                             )
-                            _bone_sdf_cache[sim_id] = (arm_mod.object, bake_res, 'STATIC')
+                            _bone_sdf_cache[sim_id] = (arm_mod.object.name, bake_res, 'STATIC')
                             _bone_sdf_signatures[sim_id] = current_bone_sig
+                            sdf_assigned = True
                             logger.info(f"[Collider Sync] ボーンSDFコライダーを設定/更新しました: {obj.name}")
                     else:
                         bake_res = None
@@ -604,12 +749,31 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                     cache_entry = _bone_sdf_cache[sim_id]
                     bake_res = cache_entry[1]
                     sdf_sources.append("memory")
+                    sdf_assigned = True
 
                 # DYNAMIC_GPU の場合はGPU側でメッシュ変形に追従するため、関節メッシュハイブリッドの重いCPU to_mesh()評価はスキップ
                 if update_mode == 'DYNAMIC_GPU':
                     continue
+                if not use_cached_mesh and bake_res is not None:
+                    tri_coords, attr_block, _ = _extract_active_joint_mesh_triangles(
+                        obj,
+                        col_settings,
+                        arm_mod=arm_mod,
+                        bake_res=bake_res,
+                        depsgraph=depsgraph,
+                    )
+                    if tri_coords is not None:
+                        all_mesh_triangles.append(tri_coords)
+                        all_mesh_attributes.append(attr_block)
 
             elif col_settings.collider_type == 'MESH_SDF' and obj.type == 'MESH':
+                if sdf_assigned:
+                    warn_key = (sim_id, obj.name, "MESH_SDF")
+                    if warn_key not in _bone_sdf_multi_warned:
+                        _bone_sdf_multi_warned.add(warn_key)
+                        logger.warning(f"[Collider Sync] 1シミュレータにつきSDFコライダーは1件のみ有効です。'{obj.name}' (MESH_SDF) をスキップします。")
+                    continue
+
                 current_mesh_sig = (
                     obj.name,
                     round(float(getattr(col_settings, "mesh_sdf_voxel_size", 0.004)), 4),
@@ -619,7 +783,7 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                     round(float(getattr(col_settings, "restitution", 0.0)), 3),
                     int(getattr(col_settings, "mesh_sdf_max_vram_mb", DEFAULT_MESH_SDF_MAX_VRAM_MB)),
                     bool(getattr(col_settings, "mesh_sdf_auto_scale", True)),
-                bool(getattr(col_settings, "close_open_boundaries", True)),
+                    bool(getattr(col_settings, "close_open_boundaries", True)),
                 )
                 needs_rebake = (sim_id not in _bone_sdf_cache) or (_bone_sdf_signatures.get(sim_id) != current_mesh_sig)
                 if needs_rebake:
@@ -636,8 +800,9 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                             bake_res.texture_bytes,
                             bake_res.bone_infos,
                         )
-                        _bone_sdf_cache[sim_id] = (obj, bake_res, 'MESH_SDF')
+                        _bone_sdf_cache[sim_id] = (obj.name, bake_res, 'MESH_SDF')
                         _bone_sdf_signatures[sim_id] = current_mesh_sig
+                        sdf_assigned = True
                         logger.info(f"[Collider Sync] 単一メッシュ直方体SDFコライダーを設定/更新しました: {obj.name} ({bake_res.width}x{bake_res.height}x{bake_res.depth})")
                     else:
                         _bone_sdf_cache.pop(sim_id, None)
@@ -645,6 +810,7 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                         sdf_sources.append("failed")
                 else:
                     sdf_sources.append("memory")
+                    sdf_assigned = True
                 continue
 
         # SDF取得元の集約 (baked > failed > disk > memory > none の優先度)
@@ -661,6 +827,8 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
         _last_sync_info[sim_id] = {"sdf_source": sdf_source}
 
         if not use_cached_mesh:
+            while len(_scene_mesh_collider_cache) >= MAX_SCENE_MESH_CACHE_ENTRIES:
+                _scene_mesh_collider_cache.pop(next(iter(_scene_mesh_collider_cache)))
             _scene_mesh_collider_cache[scene_cache_key] = (all_mesh_triangles, all_mesh_attributes, has_cluster_culling, max_sweep_margin)
         if all_mesh_triangles:
             tri_array = np.vstack(all_mesh_triangles) if len(all_mesh_triangles) > 1 else all_mesh_triangles[0]
@@ -679,6 +847,19 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
                 enable_single_sided_recovery=True,
                 sweep_margin=max_sweep_margin,
             )
+
+    # SDFコライダーが0件になった、またはベイク失敗/アーマチュア喪失等で再割当されなかった場合は即時クリア
+    if (
+        not has_bone_sdf or (state_changed and not sdf_assigned)
+    ) and (
+        sim_id in _bone_sdf_cache
+        or sim_id in _bone_sdf_signatures
+        or (hasattr(sim, "bone_sdf_enabled") and sim.bone_sdf_enabled())
+    ):
+        if hasattr(sim, "clear_bone_sdf_colliders"):
+            sim.clear_bone_sdf_colliders()
+        _bone_sdf_cache.pop(sim_id, None)
+        _bone_sdf_signatures.pop(sim_id, None)
 
     # コライダーおよびボーンSDFの前フレームからの移動量を追跡し、CFL適応サブステップへ通知する
     active_motion_keys = set()
@@ -699,11 +880,16 @@ def sync_colliders(sim, scene, *, depsgraph=None, force=False, cloth_obj=None):
     # 毎フレームのボーン変換行列更新 (BONE_SDF / MESH_SDF)
     if sim_id in _bone_sdf_cache:
         cache_entry = _bone_sdf_cache[sim_id]
-        target_obj = cache_entry[0]
+        target_obj = _resolve_scene_object(cache_entry[0], scene)
         bake_res = cache_entry[1]
         mode = cache_entry[2] if len(cache_entry) >= 3 else 'STATIC'
 
-        if mode == 'MESH_SDF' and target_obj:
+        if target_obj is None:
+            _bone_sdf_cache.pop(sim_id, None)
+            _bone_sdf_signatures.pop(sim_id, None)
+            if hasattr(sim, "clear_bone_sdf_colliders"):
+                sim.clear_bone_sdf_colliders()
+        elif mode == 'MESH_SDF':
             # 単一メッシュSDF: オブジェクトのワールド行列を1つの変換行列として同期
             eval_obj = target_obj.evaluated_get(depsgraph) if depsgraph else target_obj
             mat_world = np.array(eval_obj.matrix_world, dtype=np.float32)

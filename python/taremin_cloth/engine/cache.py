@@ -15,18 +15,26 @@ _simulators = {}
 _rest_positions = {}
 # 伸縮グループの直前スケールキャッシュ（急激な変化の平滑化用）
 _prev_elastic_scales = {}
+# 伸縮グループの直前剛性倍率キャッシュ
+_prev_elastic_multipliers = {}
 # 紐パーツの直前スケールキャッシュ（引き絞りの平滑化用）
 _prev_string_scales = {}
 # タイムライン再生用フレーム座標キャッシュ (obj_name -> { frame_num: np.ndarray })
 _timeline_frame_cache = {}
+# タイムライン再生用 紐(Curve)制御点キャッシュ (obj_name -> { frame_num: list[(curve_obj_name, np.ndarray)] })
+_timeline_curve_cache = {}
+# シミュレータ生成時トポロジー署名キャッシュ (obj_name -> (n_verts, n_edges, n_polys, n_sim_verts))
+_simulator_topology_signatures = {}
 # バッファリング開始フレーム番号 (obj_name -> start_frame)
 _buffered_start_frames = {}
 # 布パラメータシグネチャキャッシュ (obj_name -> params_tuple)
 _cloth_param_signatures = {}
 # アタッチメントピンの頂点インデックス・ウェイト一覧キャッシュ (cache_key -> list[(vert_idx, weight)])
 _attachment_pin_indices_cache = {}
-# アタッチメントピンの前回ローカルターゲット位置キャッシュ (obj_name -> (local_target_tuple, target_mat_tuple))
+# アタッチメントピンの前回ローカルターゲット位置キャッシュ (obj_name -> target_signature)
 _prev_attachment_pin_targets = {}
+# アタッチメントピンで設定した前回頂点インデックス集合 (obj_name -> set[int])
+_prev_attachment_pin_indices = {}
 # 中継点縫合コントローラーキャッシュ (obj_name -> WaypointManager)
 _waypoint_managers = {}
 # 縫合クラスタマップキャッシュ (obj_name -> dict[int, list[int]])
@@ -233,30 +241,45 @@ def restore_rest_positions(obj, *, clear=False, clear_timeline=True):
         obj.update_tag()
 
 
+def clear_attachment_pin_cache(*, obj_name=None):
+    """アタッチメントピン探索・ターゲット座標キャッシュを破棄する"""
+    global _attachment_pin_indices_cache, _prev_attachment_pin_targets, _prev_attachment_pin_indices
+    if obj_name is None:
+        _attachment_pin_indices_cache.clear()
+        _prev_attachment_pin_targets.clear()
+        _prev_attachment_pin_indices.clear()
+        return
+    _prev_attachment_pin_targets.pop(obj_name, None)
+    _prev_attachment_pin_indices.pop(obj_name, None)
+    for k in list(_attachment_pin_indices_cache.keys()):
+        if isinstance(k, tuple) and k[0] == obj_name:
+            _attachment_pin_indices_cache.pop(k, None)
+
+
 def clear_simulator_for_object(obj_name, *, clear_timeline=True):
     """特定オブジェクトに対応するシミュレータおよび関連キャッシュを破棄する"""
-    global _simulators
-    global _prev_elastic_scales, _prev_string_scales, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
+    global _simulators, _simulator_topology_signatures
+    global _prev_elastic_scales, _prev_elastic_multipliers, _prev_string_scales, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
     entry = _simulators.pop(obj_name, None)
+    _simulator_topology_signatures.pop(obj_name, None)
     had_sim = entry is not None
     if had_sim:
         from .collider import clear_collider_motion_cache
         sim = entry[0] if isinstance(entry, tuple) else entry
         clear_collider_motion_cache(sim=sim)
     _prev_elastic_scales.pop(obj_name, None)
+    _prev_elastic_multipliers.pop(obj_name, None)
     _prev_string_scales.pop(obj_name, None)
-    _prev_attachment_pin_targets.pop(obj_name, None)
     _waypoint_managers.pop(obj_name, None)
     _seam_cluster_maps.pop(obj_name, None)
     _curve_parts_runtime_cache.pop(obj_name, None)
     purge_applied_signature(obj_name)
     from .params import clear_wrinkle_signature_cache
     clear_wrinkle_signature_cache(obj_name)
-    for k in list(_attachment_pin_indices_cache.keys()):
-        if isinstance(k, tuple) and k[0] == obj_name:
-            _attachment_pin_indices_cache.pop(k, None)
+    clear_attachment_pin_cache(obj_name=obj_name)
     if clear_timeline:
         _timeline_frame_cache.pop(obj_name, None)
+        _timeline_curve_cache.pop(obj_name, None)
         _buffered_start_frames.pop(obj_name, None)
         _cloth_param_signatures.pop(obj_name, None)
     if had_sim:
@@ -267,8 +290,8 @@ def clear_simulators():
     """全シミュレータインスタンスおよび各種キャッシュを破棄する"""
     from .collider import clear_collider_cache, clear_collider_motion_cache
     from .runner import restore_fast_playback
-    global _simulators
-    global _prev_elastic_scales, _prev_string_scales, _timeline_frame_cache, _buffered_start_frames, _cloth_param_signatures
+    global _simulators, _simulator_topology_signatures
+    global _prev_elastic_scales, _prev_elastic_multipliers, _prev_string_scales, _timeline_frame_cache, _timeline_curve_cache, _buffered_start_frames, _cloth_param_signatures
     global _attachment_pin_indices_cache, _prev_attachment_pin_targets, _waypoint_managers, _seam_cluster_maps, _curve_parts_runtime_cache
     restore_fast_playback()
     clear_collider_cache()
@@ -278,20 +301,22 @@ def clear_simulators():
     clear_wrinkle_signature_cache(None)
     count = len(_simulators)
     _simulators.clear()
+    _simulator_topology_signatures.clear()
     _prev_elastic_scales.clear()
+    _prev_elastic_multipliers.clear()
     _prev_string_scales.clear()
     _timeline_frame_cache.clear()
+    _timeline_curve_cache.clear()
     _buffered_start_frames.clear()
     _cloth_param_signatures.clear()
-    _attachment_pin_indices_cache.clear()
-    _prev_attachment_pin_targets.clear()
+    clear_attachment_pin_cache(obj_name=None)
     _waypoint_managers.clear()
     _curve_parts_runtime_cache.clear()
     _seam_cluster_maps.clear()
     logger.debug(f"[Simulator] Cleared all {count} simulators and caches")
 
 
-def get_cloth_params_signature(obj):
+def get_cloth_params_signature(obj, *, scene=None):
     """布オブジェクトのシミュレーション物理パラメータシグネチャを生成する"""
     settings = getattr(obj, "taremin_cloth", None)
     if not settings or not getattr(settings, "is_cloth", False):
@@ -315,6 +340,9 @@ def get_cloth_params_signature(obj):
                 int(getattr(sp, "eyelet_stride", 3)),
                 round(float(getattr(sp, "linear_density", 0.015)), 5),
                 round(float(getattr(sp, "radius", 0.003)), 5),
+                round(float(getattr(sp, "pull_length", 0.0)), 5),
+                round(float(getattr(sp, "pull_offset_left", 0.0)), 5),
+                round(float(getattr(sp, "pull_offset_right", 0.0)), 5),
                 str(getattr(sp, "guide_vert_indices_str", "")),
                 str(getattr(sp, "seam_bridge_pairs_str", "")),
             )
@@ -322,6 +350,9 @@ def get_cloth_params_signature(obj):
         )
 
     pin_obj_name = settings.pin_target_object.name if getattr(settings, "pin_target_object", None) else ""
+    wrinkle_col_name = settings.wrinkle_collection.name if getattr(settings, "wrinkle_collection", None) else ""
+    wrinkle_arm_name = settings.wrinkle_armature.name if getattr(settings, "wrinkle_armature", None) else ""
+    sc = scene if scene is not None else getattr(getattr(bpy, "context", None), "scene", None)
     # 前半: トポロジー・再構築キー（SimConfigに含まれないBlender側構成キー）
     # 後半: Live物理キー（engine.simconfig の Single Source of Truth に完全委譲）
     return (
@@ -333,25 +364,35 @@ def get_cloth_params_signature(obj):
         bool(getattr(settings, "enable_coarse_constraints", False)),
         str(getattr(settings, "self_collision_purpose", "STANDARD")),
         int(getattr(settings, "substeps", 20)),
+        int(getattr(settings, "layer_id", 0)),
+        str(getattr(settings, "triangulation_mode", "QUAD")),
+        bool(getattr(settings, "use_wrinkle_field", False)),
+        round(float(getattr(settings, "wrinkle_global_strength", 1.0)), 4),
+        str(getattr(settings, "wrinkle_bone_name", "")),
+        round(float(getattr(settings, "wrinkle_bone_radius", 0.0)), 5),
+        round(float(getattr(settings, "wrinkle_valley_depth", 0.015)), 5),
+        round(float(getattr(settings, "wrinkle_crest_depth", 0.020)), 5),
+        wrinkle_col_name,
+        wrinkle_arm_name,
         elastic_tuples,
         string_tuples,
-        sim_config_signature(collect_sim_config(settings)),
+        sim_config_signature(collect_sim_config(settings, scene=sc)),
     )
 
 
-def check_and_update_params_signature(obj):
+def check_and_update_params_signature(obj, *, scene=None):
     """パラメータが変更されていればキャッシュを自動破棄し、Trueを返す"""
     if not obj:
         return False
-    new_sig = get_cloth_params_signature(obj)
+    new_sig = get_cloth_params_signature(obj, scene=scene)
     if new_sig is None:
         return False
 
     old_sig = _cloth_param_signatures.get(obj.name)
     if old_sig is not None and old_sig != new_sig:
         logger.info(f"[Cache] Cloth parameters changed for '{obj.name}'. Invaliding timeline cache & simulator.")
-        _cloth_param_signatures[obj.name] = new_sig
         clear_simulator_for_object(obj.name)
+        _cloth_param_signatures[obj.name] = new_sig
         return True
 
     _cloth_param_signatures[obj.name] = new_sig
@@ -389,8 +430,10 @@ def clear_timeline_cache(obj_name=None):
     """タイムラインフレームキャッシュを破棄する"""
     if obj_name:
         _timeline_frame_cache.pop(obj_name, None)
+        _timeline_curve_cache.pop(obj_name, None)
     else:
         _timeline_frame_cache.clear()
+        _timeline_curve_cache.clear()
 
 
 def is_object_baked(obj):

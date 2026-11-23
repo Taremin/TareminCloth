@@ -474,7 +474,9 @@ def apply_dynamic_diagonal_triangulation(
         rest_pos_arr = np.array(rest_positions, dtype=np.float32)
     elif "_taremin_cloth_rest_positions" in obj:
         raw_rest = obj["_taremin_cloth_rest_positions"]
-        if len(raw_rest) == n_verts * 3:
+        if isinstance(raw_rest, (bytes, bytearray, memoryview)) and len(raw_rest) == n_verts * 3 * 4:
+            rest_pos_arr = np.frombuffer(raw_rest, dtype=np.float32).reshape((n_verts, 3)).copy()
+        elif len(raw_rest) == n_verts * 3:
             rest_pos_arr = np.array(raw_rest, dtype=np.float32).reshape((n_verts, 3))
     
     if rest_pos_arr is None:

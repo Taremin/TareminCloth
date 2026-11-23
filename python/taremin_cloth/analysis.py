@@ -51,14 +51,27 @@ def coplanar_tri_tri_2d(
         o2 = orient(a, b, d)
         o3 = orient(c, d, a)
         o4 = orient(c, d, b)
-        return (o1 * o2 < -eps * eps) and (o3 * o4 < -eps * eps)
+        tol_2d = min(float(eps), 1e-6)
+        tol_ab = float(np.hypot(b[0] - a[0], b[1] - a[1])) * tol_2d
+        tol_cd = float(np.hypot(d[0] - c[0], d[1] - c[1])) * tol_2d
+        return (
+            ((o1 > tol_ab and o2 < -tol_ab) or (o1 < -tol_ab and o2 > tol_ab))
+            and ((o3 > tol_cd and o4 < -tol_cd) or (o3 < -tol_cd and o4 > tol_cd))
+        )
 
     @allow_positional
     def point_in_tri(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> bool:
         o1 = orient(a, b, p)
         o2 = orient(b, c, p)
         o3 = orient(c, a, p)
-        return (o1 > eps and o2 > eps and o3 > eps) or (o1 < -eps and o2 < -eps and o3 < -eps)
+        tol_2d = min(float(eps), 1e-6)
+        tol_ab = float(np.hypot(b[0] - a[0], b[1] - a[1])) * tol_2d
+        tol_bc = float(np.hypot(c[0] - b[0], c[1] - b[1])) * tol_2d
+        tol_ca = float(np.hypot(a[0] - c[0], a[1] - c[1])) * tol_2d
+        return (
+            (o1 > tol_ab and o2 > tol_bc and o3 > tol_ca)
+            or (o1 < -tol_ab and o2 < -tol_bc and o3 < -tol_ca)
+        )
 
     # 1. エッジ交差テスト (3x3 = 9ペア)
     edges_p = [(p0, p1), (p1, p2), (p2, p0)]
@@ -104,10 +117,21 @@ def tri_tri_intersection_moller(
             )
         except Exception:
             pass
-    # 1. 三角形Vの平面方程式: N1 . (X - V0) = 0
+    # 1. 三角形Vの単位法線平面: N1 . (X - V0) = 0
+    v0 = np.asarray(v0, dtype=np.float64)
+    v1 = np.asarray(v1, dtype=np.float64)
+    v2 = np.asarray(v2, dtype=np.float64)
+    u0 = np.asarray(u0, dtype=np.float64)
+    u1 = np.asarray(u1, dtype=np.float64)
+    u2 = np.asarray(u2, dtype=np.float64)
+
     e1 = v1 - v0
     e2 = v2 - v0
-    n1 = np.cross(e1, e2)
+    n1_raw = np.cross(e1, e2)
+    n1_len = float(np.linalg.norm(n1_raw))
+    if n1_len <= 1e-15:
+        return False
+    n1 = n1_raw / n1_len
     d1 = -float(np.dot(n1, v0))
 
     # Uの各頂点と平面1との符号付き距離
@@ -127,10 +151,14 @@ def tri_tri_intersection_moller(
     if du0du1 > 0.0 and du0du2 > 0.0:
         return False
 
-    # 2. 三角形Uの平面方程式: N2 . (X - U0) = 0
+    # 2. 三角形Uの単位法線平面: N2 . (X - U0) = 0
     e1_u = u1 - u0
     e2_u = u2 - u0
-    n2 = np.cross(e1_u, e2_u)
+    n2_raw = np.cross(e1_u, e2_u)
+    n2_len = float(np.linalg.norm(n2_raw))
+    if n2_len <= 1e-15:
+        return False
+    n2 = n2_raw / n2_len
     d2 = -float(np.dot(n2, u0))
 
     dv0 = float(np.dot(n2, v0)) + d2
@@ -151,9 +179,13 @@ def tri_tri_intersection_moller(
 
     # 3. 交差線の方向ベクトル D = N1 x N2
     d = np.cross(n1, n2)
+    all_du_zero = (du0 == 0.0 and du1 == 0.0 and du2 == 0.0)
+    all_dv_zero = (dv0 == 0.0 and dv1 == 0.0 and dv2 == 0.0)
 
-    # 同一平面 (Coplanar) の場合
-    if np.dot(d, d) < 1e-10:
+    # 同一平面 (Coplanar) / 平行平面の場合
+    if float(np.dot(d, d)) < 1e-10 or all_du_zero or all_dv_zero:
+        if float(np.dot(d, d)) < 1e-10 and not (all_du_zero and all_dv_zero):
+            return False
         abs_n = np.abs(n1)
         max_idx = int(np.argmax(abs_n))
         axes = [i for i in range(3) if i != max_idx]
@@ -171,11 +203,15 @@ def tri_tri_intersection_moller(
     @allow_positional
     def compute_intervals(p0: float, p1: float, p2: float, d0: float, d1: float, d2: float, d0d1: float, d0d2: float) -> Tuple[float, float]:
         if d0d1 > 0.0:
-            return (p2 + (p0 - p2) * (d2 / (d2 - d0)), p2 + (p1 - p2) * (d2 / (d1 - d2)))
+            return (p2 + (p0 - p2) * (d2 / (d2 - d0)), p2 + (p1 - p2) * (d2 / (d2 - d1)))
         elif d0d2 > 0.0:
-            return (p1 + (p0 - p1) * (d1 / (d1 - d0)), p1 + (p2 - p1) * (d1 / (d2 - d1)))
-        else:
+            return (p1 + (p0 - p1) * (d1 / (d1 - d0)), p1 + (p2 - p1) * (d1 / (d1 - d2)))
+        elif d1 * d2 > 0.0 or d0 != 0.0:
             return (p0 + (p1 - p0) * (d0 / (d0 - d1)), p0 + (p2 - p0) * (d0 / (d0 - d2)))
+        elif d1 != 0.0:
+            return (p1 + (p0 - p1) * (d1 / (d1 - d0)), p1 + (p2 - p1) * (d1 / (d1 - d2)))
+        else:
+            return (p2 + (p0 - p2) * (d2 / (d2 - d0)), p2 + (p1 - p2) * (d2 / (d2 - d1)))
 
     isect1_a, isect1_b = compute_intervals(vp0, vp1, vp2, dv0, dv1, dv2, dv0dv1, dv0dv2)
     isect2_a, isect2_b = compute_intervals(up0, up1, up2, du0, du1, du2, du0du1, du0du2)
@@ -237,11 +273,16 @@ def find_triangle_intersections(
             for v in f:
                 vert_to_faces.setdefault(int(v), []).append(f_idx)
 
-    # セルサイズの自動推定
+    # セルサイズの自動推定（3辺平均と全体スパン下限により巨大グリッドOOMを防止）
+    max_span = float(np.max(np.max(maxs, axis=0) - np.min(mins, axis=0))) if len(tris) > 0 else 0.0
     if cell_size is None or cell_size <= 0.0:
-        edge_lens = np.linalg.norm(tris[:, 1, :] - tris[:, 0, :], axis=1)
-        mean_len = float(np.mean(edge_lens)) if len(edge_lens) > 0 else 0.05
-        cell_size = max(mean_len * 2.0, 1e-4)
+        e01 = np.linalg.norm(tris[:, 1, :] - tris[:, 0, :], axis=1)
+        e12 = np.linalg.norm(tris[:, 2, :] - tris[:, 1, :], axis=1)
+        e20 = np.linalg.norm(tris[:, 0, :] - tris[:, 2, :], axis=1)
+        mean_len = float(np.mean((e01 + e12 + e20) / 3.0)) if len(tris) > 0 else 0.05
+        cell_size = max(mean_len * 2.0, max_span / 128.0, 1e-4)
+    else:
+        cell_size = max(float(cell_size), max_span / 128.0, 1e-4)
 
     # 空間ハッシュグリッドへの登録
     grid: Dict[Tuple[int, int, int], List[int]] = {}

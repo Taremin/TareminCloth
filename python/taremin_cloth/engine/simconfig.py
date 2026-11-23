@@ -18,7 +18,7 @@ from ..utils.args_guard import allow_positional
 from ..utils.logger import logger
 
 #: Rust SimConfigに存在しないPython側付帯キー (転送・署名専用)
-EXTRA_KEYS = ("gravity_scale", "sewing_shrink_speed")
+EXTRA_KEYS = ("gravity_scale",)
 
 #: 署名に含めるLiveキー (固定順序・丸め済みタプル化される)
 SIGNATURE_KEYS = (
@@ -215,9 +215,9 @@ def collect_sim_config(settings: Any, *, scene: Any = None) -> Dict[str, Any]:
         "auto_compensate_iterations": bool(_get(settings, "auto_compensate_iterations", True)),
         "enable_strain_adaptive": bool(_get(settings, "enable_strain_adaptive", True)),
         "strain_tolerance": _f(settings, "strain_tolerance", 0.008),
+        "sewing_shrink_speed": _f(settings, "sewing_shrink_speed", 1.0),
         # 付帯キー (転送・署名専用、Rust apply時は除外)
         "gravity_scale": scale,
-        "sewing_shrink_speed": _f(settings, "sewing_shrink_speed", 1.0),
     }
 
 
@@ -337,6 +337,8 @@ def apply_sim_config_legacy(sim: Any, cfg: Dict[str, Any]) -> None:
         )
     if hasattr(sim, "set_sewing_stiffness"):
         sim.set_sewing_stiffness(float(cfg.get("sewing_stiffness", 10000.0)))
+    if hasattr(sim, "set_sewing_shrink_speed"):
+        sim.set_sewing_shrink_speed(float(cfg.get("sewing_shrink_speed", 1.0)))
     if hasattr(sim, "set_areal_density"):
         try:
             sim.set_areal_density(float(cfg.get("areal_density", 0.15)))

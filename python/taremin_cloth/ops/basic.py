@@ -32,6 +32,9 @@ class TAREMIN_CLOTH_OT_toggle_cloth(bpy.types.Operator):
         return context.active_object and context.active_object.type == 'MESH'
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         obj = context.active_object
         settings = obj.taremin_cloth
         settings.is_cloth = not settings.is_cloth
@@ -59,6 +62,9 @@ class TAREMIN_CLOTH_OT_reset_selected(bpy.types.Operator):
         return bool(obj and obj.type == 'MESH' and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth)
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         obj = context.active_object
         if not (obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth and obj.type == 'MESH'):
             cloth_objs = [o for o in getattr(context, "selected_objects", []) if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
@@ -97,6 +103,9 @@ class TAREMIN_CLOTH_OT_reset_all(bpy.types.Operator):
         return any(getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth for obj in scene.objects)
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         scene = context.scene
         if scene:
             for obj in scene.objects:
@@ -151,6 +160,9 @@ class TAREMIN_CLOTH_OT_apply_rest_shape(bpy.types.Operator):
         return has_sel or has_any
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         if self.all_objects:
             targets = [o for o in context.scene.objects if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
         else:
@@ -206,11 +218,14 @@ class TAREMIN_CLOTH_OT_clear_cache(bpy.types.Operator):
         return has_sel or has_any
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         if self.all_objects:
             targets = [o for o in context.scene.objects if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
         else:
             obj = context.active_object
-            if obj and getattr(obj, "taremin_cloth", None) and obj.taremin_cloth.is_cloth and obj.type == 'MESH':
+            if obj and getattr(obj, "taremin_cloth", None) and o.taremin_cloth.is_cloth and obj.type == 'MESH':
                 targets = [obj]
             else:
                 cloth_objs = [o for o in getattr(context, "selected_objects", []) if getattr(o, "taremin_cloth", None) and o.taremin_cloth.is_cloth and o.type == 'MESH']
@@ -350,6 +365,9 @@ class TAREMIN_CLOTH_OT_rebake_bone_sdf(bpy.types.Operator):
         )
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         obj = context.active_object
         col_settings = obj.taremin_cloth_collider
         if col_settings.collider_type == 'MESH_SDF':
@@ -609,6 +627,9 @@ class TAREMIN_CLOTH_OT_create_pin_group(bpy.types.Operator):
         )
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         obj = context.active_object
         settings = obj.taremin_cloth
 
@@ -646,6 +667,9 @@ class TAREMIN_CLOTH_OT_toggle_weight_paint(bpy.types.Operator):
         )
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         obj = context.active_object
         settings = obj.taremin_cloth
 

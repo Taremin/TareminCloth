@@ -8,7 +8,7 @@
 
 from dataclasses import dataclass
 import math
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ..utils.args_guard import allow_positional
@@ -27,6 +27,7 @@ class BoneSegment:
     cum_end: float            # チェーン全体における終了累積距離 (m)
     is_virtual: bool = False  # 非連続ボーン間の空欄補間リンクか
     name: str = ""            # ボーン名
+    normal_hint: Optional[np.ndarray] = None  # ボーン固有ロール基準方向 (3,)
 
 
 @dataclass
@@ -52,23 +53,36 @@ class BoneChain:
     @classmethod
     def from_bones(
         cls,
-        bones_data: Sequence[Tuple[str, Sequence[float], Sequence[float], float]],
+        bones_data: Sequence[Tuple[Any, ...]],
         *,
         gap_threshold: float = 0.001,
     ) -> "BoneChain":
         """
-        ボーン定義リスト [(name, head, tail, radius), ...] からボーンチェーンを構築。
+        ボーン定義リスト [(name, head, tail, radius[, normal_hint]), ...] からボーンチェーンを構築。
         親Tailと子Headが gap_threshold (既定1mm) 以上離れている場合は仮想リンクを自動補間。
         """
         segments: List[BoneSegment] = []
         cum_dist = 0.0
 
-        for i, (b_name, b_head, b_tail, b_rad) in enumerate(bones_data):
+        for entry in bones_data:
+            if len(entry) >= 5:
+                b_name, b_head, b_tail, b_rad, b_hint = entry[:5]
+            else:
+                b_name, b_head, b_tail, b_rad = entry
+                b_hint = None
+
             h = np.array(b_head, dtype=np.float32)
             t = np.array(b_tail, dtype=np.float32)
             seg_len = float(np.linalg.norm(t - h))
             if seg_len < 1e-6:
                 continue
+
+            hint_arr: Optional[np.ndarray] = None
+            if b_hint is not None:
+                try:
+                    hint_arr = np.asarray(b_hint, dtype=np.float32).reshape(3)
+                except Exception:
+                    hint_arr = None
 
             # 半径の取得 (単一値または (head_radius, tail_radius))
             if isinstance(b_rad, (tuple, list)):
@@ -94,6 +108,7 @@ class BoneChain:
                         cum_end=cum_dist + gap_len,
                         is_virtual=True,
                         name=f"Link_{segments[-1].name}_to_{b_name}",
+                        normal_hint=None,
                     )
                     segments.append(v_link)
                     cum_dist += gap_len
@@ -109,6 +124,7 @@ class BoneChain:
                 cum_end=cum_dist + seg_len,
                 is_virtual=False,
                 name=b_name,
+                normal_hint=hint_arr,
             )
             segments.append(b_seg)
             cum_dist += seg_len
@@ -133,7 +149,7 @@ class BoneChain:
             else:
                 axis = d / ln
             if n_ref is None:
-                _, n0, _ = build_orthonormal_basis(axis)
+                _, n0, _ = build_orthonormal_basis(axis, normal_hint=seg.normal_hint)
                 n_ref = n0.astype(np.float64)
             # 前区間の法線を現区間平面へ射影（最小回転伝搬）
             n_proj = n_ref - float(np.dot(n_ref, axis)) * axis
@@ -307,7 +323,7 @@ class BoneChain:
         rad = target_seg.radius_head + (target_seg.radius_tail - target_seg.radius_head) * u
 
         axis = target_seg.tail - target_seg.head
-        axis_norm, norm, binorm = build_orthonormal_basis(axis)
+        axis_norm, norm, binorm = build_orthonormal_basis(axis, normal_hint=target_seg.normal_hint)
 
         # 関節境界での接線急変を緩和するため、前後のセグメントと滑らかにブレンド
         # (セグメント端の 15% 区間で球面線形補間に近い接線ブレンド)
@@ -317,13 +333,13 @@ class BoneChain:
             prev_norm = prev_axis / (np.linalg.norm(prev_axis) + 1e-8)
             blend_w = 0.5 * (1.0 - u / blend_margin)
             axis_blended = axis_norm * (1.0 - blend_w) + prev_norm * blend_w
-            axis_norm, norm, binorm = build_orthonormal_basis(axis_blended)
+            axis_norm, norm, binorm = build_orthonormal_basis(axis_blended, normal_hint=target_seg.normal_hint)
         elif u > (1.0 - blend_margin) and seg_idx < len(self.segments) - 1:
             next_axis = self.segments[seg_idx + 1].tail - self.segments[seg_idx + 1].head
             next_norm = next_axis / (np.linalg.norm(next_axis) + 1e-8)
             blend_w = 0.5 * ((u - (1.0 - blend_margin)) / blend_margin)
             axis_blended = axis_norm * (1.0 - blend_w) + next_norm * blend_w
-            axis_norm, norm, binorm = build_orthonormal_basis(axis_blended)
+            axis_norm, norm, binorm = build_orthonormal_basis(axis_blended, normal_hint=target_seg.normal_hint)
 
         return ChainEvalResult(
             position=pos,
@@ -431,21 +447,26 @@ def slide_curves_along_chain(
                 theta = 0.0
             else:
                 theta = math.atan2(float(np.dot(r_vec, b_p)), float(np.dot(r_vec, n_p)))
-            s_new = max(0.0, min(total_len, s_p + axial + delta_s))
+            s_raw = s_p + axial + delta_s
+            s_clamped = max(0.0, min(total_len, s_raw))
+            overflow = s_raw - s_clamped
             # station_point と等価のインライン評価（astype排除）
             jn = n_seg - 1
             for jj in range(n_seg):
-                if s_new <= float(seg_cum[jj] + seg_len[jj]) or jj == n_seg - 1:
+                if s_clamped <= float(seg_cum[jj] + seg_len[jj]) or jj == n_seg - 1:
                     jn = jj
                     break
             denom = seg_len[jn]
-            un = 0.0 if denom < 1e-9 else max(0.0, min(1.0, (s_new - float(seg_cum[jn])) / denom))
+            un = 0.0 if denom < 1e-9 else max(0.0, min(1.0, (s_clamped - float(seg_cum[jn])) / denom))
             q_new = seg_heads[jn] + seg_vecs[jn] * un
             r_new = float(seg_rh[jn] + (seg_rt[jn] - seg_rh[jn]) * un)
-            axis_new, n_new, b_new = chain.blended_frame_at(s_new, frames=frames)
+            axis_new, n_new, b_new = chain.blended_frame_at(s_clamped, frames=frames)
             kk = (r_new / max(r_p, 1e-4)) * user_scale
-            new_pts[k] = (q_new
-                          + (math.cos(theta) * n_new + math.sin(theta) * b_new) * (h * kk))
+            new_pts[k] = (
+                q_new
+                + axis_new * overflow
+                + (math.cos(theta) * n_new + math.sin(theta) * b_new) * (h * kk)
+            )
         slid_curves.append(np.asarray(new_pts, dtype=np.float32))
 
     return slid_curves

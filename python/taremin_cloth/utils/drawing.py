@@ -10,6 +10,11 @@ import gpu
 import numpy as np
 from gpu_extras.batch import batch_for_shader
 
+try:
+    import mathutils
+except ImportError:
+    mathutils = None
+
 from .. import i18n
 from .args_guard import allow_positional
 
@@ -408,8 +413,48 @@ def get_smooth_color_line_shader():
     return None
 
 
-@allow_positional
-def get_edge_initial_length(obj, v0_idx, v1_idx):
+def should_draw_pin_overlay(settings) -> bool:
+    """現在のインタラクティブ状態と設定に基づきピン留め頂点オーバーレイを描画すべきか判定する。"""
+    return not (getattr(settings, "pin_overlay_interactive_only", True) and not _interactive_active)
+
+
+def should_draw_elastic_overlay(settings) -> bool:
+    """現在のインタラクティブ状態と設定に基づき伸縮グループオーバーレイを描画すべきか判定する。"""
+    if not getattr(settings, "show_elastic_overlay", True):
+        return False
+    if getattr(settings, "elastic_overlay_interactive_only", True) and not _interactive_active:
+        return False
+    return True
+
+
+def get_cached_pin_indices(obj, *, vg_name: str = None):
+    """ピン頂点グループの頂点インデックス一覧をキャッシュ経由で取得する。"""
+    mesh = getattr(obj, "data", None)
+    if mesh is None:
+        return []
+    resolved_vg_name = vg_name or (getattr(getattr(obj, "taremin_cloth", None), "pin_vertex_group", "") or "Pin")
+    vg = obj.vertex_groups.get(resolved_vg_name)
+    if not vg:
+        return []
+
+    cache_key = (obj.name, resolved_vg_name)
+    vert_count = len(mesh.vertices)
+    cached = _pin_indices_cache.get(cache_key)
+    if cached is not None and cached[1] == vert_count:
+        return cached[0]
+
+    vg_idx = vg.index
+    pin_indices = [
+        v.index
+        for v in mesh.vertices
+        for g in v.groups
+        if g.group == vg_idx and g.weight > 0.0
+    ]
+    _pin_indices_cache[cache_key] = (pin_indices, vert_count)
+    return pin_indices
+
+
+def get_edge_initial_length(obj, *, v0_idx, v1_idx):
     """オブジェクトの初期座標からエッジの初期自然長を算出する"""
     if "_taremin_cloth_rest_positions" in obj:
         raw = np.frombuffer(obj["_taremin_cloth_rest_positions"], dtype=np.float32)
@@ -423,22 +468,12 @@ def get_edge_initial_length(obj, v0_idx, v1_idx):
 
 
 def draw_callback_3d():
-    """3Dビューポートのオーバーレイ描画コールバック (インタラクティブシミュレーション実行中のみ)"""
-    if not _interactive_active:
-        return
-
+    """3Dビューポートのオーバーレイ描画コールバック。"""
     context = bpy.context
     if not context or not context.scene:
         return
 
-    region_3d = getattr(context, "region_data", None)
-    if region_3d is None and hasattr(context, "space_data") and hasattr(context.space_data, "region_3d"):
-        region_3d = context.space_data.region_3d
-
-    point_shader = get_point_shader()
-    line_shader = get_line_shader()
-    smooth_line_shader = get_smooth_color_line_shader()
-
+    target_objs = []
     for obj in context.scene.objects:
         if obj.type != 'MESH' or not hasattr(obj, "taremin_cloth"):
             continue
@@ -455,13 +490,31 @@ def draw_callback_3d():
             if getattr(obj, "hide_viewport", False) or (hasattr(obj, "hide_get") and obj.hide_get()):
                 continue
 
-        # インタラクティブシミュレーション実行中は、シミュレータに登録されているアクティブな布オブジェクトのみ描画
         if _interactive_active:
             from ..engine.cache import _simulators
             if obj.name not in _simulators:
                 continue
+            target_objs.append((obj, settings))
+        else:
+            has_pin = should_draw_pin_overlay(settings)
+            has_elastic = should_draw_elastic_overlay(settings) and bool(getattr(settings, "elastic_groups", None))
+            if has_pin or has_elastic:
+                target_objs.append((obj, settings))
 
+    if not target_objs:
+        return
+
+    region_3d = getattr(context, "region_data", None)
+    if region_3d is None and hasattr(context, "space_data") and hasattr(context.space_data, "region_3d"):
+        region_3d = context.space_data.region_3d
+
+    point_shader = get_point_shader()
+    line_shader = get_line_shader()
+    smooth_line_shader = get_smooth_color_line_shader()
+
+    for obj, settings in target_objs:
         mesh = obj.data
+        vert_count = len(mesh.vertices)
         world_mat = obj.matrix_world
 
         # 深度テスト（物陰オクルージョン判定）の設定
@@ -477,28 +530,10 @@ def draw_callback_3d():
                 gpu.state.depth_test_set('NONE')
 
             # 1. ピン留め頂点の描画（設定色、Interactive Only対応）
-            show_pin = True
-            if getattr(settings, "pin_overlay_interactive_only", True) and not _interactive_active:
-                show_pin = False
-
+            show_pin = should_draw_pin_overlay(settings)
             vg_name = settings.pin_vertex_group or "Pin"
-            vg = obj.vertex_groups.get(vg_name)
-            if show_pin and vg and point_shader:
-                cache_key = (obj.name, vg_name)
-                vert_count = len(mesh.vertices)
-                cached = _pin_indices_cache.get(cache_key)
-                if cached is not None and cached[1] == vert_count:
-                    pin_indices = cached[0]
-                else:
-                    vg_idx = vg.index
-                    pin_indices = [
-                        v.index
-                        for v in mesh.vertices
-                        for g in v.groups
-                        if g.group == vg_idx and g.weight > 0.0
-                    ]
-                    _pin_indices_cache[cache_key] = (pin_indices, vert_count)
-
+            if show_pin and point_shader:
+                pin_indices = get_cached_pin_indices(obj, vg_name=vg_name)
                 if pin_indices:
                     if len(pin_indices) > 32:
                         coords = np.empty((vert_count, 3), dtype=np.float32)
@@ -559,8 +594,8 @@ def draw_callback_3d():
                             line_batch.draw(line_shader)
                             gpu.state.blend_set('NONE')
 
-            # 3. 縫合エッジ（Loose Edge）の描画（水色ライン）
-            if settings.enable_sewing and line_shader:
+            # 3. 縫合エッジ（Loose Edge）の描画（水色ライン、インタラクティブ中のみ）
+            if _interactive_active and settings.enable_sewing and line_shader:
                 cache_key = obj.name
                 vert_count = len(mesh.vertices)
                 edge_count = len(mesh.edges)
@@ -620,10 +655,8 @@ def draw_callback_3d():
                         batch.draw(line_shader)
                         gpu.state.blend_set('NONE')
 
-            # 4. 伸縮エッジ（Elastic Bands）の描画（収縮=青、伸長=赤、目標収束=フェード）
-            show_elastic = getattr(settings, "show_elastic_overlay", True)
-            if getattr(settings, "elastic_overlay_interactive_only", True) and not _interactive_active:
-                show_elastic = False
+            # 4. 伸縮エッジ（Elastic Bands）の描画（グループ色基準・目標収束=フェード）
+            show_elastic = should_draw_elastic_overlay(settings)
 
             if show_elastic and settings.elastic_groups:
                 elastic_lines = []
@@ -637,13 +670,13 @@ def draw_callback_3d():
                         continue
 
                     scale = grp.scale
-                    # 基本色: 収縮(scale < 1.0)なら青系、伸長(scale > 1.0)なら赤・オレンジ系
-                    if scale < 0.999:
-                        base_rgb = (0.1, 0.65, 1.0) # シアンブルー
-                    elif scale > 1.001:
-                        base_rgb = (1.0, 0.35, 0.1) # オレンジレッド
-                    else:
-                        base_rgb = (0.6, 0.6, 0.6) # 変化なし（グレー）
+                    raw_col = getattr(grp, "color", (0.2, 0.7, 1.0, 1.0))
+                    try:
+                        base_rgb = (float(raw_col[0]), float(raw_col[1]), float(raw_col[2]))
+                        base_alpha = float(raw_col[3]) if len(raw_col) >= 4 else 1.0
+                    except (TypeError, ValueError, IndexError):
+                        base_rgb = (0.2, 0.7, 1.0)
+                        base_alpha = 1.0
 
                     for e_idx in edge_indices:
                         if e_idx >= len(mesh.edges):
@@ -656,19 +689,26 @@ def draw_callback_3d():
                         p1_w = world_mat @ mesh.vertices[v1_idx].co
                         curr_len = (p1_w - p0_w).length
 
-                        l0 = get_edge_initial_length(obj, v0_idx, v1_idx)
+                        l0 = get_edge_initial_length(obj, v0_idx=v0_idx, v1_idx=v1_idx)
                         if l0 <= 1e-6:
                             continue
 
                         target_len = l0 * scale
 
-                        # 目標収束度合い（テンション誤差の評価）
+                        # 目標収束度合い（テンション誤差の評価）に応じて明度とアルファを変調
                         err = abs(curr_len - target_len) / (l0 * 0.25 + 1e-5)
-                        fade = min(1.0, max(0.12, err)) # 最小アルファ 0.12 (位置がわかるように薄く残す)
+                        norm_err = min(1.0, err)
+                        fade = min(1.0, max(0.15, err))  # 最小アルファ 0.15 (位置がわかるように薄く残す)
+                        bright = 0.65 + 0.35 * norm_err
 
-                        alpha = fade * 0.9
+                        alpha = fade * 0.9 * max(0.0, min(1.0, base_alpha))
 
-                        c = (base_rgb[0], base_rgb[1], base_rgb[2], alpha)
+                        c = (
+                            min(1.0, base_rgb[0] * bright),
+                            min(1.0, base_rgb[1] * bright),
+                            min(1.0, base_rgb[2] * bright),
+                            alpha,
+                        )
                         elastic_lines.append([p0_w.x, p0_w.y, p0_w.z])
                         elastic_lines.append([p1_w.x, p1_w.y, p1_w.z])
                         elastic_colors.append(c)
@@ -683,14 +723,15 @@ def draw_callback_3d():
                         smooth_line_shader.bind()
                         batch.draw(smooth_line_shader)
                     elif line_shader:
+                        fallback_col = elastic_colors[0] if elastic_colors else (0.2, 0.7, 1.0, 0.8)
                         batch = batch_for_shader(line_shader, 'LINES', {"pos": draw_elastic_lines})
                         line_shader.bind()
-                        line_shader.uniform_float("color", (0.2, 0.7, 1.0, 0.8))
+                        line_shader.uniform_float("color", fallback_col)
                         batch.draw(line_shader)
                     gpu.state.blend_set('NONE')
 
-            # --- 3. ドレープガイドの影響範囲の半透明描画 ---
-            # use_wrinkle_field が無効・実験フラグOFFのときはプレビューも描画しない。
+            # --- 3. ドレープガイドの影響範囲の半透明描画（インタラクティブ中のみ） ---
+            # use_wrinkle_field が無効・実験フラグOFF・非インタラクティブのときはプレビューも描画しない。
             try:
                 try:
                     from ..preferences import is_wrinkle_field_enabled as _is_wf_enabled
@@ -698,7 +739,7 @@ def draw_callback_3d():
                 except Exception:
                     _exp_enabled = True
                 preview_mode = getattr(settings, "wrinkle_preview_mode", "BOTH") if settings else "BOTH"
-                if _exp_enabled and preview_mode in ("RANGE", "BOTH") and getattr(settings, "use_wrinkle_field", False):
+                if _interactive_active and _exp_enabled and preview_mode in ("RANGE", "BOTH") and getattr(settings, "use_wrinkle_field", False):
                     # 実験フラグONかつ use_wrinkle_field 有効時のみ描画
                     wrinkle_curves_data = []
                     processed_objs = set()
@@ -730,7 +771,13 @@ def draw_callback_3d():
                             curve_bone = ""
                         w_mat = c_obj.matrix_world
                         for sp in c_obj.data.splines:
-                            pts = [(w_mat @ (p.co.xyz if hasattr(p.co, "xyz") else mathutils.Vector(p.co[:3]))) for p in sp.points]
+                            pts = [
+                                (w_mat @ (
+                                    p.co.xyz if hasattr(p.co, "xyz")
+                                    else (mathutils.Vector(p.co[:3]) if mathutils is not None else p.co[:3])
+                                ))
+                                for p in sp.points
+                            ]
                             if len(pts) >= 2:
                                 wrinkle_curves_data.append((w_type, [list(p) for p in pts], inf_r, tgt_r, curve_bone))
 
@@ -770,7 +817,11 @@ def draw_callback_3d():
                                     break
                         settings_bone = getattr(settings, "wrinkle_bone_name", "") if settings else ""
                         if arm_obj is not None and getattr(arm_obj, "pose", None):
-                            from ..engine.wrinkle_field import build_orthonormal_basis, resolve_bone_radius
+                            from ..engine.wrinkle_field import (
+                                build_orthonormal_basis,
+                                resolve_bone_radius,
+                                resolve_pose_bone_normal_hint,
+                            )
                             from collections import defaultdict
                             pbs = arm_obj.pose.bones
                             if settings_bone not in pbs:
@@ -800,7 +851,8 @@ def draw_callback_3d():
                                 axis_raw = b_tail - b_head
                                 if float(np.linalg.norm(axis_raw)) < 1e-6:
                                     continue
-                                axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                n_hint = resolve_pose_bone_normal_hint(arm_obj, pb)
+                                axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw, normal_hint=n_hint)
                                 bone_rad = resolve_bone_radius(
                                     explicit_r,
                                     float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
@@ -823,7 +875,8 @@ def draw_callback_3d():
                                     b_tail = np.array((w_mat @ pb.tail)[:3], dtype=np.float64)
                                     axis_raw = b_tail - b_head
                                     if float(np.linalg.norm(axis_raw)) >= 1e-6:
-                                        axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw)
+                                        n_hint = resolve_pose_bone_normal_hint(arm_obj, pb)
+                                        axis_n, n_vec, _bn = build_orthonormal_basis(axis_raw, normal_hint=n_hint)
                                         bone_rad = resolve_bone_radius(
                                             explicit_r,
                                             float(getattr(pb.bone, "head_radius", 0.0) or 0.0),
@@ -1260,17 +1313,17 @@ def build_wrinkle_influence_meshes(
         )
         for i in range(n_sh):
             # alpha はシェーダの dist_factor（目標で0・縁で最大）に比例させる。
-            # 谷: 目標側ほど淡く / 山: 目標側ほど淡く（縁＝最大影響が濃い）。
+            # 山・谷いずれも i=0 が目標側（最も淡く）、i=n_sh-1 が最縁（最大影響で最も濃い）。
             frac_in = i / n_sh
             frac_out = (i + 1) / n_sh
             mid = (frac_in + frac_out) * 0.5
             if is_crest:
-                # i=0 が最内縁（最大影響）
+                # i=0 が目標側（r=target_r）、i=n_sh-1 が最内縁（r=target_r-depth、最大影響）
                 r_hi = span["target_r"] - depth * frac_in
                 r_lo = span["target_r"] - depth * frac_out
-                alpha = 1.0 - mid
+                alpha = mid
             else:
-                # i=n_sh-1 が最外縁（最大影響）
+                # i=0 が目標側（r=target_r）、i=n_sh-1 が最外縁（r=target_r+depth、最大影響）
                 r_lo = span["target_r"] + depth * frac_in
                 r_hi = span["target_r"] + depth * frac_out
                 alpha = mid
@@ -1651,7 +1704,8 @@ def draw_callback_2d():
             _draw_top_badge(region, shader_2d, sew_margin_x, sew_y_top, sewing_text, sew_color)
 
         # 2. キー操作ガイドバッジの描画 (画面下部中央・最大2行、docs/hud.md:5)
-        if show_help:
+        # 下部中央エリアは Progress (Bake / Init) / Toast と排他表示（優先順: Bake > Init > Toast > Guidance）
+        if show_help and not _bake_overlay_info and not _init_overlay_info and not _toast_overlay_info:
             base_guide = i18n.trans("[LMB Drag] Move  |  [P] Pin/Unpin  |  [Esc / RMB] Exit")
             suffix = _interactive_fps_info.get("guide_line1_suffix")
             line2 = _interactive_fps_info.get("guide_line2")
@@ -1716,7 +1770,7 @@ def draw_callback_2d():
         _draw_bottom_center_progress(region, shader_2d, bake_text, pct)
 
     # --- 3. 起動準備中オーバーレイバッジの描画 (画面下部中央) ---
-    if _init_overlay_info:
+    elif _init_overlay_info:
         message = _init_overlay_info.get("message", "")
         cur = _init_overlay_info.get("current", 0)
         total = _init_overlay_info.get("total", 1)

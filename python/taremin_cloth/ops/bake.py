@@ -45,7 +45,7 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
             for obj in scene.objects
         )
 
-    def cleanup(self, context):
+    def cleanup(self, context, *, discard_cache: bool = False):
         """モーダルベイクの終了・クリーンアップ処理"""
         wm = context.window_manager
         if self._timer:
@@ -54,7 +54,18 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
 
         clear_bake_overlay_info()
         runner._is_baking = False
-        bake_finalize_simulation(self.bake_ctx)
+        if discard_cache:
+            runner.flush_all_async_simulations(update_mesh=False)
+            scene = (self.bake_ctx.get("scene") if self.bake_ctx else None) or getattr(context, "scene", None)
+            if scene is not None:
+                free_scene_bake(scene)
+                if self.bake_ctx and "start_frame" in self.bake_ctx:
+                    try:
+                        scene.frame_set(self.bake_ctx["start_frame"])
+                    except Exception:
+                        pass
+        else:
+            bake_finalize_simulation(self.bake_ctx)
 
         try:
             wm.progress_end()
@@ -69,7 +80,7 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
     def modal(self, context, event):
         if event.type in {'RIGHTMOUSE', 'ESC'}:
             logger.info(f"[Bake] Cancelled by user at frame {self.current_frame}")
-            self.cleanup(context)
+            self.cleanup(context, discard_cache=True)
             self.report({'WARNING'}, "シミュレーションのベイクを中断しました")
             return {'CANCELLED'}
 
@@ -108,7 +119,7 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
                     self.current_frame += 1
                 except Exception as e:
                     logger.error(f"[Bake] Error during bake step at frame {self.current_frame}: {e}", exc_info=True)
-                    self.cleanup(context)
+                    self.cleanup(context, discard_cache=True)
                     self.report({'ERROR'}, f"ベイク実行中にエラーが発生しました: {e}")
                     return {'CANCELLED'}
             else:
@@ -121,6 +132,9 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
         return {'PASS_THROUGH'}
 
     def invoke(self, context, event):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         # ヘッドレスモード（CLI/テスト）時は同期的に execute を実行
         if getattr(bpy.app, "background", False):
             return self.execute(context)
@@ -150,6 +164,9 @@ class TAREMIN_CLOTH_OT_bake(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
+        from .interactive import stop_interactive_if_running
+        stop_interactive_if_running()
+
         scene = context.scene
         wm = context.window_manager
 

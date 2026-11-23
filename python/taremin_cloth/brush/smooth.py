@@ -61,6 +61,7 @@ class SmoothTool(BaseBrushTool):
         return base
 
     def __init__(self):
+        super().__init__()
         self.reset()
 
     def reset(self):
@@ -77,7 +78,8 @@ class SmoothTool(BaseBrushTool):
         self._ensure_adjacency(ctx)
         if self.adj_offsets is None or self.adj_indices is None:
             return False
-        ok = self._dab(ctx, _pinned_set_of(ctx))
+        pinned = _pinned_set_of(ctx)
+        ok = self._dab(ctx, pinned, init_active_region=True)
         self.dragging = bool(ok)
         return bool(ok)
 
@@ -143,6 +145,7 @@ class SmoothTool(BaseBrushTool):
 
     def abort(self, sim, pinned_verts):
         self.dragging = False
+        self.active_region.release_temp_pins(sim)
         if self.owned:
             for v_idx in list(self.owned.keys()):
                 if v_idx not in (pinned_verts or set()):
@@ -181,7 +184,7 @@ class SmoothTool(BaseBrushTool):
             self.adj_num_verts = 0
             return False
 
-    def _dab(self, ctx, pinned_verts):
+    def _dab(self, ctx, pinned_verts, *, init_active_region=False):
         obj, sim = ctx.obj, ctx.sim
         if obj is None or sim is None:
             return False
@@ -207,16 +210,26 @@ class SmoothTool(BaseBrushTool):
             except Exception:
                 pass
         pin_idx, pin_w = select_grab_pins(found, weights)
+        pinned = set(pinned_verts) if pinned_verts else set()
         if not pin_idx:
+            if init_active_region and brush_opt(ctx.brush, "use_active_region", False):
+                scale = float(brush_opt(ctx.brush, "active_region_scale", 2.5))
+                self.active_region.freeze_inactive_region(
+                    sim, pos_2d, res["center"], radius, active_scale=scale, exclude_pins=set(self.owned.keys()) | pinned
+                )
             update_brush_circle(ctx.context, obj, res["center"], radius, ctx.mouse_pos)
             return True
-        pinned = set(pinned_verts) if pinned_verts else set()
         live_idx, live_w = [], []
         for v_idx, w in zip(pin_idx, pin_w):
             if int(v_idx) not in pinned:
                 live_idx.append(int(v_idx))
                 live_w.append(float(w))
         if not live_idx:
+            if init_active_region and brush_opt(ctx.brush, "use_active_region", False):
+                scale = float(brush_opt(ctx.brush, "active_region_scale", 2.5))
+                self.active_region.freeze_inactive_region(
+                    sim, pos_2d, res["center"], radius, active_scale=scale, exclude_pins=set(self.owned.keys()) | pinned
+                )
             update_brush_circle(ctx.context, obj, res["center"], radius, ctx.mouse_pos)
             return True
         try:
@@ -251,6 +264,11 @@ class SmoothTool(BaseBrushTool):
                     self.owned[int(v_idx)] = float(w)
                 except Exception:
                     pass
+        if init_active_region and brush_opt(ctx.brush, "use_active_region", False):
+            scale = float(brush_opt(ctx.brush, "active_region_scale", 2.5))
+            self.active_region.freeze_inactive_region(
+                sim, pos_2d, res["center"], radius, active_scale=scale, exclude_pins=set(self.owned.keys()) | pinned
+            )
         update_brush_circle(ctx.context, obj, res["center"], radius, ctx.mouse_pos)
         return True
 
@@ -263,4 +281,5 @@ class SmoothTool(BaseBrushTool):
                         ctx.sim.release_pin(v_idx)
                     except Exception:
                         pass
+        self.active_region.release_temp_pins(ctx.sim)
         self.owned = {}

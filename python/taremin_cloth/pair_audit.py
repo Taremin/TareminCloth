@@ -189,8 +189,8 @@ def segment_segment_distances(
     denom = a * e - b * b
     use = valid_e & (np.abs(denom) > eps)
     s[use] = np.clip((b[use] * f[use] - c[use] * e[use]) / denom[use], 0.0, 1.0)
-    t[~valid_e] = np.clip(-c[~valid_e] / a, 0.0, 1.0)
-    s[~valid_e] = 0.0
+    s[~valid_e] = np.clip(-c[~valid_e] / a, 0.0, 1.0)
+    t[~valid_e] = 0.0
     nurse = use | valid_e
     t[nurse] = (b[nurse] * s[nurse] + f[nurse]) / np.maximum(e[nurse], eps)
     lo = nurse & (t < 0.0)
@@ -321,8 +321,8 @@ def audit_frame(
             f = faces[fi]
             if i in f:
                 continue
-            if all(int(v) in near[i] for v in f):
-                continue  # 保守的除外
+            if any(int(v) in near[i] for v in f):
+                continue  # 保守的除外 (GPUと同じ1頂点以上OR除外)
             if dist < check_static:
                 gt_vt.add((i, fi))
 
@@ -381,7 +381,7 @@ def audit_frame(
             if len({a, b, c, dd}) < 4:
                 continue
             # GPU条件 (始点同士が非近傍) の近似
-            if c in near[a]:
+            if (c in near[a]) or (dd in near[a]) or (c in near[b]) or (dd in near[b]):
                 continue
             if dist < check_static and dist > 1e-9:
                 gt_ee.add((ei, ej))
@@ -402,12 +402,14 @@ def audit_frame(
     prev_ep1 = prev_pos[edges[:, 1]]
     for (ei, ej) in ee_missed:
         a, b = int(edges[ei][0]), int(edges[ei][1])
+        c, dd = int(edges[ej][0]), int(edges[ej][1])
         d0 = float(segment_segment_distances(
             prev_ep0[ei], prev_ep1[ei],
             prev_ep0[ej:ej + 1], prev_ep1[ej:ej + 1])[0])
         # 収集時の受理 bound (シェーダーの check_thick 相当)
         check_start = (eff_thick + float(safety_margin)
-                       + float(horizon[a]) + float(horizon[int(edges[ej][0])]))
+                       + max(float(horizon[a]), float(horizon[b]))
+                       + max(float(horizon[c]), float(horizon[dd])))
         if d0 > check_start:
             ee_miss_horizon += 1
         else:
