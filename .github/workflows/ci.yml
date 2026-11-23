@@ -64,16 +64,22 @@ jobs:
           mkdir -p python/taremin_cloth
           cp target/release/taremin_cloth_core.dll python/taremin_cloth/taremin_cloth_core.pyd
 
+      - name: Build Standalone GUI (cloth_gui)
+        shell: bash
+        run: |
+          cargo build --release -p cloth_gui
+
       - name: Run Python Unit Tests
         shell: bash
         run: |
           python -m tools.parallel_unittest --standalone
 
-      - name: Check Protocol & i18n Integrity
+      - name: Check Protocol, i18n & Function Args Integrity
         shell: bash
         run: |
           python tools/audit_protocol.py --check
           python tools/audit_i18n.py --check
+          python tools/audit_function_args.py --check
 
       - name: Check Documentation Integrity (Links, Mermaid, KaTeX)
         shell: bash

@@ -268,6 +268,33 @@ def lint_markdown_content(file_path: str, lines: List[str]) -> Tuple[List[Tuple[
     return mermaid_errors, math_errors, emphasis_errors
 
 
+def extract_gfm_heading_slugs(md_text: str) -> Set[str]:
+    """Markdown 見出し (# ...) から GitHub GFM 互換のアンカースラッグ集合を生成する."""
+    slugs: Set[str] = set()
+    counts: Dict[str, int] = {}
+    in_fenced_code = False
+
+    for line in md_text.splitlines():
+        if line.strip().startswith("```"):
+            in_fenced_code = not in_fenced_code
+            continue
+        if in_fenced_code:
+            continue
+        m = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if not m:
+            continue
+        raw = m.group(1)
+        raw = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw)
+        raw = raw.replace("`", "").replace("*", "")
+        cleaned = re.sub(r"[^\w\s-]", "", raw.lower())
+        slug = cleaned.replace(" ", "-")
+        idx = counts.get(slug, 0)
+        counts[slug] = idx + 1
+        slugs.add(slug if idx == 0 else f"{slug}-{idx}")
+
+    return slugs
+
+
 def inspect_markdown_file(file_path: str) -> Dict[str, any]:
     """Markdownファイルをスキャンしてリンク・Mermaid・数式構文を抽出・検証する."""
     external_urls: List[str] = []
@@ -280,12 +307,20 @@ def inspect_markdown_file(file_path: str) -> Dict[str, any]:
     with open(file_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
+    in_fenced_code = False
     for line_no, line in enumerate(lines, 1):
-        for m in raw_url_pattern.findall(line):
+        if line.strip().startswith("```"):
+            in_fenced_code = not in_fenced_code
+            continue
+        if in_fenced_code:
+            continue
+
+        scan_line = _INLINE_CODE_RE.sub("", line)
+        for m in raw_url_pattern.findall(scan_line):
             clean_url = m.rstrip(".,;:)")
             external_urls.append(clean_url)
 
-        for text, target in md_link_pattern.findall(line):
+        for text, target in md_link_pattern.findall(scan_line):
             target = target.strip()
             if target.startswith("file://") or re.match(r'^[a-zA-Z]:[\\/]', target):
                 forbidden_links.append((line_no, target, "絶対パス・file:/// スキームが使用されています（環境依存リンク）"))
@@ -294,8 +329,6 @@ def inspect_markdown_file(file_path: str) -> Dict[str, any]:
                 clean_target = target.rstrip(".,;:)")
                 if clean_target not in external_urls:
                     external_urls.append(clean_target)
-                continue
-            if target.startswith("#"):
                 continue
             local_links.append((line_no, target))
 
@@ -336,6 +369,14 @@ def main():
 
     all_success = True
     checked_external_urls: Set[str] = set()
+    heading_slug_cache: Dict[str, Set[str]] = {}
+
+    def get_slugs(path: str) -> Set[str]:
+        norm = os.path.abspath(path)
+        if norm not in heading_slug_cache:
+            with open(norm, "r", encoding="utf-8") as fp:
+                heading_slug_cache[norm] = extract_gfm_heading_slugs(fp.read())
+        return heading_slug_cache[norm]
 
     print("=" * 65)
     print("GFM Markdown Integrity & Link Checker (Links / Mermaid / Math / Emphasis)")
@@ -391,21 +432,34 @@ def main():
         else:
             print("  [PASS] Japanese emphasis syntax valid.")
 
-        # 4. ローカル相対パス検証
+        # 4. ローカル相対パスおよび #anchor 見出しスラッグ検証
         local_links = scan_res["local_links"]
         if local_links:
-            print(f"  Checking {len(local_links)} local relative link(s)...")
+            print(f"  Checking {len(local_links)} local link(s) / anchor(s)...")
             for line_no, target in local_links:
-                clean_target = target.split("#")[0]
-                if not clean_target:
-                    continue
-                target_abs = os.path.normpath(os.path.join(base_dir, clean_target))
-                if os.path.exists(target_abs):
-                    rel_to_repo = os.path.relpath(target_abs, os.getcwd())
-                    print(f"    [PASS] (Line {line_no}) {target} -> exists ({rel_to_repo})")
+                if "#" in target:
+                    clean_target, anchor = target.split("#", 1)
                 else:
-                    print(f"    [FAIL] (Line {line_no}) {target} -> NOT FOUND ({target_abs})")
-                    all_success = False
+                    clean_target, anchor = target, ""
+
+                if clean_target:
+                    target_abs = os.path.normpath(os.path.join(base_dir, clean_target))
+                    if not os.path.exists(target_abs):
+                        print(f"    [FAIL] (Line {line_no}) {target} -> NOT FOUND ({target_abs})")
+                        all_success = False
+                        continue
+                else:
+                    target_abs = os.path.abspath(file_path)
+
+                if anchor and os.path.isfile(target_abs) and target_abs.lower().endswith(".md"):
+                    slugs = get_slugs(target_abs)
+                    if anchor.lower() not in slugs and anchor not in slugs:
+                        print(f"    [FAIL] (Line {line_no}) {target} -> ANCHOR NOT FOUND (#{anchor})")
+                        all_success = False
+                        continue
+
+                rel_to_repo = os.path.relpath(target_abs, os.getcwd())
+                print(f"    [PASS] (Line {line_no}) {target} -> exists ({rel_to_repo})")
         else:
             print("  No local relative links found.")
 

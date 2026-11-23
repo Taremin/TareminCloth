@@ -132,6 +132,7 @@ def get_version_files(repo_root: Path) -> list[tuple[str, Path, str]]:
     """(ファイル種別, ファイルパス, 抽出・置換パターン種別)"""
     return [
         ("Blender Addon", repo_root / "__init__.py", "init_py"),
+        ("Blender Addon (pkg)", repo_root / "python" / "taremin_cloth" / "__init__.py", "init_py"),
         ("PyPI / Maturin", repo_root / "pyproject.toml", "pyproject_toml"),
         ("Cargo PyO3 Core", repo_root / "crates" / "cloth_py" / "Cargo.toml", "cargo_toml"),
         ("Cargo Core", repo_root / "crates" / "cloth_core" / "Cargo.toml", "cargo_toml"),
@@ -180,21 +181,25 @@ def write_file_version(path: Path, kind: str, new_ver: SemVer) -> None:
 def check_version_consistency(repo_root: Path) -> tuple[bool, SemVer | None, dict[str, str]]:
     files = get_version_files(repo_root)
     versions: dict[str, str] = {}
-    parsed_semvers: list[SemVer] = []
+    parsed_semvers: list[tuple[str, SemVer]] = []
 
     for name, path, kind in files:
         v = read_file_version(path, kind)
         versions[name] = v or "未検出"
         if v:
             try:
-                parsed_semvers.append(SemVer.parse(v))
+                parsed_semvers.append((kind, SemVer.parse(v)))
             except Exception:
                 pass
 
     if not parsed_semvers:
         return False, None, versions
 
-    primary_ver = parsed_semvers[1] if len(parsed_semvers) > 1 else parsed_semvers[0]
+    # init_py はプレリリース表記を保持できないため、pyproject.toml / Cargo.toml から基準バージョンを選ぶ
+    primary_ver = next(
+        (sv for kind, sv in parsed_semvers if kind != "init_py"),
+        parsed_semvers[0][1],
+    )
     all_match = True
     for name, path, kind in files:
         cur_v = versions.get(name)

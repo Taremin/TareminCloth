@@ -74,6 +74,34 @@ jobs:
               target/aarch64-apple-darwin/release/taremin_cloth_gui \
               -output target/release/taremin_cloth_gui
             echo "GUI_BIN=target/release/taremin_cloth_gui" >> $GITHUB_ENV
+          elif [ "${{ matrix.platform }}" = "linux-x64" ]; then
+            docker run --rm \
+              -v "${{ github.workspace }}:/io" \
+              -w /io \
+              quay.io/pypa/manylinux_2_28_x86_64 \
+              bash -exc '
+                export CARGO_HOME=/tmp/cargo
+                export RUSTUP_HOME=/tmp/rustup
+                export PATH="/tmp/cargo/bin:$PATH"
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+                cargo build --release -p cloth_gui --target x86_64-unknown-linux-gnu
+                chmod -R a+rwX target/x86_64-unknown-linux-gnu
+              '
+            GUI_BIN="target/${{ matrix.target }}/release/taremin_cloth_gui"
+            python - "$GUI_BIN" << 'PY'
+          import re
+          import subprocess
+          import sys
+
+          gui_bin = sys.argv[1]
+          out = subprocess.check_output(["objdump", "-T", gui_bin], text=True)
+          versions = sorted(set(re.findall(r"GLIBC_(\d+(?:\.\d+)+)", out)))
+          bad = [v for v in versions if tuple(int(x) for x in v.split(".")) > (2, 28)]
+          print(f"Detected GLIBC versions: {versions}")
+          if bad:
+              raise SystemExit(f"GLIBC version exceeds 2.28: {bad}")
+          PY
+            echo "GUI_BIN=$GUI_BIN" >> $GITHUB_ENV
           else
             cargo build --release -p cloth_gui --target ${{ matrix.target }}
             GUI_BIN="target/${{ matrix.target }}/release/taremin_cloth_gui"

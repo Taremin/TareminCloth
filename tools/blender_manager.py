@@ -4,6 +4,7 @@ Python標準ライブラリのみで動作し、追加依存関係を必要と�
 """
 
 import os
+import hashlib
 import re
 import sys
 import shutil
@@ -288,6 +289,73 @@ def fetch_latest_patch_zip(version_spec: str) -> Tuple[str, str]:
     return default_zip, f"{dir_url}{default_zip}"
 
 
+def _fetch_official_sha256(
+    zip_url: str,
+    *,
+    zip_filename: str,
+    timeout: float = 15.0,
+) -> Optional[str]:
+    """Blender公式ディレクトリから対応する .sha256 マニフェストを取得し、対象ZIPのハッシュを返す."""
+    m = re.match(r"^(blender-\d+\.\d+(?:\.\d+)?)", zip_filename, re.IGNORECASE)
+    if not m:
+        return None
+    sha_filename = f"{m.group(1)}.sha256"
+    base_dir = zip_url.rsplit("/", 1)[0]
+    sha_url = f"{base_dir}/{sha_filename}"
+    req = urllib.request.Request(
+        sha_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    target_lower = zip_filename.lower()
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            digest, fname = parts[0], parts[-1].lstrip("*")
+            if os.path.basename(fname).lower() == target_lower and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                return digest.lower()
+    return None
+
+
+def _verify_zip_sha256(zip_path: Path, *, expected_sha256: str) -> None:
+    """ZIP ファイルの SHA-256 を算出し、期待値と一致しなければ RuntimeError を送出する."""
+    expected = expected_sha256.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError(f"期待される SHA-256 形式が不正です: {expected_sha256!r}")
+    h = hashlib.sha256()
+    with open(zip_path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    actual = h.hexdigest().lower()
+    if actual != expected:
+        raise RuntimeError(
+            f"SHA-256 検証に失敗しました ({zip_path.name}): expected={expected}, actual={actual}"
+        )
+
+
+def _safe_extract_zip(zip_path: Path, *, dest_dir: Path) -> None:
+    """Zip Slip（パストラバーサル）を検証した上で ZIP を展開する."""
+    dest_resolved = dest_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        for info in zip_ref.infolist():
+            member_path = (dest_resolved / info.filename).resolve()
+            if not member_path.is_relative_to(dest_resolved):
+                raise RuntimeError(
+                    f"不正なZIPエントリパス（パストラバーサル検出）を拒否しました: {info.filename!r}"
+                )
+        zip_ref.extractall(dest_resolved)
+
+
 def download_blender(version: str) -> Path:
     """指定されたバージョンのBlenderを動的に検索・ダウンロード・解凍してblender.exeのパスを返す"""
     version_key = version.strip()
@@ -314,9 +382,17 @@ def download_blender(version: str) -> Path:
 
     try:
         download_file_with_progress(url, zip_path)
+        skip_sha = os.environ.get("TAREMIN_BLENDER_SKIP_SHA256", "").strip() == "1"
+        if not skip_sha:
+            expected_sha = _fetch_official_sha256(url, zip_filename=zip_filename)
+            if not expected_sha:
+                raise RuntimeError(
+                    f"公式 SHA-256 マニフェストの取得または一致エントリ検出に失敗しました: {zip_filename}"
+                )
+            print(f"[BlenderManager] SHA-256 検証中 ({expected_sha[:12]}...)...")
+            _verify_zip_sha256(zip_path, expected_sha256=expected_sha)
         print("[BlenderManager] ダウンロード完了。解凍中...")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(cache_dir)
+        _safe_extract_zip(zip_path, dest_dir=cache_dir)
 
         # ダウンロードしたzipは削除（ディスク容量節約）
         if zip_path.exists():

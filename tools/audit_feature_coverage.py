@@ -50,6 +50,7 @@ METADATA_FIELDS = {"version"}
 
 # SimConfigキー名 ↔ 各クライアント層での識別名候補
 PARAM_ALIASES = {
+    "gravity": ["gravity", "gravity_scale"],
     "tension_stiffness": ["stiffness", "tension_stiffness"],
     "damping": ["damping", "air_damping"],
     "enable_self_collision": ["use_self_collision", "enable_self_collision", "self_collision_enabled", "enabled"],
@@ -72,12 +73,20 @@ PARAM_ALIASES = {
         "max_iterations",
         "max_search_iterations",
     ],
+    "relief_factor": ["relief_factor", "self_collision_relief_factor"],
+    "max_displacement_ratio": ["max_displacement_ratio", "self_collision_max_displacement_ratio"],
+    "exclude_neighbors": ["exclude_neighbors", "self_collision_exclude_neighbors"],
+    "coupled_mode": ["coupled_mode", "coupled_self_collision_mode"],
+    "coupled_collider": ["coupled_collider", "coupled_collider_mode"],
+    "post_relaxation_iters": ["post_relaxation_iters", "post_collision_relaxation_iters"],
+    "substep_interval": ["substep_interval", "self_collision_substep_interval"],
+    "ee_substep_interval": ["ee_substep_interval", "self_collision_ee_substep_interval"],
     "pair_margin_mode": ["pair_margin_mode", "pair_cache_margin_mode"],
     "pair_safety_margin": ["pair_safety_margin", "pair_cache_safety_margin"],
     "pair_horizon_scale": ["pair_horizon_scale", "pair_cache_horizon_scale"],
     "pair_max_horizon": ["pair_max_horizon", "pair_cache_max_horizon"],
     "pair_max_pairs": ["pair_max_pairs", "pair_cache_max_pairs"],
-    "sewing_priority_enabled": ["sewing_priority_enabled", "use_sewing_priority"],
+    "sewing_priority_enabled": ["sewing_priority_enabled", "enable_sewing_priority", "use_sewing_priority"],
     "sewing_priority_merge_dist": ["sewing_priority_merge_dist", "sewing_priority_merge_distance"],
     "sewing_priority_ramp_frames": ["sewing_priority_ramp_frames"],
     "sewing_priority_max_frames": ["sewing_priority_max_frames"],
@@ -109,7 +118,7 @@ def parse_sim_config(root: str) -> List[Tuple[str, str]]:
         line = line.strip()
         if not line or line.startswith("//") or line.startswith("#"):
             continue
-        field_match = re.match(r"pub\s+([a-zA-Z0-9_]+)\s*:\s*([^,;]+)", line)
+        field_match = re.match(r"pub\s+([a-zA-Z0-9_]+)\s*:\s*([^,]+)", line)
         if field_match:
             name = field_match.group(1).strip()
             ftype = field_match.group(2).strip()
@@ -211,7 +220,7 @@ def parse_gui_protocol(root: str) -> Tuple[Set[str], Set[str]]:
 
 
 def parse_gui_standalone_ui(root: str) -> Set[str]:
-    """crates/cloth_gui/src/app.rs から単体UIで操作可能なフィールド・変数を抽出"""
+    """crates/cloth_gui/src/app.rs から単体UIで編集可能なフィールド名を抽出"""
     path = os.path.join(root, "crates", "cloth_gui", "src", "app.rs")
     if not os.path.exists(path):
         return set()
@@ -219,10 +228,18 @@ def parse_gui_standalone_ui(root: str) -> Set[str]:
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
+    # UI パネル定義範囲のみを切り出して偽陽性を防ぐ
+    start_idx = content.find("egui::SidePanel::left")
+    if start_idx >= 0:
+        end_idx = content.find("// 2D オーバーレイ描画", start_idx)
+        ui_section = content[start_idx:end_idx] if end_idx > start_idx else content[start_idx:]
+    else:
+        ui_section = content
+
     fields = set()
-    for m in re.finditer(r"self\.([a-zA-Z0-9_]+)", content):
+    for m in re.finditer(r"&mut\s+self\.([a-zA-Z0-9_]+)", ui_section):
         fields.add(m.group(1))
-    for m in re.finditer(r"&mut\s+self\.([a-zA-Z0-9_]+)", content):
+    for m in re.finditer(r"ui\.selectable_label\([^)]*self\.([a-zA-Z0-9_]+)", ui_section):
         fields.add(m.group(1))
 
     return fields
@@ -334,11 +351,11 @@ FEATURES_LIST = [
     # 対話・操作機能
     FeatureSpec("Interactive", "Play / Pause / Step", "シミュレーション進行・一時停止・コマ送り", "step_cloth_scene", "step"),
     FeatureSpec("Interactive", "Reset", "初期レストポーズへのリセット", "cache_rest_positions", "reset"),
-    FeatureSpec("Interactive", "Cold Resume", "停止時の変形ポーズを保持して再開", "set_positions_and_velocities", "cached_positions"),
+    FeatureSpec("Interactive", "Cold Resume", "停止時の変形ポーズを保持して再開", "set_positions_and_velocities", "set_positions_and_velocities"),
     FeatureSpec("Interactive", "Grab Dragging", "マウスドラッグによる布頂点操作", "grab", "grab_initial_pos"),
     FeatureSpec("Interactive", "Pin Toggle / Management", "頂点ピン留め設定・リアルタイム追加/解除", "pin", "pinned_verts"),
     FeatureSpec("Interactive", "Dynamic Pin Tracking", "外部オブジェクト・ボーンへのピン追従", "sync_attachment_pins", "UpdatePins"),
-    FeatureSpec("Interactive", "Apply Pose (Writeback)", "変形結果をメッシュ形状として確定", "apply_modifier", "ApplyPose"),
+    FeatureSpec("Interactive", "Apply Pose (Writeback)", "変形結果をメッシュ形状として確定", "apply_rest_shape", "ApplyPose"),
     FeatureSpec("Interactive", "In-flight Param Tuning", "シミュレーション実行中のリアルタイム調整", "sync_cloth_parameters", "SetParams"),
 
     # 高度機能・ツール

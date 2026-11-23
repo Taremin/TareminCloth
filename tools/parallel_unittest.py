@@ -165,7 +165,19 @@ def _matches_pattern(file_path: Path, *, repo_root: Path, pattern: str) -> bool:
     return False
 
 
-_BLENDER_SKIP_RE = re.compile(r"skipUnless\([^\n]*_IS_REAL_BLENDER")
+_BLENDER_SKIP_RE = re.compile(r"skipUnless\([^\n]*\b_?IS_REAL_BLENDER\b")
+
+
+def _node_requires_blender(node: ast.AST) -> bool:
+    """クラスまたはメソッドのデコレータに _?IS_REAL_BLENDER 依存があるか判定する"""
+    for dec in getattr(node, "decorator_list", None) or []:
+        try:
+            dec_src = ast.unparse(dec)
+        except Exception:
+            continue
+        if _BLENDER_SKIP_RE.search(dec_src):
+            return True
+    return False
 
 
 def _is_blender_required_file(file_path: Path, text: str) -> bool:
@@ -336,6 +348,7 @@ def _extract_units_from_file(
     *,
     granularity: str = "auto",
     source_text: Optional[str] = None,
+    scope: str = "all",
 ) -> List[TestUnit]:
     """単一の test_*.py ファイルから実行ユニット一覧を構築する"""
     text = (
@@ -345,7 +358,8 @@ def _extract_units_from_file(
     )
     rel_posix = _normalize_rel_path(file_path, repo_root)
     mod_name = ".".join(Path(rel_posix).with_suffix("").parts)
-    requires_blender = _is_blender_required_file(file_path, text)
+    file_is_e2e = "e2e" in file_path.parts
+    file_has_blender = _is_blender_required_file(file_path, text)
     file_name = file_path.name
     file_size = len(text)
 
@@ -360,56 +374,74 @@ def _extract_units_from_file(
         base_priority = 2
         base_weight = file_size
 
-    if granularity == "file" or "parallel: keep-module" in text:
-        return [
-            TestUnit(
-                target=mod_name,
-                file_path=file_path,
-                priority=base_priority,
-                weight=base_weight,
-                requires_blender=requires_blender,
-                uses_gpu=is_gpu_unit,
-            )
-        ]
+    module_unit = TestUnit(
+        target=mod_name,
+        file_path=file_path,
+        priority=base_priority,
+        weight=base_weight,
+        requires_blender=file_has_blender,
+        uses_gpu=is_gpu_unit,
+    )
 
     try:
         tree = ast.parse(text, filename=str(file_path))
     except SyntaxError:
-        return [
-            TestUnit(
-                target=mod_name,
-                file_path=file_path,
-                priority=base_priority,
-                weight=base_weight,
-                requires_blender=requires_blender,
-                uses_gpu=is_gpu_unit,
-            )
-        ]
+        return [module_unit]
 
-    source_lines = text.splitlines()
-    units: List[TestUnit] = []
+    class_entries: List[Tuple[ast.ClassDef, List[str], Dict[str, bool]]] = []
+    all_blender_flags: set[bool] = set()
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
         methods = _collect_test_methods(node)
-        if not methods and not _has_testcase_base(node):
-            continue
         if not methods:
             continue
+        class_blender = file_is_e2e or _node_requires_blender(node)
+        method_nodes = {
+            item.name: item
+            for item in node.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test_")
+        }
+        method_blender_map = {
+            m_name: (class_blender or _node_requires_blender(method_nodes[m_name]))
+            for m_name in methods
+        }
+        all_blender_flags.update(method_blender_map.values())
+        class_entries.append((node, methods, method_blender_map))
 
+    if not class_entries:
+        return [module_unit]
+
+    keep_module = granularity == "file" or "parallel: keep-module" in text
+    is_mixed_file = len(all_blender_flags) > 1
+    if keep_module and (not is_mixed_file or scope == "all"):
+        return [module_unit]
+
+    source_lines = text.splitlines()
+    units: List[TestUnit] = []
+    for node, methods, method_blender_map in class_entries:
         class_target = f"{mod_name}.{node.name}"
-        if granularity == "auto" and _class_requires_grouping(
-            node,
-            methods=methods,
-            source_lines=source_lines,
-        ):
+        class_flags = set(method_blender_map.values())
+        class_mixed = len(class_flags) > 1
+        use_class_unit = not class_mixed and (
+            keep_module
+            or (
+                granularity == "auto"
+                and _class_requires_grouping(
+                    node,
+                    methods=methods,
+                    source_lines=source_lines,
+                )
+            )
+        )
+        if use_class_unit:
             units.append(
                 TestUnit(
                     target=class_target,
                     file_path=file_path,
                     priority=base_priority,
                     weight=base_weight,
-                    requires_blender=requires_blender,
+                    requires_blender=next(iter(class_flags)),
                     uses_gpu=is_gpu_unit,
                 )
             )
@@ -426,22 +458,10 @@ def _extract_units_from_file(
                     file_path=file_path,
                     priority=prio,
                     weight=per_method_weight,
-                    requires_blender=requires_blender,
+                    requires_blender=method_blender_map[m_name],
                     uses_gpu=is_gpu_unit,
                 )
             )
-
-    if not units:
-        return [
-            TestUnit(
-                target=mod_name,
-                file_path=file_path,
-                priority=base_priority,
-                weight=base_weight,
-                requires_blender=requires_blender,
-                uses_gpu=is_gpu_unit,
-            )
-        ]
 
     return units
 
@@ -492,10 +512,9 @@ def discover_test_units(
                     continue
             else:
                 txt = f.read_text(encoding="utf-8", errors="ignore")
-                is_blender_req = _is_blender_required_file(f, txt)
-                if scope == "standalone" and is_blender_req:
+                if scope == "standalone" and "e2e" in f.parts:
                     continue
-                if scope == "blender" and not is_blender_req:
+                if scope == "blender" and not _is_blender_required_file(f, txt):
                     continue
                 matched_texts[f] = txt
 
@@ -509,8 +528,15 @@ def discover_test_units(
                 repo_root,
                 granularity=granularity,
                 source_text=matched_texts.get(f),
+                scope=scope,
             )
         )
+
+    if not pattern:
+        if scope == "standalone":
+            units = [u for u in units if not u.requires_blender]
+        elif scope == "blender":
+            units = [u for u in units if u.requires_blender]
 
     # LPT + 同一ファイル分散 + GPUリセット末尾配置
     units.sort(key=lambda u: (u.priority, -u.weight, u.target))

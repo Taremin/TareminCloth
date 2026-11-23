@@ -38,6 +38,7 @@ def extract_terms_from_ast(addon_dir: Path = ADDON_DIR) -> Dict[str, List[Dict[s
         "bl_labels": [],
         "bl_descriptions": [],
         "ui_texts": [],
+        "fstring_trans": [],
         "raw_props": [],
     }
 
@@ -140,14 +141,22 @@ def extract_terms_from_ast(addon_dir: Path = ADDON_DIR) -> Dict[str, List[Dict[s
                 ) or (
                     isinstance(node.func, ast.Attribute) and node.func.attr in ("trans", "pgettext", "pgettext_iface")
                 ):
-                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                        t_val = node.args[0].value.strip()
-                        if t_val:
-                            results["ui_texts"].append({
+                    if node.args:
+                        arg0 = node.args[0]
+                        if isinstance(arg0, ast.Constant) and isinstance(arg0.value, str):
+                            t_val = arg0.value.strip()
+                            if t_val:
+                                results["ui_texts"].append({
+                                    "file": str(rel),
+                                    "line": node.lineno,
+                                    "text": t_val,
+                                    "source": "trans",
+                                })
+                        elif isinstance(arg0, ast.JoinedStr):
+                            results["fstring_trans"].append({
                                 "file": str(rel),
                                 "line": node.lineno,
-                                "text": t_val,
-                                "source": "trans",
+                                "expr": ast.unparse(node),
                             })
                 elif isinstance(node.func, ast.Attribute) and node.func.attr in ("label", "prop", "operator", "menu"):
                     for kw in node.keywords:
@@ -231,7 +240,7 @@ def run_audit(translations_dir: Path = TRANSLATIONS_DIR) -> Dict[str, Any]:
     # コードで使われていないキー（デッドキー）
     all_code_texts = set()
     for cat_name, cat in extracted.items():
-        if cat_name == "raw_props":
+        if cat_name in ("raw_props", "fstring_trans"):
             continue
         for itm in cat:
             all_code_texts.add(itm["text"])
@@ -269,6 +278,7 @@ def run_audit(translations_dir: Path = TRANSLATIONS_DIR) -> Dict[str, Any]:
             "missing_bl_labels": len(missing_bl_label),
             "missing_bl_descriptions": len(missing_bl_desc),
             "missing_ui_texts": len(missing_ui),
+            "fstring_trans": len(extracted["fstring_trans"]),
             "missing_in_ja": len(missing_in_ja),
             "extra_in_ja": len(extra_in_ja),
             "dead_keys": len(dead_keys),
@@ -284,6 +294,7 @@ def run_audit(translations_dir: Path = TRANSLATIONS_DIR) -> Dict[str, Any]:
             "bl_descriptions": missing_bl_desc,
             "ui_texts": missing_ui,
         },
+        "fstring_trans": extracted["fstring_trans"],
         "raw_props": extracted["raw_props"],
         "key_diff": {
             "missing_in_ja": missing_in_ja,
@@ -335,6 +346,8 @@ def main():
         + counts["missing_enum_items"]
         + counts["missing_bl_labels"]
         + counts["missing_bl_descriptions"]
+        + counts["missing_ui_texts"]
+        + counts["fstring_trans"]
         + counts["missing_in_ja"]
         + counts["extra_in_ja"]
         + counts["raw_props"]
@@ -358,6 +371,7 @@ def main():
     print(f"・未登録 パネル/オペレーター Label: {counts['missing_bl_labels']} 件")
     print(f"・未登録 オペレーター Description:  {counts['missing_bl_descriptions']} 件")
     print(f"・未登録 UIテキスト (trans等):    {counts['missing_ui_texts']} 件")
+    print(f"・動的 f-string 翻訳 (trans(f\"...\")): {counts['fstring_trans']} 件")
     print(f"・コンテキスト未注入 生 bpy.props: {counts['raw_props']} 件")
     print(f"・en_US にあるが ja_JP に未登録:  {counts['missing_in_ja']} 件")
     print(f"・ja_JP にあるが en_US に未登録:  {counts['extra_in_ja']} 件")
@@ -365,10 +379,20 @@ def main():
     print(f"・descriptions.json 未同期 (過剰): {counts['extra_in_desc_file']} 件")
     print("==================================================")
 
+    if report["fstring_trans"]:
+        print("\n[ALERT: 辞書と一致しない動的 f-string による i18n.trans() 呼び出し]")
+        for itm in report["fstring_trans"]:
+            print(f"  {itm['file']}:{itm['line']} -> {itm['expr']} (フォーマット文字列 % 演算子を使用してください)")
+
     if report["raw_props"]:
         print("\n[ALERT: コンテキスト欠落の恐れがある生の bpy.props 直接使用]")
         for itm in report["raw_props"]:
             print(f"  {itm['file']}:{itm['line']} -> {itm['detail']} (properties.py 経由のラップを使用してください)")
+
+    if report["missing"]["ui_texts"]:
+        print("\n[未登録 UIテキスト (trans/label等) 一覧]")
+        for itm in report["missing"]["ui_texts"]:
+            print(f"  {itm['file']}:{itm['line']} ({itm['source']}) -> \"{itm['text']}\"")
 
     if report["missing"]["descriptions"]:
         print("\n[未登録 プロパティ Description 一覧]")
