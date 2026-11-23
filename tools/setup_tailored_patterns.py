@@ -165,16 +165,54 @@ def _move_object_to_collection(obj, target_col) -> None:
         target_col.objects.link(obj)
 
 
+def _load_obj_collider_mesh(obj_path: Path, *, name: str) -> object:
+    """外部アドオンに依存せず OBJ からコライダー用メッシュオブジェクトを軽量構築する。"""
+    import bpy
+
+    verts: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, ...]] = []
+    with obj_path.open("r", encoding="utf-8", errors="replace") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("v "):
+                parts = line.split()
+                if len(parts) >= 4:
+                    verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            elif line.startswith("f "):
+                parts = line.split()[1:]
+                idx_list = []
+                for token in parts:
+                    v_str = token.split("/")[0]
+                    if not v_str:
+                        continue
+                    v_idx = int(v_str)
+                    if v_idx < 0:
+                        v_idx = len(verts) + v_idx
+                    else:
+                        v_idx -= 1
+                    idx_list.append(v_idx)
+                if len(idx_list) >= 3:
+                    faces.append(tuple(idx_list))
+
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return bpy.data.objects.new(name, mesh)
+
+
 def _setup_sotai_collider(
     sotai_col,
     *,
     body_blend_path: Path | None = None,
 ) -> tuple[object | None, object | None]:
-    """素体メッシュ SiroinoSotai_PC と Armature をシーンに用意し、BONE_SDF コライダーを設定する。"""
+    """素体メッシュ SiroinoSotai_PC と Armature をシーンに用意し、BONE_SDF (またはフォールバック MESH) コライダーを設定する。"""
     import bpy
 
     body_obj = bpy.data.objects.get("SiroinoSotai_PC")
     arm_obj = bpy.data.objects.get("Armature")
+    used_mesh_fallback = False
 
     if (body_obj is None or arm_obj is None) and body_blend_path is not None:
         if not body_blend_path.exists():
@@ -187,17 +225,30 @@ def _setup_sotai_collider(
         if body_obj is None:
             wanted.append("SiroinoSotai_PC")
 
-        with bpy.data.libraries.load(str(body_blend_path), link=False) as (data_from, data_to):
-            available = set(data_from.objects)
-            data_to.objects = [name for name in wanted if name in available]
+        try:
+            with bpy.data.libraries.load(str(body_blend_path), link=False) as (data_from, data_to):
+                available = set(data_from.objects)
+                data_to.objects = [name for name in wanted if name in available]
 
-        for loaded_obj in data_to.objects:
-            if loaded_obj is None:
-                continue
-            if loaded_obj.name == "Armature":
-                arm_obj = loaded_obj
-            elif loaded_obj.name == "SiroinoSotai_PC":
-                body_obj = loaded_obj
+            for loaded_obj in data_to.objects:
+                if loaded_obj is None:
+                    continue
+                if loaded_obj.name == "Armature":
+                    arm_obj = loaded_obj
+                elif loaded_obj.name == "SiroinoSotai_PC":
+                    body_obj = loaded_obj
+        except OSError as exc:
+            # Blender 4.2 等の旧バージョンは Blender 5.x 形式の .blend を読めないため、同梱 CC0 コライダー OBJ へフォールバック
+            fallback_obj = body_blend_path.parent / "SiroinoSotai_Mobile_collider.obj"
+            if not fallback_obj.exists():
+                raise exc
+            body_obj = _load_obj_collider_mesh(fallback_obj, name="SiroinoSotai_PC")
+            arm_obj = None
+            used_mesh_fallback = True
+            print(
+                f"[setup_tailored_patterns] 警告: {body_blend_path.name} を現 Blender バージョンで読み込めないため、"
+                f"{fallback_obj.name} (MESH コライダー) へフォールバックします ({exc})"
+            )
 
     if arm_obj is not None:
         _move_object_to_collection(arm_obj, sotai_col)
@@ -235,23 +286,31 @@ def _setup_sotai_collider(
         else:
             body_obj.data.materials[0] = mat
 
-        # コライダー設定 (開放境界キャップ閉鎖を含む BONE_SDF 標準構成)
+        # コライダー設定 (通常は BONE_SDF、旧 Blender フォールバック時は MESH)
         col_settings = body_obj.taremin_cloth_collider
         col_settings.is_collider = True
         col_settings.enabled = True
-        col_settings.collider_type = "BONE_SDF"
-        col_settings.sdf_resolution = "64"
-        col_settings.sdf_margin = 0.2
-        col_settings.weight_threshold = 0.02
-        col_settings.blend_k = 0.05
-        col_settings.sdf_update_mode = "STATIC"
-        col_settings.enable_joint_mesh = True
-        col_settings.thickness = 0.005
-        col_settings.single_sided = True
-        col_settings.enable_single_sided_recovery = True
-        col_settings.close_open_boundaries = True
-        col_settings.friction = 0.5
-        col_settings.restitution = 0.0
+        if used_mesh_fallback:
+            col_settings.collider_type = "MESH"
+            col_settings.thickness = 0.005
+            col_settings.single_sided = True
+            col_settings.enable_single_sided_recovery = True
+            col_settings.friction = 0.5
+            col_settings.restitution = 0.0
+        else:
+            col_settings.collider_type = "BONE_SDF"
+            col_settings.sdf_resolution = "64"
+            col_settings.sdf_margin = 0.2
+            col_settings.weight_threshold = 0.02
+            col_settings.blend_k = 0.05
+            col_settings.sdf_update_mode = "STATIC"
+            col_settings.enable_joint_mesh = True
+            col_settings.thickness = 0.005
+            col_settings.single_sided = True
+            col_settings.enable_single_sided_recovery = True
+            col_settings.close_open_boundaries = True
+            col_settings.friction = 0.5
+            col_settings.restitution = 0.0
 
     return body_obj, arm_obj
 
@@ -1078,15 +1137,39 @@ def setup_tailored_scene(
     body_blend_path: Path | None = None,
     active_garment: str = "Pattern_Hood",
     include_body: bool = True,
+    garment_names: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """
-    現在の Blender シーン上に素体コライダーと 4 着の洋裁テストパターンを一括構築する。
+    現在の Blender シーン上に素体コライダーと洋裁テストパターン（全 4 着または指定衣装）を構築する。
     """
     import bpy
 
     repo_root = _resolve_repo_root()
     _ensure_addon_registered(repo_root)
     from taremin_cloth.engine.runner import cache_rest_positions
+
+    garment_builders = {
+        "Pattern_TShirt": ("tshirt", build_tshirt),
+        "Pattern_Pants": ("pants", build_pants),
+        "Pattern_Shirt": ("shirt", build_shirt),
+        "Pattern_Hood": ("hood", build_hood),
+    }
+    if garment_names is None:
+        selected_names = list(GARMENT_OBJECT_NAMES)
+    else:
+        selected_names = []
+        seen_names: set[str] = set()
+        for g_name in garment_names:
+            if g_name not in garment_builders:
+                valid = ", ".join(GARMENT_OBJECT_NAMES)
+                raise ValueError(
+                    f"未知の衣装名が指定されました: {g_name!r} (有効値: {valid})"
+                )
+            if g_name not in seen_names:
+                selected_names.append(g_name)
+                seen_names.add(g_name)
+        if not selected_names:
+            raise ValueError("garment_names には 1 つ以上の衣装名を指定してください。")
 
     if body_blend_path is None:
         env_body = os.environ.get("TAREMIN_CLOTH_BODY_BLEND", "").strip()
@@ -1110,18 +1193,21 @@ def setup_tailored_scene(
         body_obj, arm_obj = _setup_sotai_collider(cols["sotai"], body_blend_path=body_blend_path)
     _setup_lighting_and_camera()
 
-    garments = {
-        "Pattern_TShirt": build_tshirt(cols["tshirt"]),
-        "Pattern_Pants": build_pants(cols["pants"]),
-        "Pattern_Shirt": build_shirt(cols["shirt"]),
-        "Pattern_Hood": build_hood(cols["hood"]),
-    }
+    garments = {}
+    for name in selected_names:
+        col_key, builder_fn = garment_builders[name]
+        garments[name] = builder_fn(cols[col_key])
 
     # レスト座標を全布オブジェクトに事前キャッシュし、アクティブ対象のみを表示する
     show_all = active_garment.upper() == "ALL"
+    resolved_active = (
+        active_garment
+        if (show_all or active_garment in garments)
+        else selected_names[0]
+    )
     for name, g_obj in garments.items():
         cache_rest_positions(g_obj, force=True)
-        is_visible = show_all or (name == active_garment)
+        is_visible = show_all or (name == resolved_active)
         g_obj.hide_viewport = not is_visible
         g_obj.hide_render = not is_visible
         if name == "Pattern_Hood":
@@ -1136,7 +1222,7 @@ def setup_tailored_scene(
     scene.frame_set(1)
     bpy.context.view_layer.update()
 
-    active_obj = garments.get(active_garment) or garments["Pattern_Hood"]
+    active_obj = garments.get(resolved_active) or next(iter(garments.values()))
     for o in bpy.context.view_layer.objects:
         o.select_set(False)
     if not active_obj.hide_viewport:

@@ -73,6 +73,10 @@ python -m unittest discover -s tests/core -t .
 python run_tests.py
 python run_tests.py --all -j 2
 python run_tests.py --test test_simulation_e2e.py
+python run_tests.py --test test_hood_self_collision_e2e.py
+
+# 5. Pattern_Hood 性能・自己衝突品質 定点観測ベンチマーク
+python benchmarks/benchmark_hood.py --scenario both
 ```
 
 
