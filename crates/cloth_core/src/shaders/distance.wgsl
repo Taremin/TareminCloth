@@ -30,6 +30,10 @@ struct SimParams {
     sewing_compliance: f32,
     enable_sewing_lock: f32,
     sewing_lock_distance: f32,
+    tension_damping: f32,
+    compression_damping: f32,
+    shear_damping: f32,
+    bending_damping: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -50,6 +54,8 @@ struct DispatchInfo {
 @group(0) @binding(4) var<storage, read_write> lambdas: array<f32>;
 
 const EPSILON: f32 = 1e-7;
+// UI減衰係数 1.0 あたり 0.01ms の剛性比例 Rayleigh 緩和時間定数 (C = tau * K -> gamma = tau / dt)
+const RAYLEIGH_TIME_SCALE: f32 = 1e-5;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -88,12 +94,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let dir = delta / dist;
-    let dt = params.gravity.w;
+    let dt = max(params.gravity.w, 1e-8);
     let alpha = compliance / (dt * dt);
 
-    // 正規XPBD: ラムダを反復跨ぎで蓄積し、時間刻み・反復数に非依存な剛性とする
+    // 拘束種別・伸縮方向に応じた内部Rayleigh減衰係数を選択
+    let damp_coeff = select(
+        select(params.compression_damping, params.tension_damping, c_val >= 0.0),
+        params.shear_damping,
+        c.constraint_type == 1u
+    );
+    let tau = damp_coeff * RAYLEIGH_TIME_SCALE;
+    let gamma = min(tau / dt, 1e4);
+    // サブステップ内の変位から相対歪み速度成分を算出 (position=確定位置, prev_pos=予測・補正位置)
+    let rel_disp = (p0 - vertices[c.v0].position) - (p1 - vertices[c.v1].position);
+    let v_proj = dot(dir, rel_disp);
+
+    // 正規XPBD + Rayleigh内部減衰: ラムダを反復跨ぎで蓄積し、時間刻み・反復数に非依存な剛性と減衰とする
     let lambda = lambdas[constraint_idx];
-    let delta_lambda = (-c_val - alpha * lambda) / (w_sum + alpha);
+    let delta_lambda = (-c_val - alpha * lambda - gamma * v_proj) / ((1.0 + gamma) * w_sum + alpha);
     lambdas[constraint_idx] = lambda + delta_lambda;
 
     // 安定緩和係数: 制約競合時の発振を防ぎ安定収束

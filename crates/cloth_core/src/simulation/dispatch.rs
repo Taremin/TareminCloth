@@ -33,6 +33,10 @@ impl GpuClothSimulator {
             },
             enable_sewing_lock: if self.enable_sewing_lock { 1.0 } else { 0.0 },
             sewing_lock_distance: self.sewing_lock_distance,
+            tension_damping: self.tension_damping,
+            compression_damping: self.compression_damping,
+            shear_damping: self.shear_damping,
+            bending_damping: self.bending_damping,
             _pad0: [0.0; 3],
         };
 
@@ -56,7 +60,7 @@ impl GpuClothSimulator {
             }
         }
 
-        let wg_size = self.workgroup_size;
+        let wg_size = self.shared.workgroup_size;
         let vert_workgroups = self.num_vertices.div_ceil(wg_size);
         let num_pins = self.dynamic_pins.len() as u32;
         let pin_workgroups = num_pins.div_ceil(wg_size);
@@ -248,7 +252,7 @@ impl GpuClothSimulator {
         // =========================================================================
         // 6. エッジコライダー詳細衝突 & 自己衝突パス
         // =========================================================================
-        // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突: 全布エッジ単一ディスパッチ)
+        // 6.1 Edge Collision Constraints Pass (エッジコライダー衝突: 全布エッジ単一ディスパッチ + 即時適用)
         let ran_edge_collision = has_colliders && self.enable_edge_collision && self.num_edges > 0;
         if ran_edge_collision {
             let query = self.profiler.begin_pass("edge_collision", encoder);
@@ -262,6 +266,18 @@ impl GpuClothSimulator {
             cpass.dispatch_workgroups(edge_workgroups, 1, 1);
             drop(cpass);
             self.profiler.end_pass(encoder, query);
+
+            // コライダー稜線押し出しを自己衝突前に prev_pos へ反映し、accum をクリアする
+            let apply_query = self.profiler.begin_pass("edge_apply", encoder);
+            let mut apply_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Edge Collision Apply Pass"),
+                timestamp_writes: self.profiler.pass_writes(&apply_query),
+            });
+            apply_pass.set_pipeline(&self.shared.ensure_self_collision().apply);
+            apply_pass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
+            apply_pass.dispatch_workgroups(vert_workgroups, 1, 1);
+            drop(apply_pass);
+            self.profiler.end_pass(encoder, apply_query);
         }
 
         // 6.2 自己衝突パス (mode 0 または 1 の場合: 反復ループ外で1回実行)
@@ -269,18 +285,6 @@ impl GpuClothSimulator {
         if ran_outer_self_collision {
             let need_rebuild = sub_idx == 0;
             self.dispatch_self_collision_passes(encoder, vert_workgroups, wg_size, "Outer", need_rebuild, is_last_substep, should_run_ee);
-        } else if ran_edge_collision {
-            // 自己衝突が走らない場合は、エッジ衝突で蓄積された変位を適用してアキュムレータをクリア
-            let query = self.profiler.begin_pass("edge_apply", encoder);
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Edge Collision Apply Pass"),
-                timestamp_writes: self.profiler.pass_writes(&query),
-            });
-            cpass.set_pipeline(&self.shared.ensure_self_collision().apply);
-            cpass.set_bind_group(0, &self.self_collision_apply_bind_group, &[]);
-            cpass.dispatch_workgroups(vert_workgroups, 1, 1);
-            drop(cpass);
-            self.profiler.end_pass(encoder, query);
         }
 
         // 6.3 Post-Self-Collision Relaxation (mode 1 または 3 の場合: 距離拘束・縫合拘束を再適用してエッジ伸びと隙間を抑制)
@@ -721,7 +725,7 @@ impl GpuClothSimulator {
 
     /// 頂点座標抽出パスをエンコード (GpuVertex から連続 f32 座標配列へ抽出)
     pub(crate) fn encode_extract_positions(&self, encoder: &mut wgpu::CommandEncoder) {
-        let wg_size = self.workgroup_size as u64;
+        let wg_size = self.shared.workgroup_size as u64;
         let vert_workgroups = (self.num_vertices as u64).div_ceil(wg_size);
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Extract Positions Pass"),
@@ -887,7 +891,13 @@ impl GpuClothSimulator {
         });
 
         self.context.device.poll(wgpu::Maintain::Wait);
-        pollster::block_on(receiver.receive()).unwrap().unwrap();
+        match pollster::block_on(receiver.receive()) {
+            Some(Ok(())) => {}
+            other => {
+                eprintln!("[TareminCloth] GPU 頂点リードバックに失敗しました (read_vertices): {:?}", other);
+                return Vec::new();
+            }
+        }
 
         let data = slice.get_mapped_range();
         let result: Vec<GpuVertex> = bytemuck::cast_slice(&data).to_vec();
@@ -1032,7 +1042,13 @@ impl GpuClothSimulator {
             });
 
             self.context.device.poll(wgpu::Maintain::Wait);
-            pollster::block_on(receiver.receive()).unwrap().unwrap();
+            match pollster::block_on(receiver.receive()) {
+                Some(Ok(())) => {}
+                other => {
+                    eprintln!("[TareminCloth] GPU 座標コンパクトリードバックに失敗しました: {:?}", other);
+                    return;
+                }
+            }
 
             let data = slice.get_mapped_range();
             let floats: &[f32] = bytemuck::cast_slice(&data);
@@ -1065,7 +1081,13 @@ impl GpuClothSimulator {
             });
 
             self.context.device.poll(wgpu::Maintain::Wait);
-            pollster::block_on(receiver.receive()).unwrap().unwrap();
+            match pollster::block_on(receiver.receive()) {
+                Some(Ok(())) => {}
+                other => {
+                    eprintln!("[TareminCloth] GPU 座標リードバックに失敗しました: {:?}", other);
+                    return;
+                }
+            }
 
             let data = slice.get_mapped_range();
             let verts: &[GpuVertex] = bytemuck::cast_slice(&data);
@@ -1133,7 +1155,13 @@ impl GpuClothSimulator {
             let _ = sender.send(v);
         });
         self.context.device.poll(wgpu::Maintain::Wait);
-        pollster::block_on(receiver.receive()).unwrap().unwrap();
+        match pollster::block_on(receiver.receive()) {
+            Some(Ok(())) => {}
+            other => {
+                eprintln!("[TareminCloth] GPU ストレージバッファリードバックに失敗しました: {:?}", other);
+                return Vec::new();
+            }
+        }
 
         let data = slice.get_mapped_range();
         let out = data[..size.min(data.len() as u64) as usize].to_vec();
@@ -1270,6 +1298,8 @@ impl GpuClothSimulator {
             return 0;
         }
 
+        let actual_substeps = self.compute_effective_substeps(dt, substeps);
+        let _actual_iters = self.compute_effective_iterations(actual_substeps);
         let slot = (self.buffered_frame_count as usize).min(self.max_buffered_frames - 1);
 
         let mut encoder = self.context.device.create_command_encoder(
@@ -1278,8 +1308,11 @@ impl GpuClothSimulator {
             },
         );
 
-        // 1. シミュレーション計算
-        self.encode_simulation_steps(&mut encoder, dt, substeps);
+        // 1. 動的ボーンSDF更新 & シミュレーション計算
+        self.dispatch_dynamic_bone_sdf_update(&mut encoder);
+        self.profiler.frame_begin();
+        self.encode_simulation_steps(&mut encoder, dt, actual_substeps);
+        self.profiler.frame_end(&mut encoder);
 
         // 2. 頂点座標の抽出 (GpuVertex -> compact_position_buffer)
         self.encode_extract_positions(&mut encoder);
@@ -1296,6 +1329,8 @@ impl GpuClothSimulator {
         );
 
         self.context.queue.submit(Some(encoder.finish()));
+        self.profiler.frame_submitted();
+        self.current_frame_seq = self.current_frame_seq.wrapping_add(1);
 
         if (self.buffered_frame_count as usize) < self.max_buffered_frames {
             self.buffered_frame_count += 1;
@@ -1340,7 +1375,14 @@ impl GpuClothSimulator {
         });
 
         self.context.device.poll(wgpu::Maintain::Wait);
-        pollster::block_on(receiver.receive()).unwrap().unwrap();
+        match pollster::block_on(receiver.receive()) {
+            Some(Ok(())) => {}
+            other => {
+                eprintln!("[TareminCloth] GPU バッファードフレームリードバックに失敗しました: {:?}", other);
+                self.buffered_frame_count = 0;
+                return 0;
+            }
+        }
 
         let data = slice.get_mapped_range();
         let floats: &[f32] = bytemuck::cast_slice(&data);
@@ -1349,6 +1391,12 @@ impl GpuClothSimulator {
 
         drop(data);
         self.buffered_staging_buffer.unmap();
+
+        let n_v3 = (self.num_vertices as usize) * 3;
+        let last_start = ((count as usize) - 1) * n_v3;
+        if last_start + n_v3 <= copy_len {
+            self.update_feedback_from_floats(&out[last_start..last_start + n_v3]);
+        }
 
         self.buffered_frame_count = 0;
         count
@@ -1373,6 +1421,7 @@ impl GpuClothSimulator {
             bytemuck::cast_slice(&self.initial_vertices),
         );
         self.reset_edge_rest_lengths();
+        self.reset_edge_stiffness_multipliers();
         self.buffered_frame_count = 0;
         self.debug_recorder.clear();
     }
@@ -1546,8 +1595,9 @@ impl GpuClothSimulator {
             // (DispatchIndirect) を避けた直接ディスパッチで足りる。
             let vt_slots = self.num_vertices * self.pair_cache_quota_vt.clamp(1, super::PAIR_QUOTA_MAX);
             let ee_slots = self.num_vertices * self.pair_cache_quota_ee.clamp(1, super::PAIR_QUOTA_MAX);
-            let vt_workgroups = vt_slots.div_ceil(64).max(1);
-            let ee_workgroups = ee_slots.div_ceil(64).max(1);
+            let wg = self.shared.workgroup_size;
+            let vt_workgroups = vt_slots.div_ceil(wg).max(1);
+            let ee_workgroups = ee_slots.div_ceil(wg).max(1);
 
             {
                 // V-T ペア解決 (計測のため E-E とパスを分ける。処理内容は同一)
@@ -1577,6 +1627,20 @@ impl GpuClothSimulator {
                 self.profiler.end_pass(encoder, query);
             }
 
+            if self.effective_normal_untangling() {
+                // pair_vt が記録した最近傍内層頂点候補を用いて毎サブステップ多層布 Untangling を解決（空間ハッシュ走査ゼロ）
+                let query = self.profiler.begin_pass_with_parent("sc_untangle", encoder, parent.as_ref());
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Pair Self Collision Untangle Pass")),
+                    timestamp_writes: self.profiler.pass_writes(&query),
+                });
+                cpass.set_pipeline(&self.shared.ensure_self_collision().untangle);
+                cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
+            }
+
             // Step D: 変位の適用 (既存の self_collision_apply_pipeline を共用)
             {
                 let query = self.profiler.begin_pass_with_parent("pair_apply", encoder, parent.as_ref());
@@ -1600,6 +1664,20 @@ impl GpuClothSimulator {
                     timestamp_writes: self.profiler.pass_writes(&query),
                 });
                 cpass.set_pipeline(&self.shared.ensure_self_collision().solve);
+                cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
+                cpass.dispatch_workgroups(vert_workgroups, 1, 1);
+                drop(cpass);
+                self.profiler.end_pass(encoder, query);
+            }
+
+            // 4-a'. Self Collision Untangle Pass (多層布かつ有効時は毎サブステップ実行・空間ハッシュ走査ゼロ・候補引き継ぎ型)
+            if self.effective_normal_untangling() {
+                let query = self.profiler.begin_pass_with_parent("sc_untangle", encoder, parent.as_ref());
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("{prefix} Self Collision Untangle Pass")),
+                    timestamp_writes: self.profiler.pass_writes(&query),
+                });
+                cpass.set_pipeline(&self.shared.ensure_self_collision().untangle);
                 cpass.set_bind_group(0, &self.self_collision_bind_group, &[]);
                 cpass.dispatch_workgroups(vert_workgroups, 1, 1);
                 drop(cpass);

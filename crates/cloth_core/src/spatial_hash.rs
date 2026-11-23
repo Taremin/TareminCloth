@@ -475,20 +475,38 @@ pub fn build_collider_edge_grid(
     cell_size: f32,
     table_size: u32,
 ) -> (Vec<u32>, Vec<u32>) {
+    let safe_cell = cell_size.max(1e-4);
+    let step_pitch = safe_cell * 0.5;
     let mut cell_counts = vec![0u32; table_size as usize];
-    let mut cell_coords = Vec::with_capacity(edges.len());
-    for edge in edges {
-        let mid = [
-            (edge.p0[0] + edge.p1[0]) * 0.5,
-            (edge.p0[1] + edge.p1[1]) * 0.5,
-            (edge.p0[2] + edge.p1[2]) * 0.5,
-        ];
-        let cx = (mid[0] / cell_size).floor() as i32;
-        let cy = (mid[1] / cell_size).floor() as i32;
-        let cz = (mid[2] / cell_size).floor() as i32;
-        let h = hash_coords_collider([cx, cy, cz], table_size);
-        cell_counts[h as usize] += 1;
-        cell_coords.push(h);
+    let mut entries: Vec<(u32, u32)> = Vec::with_capacity(edges.len());
+    let mut per_edge_hashes: Vec<u32> = Vec::new();
+
+    for (edge_idx, edge) in edges.iter().enumerate() {
+        let dx = edge.p1[0] - edge.p0[0];
+        let dy = edge.p1[1] - edge.p0[1];
+        let dz = edge.p1[2] - edge.p0[2];
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        // エッジが跨ぐすべてのセルに登録するため、セル幅の半分ピッチでサンプリングして重複排除
+        let steps = ((len / step_pitch).ceil() as usize).clamp(1, 4096);
+
+        per_edge_hashes.clear();
+        for k in 0..=steps {
+            let t = (k as f32) / (steps as f32);
+            let px = edge.p0[0] + dx * t;
+            let py = edge.p0[1] + dy * t;
+            let pz = edge.p0[2] + dz * t;
+            let cx = (px / safe_cell).floor() as i32;
+            let cy = (py / safe_cell).floor() as i32;
+            let cz = (pz / safe_cell).floor() as i32;
+            per_edge_hashes.push(hash_coords_collider([cx, cy, cz], table_size));
+        }
+        per_edge_hashes.sort_unstable();
+        per_edge_hashes.dedup();
+
+        for &h in &per_edge_hashes {
+            cell_counts[h as usize] += 1;
+            entries.push((h, edge_idx as u32));
+        }
     }
 
     let mut cell_starts = vec![0u32; (table_size + 1) as usize];
@@ -500,11 +518,11 @@ pub fn build_collider_edge_grid(
     cell_starts[table_size as usize] = sum;
 
     let mut cell_currents = cell_starts[0..table_size as usize].to_vec();
-    let mut sorted_indices = vec![0u32; edges.len()];
-    for (edge_idx, &h) in cell_coords.iter().enumerate() {
+    let mut sorted_indices = vec![0u32; entries.len()];
+    for (h, edge_idx) in entries {
         let pos = cell_currents[h as usize];
         cell_currents[h as usize] += 1;
-        sorted_indices[pos as usize] = edge_idx as u32;
+        sorted_indices[pos as usize] = edge_idx;
     }
 
     (cell_starts, sorted_indices)
@@ -625,6 +643,46 @@ impl GpuColliderEdgeSpatialHash {
             num_blocks: self.table_size.div_ceil(256),
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collider_edge_grid_multi_cell_long_edge() {
+        let edges = vec![GpuColliderEdge {
+            p0: [0.0, 0.0, 0.0],
+            thickness: 0.01,
+            p1: [2.0, 0.0, 0.0],
+            friction: 0.2,
+            normal: [0.0, 0.0, 1.0],
+            flags: 0,
+        }];
+        let cell_size = 0.1;
+        let table_size = 1024;
+        let (cell_starts, sorted_indices) =
+            build_collider_edge_grid(&edges, cell_size, table_size);
+
+        assert!(
+            sorted_indices.len() >= 20,
+            "長さ2.0m・cell=0.1mの長大エッジは全20セル以上に登録されるべき (actual={})",
+            sorted_indices.len()
+        );
+
+        for &sample_x in &[0.05f32, 0.35, 0.95, 1.55, 1.95] {
+            let cx = (sample_x / cell_size).floor() as i32;
+            let h = hash_coords_collider([cx, 0, 0], table_size) as usize;
+            let start = cell_starts[h] as usize;
+            let end = cell_starts[h + 1] as usize;
+            assert!(
+                sorted_indices[start..end].contains(&0u32),
+                "サンプル座標 x={} (cell={}) に長大コライダーエッジ0が登録されていない",
+                sample_x,
+                cx
+            );
+        }
     }
 }
 

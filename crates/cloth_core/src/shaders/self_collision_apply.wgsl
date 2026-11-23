@@ -22,7 +22,7 @@ struct SelfCollisionAccum {
     ccd_neg_x: atomic<i32>,
     ccd_neg_y: atomic<i32>,
     ccd_neg_z: atomic<i32>,
-    _pad0: u32,
+    untangle_cand_v: atomic<u32>,
     ee_ccd_count: atomic<u32>,
 };
 
@@ -140,6 +140,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (raw_neg_z != 0) { atomicStore(&accum[index].ccd_neg_z, 0); }
     let ee_cnt = atomicLoad(&accum[index].ee_ccd_count);
     if (ee_cnt != 0u) { atomicStore(&accum[index].ee_ccd_count, 0u); }
+    if (atomicLoad(&accum[index].untangle_cand_v) != 0u) {
+        atomicStore(&accum[index].untangle_cand_v, 0u);
+    }
 
     if (!is_pinned) {
         let ccd_pos = vec3<f32>(

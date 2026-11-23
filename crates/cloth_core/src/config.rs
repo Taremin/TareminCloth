@@ -1,13 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 fn d_gravity() -> [f32; 3] { [0.0, 0.0, -9.81] }
-fn d_damping() -> f32 { 0.01 }
+fn d_damping() -> f32 { 1.0 }
+fn d_inner_damping() -> f32 { 5.0 }
+fn d_bending_damping() -> f32 { 0.5 }
 fn d_iterations() -> u32 { 2 }
 fn d_solver_mode() -> u32 { 0 }
 fn d_workgroup() -> u32 { 32 }
-fn d_relief() -> f32 { 0.2 }
-fn d_max_disp() -> f32 { 0.2 }
-fn d_max_iters() -> u32 { 128 }
+fn d_relief() -> f32 { 1.0 }
+fn d_max_disp() -> f32 { 0.5 }
+fn d_max_iters() -> u32 { 256 }
 fn d_true() -> bool { true }
 fn d_horizon_scale() -> f32 { 1.3 }
 fn d_max_horizon() -> f32 { 0.02 }
@@ -15,6 +17,7 @@ fn d_safety_margin() -> f32 { 0.005 }
 fn d_pair_max() -> u32 { 65536 }
 fn d_margin_mode() -> u32 { 1 }
 fn d_sewing_stiffness() -> f32 { 10000.0 }
+fn d_sewing_shrink_speed() -> f32 { 1.0 }
 fn d_sewing_lock_distance() -> f32 { 0.02 }
 fn d_merge_dist() -> f32 { 0.005 }
 fn d_threshold() -> f32 { 0.9 }
@@ -22,11 +25,13 @@ fn d_ramp() -> u32 { 3 }
 fn d_max_frames() -> u32 { 600 }
 fn d_areal_density() -> f32 { 0.15 }
 fn d_version() -> u32 { 1 }
-fn d_relax_iters() -> u32 { 1 }
+fn d_relax_iters() -> u32 { 2 }
 fn d_substep_interval() -> u32 { 1 }
 fn d_edge_scale() -> f32 { 1.0 }
-fn d_stiffness() -> f32 { 500.0 }
-fn d_bending() -> f32 { 5.0 }
+fn d_tension_stiffness() -> f32 { 1500.0 }
+fn d_compression_stiffness() -> f32 { 150.0 }
+fn d_shear_stiffness() -> f32 { 100.0 }
+fn d_bending() -> f32 { 15.0 }
 fn d_min_substeps() -> u32 { 4 }
 fn d_max_substeps() -> u32 { 64 }
 fn d_strain_tolerance() -> f32 { 0.008 }
@@ -45,19 +50,19 @@ pub struct SimConfig {
     pub gravity: [f32; 3],
     #[serde(default = "d_damping")]
     pub damping: f32,
-    #[serde(default)]
+    #[serde(default = "d_inner_damping")]
     pub tension_damping: f32,
-    #[serde(default)]
+    #[serde(default = "d_inner_damping")]
     pub compression_damping: f32,
-    #[serde(default)]
+    #[serde(default = "d_inner_damping")]
     pub shear_damping: f32,
-    #[serde(default)]
+    #[serde(default = "d_bending_damping")]
     pub bending_damping: f32,
-    #[serde(default = "d_stiffness")]
+    #[serde(default = "d_tension_stiffness")]
     pub tension_stiffness: f32,
-    #[serde(default = "d_stiffness")]
+    #[serde(default = "d_compression_stiffness")]
     pub compression_stiffness: f32,
-    #[serde(default = "d_stiffness")]
+    #[serde(default = "d_shear_stiffness")]
     pub shear_stiffness: f32,
     #[serde(default = "d_bending")]
     pub bending_stiffness: f32,
@@ -67,7 +72,7 @@ pub struct SimConfig {
     pub solver_mode: u32,
     #[serde(default = "d_workgroup")]
     pub workgroup_size: u32,
-    #[serde(default = "d_true")]
+    #[serde(default)]
     pub enable_self_collision: bool,
     #[serde(default = "d_relief")]
     pub relief_factor: f32,
@@ -113,6 +118,8 @@ pub struct SimConfig {
     pub edge_margin_offset: f32,
     #[serde(default = "d_sewing_stiffness")]
     pub sewing_stiffness: f32,
+    #[serde(default = "d_sewing_shrink_speed")]
+    pub sewing_shrink_speed: f32,
     #[serde(default = "d_true")]
     pub enable_sewing_lock: bool,
     #[serde(default = "d_sewing_lock_distance")]
@@ -148,21 +155,21 @@ pub struct SimConfig {
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: d_version(),
             gravity: d_gravity(),
             damping: d_damping(),
-            tension_damping: 0.0,
-            compression_damping: 0.0,
-            shear_damping: 0.0,
-            bending_damping: 0.0,
-            tension_stiffness: d_stiffness(),
-            compression_stiffness: d_stiffness(),
-            shear_stiffness: 250.0,
+            tension_damping: d_inner_damping(),
+            compression_damping: d_inner_damping(),
+            shear_damping: d_inner_damping(),
+            bending_damping: d_bending_damping(),
+            tension_stiffness: d_tension_stiffness(),
+            compression_stiffness: d_compression_stiffness(),
+            shear_stiffness: d_shear_stiffness(),
             bending_stiffness: d_bending(),
             solver_iterations: d_iterations(),
             solver_mode: d_solver_mode(),
             workgroup_size: d_workgroup(),
-            enable_self_collision: true,
+            enable_self_collision: false,
             relief_factor: d_relief(),
             max_displacement_ratio: d_max_disp(),
             exclude_neighbors: true,
@@ -170,9 +177,9 @@ impl Default for SimConfig {
             self_collision_max_iterations: d_max_iters(),
             coupled_mode: 0,
             coupled_collider: false,
-            post_relaxation_iters: 1,
-            substep_interval: 1,
-            ee_substep_interval: 1,
+            post_relaxation_iters: d_relax_iters(),
+            substep_interval: d_substep_interval(),
+            ee_substep_interval: d_substep_interval(),
             self_collision_algorithm: 0,
             enable_pair_cache: false,
             pair_margin_mode: d_margin_mode(),
@@ -185,6 +192,7 @@ impl Default for SimConfig {
             edge_margin_scale: d_edge_scale(),
             edge_margin_offset: 0.0,
             sewing_stiffness: d_sewing_stiffness(),
+            sewing_shrink_speed: d_sewing_shrink_speed(),
             enable_sewing_lock: true,
             sewing_lock_distance: d_sewing_lock_distance(),
             sewing_priority_enabled: false,
@@ -232,6 +240,7 @@ mod tests {
     #[test]
     fn config_old_json_with_missing_fields() {
         let d: SimConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, SimConfig::default());
         assert_eq!(d.version, 1);
         assert_eq!(d.enable_adaptive_substep, false);
         assert_eq!(d.min_substeps, 4);

@@ -38,12 +38,24 @@ fn tri_signed_dist(p: vec3<f32>, tri: BakeMeshTriangle) -> vec3<f32> {
 }
 
 // 候補1件の評価と真のtop-2更新
-fn eval_candidate(p: vec3<f32>, tri: BakeMeshTriangle, best_sq: ptr<function, f32>, best_signed: ptr<function, f32>, second_sq: ptr<function, f32>, second_signed: ptr<function, f32>) {
-    // 案2: AABB早期棄却（真の距離の下界。改善不能なら厳密スキップ）
+fn eval_candidate(
+    p: vec3<f32>,
+    tri_idx: u32,
+    best_tri_idx: ptr<function, u32>,
+    best_sq: ptr<function, f32>,
+    best_signed: ptr<function, f32>,
+    second_sq: ptr<function, f32>,
+    second_signed: ptr<function, f32>,
+) {
+    if (tri_idx >= params.tri_count || tri_idx == *best_tri_idx) {
+        return;
+    }
+    let tri = triangles[tri_idx];
+    // 案2: AABB早期棄却（真の距離の下界。top-2 の更新余地がない場合のみ厳密スキップ）
     let tmin = min(tri.p0, min(tri.p1, tri.p2));
     let tmax = max(tri.p0, max(tri.p1, tri.p2));
     let dvec = max(tmin - p, vec3<f32>(0.0)) + max(p - tmax, vec3<f32>(0.0));
-    if (dot(dvec, dvec) >= *best_sq) {
+    if (dot(dvec, dvec) >= *second_sq) {
         return;
     }
     let r = tri_signed_dist(p, tri);
@@ -52,6 +64,7 @@ fn eval_candidate(p: vec3<f32>, tri: BakeMeshTriangle, best_sq: ptr<function, f3
         *second_signed = *best_signed;
         *best_sq = r.x;
         *best_signed = r.y;
+        *best_tri_idx = tri_idx;
     } else if (r.x < *second_sq) {
         *second_sq = r.x;
         *second_signed = r.y;
@@ -92,8 +105,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pitch = select(params.width, params.row_pitch, params.row_pitch > 0u);
     let flat_idx = (vz_g * params.height + vy) * pitch + vx;
 
-    // 遠方確定: セル内全細ボクセルがbandより遠いことが保証される
-    if (dc - halfdiag >= hparams.band) {
+    // 遠方確定: セル内全細ボクセルがbandより遠いことが保証される（内側・外側対称）
+    if (abs(dc) - halfdiag >= hparams.band) {
         output_voxels[flat_idx] = dc_packed;
         return;
     }
@@ -101,6 +114,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // 近傍: 親±2ステンシル（125セル×top-8）の候補をexact計算し真のtop-2を追跡
     let lo = vec3<i32>(0);
     let hi = vec3<i32>(coarse_dims_f) - vec3<i32>(1);
+    var best_tri_idx = 0xFFFFFFFFu;
     var best_sq = 1e10;
     var best_signed = 10.0;
     var second_sq = 1e10;
@@ -111,7 +125,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 let c = clamp(parent + vec3<i32>(dx, dy, dz), lo, hi);
                 let base = ((u32(c.z) * hparams.coarse_h + u32(c.y)) * hparams.coarse_w + u32(c.x)) * 8u;
                 for (var k = 0u; k < 8u; k++) {
-                    eval_candidate(p, triangles[coarse_tri[base + k]], &best_sq, &best_signed, &second_sq, &second_signed);
+                    eval_candidate(p, coarse_tri[base + k], &best_tri_idx, &best_sq, &best_signed, &second_sq, &second_signed);
                 }
             }
         }

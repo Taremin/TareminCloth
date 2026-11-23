@@ -96,6 +96,7 @@ fn apply_contact_response(
     *p = target_pos - tangent_disp * clamp(friction, 0.0, 1.0);
 
     // 2. 法線突入速度の吸収と反発 (Velocity Projection)
+    // 接触時は縫合・距離拘束の押し戻し変位が離脱速度へ昇格して曲面から跳ね飛ばされないよう desired_v_out_n >= 0 を 0.0 に抑制する
     let effective_dt = max(dt, 1e-6);
     let v_in_n = dot((p_initial - *x_n) / effective_dt, normal);
     var desired_v_out_n = 0.0;
@@ -359,6 +360,20 @@ fn intersect_segment_triangle(
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 
+// 線分 a-b と中心 c の最短距離の二乗（高速移動時のトンネル通過境界球カリング用）
+fn segment_sphere_dist_sq(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> f32 {
+    let ab = b - a;
+    let ab_sq = dot(ab, ab);
+    if (ab_sq <= 1e-12) {
+        let d = a - c;
+        return dot(d, d);
+    }
+    let t = clamp(dot(c - a, ab) / ab_sq, 0.0, 1.0);
+    let closest = a + ab * t;
+    let d = closest - c;
+    return dot(d, d);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
@@ -447,10 +462,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // [直接全走査パス - デフォルト OFF]
         for (var i = 0u; i < total_tris; i = i + 1u) {
             let b = mesh_bounds[i];
-            let diff = p - b.xyz;
-            let diff_old = v.position - b.xyz;
             let r = b.w * 1.5 + thickness;
-            if (dot(diff, diff) > r * r && dot(diff_old, diff_old) > r * r) {
+            if (segment_sphere_dist_sq(v.position, p, b.xyz) > r * r) {
                 continue;
             }
 
@@ -533,10 +546,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         for (var g = 0u; g < num_groups; g = g + 1u) {
             let gb = collider_group_bounds[g];
-            let diff_g = p - gb.xyz;
-            let diff_old_g = v.position - gb.xyz;
             let rg = gb.w + thickness * 4.0 + sweep_offset;
-            if (dot(diff_g, diff_g) > rg * rg && dot(diff_old_g, diff_old_g) > rg * rg) {
+            if (segment_sphere_dist_sq(v.position, p, gb.xyz) > rg * rg) {
                 continue;
             }
 
@@ -545,10 +556,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
             for (var i = start_i; i < end_i; i = i + 1u) {
                 let b = mesh_bounds[i];
-                let diff = p - b.xyz;
-                let diff_old = v.position - b.xyz;
                 let r = b.w + thickness * 4.0;
-                if (dot(diff, diff) > r * r && dot(diff_old, diff_old) > r * r) {
+                if (segment_sphere_dist_sq(v.position, p, b.xyz) > r * r) {
                     continue;
                 }
 
@@ -634,10 +643,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     // フェーズ3: ボーン局所SDFコライダーの判定・押し戻し
-    // メッシュコライダーで既に接触・押し戻しが行われた頂点は、二重適用による干渉・摩擦引き攣れを防ぐためスキップ
-    if (!has_front_contact && !has_valid_recovery) {
-        solve_bone_sdf_collision(&p, &x_n, dt, p_initial, thickness);
-    }
+    // メッシュコライダー接触後も Bone SDF との相互めり込みを防ぐため併用し、p を基準に速度整合性を保つ
+    solve_bone_sdf_collision(&p, &x_n, dt, p, thickness);
 
     v.prev_pos = p;
     v.position = x_n; // 法線突入速度を吸収した基準位置

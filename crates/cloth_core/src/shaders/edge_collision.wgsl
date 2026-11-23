@@ -22,6 +22,8 @@ struct GpuColliderEdge {
     thickness: f32,
     p1: vec3<f32>,
     friction: f32,
+    normal: vec3<f32>,
+    flags: u32,
 };
 
 struct EdgeCollisionParams {
@@ -50,7 +52,7 @@ struct SelfCollisionAccum {
     ccd_neg_x: atomic<i32>,
     ccd_neg_y: atomic<i32>,
     ccd_neg_z: atomic<i32>,
-    _pad0: u32,
+    untangle_cand_v: atomic<u32>,
     ee_ccd_count: atomic<u32>,
 };
 
@@ -64,15 +66,17 @@ struct SelfCollisionAccum {
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
+const MAX_ATOMIC_FIXED: f32 = 50000000.0;
 
-fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
-    atomicAdd(&accum[v_idx].dx, ix);
-    atomicAdd(&accum[v_idx].dy, iy);
-    atomicAdd(&accum[v_idx].dz, iz);
-    atomicAdd(&accum[v_idx].count, 1u);
+// コライダーとの衝突はハード保護チャネル (pin_dx/pin_count) に書き込み、動的布間平均化による希釈を防ぐ
+fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    atomicAdd(&accum[v_idx].pin_dx, ix);
+    atomicAdd(&accum[v_idx].pin_dy, iy);
+    atomicAdd(&accum[v_idx].pin_dz, iz);
+    atomicAdd(&accum[v_idx].pin_count, 1u);
 }
 
 fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
@@ -216,8 +220,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         let pt_col = q0 + (q1 - q0) * res.t;
                         let diff = pt_cloth - pt_col;
 
+                        let is_single_sided = (col_edge.flags & 1u) != 0u;
+                        let has_edge_normal = dot(col_edge.normal, col_edge.normal) > 0.25;
+
                         var normal = vec3<f32>(0.0, 0.0, 1.0);
-                        if (res.dist > EPSILON) {
+                        var penetration = target_dist - res.dist;
+                        if (is_single_sided && has_edge_normal) {
+                            let signed_proj = dot(diff, col_edge.normal);
+                            if (signed_proj >= 0.0) {
+                                if (res.dist > EPSILON) {
+                                    normal = diff / res.dist;
+                                } else {
+                                    normal = col_edge.normal;
+                                }
+                                penetration = target_dist - res.dist;
+                            } else {
+                                // 弦状の裏側食い込み時はコライダー内部へ押し込まず、外向きエッジ法線方向へ表側へ戻す
+                                normal = col_edge.normal;
+                                penetration = min(target_dist - signed_proj, target_dist * 2.0);
+                            }
+                        } else if (res.dist > EPSILON) {
                             normal = diff / res.dist;
                         } else {
                             // ほぼ交差している場合、線分外積から法線を推定
@@ -230,7 +252,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             }
                         }
 
-                        let penetration = target_dist - res.dist;
                         let push = normal * penetration;
 
                         // コライダーは無限質量 (動かない) ため、100% 布端点にのみ分配
@@ -238,10 +259,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         let b = res.s;
                         let denom = a * a * w0 + b * b * w1;
                         if (denom > EPSILON) {
-                            let factor0 = (a * w0) / denom;
-                            let factor1 = (b * w1) / denom;
-                            add_disp_atomic(u0, push * factor0);
-                            add_disp_atomic(u1, push * factor1);
+                            let factor0 = min((a * w0) / denom, 2.0);
+                            let factor1 = min((b * w1) / denom, 2.0);
+                            if (w0 > 0.0) {
+                                add_pin_disp_atomic(u0, push * factor0);
+                            }
+                            if (w1 > 0.0) {
+                                add_pin_disp_atomic(u1, push * factor1);
+                            }
                         }
                     }
                 }

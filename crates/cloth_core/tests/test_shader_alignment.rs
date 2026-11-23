@@ -1,18 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::{offset_of, size_of};
 
 use cloth_core::mesh::{
     EdgeCollisionParams, GpuBendingConstraint, GpuCollider, GpuColliderEdge, GpuDistanceConstraint,
-    GpuEdge, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuStarPair, GpuVertex,
-    PairCollectParams, PairCounters, PairSolveParams, SelfCollisionParams, SimParams,
-};
-use cloth_core::simulation::types::{
-    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
-    GpuSelfCollisionAccum, GpuSkinningVertex, GpuWrinkleProfileSample, NormalParams, PinParams,
-    WrinkleFieldParams,
+    GpuEdge, GpuEePair, GpuMeshTriangle, GpuPinConstraint, GpuSewingConstraint, GpuStarPair,
+    GpuVertex, GpuVtPair, PairCollectParams, PairCounters, PairSolveParams, SelfCollisionParams,
+    SimParams,
 };
 use cloth_core::sdf_baker::{
-    GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams, GpuHierFineParams,
+    GpuBakeMeshParams, GpuBakeMeshTriangle, GpuBakeParams, GpuBakeTriangle, GpuHierFineParams,
+};
+use cloth_core::simulation::types::{
+    CollisionParams, DispatchInfo, GpuAtomicAccum, GpuBoneInfo, GpuBoneTransform,
+    GpuBoneTriangleSource, GpuSelfCollisionAccum, GpuSkinningVertex, NormalParams, PinParams,
+    WrinkleFieldParams,
 };
 use cloth_core::spatial_hash::SpatialHashParams;
 use cloth_core::virtual_mesh::{GpuVirtualVertexDef, SelfCollisionVvParams, VirtualForwardParams};
@@ -74,6 +75,7 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("collision.wgsl", include_str!("../src/shaders/collision.wgsl")),
     ("edge_collision.wgsl", include_str!("../src/shaders/edge_collision.wgsl")),
     ("self_collision.wgsl", include_str!("../src/shaders/self_collision.wgsl")),
+    ("self_collision_untangle.wgsl", include_str!("../src/shaders/self_collision_untangle.wgsl")),
     ("predict.wgsl", include_str!("../src/shaders/predict.wgsl")),
     ("update_vel.wgsl", include_str!("../src/shaders/update_vel.wgsl")),
     ("distance.wgsl", include_str!("../src/shaders/distance.wgsl")),
@@ -82,7 +84,6 @@ const ALL_SHADERS: &[(&str, &str)] = &[
     ("sewing.wgsl", include_str!("../src/shaders/sewing.wgsl")),
     ("sewing_shrink.wgsl", include_str!("../src/shaders/sewing_shrink.wgsl")),
     ("pin.wgsl", include_str!("../src/shaders/pin.wgsl")),
-    ("spatial_hash_build.wgsl", include_str!("../src/shaders/spatial_hash_build.wgsl")),
     ("spatial_grid_sort.wgsl", include_str!("../src/shaders/spatial_grid_sort.wgsl")),
     ("compute_normals.wgsl", include_str!("../src/shaders/compute_normals.wgsl")),
     ("extract_positions.wgsl", include_str!("../src/shaders/extract_positions.wgsl")),
@@ -208,381 +209,212 @@ fn test_cross_shader_struct_consistency() {
     }
 }
 
+macro_rules! verify_wgsl_struct {
+    ($file:expr, $structs:expr, $hits:expr, $wgsl_name:literal => $rust_type:ty { $($field:ident),+ $(,)? }) => {
+        if let Some(s) = $structs.get($wgsl_name) {
+            *$hits.entry($wgsl_name).or_insert(0) += 1;
+            check_struct_size!($file, s, $rust_type);
+            $(
+                check_member!($file, s, $rust_type, $field);
+            )+
+        }
+    };
+}
+
 #[test]
 fn test_rust_and_wgsl_struct_alignment() {
-    let mut hit_counts: HashMap<&'static str, usize> = HashMap::new();
-
-    for &(filename, src) in ALL_SHADERS {
-        let structs = parse_wgsl_structs(filename, src);
-
-        if let Some(s) = structs.get("GpuVertex") {
-            *hit_counts.entry("GpuVertex").or_insert(0) += 1;
-            check_struct_size!(filename, s, GpuVertex);
-            check_member!(filename, s, GpuVertex, position);
-            check_member!(filename, s, GpuVertex, inv_mass);
-            check_member!(filename, s, GpuVertex, prev_pos);
-            check_member!(filename, s, GpuVertex, layer_id);
-            check_member!(filename, s, GpuVertex, velocity);
-            check_member!(filename, s, GpuVertex, thickness);
-        }
-
-        if let Some(s) = structs.get("SimParams") {
-            check_struct_size!(filename, s, SimParams);
-            check_member!(filename, s, SimParams, gravity);
-            check_member!(filename, s, SimParams, damping);
-            check_member!(filename, s, SimParams, substeps);
-            check_member!(filename, s, SimParams, num_vertices);
-            check_member!(filename, s, SimParams, num_distance_constraints);
-            check_member!(filename, s, SimParams, num_bending_constraints);
-            check_member!(filename, s, SimParams, num_sewing_constraints);
-            check_member!(filename, s, SimParams, sewing_compliance);
-            check_member!(filename, s, SimParams, enable_sewing_lock);
-            check_member!(filename, s, SimParams, sewing_lock_distance);
-        }
-
-        if let Some(s) = structs.get("CollisionParams") {
-            check_struct_size!(filename, s, CollisionParams);
-            check_member!(filename, s, CollisionParams, num_vertices);
-            check_member!(filename, s, CollisionParams, num_colliders);
-            check_member!(filename, s, CollisionParams, num_mesh_triangles);
-            check_member!(filename, s, CollisionParams, num_clusters);
-            check_member!(filename, s, CollisionParams, dt);
-            check_member!(filename, s, CollisionParams, edge_margin_scale);
-            check_member!(filename, s, CollisionParams, edge_margin_offset);
-            check_member!(filename, s, CollisionParams, enable_cluster_culling);
-            check_member!(filename, s, CollisionParams, enable_single_sided_recovery);
-            check_member!(filename, s, CollisionParams, sweep_margin_offset);
-            check_member!(filename, s, CollisionParams, num_bones);
-            check_member!(filename, s, CollisionParams, enable_bone_sdf);
-        }
-
-        if let Some(s) = structs.get("GpuBoneInfo") {
-            check_struct_size!(filename, s, GpuBoneInfo);
-            check_member!(filename, s, GpuBoneInfo, aabb_min);
-            check_member!(filename, s, GpuBoneInfo, aabb_max);
-            check_member!(filename, s, GpuBoneInfo, uvw_scale);
-            check_member!(filename, s, GpuBoneInfo, uvw_offset);
-            check_member!(filename, s, GpuBoneInfo, params);
-        }
-
-        if let Some(s) = structs.get("GpuBoneTransform") {
-            check_struct_size!(filename, s, GpuBoneTransform);
-            check_member!(filename, s, GpuBoneTransform, world_matrix);
-            check_member!(filename, s, GpuBoneTransform, inv_world_matrix);
-        }
-
-        if let Some(s) = structs.get("GpuEdge") {
-            check_struct_size!(filename, s, GpuEdge);
-            check_member!(filename, s, GpuEdge, v0);
-            check_member!(filename, s, GpuEdge, v1);
-        }
-
-        if let Some(s) = structs.get("SelfCollisionParams") {
-            check_struct_size!(filename, s, SelfCollisionParams);
-            check_member!(filename, s, SelfCollisionParams, cell_size);
-            check_member!(filename, s, SelfCollisionParams, table_size);
-            check_member!(filename, s, SelfCollisionParams, num_vertices);
-            check_member!(filename, s, SelfCollisionParams, num_edges);
-            check_member!(filename, s, SelfCollisionParams, relief_factor);
-            check_member!(filename, s, SelfCollisionParams, max_displacement_ratio);
-            check_member!(filename, s, SelfCollisionParams, enable_relief);
-            check_member!(filename, s, SelfCollisionParams, enable_normal_untangling);
-            check_member!(filename, s, SelfCollisionParams, exclude_neighbors);
-            check_member!(filename, s, SelfCollisionParams, max_search_iterations);
-        }
-
-        if let Some(s) = structs.get("SpatialHashParams") {
-            check_struct_size!(filename, s, SpatialHashParams);
-            check_member!(filename, s, SpatialHashParams, cell_size);
-            check_member!(filename, s, SpatialHashParams, table_size);
-            check_member!(filename, s, SpatialHashParams, num_vertices);
-            check_member!(filename, s, SpatialHashParams, num_blocks);
-        }
-
-        if let Some(s) = structs.get("PinParams") {
-            check_struct_size!(filename, s, PinParams);
-            check_member!(filename, s, PinParams, num_pins);
-        }
-
-        if let Some(s) = structs.get("NormalParams") {
-            check_struct_size!(filename, s, NormalParams);
-            check_member!(filename, s, NormalParams, num_vertices);
-        }
-
-        if let Some(s) = structs.get("DispatchInfo") {
-            check_struct_size!(filename, s, DispatchInfo);
-            check_member!(filename, s, DispatchInfo, color_offset);
-            check_member!(filename, s, DispatchInfo, color_count);
-        }
-
-        if let Some(s) = structs.get("GpuCollider") {
-            check_struct_size!(filename, s, GpuCollider);
-            check_member!(filename, s, GpuCollider, collider_type);
-            check_member!(filename, s, GpuCollider, friction);
-            check_member!(filename, s, GpuCollider, restitution);
-            check_member!(filename, s, GpuCollider, point_a);
-            check_member!(filename, s, GpuCollider, radius);
-            check_member!(filename, s, GpuCollider, point_b);
-        }
-
-        if let Some(s) = structs.get("GpuMeshTriangle") {
-            check_struct_size!(filename, s, GpuMeshTriangle);
-            check_member!(filename, s, GpuMeshTriangle, p0);
-            check_member!(filename, s, GpuMeshTriangle, friction);
-            check_member!(filename, s, GpuMeshTriangle, p1);
-            check_member!(filename, s, GpuMeshTriangle, thickness);
-            check_member!(filename, s, GpuMeshTriangle, p2);
-            check_member!(filename, s, GpuMeshTriangle, restitution);
-            check_member!(filename, s, GpuMeshTriangle, flags);
-        }
-
-        if let Some(s) = structs.get("GpuDistanceConstraint") {
-            check_struct_size!(filename, s, GpuDistanceConstraint);
-            check_member!(filename, s, GpuDistanceConstraint, v0);
-            check_member!(filename, s, GpuDistanceConstraint, v1);
-            check_member!(filename, s, GpuDistanceConstraint, rest_length);
-            check_member!(filename, s, GpuDistanceConstraint, tension_compliance);
-            check_member!(filename, s, GpuDistanceConstraint, compression_compliance);
-            check_member!(filename, s, GpuDistanceConstraint, constraint_type);
-        }
-
-        if let Some(s) = structs.get("GpuBendingConstraint") {
-            check_struct_size!(filename, s, GpuBendingConstraint);
-            check_member!(filename, s, GpuBendingConstraint, v0);
-            check_member!(filename, s, GpuBendingConstraint, v1);
-            check_member!(filename, s, GpuBendingConstraint, v2);
-            check_member!(filename, s, GpuBendingConstraint, v3);
-            check_member!(filename, s, GpuBendingConstraint, rest_length);
-            check_member!(filename, s, GpuBendingConstraint, compliance);
-        }
-
-        if let Some(s) = structs.get("GpuPinConstraint") {
-            check_struct_size!(filename, s, GpuPinConstraint);
-            check_member!(filename, s, GpuPinConstraint, vertex_idx);
-            check_member!(filename, s, GpuPinConstraint, weight);
-            check_member!(filename, s, GpuPinConstraint, target_pos);
-        }
-
-        if let Some(s) = structs.get("GpuSewingConstraint") {
-            check_struct_size!(filename, s, GpuSewingConstraint);
-            check_member!(filename, s, GpuSewingConstraint, v0);
-            check_member!(filename, s, GpuSewingConstraint, v1);
-            check_member!(filename, s, GpuSewingConstraint, current_rest_len);
-            check_member!(filename, s, GpuSewingConstraint, target_rest_len);
-            check_member!(filename, s, GpuSewingConstraint, shrink_speed);
-            check_member!(filename, s, GpuSewingConstraint, compliance);
-            check_member!(filename, s, GpuSewingConstraint, lock_on_close);
-        }
-
-
-        if let Some(s) = structs.get("GpuStarPair") {
-            check_struct_size!(filename, s, GpuStarPair);
-            check_member!(filename, s, GpuStarPair, v0);
-            check_member!(filename, s, GpuStarPair, v1);
-        }
-
-        if let Some(s) = structs.get("PairCollectParams") {
-            check_struct_size!(filename, s, PairCollectParams);
-            check_member!(filename, s, PairCollectParams, cell_size);
-            check_member!(filename, s, PairCollectParams, table_size);
-            check_member!(filename, s, PairCollectParams, num_vertices);
-            check_member!(filename, s, PairCollectParams, max_vt_pairs);
-            check_member!(filename, s, PairCollectParams, max_ee_pairs);
-            check_member!(filename, s, PairCollectParams, safety_margin);
-            check_member!(filename, s, PairCollectParams, exclude_neighbors);
-            check_member!(filename, s, PairCollectParams, margin_mode);
-            check_member!(filename, s, PairCollectParams, dt_frame);
-            check_member!(filename, s, PairCollectParams, velocity_horizon_scale);
-            check_member!(filename, s, PairCollectParams, max_horizon);
-        }
-
-        if let Some(s) = structs.get("PairCounters") {
-            check_struct_size!(filename, s, PairCounters);
-            check_member!(filename, s, PairCounters, vt_count);
-            check_member!(filename, s, PairCounters, ee_count);
-        }
-
-        if let Some(s) = structs.get("SolveParams") {
-            check_struct_size!(filename, s, PairSolveParams);
-            check_member!(filename, s, PairSolveParams, num_vertices);
-            check_member!(filename, s, PairSolveParams, max_vt_pairs);
-            check_member!(filename, s, PairSolveParams, max_ee_pairs);
-            check_member!(filename, s, PairSolveParams, enable_normal_untangling);
-        }
-
-        if let Some(s) = structs.get("GpuSkinningVertex") {
-            check_struct_size!(filename, s, GpuSkinningVertex);
-            check_member!(filename, s, GpuSkinningVertex, pos);
-            check_member!(filename, s, GpuSkinningVertex, normal);
-            check_member!(filename, s, GpuSkinningVertex, bone_indices);
-            check_member!(filename, s, GpuSkinningVertex, bone_weights);
-        }
-
-        if let Some(s) = structs.get("GpuBoneTriangleSource") {
-            check_struct_size!(filename, s, GpuBoneTriangleSource);
-            check_member!(filename, s, GpuBoneTriangleSource, i0);
-            check_member!(filename, s, GpuBoneTriangleSource, i1);
-            check_member!(filename, s, GpuBoneTriangleSource, i2);
-            check_member!(filename, s, GpuBoneTriangleSource, bone_idx);
-        }
-
-        if let Some(s) = structs.get("GpuBakeParams") {
-            check_struct_size!(filename, s, GpuBakeParams);
-            check_member!(filename, s, GpuBakeParams, local_min);
-            check_member!(filename, s, GpuBakeParams, tri_start);
-            check_member!(filename, s, GpuBakeParams, local_max);
-            check_member!(filename, s, GpuBakeParams, tri_count);
-            check_member!(filename, s, GpuBakeParams, tile_col);
-            check_member!(filename, s, GpuBakeParams, tile_row);
-            check_member!(filename, s, GpuBakeParams, tile_layer);
-            check_member!(filename, s, GpuBakeParams, res);
-            check_member!(filename, s, GpuBakeParams, total_width);
-            check_member!(filename, s, GpuBakeParams, total_height);
-            check_member!(filename, s, GpuBakeParams, total_depth);
-            check_member!(filename, s, GpuBakeParams, row_pitch);
-        }
-
-        if let Some(s) = structs.get("BakeMeshParams") {
-            check_struct_size!(filename, s, GpuBakeMeshParams);
-            check_member!(filename, s, GpuBakeMeshParams, local_min);
-            check_member!(filename, s, GpuBakeMeshParams, tri_count);
-            check_member!(filename, s, GpuBakeMeshParams, local_max);
-            check_member!(filename, s, GpuBakeMeshParams, row_pitch);
-            check_member!(filename, s, GpuBakeMeshParams, width);
-            check_member!(filename, s, GpuBakeMeshParams, height);
-            check_member!(filename, s, GpuBakeMeshParams, depth);
-            check_member!(filename, s, GpuBakeMeshParams, _pad0);
-        }
-
-        if let Some(s) = structs.get("BakeMeshTriangle") {
-            check_struct_size!(filename, s, GpuBakeMeshTriangle);
-            check_member!(filename, s, GpuBakeMeshTriangle, p0);
-            check_member!(filename, s, GpuBakeMeshTriangle, _pad0);
-            check_member!(filename, s, GpuBakeMeshTriangle, p1);
-            check_member!(filename, s, GpuBakeMeshTriangle, _pad1);
-            check_member!(filename, s, GpuBakeMeshTriangle, p2);
-            check_member!(filename, s, GpuBakeMeshTriangle, _pad2);
-            check_member!(filename, s, GpuBakeMeshTriangle, normal);
-            check_member!(filename, s, GpuBakeMeshTriangle, _pad3);
-        }
-
-        if let Some(s) = structs.get("GpuColliderEdge") {
-            check_struct_size!(filename, s, GpuColliderEdge);
-            check_member!(filename, s, GpuColliderEdge, p0);
-            check_member!(filename, s, GpuColliderEdge, thickness);
-            check_member!(filename, s, GpuColliderEdge, p1);
-            check_member!(filename, s, GpuColliderEdge, friction);
-        }
-
-        if let Some(s) = structs.get("EdgeCollisionParams") {
-            check_struct_size!(filename, s, EdgeCollisionParams);
-            check_member!(filename, s, EdgeCollisionParams, cell_size);
-            check_member!(filename, s, EdgeCollisionParams, table_size);
-            check_member!(filename, s, EdgeCollisionParams, num_cloth_edges);
-            check_member!(filename, s, EdgeCollisionParams, num_collider_edges);
-            check_member!(filename, s, EdgeCollisionParams, edge_margin_scale);
-            check_member!(filename, s, EdgeCollisionParams, edge_margin_offset);
-        }
-
-        if let Some(s) = structs.get("GpuWrinkleProfileSample") {
-            check_struct_size!(filename, s, GpuWrinkleProfileSample);
-            check_member!(filename, s, GpuWrinkleProfileSample, valley_z);
-            check_member!(filename, s, GpuWrinkleProfileSample, valley_radius);
-            check_member!(filename, s, GpuWrinkleProfileSample, crest_z);
-            check_member!(filename, s, GpuWrinkleProfileSample, crest_radius);
-            check_member!(filename, s, GpuWrinkleProfileSample, valley_weight);
-            check_member!(filename, s, GpuWrinkleProfileSample, crest_weight);
-            check_member!(filename, s, GpuWrinkleProfileSample, _pad0);
-            check_member!(filename, s, GpuWrinkleProfileSample, _pad1);
-        }
-
-        if let Some(s) = structs.get("WrinkleFieldParams") {
-            check_struct_size!(filename, s, WrinkleFieldParams);
-            check_member!(filename, s, WrinkleFieldParams, bone_origin);
-            check_member!(filename, s, WrinkleFieldParams, bone_axis);
-            check_member!(filename, s, WrinkleFieldParams, bone_normal);
-            check_member!(filename, s, WrinkleFieldParams, bone_binormal);
-            check_member!(filename, s, WrinkleFieldParams, z_range);
-            check_member!(filename, s, WrinkleFieldParams, r_range);
-            check_member!(filename, s, WrinkleFieldParams, enabled);
-            check_member!(filename, s, WrinkleFieldParams, use_texture);
-            check_member!(filename, s, WrinkleFieldParams, valley_window);
-            check_member!(filename, s, WrinkleFieldParams, crest_window);
-        }
-
-        if let Some(s) = structs.get("HierFineParams") {
-            *hit_counts.entry("HierFineParams").or_insert(0) += 1;
-            check_struct_size!(filename, s, GpuHierFineParams);
-            check_member!(filename, s, GpuHierFineParams, coarse_w);
-            check_member!(filename, s, GpuHierFineParams, coarse_h);
-            check_member!(filename, s, GpuHierFineParams, coarse_d);
-            check_member!(filename, s, GpuHierFineParams, band);
-            check_member!(filename, s, GpuHierFineParams, z_offset);
-            check_member!(filename, s, GpuHierFineParams, _pad0);
-            check_member!(filename, s, GpuHierFineParams, _pad1);
-            check_member!(filename, s, GpuHierFineParams, _pad2);
-        }
-
-        if let Some(s) = structs.get("GpuVirtualVertexDef") {
-            *hit_counts.entry("GpuVirtualVertexDef").or_insert(0) += 1;
-            check_struct_size!(filename, s, GpuVirtualVertexDef);
-            check_member!(filename, s, GpuVirtualVertexDef, parent_indices);
-            check_member!(filename, s, GpuVirtualVertexDef, bary_weights);
-        }
-
-        if let Some(s) = structs.get("VirtualForwardParams") {
-            *hit_counts.entry("VirtualForwardParams").or_insert(0) += 1;
-            check_struct_size!(filename, s, VirtualForwardParams);
-            check_member!(filename, s, VirtualForwardParams, num_real_vertices);
-            check_member!(filename, s, VirtualForwardParams, num_virtual_vertices);
-            check_member!(filename, s, VirtualForwardParams, _pad0);
-            check_member!(filename, s, VirtualForwardParams, _pad1);
-        }
-
-        if let Some(s) = structs.get("SelfCollisionVvParams") {
-            *hit_counts.entry("SelfCollisionVvParams").or_insert(0) += 1;
-            check_struct_size!(filename, s, SelfCollisionVvParams);
-            check_member!(filename, s, SelfCollisionVvParams, cell_size);
-            check_member!(filename, s, SelfCollisionVvParams, table_size);
-            check_member!(filename, s, SelfCollisionVvParams, num_real_vertices);
-            check_member!(filename, s, SelfCollisionVvParams, num_total_particles);
-            check_member!(filename, s, SelfCollisionVvParams, relief_factor);
-            check_member!(filename, s, SelfCollisionVvParams, max_displacement_ratio);
-            check_member!(filename, s, SelfCollisionVvParams, _pad0);
-            check_member!(filename, s, SelfCollisionVvParams, _pad1);
-        }
-
-        if let Some(s) = structs.get("SelfCollisionAccum") {
-            *hit_counts.entry("SelfCollisionAccum").or_insert(0) += 1;
-            check_struct_size!(filename, s, GpuSelfCollisionAccum);
-            check_member!(filename, s, GpuSelfCollisionAccum, dx);
-            check_member!(filename, s, GpuSelfCollisionAccum, dy);
-            check_member!(filename, s, GpuSelfCollisionAccum, dz);
-            check_member!(filename, s, GpuSelfCollisionAccum, count);
-            check_member!(filename, s, GpuSelfCollisionAccum, pin_dx);
-            check_member!(filename, s, GpuSelfCollisionAccum, pin_dy);
-            check_member!(filename, s, GpuSelfCollisionAccum, pin_dz);
-            check_member!(filename, s, GpuSelfCollisionAccum, pin_count);
-            check_member!(filename, s, GpuSelfCollisionAccum, ccd_pos_x);
-            check_member!(filename, s, GpuSelfCollisionAccum, ccd_pos_y);
-            check_member!(filename, s, GpuSelfCollisionAccum, ccd_pos_z);
-            check_member!(filename, s, GpuSelfCollisionAccum, ccd_neg_x);
-            check_member!(filename, s, GpuSelfCollisionAccum, ccd_neg_y);
-            check_member!(filename, s, GpuSelfCollisionAccum, ccd_neg_z);
-            check_member!(filename, s, GpuSelfCollisionAccum, _pad0);
-            check_member!(filename, s, GpuSelfCollisionAccum, ee_ccd_count);
-        }
-    }
-
-    // 空振り (Vacuous Truth) 防止アサーション
-    for required in [
+    const REQUIRED_BUFFER_STRUCTS: &[&str] = &[
         "GpuVertex",
+        "SimParams",
+        "CollisionParams",
+        "GpuBoneInfo",
+        "GpuBoneTransform",
+        "GpuEdge",
+        "SelfCollisionParams",
+        "SpatialHashParams",
+        "PinParams",
+        "NormalParams",
+        "DispatchInfo",
+        "GpuCollider",
+        "GpuMeshTriangle",
+        "GpuDistanceConstraint",
+        "GpuBendingConstraint",
+        "GpuPinConstraint",
+        "GpuSewingConstraint",
+        "GpuStarPair",
+        "PairCollectParams",
+        "PairCounters",
+        "SolveParams",
+        "RestVertex",
+        "BoneTriangleSource",
+        "BakeParams",
+        "BakeTriangle",
+        "BakeMeshParams",
+        "BakeMeshTriangle",
+        "GpuColliderEdge",
+        "EdgeCollisionParams",
+        "WrinkleFieldParams",
         "HierFineParams",
         "GpuVirtualVertexDef",
         "VirtualForwardParams",
         "SelfCollisionVvParams",
         "SelfCollisionAccum",
-    ] {
+        "GpuVtPair",
+        "GpuEePair",
+        "AtomicAccum",
+    ];
+    // WGSL 関数内部のローカル変数・戻り値専用構造体（GPU バッファ境界に載らないもの）
+    const LOCAL_HELPER_STRUCTS: &[&str] = &[
+        "ClosestResult",
+        "SegmentDistanceResult",
+        "ClosestBaryResult",
+        "SegmentEval",
+        "TwoHopResult",
+        "ParticleInfo",
+    ];
+
+    let mut hit_counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut seen_wgsl_structs: HashSet<String> = HashSet::new();
+
+    for &(filename, src) in ALL_SHADERS {
+        let structs = parse_wgsl_structs(filename, src);
+        for name in structs.keys() {
+            seen_wgsl_structs.insert(name.clone());
+        }
+
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuVertex" => GpuVertex {
+            position, inv_mass, prev_pos, layer_id, velocity, thickness
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "SimParams" => SimParams {
+            gravity, damping, substeps, num_vertices, num_distance_constraints,
+            num_bending_constraints, num_sewing_constraints, sewing_compliance,
+            enable_sewing_lock, sewing_lock_distance, tension_damping,
+            compression_damping, shear_damping, bending_damping
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "CollisionParams" => CollisionParams {
+            num_vertices, num_colliders, num_mesh_triangles, num_clusters, dt,
+            edge_margin_scale, edge_margin_offset, enable_cluster_culling,
+            enable_single_sided_recovery, sweep_margin_offset, num_bones, enable_bone_sdf
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuBoneInfo" => GpuBoneInfo {
+            aabb_min, aabb_max, uvw_scale, uvw_offset, params
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuBoneTransform" => GpuBoneTransform {
+            world_matrix, inv_world_matrix
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuEdge" => GpuEdge {
+            v0, v1
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "SelfCollisionParams" => SelfCollisionParams {
+            cell_size, table_size, num_vertices, num_edges, relief_factor,
+            max_displacement_ratio, enable_relief, enable_normal_untangling,
+            exclude_neighbors, max_search_iterations, enable_ee, _pad3
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "SpatialHashParams" => SpatialHashParams {
+            cell_size, table_size, num_vertices, num_blocks
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "PinParams" => PinParams {
+            num_pins
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "NormalParams" => NormalParams {
+            num_vertices
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "DispatchInfo" => DispatchInfo {
+            color_offset, color_count
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuCollider" => GpuCollider {
+            collider_type, friction, restitution, point_a, radius, point_b
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuMeshTriangle" => GpuMeshTriangle {
+            p0, friction, p1, thickness, p2, restitution, flags
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuDistanceConstraint" => GpuDistanceConstraint {
+            v0, v1, rest_length, tension_compliance, compression_compliance, constraint_type
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuBendingConstraint" => GpuBendingConstraint {
+            v0, v1, v2, v3, rest_length, compliance
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuPinConstraint" => GpuPinConstraint {
+            vertex_idx, weight, target_pos
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuSewingConstraint" => GpuSewingConstraint {
+            v0, v1, current_rest_len, target_rest_len, shrink_speed, compliance, lock_on_close
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuStarPair" => GpuStarPair {
+            v0, v1
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "PairCollectParams" => PairCollectParams {
+            cell_size, table_size, num_vertices, max_vt_pairs, max_ee_pairs,
+            safety_margin, exclude_neighbors, margin_mode, dt_frame,
+            velocity_horizon_scale, max_horizon, quota_vt, quota_ee
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "PairCounters" => PairCounters {
+            vt_count, ee_count, vt_dropped, ee_dropped
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "SolveParams" => PairSolveParams {
+            num_vertices, max_vt_pairs, max_ee_pairs, enable_normal_untangling
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "RestVertex" => GpuSkinningVertex {
+            pos, _pad0, normal, _pad1, bone_indices, bone_weights
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "BoneTriangleSource" => GpuBoneTriangleSource {
+            i0, i1, i2, bone_idx, w0, w1, w2, _pad
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "BakeParams" => GpuBakeParams {
+            local_min, tri_start, local_max, tri_count, tile_col, tile_row,
+            tile_layer, res, total_width, total_height, total_depth, row_pitch
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "BakeTriangle" => GpuBakeTriangle {
+            p0, w0, p1, w1, p2, w2, normal, _pad
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "BakeMeshParams" => GpuBakeMeshParams {
+            local_min, tri_count, local_max, row_pitch, width, height, depth, _pad0
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "BakeMeshTriangle" => GpuBakeMeshTriangle {
+            p0, _pad0, p1, _pad1, p2, _pad2, normal, _pad3
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuColliderEdge" => GpuColliderEdge {
+            p0, thickness, p1, friction, normal, flags
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "EdgeCollisionParams" => EdgeCollisionParams {
+            cell_size, table_size, num_cloth_edges, num_collider_edges,
+            edge_margin_scale, edge_margin_offset
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "WrinkleFieldParams" => WrinkleFieldParams {
+            bone_origin, bone_axis, bone_normal, bone_binormal, z_range, r_range,
+            enabled, use_texture, valley_window, crest_window
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "HierFineParams" => GpuHierFineParams {
+            coarse_w, coarse_h, coarse_d, band, z_offset, _pad0, _pad1, _pad2
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuVirtualVertexDef" => GpuVirtualVertexDef {
+            parent_indices, bary_weights
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "VirtualForwardParams" => VirtualForwardParams {
+            num_real_vertices, num_virtual_vertices, _pad0, _pad1
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "SelfCollisionVvParams" => SelfCollisionVvParams {
+            cell_size, table_size, num_real_vertices, num_total_particles,
+            relief_factor, max_displacement_ratio, _pad0, _pad1
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "SelfCollisionAccum" => GpuSelfCollisionAccum {
+            dx, dy, dz, count, pin_dx, pin_dy, pin_dz, pin_count,
+            ccd_pos_x, ccd_pos_y, ccd_pos_z, ccd_neg_x, ccd_neg_y, ccd_neg_z,
+            untangle_cand_v, ee_ccd_count
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuVtPair" => GpuVtPair {
+            vert_i, vert_j, v0, v1
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "GpuEePair" => GpuEePair {
+            v_i, v_ui, v_j, v_vj
+        });
+        verify_wgsl_struct!(filename, structs, hit_counts, "AtomicAccum" => GpuAtomicAccum {
+            dx, dy, dz, count
+        });
+    }
+
+    // 空振り (Vacuous Truth) 防止アサーション: 全38バッファ構造体が最低1回はWGSLと突合されること
+    for required in REQUIRED_BUFFER_STRUCTS {
         assert!(
             hit_counts.get(required).copied().unwrap_or(0) > 0,
             "Struct '{}' was never checked against any WGSL shader (vacuous assertion)!",
@@ -591,8 +423,24 @@ fn test_rust_and_wgsl_struct_alignment() {
     }
     assert_eq!(
         hit_counts.get("SelfCollisionAccum").copied().unwrap_or(0),
-        7,
-        "SelfCollisionAccum は全7つの自己衝突/エッジ衝突シェーダーで一致検証されるべき"
+        8,
+        "SelfCollisionAccum は全8つの自己衝突/エッジ衝突シェーダーで一致検証されるべき"
+    );
+
+    // 未知 WGSL 構造体の追加漏れ防止アサーション
+    let allowed: HashSet<&str> = REQUIRED_BUFFER_STRUCTS
+        .iter()
+        .chain(LOCAL_HELPER_STRUCTS.iter())
+        .copied()
+        .collect();
+    let unknown: Vec<String> = seen_wgsl_structs
+        .into_iter()
+        .filter(|name| !allowed.contains(name.as_str()))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "test_shader_alignment.rs で未網羅の WGSL 構造体が検出されました: {:?}",
+        unknown
     );
 }
 

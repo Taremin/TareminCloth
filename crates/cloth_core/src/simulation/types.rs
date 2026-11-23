@@ -87,24 +87,22 @@ pub struct GpuBoneTriangleSource {
     pub _pad: f32,
 }
 
-/// ドレープガイド旧1Dプロファイルサンプル（サイズ: 32バイト, 16Bアライメント準拠）
-/// 注意: 旧1Dプロファイルパスの残骸であり、現行2D-SDFテクスチャ方式では未使用。
-/// WGSL・BGL・dispatchからの参照はない。alignmentテストの回帰検出用に型のみ保持する。
+/// 距離拘束原子加算ソルバー用アキュムレータ（WGSL `AtomicAccum` と 1:1 対応・16 bytes / vertex）
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GpuWrinkleProfileSample {
-    pub valley_z: f32,       // 谷の軸方向ターゲット位置 (m)
-    pub valley_radius: f32,  // 谷の径方向ターゲット半径 (m, 通常はボーン表面)
-    pub crest_z: f32,        // 山の軸方向ターゲット位置 (m)
-    pub crest_radius: f32,   // 山の径方向ターゲット半径 (m, 外側)
-    pub valley_weight: f32,  // 谷のメタボールポテンシャル強度 (0.0〜1.0)
-    pub crest_weight: f32,   // 山のメタボールポテンシャル強度 (0.0〜1.0)
-    pub _pad0: f32,
-    pub _pad1: f32,
+pub struct GpuAtomicAccum {
+    /// X変位合計 (固定小数点 i32)
+    pub dx: i32,
+    /// Y変位合計 (固定小数点 i32)
+    pub dy: i32,
+    /// Z変位合計 (固定小数点 i32)
+    pub dz: i32,
+    /// 加算回数
+    pub count: u32,
 }
 
 /// ドレープガイド Uniform パラメータ（サイズ: 96バイト, 16Bアライメント準拠）
-/// 注意: `bone_origin.w` は現在WGSL未読の予約フィールドである。
+/// `bone_origin.w` は径方向カットオフ影響半径 (m, `wrinkle_field.wgsl` で使用)。
 /// `valley_window` / `crest_window` は径方向グラデーション窓 (m)。
 /// サイズ変更（96B→）は WGSL・Rust・Python・alignmentテストの同時変更になるため行わない。
 #[repr(C)]
@@ -173,8 +171,8 @@ pub struct GpuSelfCollisionAccum {
     pub ccd_neg_y: i32,
     /// 真の CCD 負方向最小変位 Z (固定小数点 i32, atomicMin)
     pub ccd_neg_z: i32,
-    /// 16バイトアライメント調整用パディング
-    pub _pad0: u32,
+    /// 多層布 Untangling 用の最近傍内層頂点候補 (`j + 1`, `0` = 候補なし)
+    pub untangle_cand_v: u32,
     /// E-E CCD 非ゼロ変位書き込みカウント（高密度衝突時の協調減衰判定用）
     pub ee_ccd_count: u32,
 }

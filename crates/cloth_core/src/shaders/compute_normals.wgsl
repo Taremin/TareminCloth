@@ -29,6 +29,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+    // 自己衝突解決前の過渡位置 prev_pos ではなく、サブステップ開始時の確定座標 position から法線を算出することで、
+    // 多層布 Untangling（layer_id 表裏判定）の一時的折り畳みによる逆転誤作動を防止する
     let p_i = vertices[index].position;
     let start = star_offsets[index];
     let end = star_offsets[index + 1u];

@@ -14,12 +14,12 @@ struct GpuVertex {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
-    if (index >= arrayLength(&vertices)) {
+    let base = index * 3u;
+    if (base + 2u >= arrayLength(&out_positions) || index >= arrayLength(&vertices)) {
         return;
     }
 
     let p = vertices[index].position;
-    let base = index * 3u;
     out_positions[base] = p.x;
     out_positions[base + 1u] = p.y;
     out_positions[base + 2u] = p.z;

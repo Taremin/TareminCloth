@@ -46,7 +46,7 @@ struct SelfCollisionAccum {
     ccd_neg_x: atomic<i32>,
     ccd_neg_y: atomic<i32>,
     ccd_neg_z: atomic<i32>,
-    _pad0: u32,
+    untangle_cand_v: atomic<u32>,
     ee_ccd_count: atomic<u32>,
 };
 
@@ -68,11 +68,12 @@ fn is_open_boundary_edge(e_idx: u32) -> bool {
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
+const MAX_ATOMIC_FIXED: f32 = 50000000.0;
 
 fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     atomicAdd(&accum[v_idx].dx, ix);
     atomicAdd(&accum[v_idx].dy, iy);
     atomicAdd(&accum[v_idx].dz, iz);
@@ -80,9 +81,9 @@ fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
 }
 
 fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     atomicAdd(&accum[v_idx].pin_dx, ix);
     atomicAdd(&accum[v_idx].pin_dy, iy);
     atomicAdd(&accum[v_idx].pin_dz, iz);
@@ -90,9 +91,9 @@ fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
 }
 
 fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>, count_ee: bool) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     if (ix > 0) {
         atomicMax(&accum[v_idx].ccd_pos_x, ix);
     } else if (ix < 0) {
@@ -122,19 +123,31 @@ fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>, count_ee: bool) {
 fn is_outer_edge_behind_inner(
     layer_a: u32,
     layer_b: u32,
-    vert_a: u32,
-    vert_b: u32,
+    a0: u32,
+    a1: u32,
+    b0: u32,
+    b1: u32,
+    a_fixed: bool,
+    b_fixed: bool,
     delta_ab: vec3<f32>,
 ) -> bool {
     if (layer_a == layer_b) {
         return false;
     }
+    let na_raw = normals[a0].xyz + normals[a1].xyz;
+    let nb_raw = normals[b0].xyz + normals[b1].xyz;
+    let na_len = length(na_raw);
+    let nb_len = length(nb_raw);
     if (layer_a > layer_b) {
-        let n_inner = normals[vert_b].xyz;
-        return (dot(n_inner, n_inner) > 0.25) && (dot(delta_ab, n_inner) < 0.0);
+        if (nb_len <= 0.5) { return false; }
+        let n_inner = nb_raw / nb_len;
+        let allow = b_fixed || (na_len <= 0.5) || (dot(na_raw / max(na_len, EPSILON), n_inner) > 0.0);
+        return allow && (dot(delta_ab, n_inner) < 0.0);
     }
-    let n_inner = normals[vert_a].xyz;
-    return (dot(n_inner, n_inner) > 0.25) && (dot(-delta_ab, n_inner) < 0.0);
+    if (na_len <= 0.5) { return false; }
+    let n_inner = na_raw / na_len;
+    let allow = a_fixed || (nb_len <= 0.5) || (dot(nb_raw / max(nb_len, EPSILON), n_inner) > 0.0);
+    return allow && (dot(-delta_ab, n_inner) < 0.0);
 }
 
 fn hash_coords(coord: vec3<i32>, table_size: u32) -> u32 {
@@ -273,10 +286,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let p_u0_old = v_u0.position;
     let p_u1_old = v_u1.position;
 
-    // 自エッジが両端点ピン留めで静止している場合は移動がないため早期リターン可能
-    if (is_pinned_u0 && is_pinned_u1 && length(p_u0 - p_u0_old) < EPSILON && length(p_u1 - p_u1_old) < EPSILON) {
-        return;
-    }
+    // 両端点静止ピンエッジも edge_idx < edge_b_idx の相手動的エッジを処理するため早期リターンしない
 
     let thick_u0 = v_u0.thickness;
     let thick_u1 = v_u1.thickness;
@@ -309,6 +319,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     let edge_b_idx = edge_sorted_indices[start + idx];
 
                     // 【辞書順序制約】全世界で edge_idx < edge_b_idx のペアのみを厳密に 1 回処理
+                    // 静止ピンエッジスレッドも有効であるためメモリロード前に 50% を即除外する
                     if (edge_idx >= edge_b_idx) {
                         continue;
                     }
@@ -397,7 +408,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     if (run_ccd) {
                         // 粗サンプル（9点: tau = 0/8 .. 8/8）による最小距離と体積符号反転の探索
                         var min_sample_dist_sq = 1e20;
-                        var min_k = 0u;
+                        var best_tau = 0.0;
+                        var half_span = 0.125;
                         var min_st = vec2<f32>(0.0, 0.0);
                         var prev_vol = eval_segment_volume(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, 0.0);
                         var zero_cross_tau = -1.0;
@@ -407,7 +419,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             let eval_res = eval_segment_dist_sq(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, tau_k);
                             if (eval_res.dist_sq < min_sample_dist_sq) {
                                 min_sample_dist_sq = eval_res.dist_sq;
-                                min_k = k;
+                                best_tau = tau_k;
                                 min_st = eval_res.st;
                             }
                             if (k > 0u) {
@@ -424,15 +436,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             let eval_zc = eval_segment_dist_sq(p_u0_old, p_u0, p_u1_old, p_u1, p_j_old, p_j, p_vj_old, p_vj, zero_cross_tau);
                             if (eval_zc.dist_sq < min_sample_dist_sq) {
                                 min_sample_dist_sq = eval_zc.dist_sq;
-                                min_k = u32(clamp(round(zero_cross_tau * 8.0), 0.0, 8.0));
+                                best_tau = zero_cross_tau;
+                                half_span = 0.0625;
                                 min_st = eval_zc.st;
                             }
                         }
 
                         // 三分探索（6回）で最接近点 (tau*, s*, t*) を特定
-                        var t_lo = max(0.0, (f32(min_k) - 1.0) * 0.125);
-                        var t_hi = min(1.0, (f32(min_k) + 1.0) * 0.125);
-                        var tau_star = f32(min_k) * 0.125;
+                        var t_lo = max(0.0, best_tau - half_span);
+                        var t_hi = min(1.0, best_tau + half_span);
+                        var tau_star = best_tau;
                         var dist_sq_star = min_sample_dist_sq;
                         var st_star = min_st;
 
@@ -551,23 +564,39 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 let count_pin_ee = !(edge_a_all_pin || edge_b_all_pin);
                                 if (edge_b_has_pin) {
                                     let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
-                                    if (v_u0.inv_mass > 0.0) {
-                                        let col_disp_0 = n0 * (pen_ccd * (1.0 - s_star)) + edge_move * ((1.0 - s_star) * 0.5);
-                                        add_ccd_atomic(u0, col_disp_0, count_pin_ee);
-                                    }
-                                    if (v_u1.inv_mass > 0.0) {
-                                        let col_disp_1 = n0 * (pen_ccd * s_star) + edge_move * (s_star * 0.5);
-                                        add_ccd_atomic(u1, col_disp_1, count_pin_ee);
+                                    let a = 1.0 - s_star;
+                                    let b = s_star;
+                                    let w0 = v_u0.inv_mass;
+                                    let w1 = v_u1.inv_mass;
+                                    let denom = a * a * w0 + b * b * w1;
+                                    if (denom > EPSILON) {
+                                        let push_base = n0 * pen_ccd + edge_move * 0.5;
+                                        if (w0 > 0.0) {
+                                            let f0 = min((a * w0) / denom, 2.0);
+                                            add_ccd_atomic(u0, push_base * f0, count_pin_ee);
+                                        }
+                                        if (w1 > 0.0) {
+                                            let f1 = min((b * w1) / denom, 2.0);
+                                            add_ccd_atomic(u1, push_base * f1, count_pin_ee);
+                                        }
                                     }
                                 } else if (edge_a_has_pin) {
                                     let edge_move = ((p_u0 - p_u0_old) + (p_u1 - p_u1_old)) * 0.5;
-                                    if (v_j.inv_mass > 0.0) {
-                                        let col_disp_j = -n0 * (pen_ccd * (1.0 - t_star)) + edge_move * ((1.0 - t_star) * 0.5);
-                                        add_ccd_atomic(j, col_disp_j, count_pin_ee);
-                                    }
-                                    if (v_vj.inv_mass > 0.0) {
-                                        let col_disp_vj = -n0 * (pen_ccd * t_star) + edge_move * (t_star * 0.5);
-                                        add_ccd_atomic(vj, col_disp_vj, count_pin_ee);
+                                    let a = 1.0 - t_star;
+                                    let b = t_star;
+                                    let w0 = v_j.inv_mass;
+                                    let w1 = v_vj.inv_mass;
+                                    let denom = a * a * w0 + b * b * w1;
+                                    if (denom > EPSILON) {
+                                        let push_base = -n0 * pen_ccd + edge_move * 0.5;
+                                        if (w0 > 0.0) {
+                                            let fj = min((a * w0) / denom, 2.0);
+                                            add_ccd_atomic(j, push_base * fj, count_pin_ee);
+                                        }
+                                        if (w1 > 0.0) {
+                                            let fvj = min((b * w1) / denom, 2.0);
+                                            add_ccd_atomic(vj, push_base * fvj, count_pin_ee);
+                                        }
                                     }
                                 } else {
                                     let w_u0 = v_u0.inv_mass;
@@ -645,20 +674,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         }
                     }
 
+                    let dist_ee = sqrt(dist_sq_ee);
                     // 単一レイヤー時は normals バッファへのグローバルメモリアクセスを完全スキップ
                     var is_untangling_ee = false;
                     if (params.enable_normal_untangling != 0u) {
+                        let edge_a_fixed_ee = (v_u0.inv_mass <= 0.0) && (v_u1.inv_mass <= 0.0);
+                        let edge_b_fixed_ee = (v_j.inv_mass <= 0.0) && (v_vj.inv_mass <= 0.0);
                         is_untangling_ee = is_outer_edge_behind_inner(
                             v_u0.layer_id,
                             v_j.layer_id,
                             u0,
+                            u1,
                             j,
+                            vj,
+                            edge_a_fixed_ee,
+                            edge_b_fixed_ee,
                             delta_ee,
                         );
                     }
 
                     if (!is_untangling_ee) {
-                        let dist_ee = sqrt(dist_sq_ee);
                         let n_ee = delta_ee / dist_ee;
                         let pen_ee = effective_thick - dist_ee;
                         let s = st.x;
@@ -670,26 +705,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         }
 
                         if (edge_b_has_pin) {
-                            // 相手エッジがピン -> 自エッジ側を変位
+                            // 相手エッジがピン -> 自エッジ側を変位（線分パラメータ正規化）
                             let edge_move = ((p_j - p_j_old) + (p_vj - p_vj_old)) * 0.5;
-                            if (v_u0.inv_mass > 0.0) {
-                                let col_disp_0 = n_ee * (pen_ee * (1.0 - s)) + edge_move * (1.0 - s) * 0.5;
-                                add_pin_disp_atomic(u0, col_disp_0);
-                            }
-                            if (v_u1.inv_mass > 0.0) {
-                                let col_disp_1 = n_ee * (pen_ee * s) + edge_move * s * 0.5;
-                                add_pin_disp_atomic(u1, col_disp_1);
+                            let a = 1.0 - s;
+                            let b = s;
+                            let w0 = v_u0.inv_mass;
+                            let w1 = v_u1.inv_mass;
+                            let denom = a * a * w0 + b * b * w1;
+                            if (denom > EPSILON) {
+                                let push_base = n_ee * pen_ee + edge_move * 0.5;
+                                if (w0 > 0.0) {
+                                    let f0 = min((a * w0) / denom, 2.0);
+                                    add_pin_disp_atomic(u0, push_base * f0);
+                                }
+                                if (w1 > 0.0) {
+                                    let f1 = min((b * w1) / denom, 2.0);
+                                    add_pin_disp_atomic(u1, push_base * f1);
+                                }
                             }
                         } else if (edge_a_has_pin) {
-                            // 自エッジがピン -> 相手エッジ側を変位
+                            // 自エッジがピン -> 相手エッジ側を変位（線分パラメータ正規化）
                             let edge_move = ((p_u0 - p_u0_old) + (p_u1 - p_u1_old)) * 0.5;
-                            if (v_j.inv_mass > 0.0) {
-                                let col_disp_j = -n_ee * (pen_ee * (1.0 - t)) + edge_move * (1.0 - t) * 0.5;
-                                add_pin_disp_atomic(j, col_disp_j);
-                            }
-                            if (v_vj.inv_mass > 0.0) {
-                                let col_disp_vj = -n_ee * (pen_ee * t) + edge_move * t * 0.5;
-                                add_pin_disp_atomic(vj, col_disp_vj);
+                            let a = 1.0 - t;
+                            let b = t;
+                            let w0 = v_j.inv_mass;
+                            let w1 = v_vj.inv_mass;
+                            let denom = a * a * w0 + b * b * w1;
+                            if (denom > EPSILON) {
+                                let push_base = -n_ee * pen_ee + edge_move * 0.5;
+                                if (w0 > 0.0) {
+                                    let fj = min((a * w0) / denom, 2.0);
+                                    add_pin_disp_atomic(j, push_base * fj);
+                                }
+                                if (w1 > 0.0) {
+                                    let fvj = min((b * w1) / denom, 2.0);
+                                    add_pin_disp_atomic(vj, push_base * fvj);
+                                }
                             }
                         } else {
                             // 両エッジ動的 -> Coupled XPBD 対称質量分配

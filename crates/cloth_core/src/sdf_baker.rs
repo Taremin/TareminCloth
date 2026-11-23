@@ -200,7 +200,7 @@ fn normalize(v: &[f32; 3]) -> [f32; 3] {
 }
 
 /// 三角形集合における開放境界エッジ（1回しか出現しない無向辺）の集合を返す
-fn collect_open_boundary_undirected_edges(
+pub fn collect_open_boundary_undirected_edges(
     mesh_tris: &[[i32; 3]],
     num_verts: usize,
 ) -> std::collections::HashSet<(i32, i32)> {
@@ -791,14 +791,6 @@ pub fn bake_bone_sdf_gpu_ext(
     });
 
     // バッファ作成
-    let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("SDF Baker Params Buffer"),
-        size: (std::mem::size_of::<GpuBakeParams>() * bake_params_list.len()) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&params_buffer, 0, bytemuck::cast_slice(&bake_params_list));
-
     let triangles_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("SDF Baker Triangles Buffer"),
         size: (std::mem::size_of::<GpuBakeTriangle>() * all_bake_triangles.len()) as u64,
@@ -807,8 +799,35 @@ pub fn bake_bone_sdf_gpu_ext(
     });
     queue.write_buffer(&triangles_buffer, 0, bytemuck::cast_slice(&all_bake_triangles));
 
-    let total_voxels = total_width * total_height * total_depth;
-    let output_bytes = (total_voxels * 4) as u64; // 1 voxel = 4 bytes (Rg16Float = u32)
+    let total_voxels = (total_width as u64)
+        .checked_mul(total_height as u64)
+        .and_then(|v| v.checked_mul(total_depth as u64))
+        .ok_or_else(|| "Bone SDF解像度がu64範囲を超えています".to_string())?;
+    let output_bytes = total_voxels
+        .checked_mul(4)
+        .ok_or_else(|| "Bone SDF出力バイト数がu64範囲を超えています".to_string())?; // 1 voxel = 4 bytes (Rg16Float = u32)
+
+    let max_buf_size = device.limits().max_buffer_size;
+    let max_storage_size = device.limits().max_storage_buffer_binding_size as u64;
+    if output_bytes > max_buf_size || output_bytes > max_storage_size {
+        let req_mb = output_bytes / (1024 * 1024);
+        let max_mb = max_buf_size.min(max_storage_size) / (1024 * 1024);
+        return Err(format!(
+            "Bone SDFアトラス ({}x{}x{}, 必要容量: 約{}MB) がGPUのバッファ上限 ({}MB) を超えています。解像度を下げるか有効ボーン数を減らしてください。",
+            total_width, total_height, total_depth, req_mb, max_mb
+        ));
+    }
+
+    let max_3d_dim = device.limits().max_texture_dimension_3d;
+    if (total_width as u64) > (max_3d_dim as u64)
+        || (total_height as u64) > (max_3d_dim as u64)
+        || (total_depth as u64) > (max_3d_dim as u64)
+    {
+        return Err(format!(
+            "Bone SDFアトラス寸法 ({}x{}x{}) がGPUの3Dテクスチャ最大解像度 ({}) を超えています。",
+            total_width, total_height, total_depth, max_3d_dim
+        ));
+    }
 
     let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("SDF Baker Output Buffer"),
@@ -824,44 +843,62 @@ pub fn bake_bone_sdf_gpu_ext(
         mapped_at_creation: false,
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("SDF Baker BindGroup"),
-        layout: &bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: params_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: triangles_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: output_buffer.as_entire_binding(),
-            },
-        ],
-    });
+    // TDR回避のためボーンを少数バッチに分割してディスパッチ・GPU完了待機する
+    const BONES_PER_BATCH: usize = 8;
+    let wg_x = (safe_res as u32).div_ceil(4);
+    let wg_y = (safe_res as u32).div_ceil(4);
 
-    // ディスパッチ記録
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("SDF Baker Encoder"),
-    });
-
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("SDF Baker Compute Pass"),
-            timestamp_writes: None,
+    for chunk in bake_params_list.chunks(BONES_PER_BATCH) {
+        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SDF Baker Params Buffer (Batch)"),
+            size: (std::mem::size_of::<GpuBakeParams>() * chunk.len()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        pass.set_pipeline(&compute_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        queue.write_buffer(&params_buffer, 0, bytemuck::cast_slice(chunk));
 
-        let wg_x = (safe_res as u32).div_ceil(4);
-        let wg_y = (safe_res as u32).div_ceil(4);
-        let wg_z = (safe_res as u32 * n_active as u32).div_ceil(4);
-        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SDF Baker BindGroup (Batch)"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: triangles_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("SDF Baker Batch Encoder"),
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("SDF Baker Compute Pass (Batch)"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&compute_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+
+            let wg_z = (safe_res as u32 * chunk.len() as u32).div_ceil(4);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
     }
 
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("SDF Baker Readback Encoder"),
+    });
     encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_bytes);
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -1193,8 +1230,13 @@ pub fn bake_mesh_sdf_gpu_ext(
     });
     queue.write_buffer(&triangles_buffer, 0, bytemuck::cast_slice(&bake_triangles));
 
-    let total_voxels = width * height * depth;
-    let output_bytes = (total_voxels * 4) as u64;
+    let total_voxels = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|v| v.checked_mul(depth as u64))
+        .ok_or_else(|| "Mesh SDF解像度がu64範囲を超えています".to_string())?;
+    let output_bytes = total_voxels
+        .checked_mul(4)
+        .ok_or_else(|| "Mesh SDF出力バイト数がu64範囲を超えています".to_string())?;
 
     // GPU制限チェック: デバイスの最大バッファサイズおよびストレージバッファ制限を超えていないか事前検証（Panic防止）
     let max_buf_size = device.limits().max_buffer_size;
@@ -1434,14 +1476,22 @@ pub fn bake_mesh_sdf_coarse_ext(
     });
     queue.write_buffer(&triangles_buffer, 0, bytemuck::cast_slice(&bake_triangles));
 
-    let total_voxels = width * height * depth;
-    let output_bytes = (total_voxels * 4) as u64;
+    let total_voxels = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|v| v.checked_mul(depth as u64))
+        .ok_or_else(|| "Mesh SDF粗グリッド解像度がu64範囲を超えています".to_string())?;
+    let output_bytes = total_voxels
+        .checked_mul(4)
+        .ok_or_else(|| "Mesh SDF粗グリッド出力バイト数がu64範囲を超えています".to_string())?;
+    let tri_bytes = output_bytes
+        .checked_mul(8)
+        .ok_or_else(|| "Mesh SDF粗グリッド三角形バッファサイズがu64範囲を超えています".to_string())?;
 
     // GPU制限チェック (legacyと同一式。tri出力は8倍)
     let max_buf_size = device.limits().max_buffer_size;
     let max_storage_size = device.limits().max_storage_buffer_binding_size as u64;
-    if output_bytes * 8 > max_buf_size || output_bytes * 8 > max_storage_size {
-        let req_mb = (output_bytes * 8) / (1024 * 1024);
+    if tri_bytes > max_buf_size || tri_bytes > max_storage_size {
+        let req_mb = tri_bytes / (1024 * 1024);
         let max_mb = max_buf_size.min(max_storage_size) / (1024 * 1024);
         return Err(format!(
             "Mesh SDF粗グリッド ({}x{}x{}, 必要容量: 約{}MB) がGPUのバッファ上限 ({}MB) を超えています。ボクセルサイズを大きくしてください。",
@@ -1465,7 +1515,7 @@ pub fn bake_mesh_sdf_coarse_ext(
     });
     let tri_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Mesh SDF Coarse TriIdx Buffer"),
-        size: output_bytes * 8,
+        size: tri_bytes,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -1477,7 +1527,7 @@ pub fn bake_mesh_sdf_coarse_ext(
     });
     let tri_staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Mesh SDF Coarse TriIdx Staging"),
-        size: output_bytes * 8,
+        size: tri_bytes,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -1725,8 +1775,13 @@ pub fn bake_mesh_sdf_hierarchical_ext(
         mapped_at_creation: false,
     });
 
-    let total_voxels = width * height * depth;
-    let output_bytes = (total_voxels * 4) as u64;
+    let total_voxels = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|v| v.checked_mul(depth as u64))
+        .ok_or_else(|| "Mesh SDF解像度がu64範囲を超えています".to_string())?;
+    let output_bytes = total_voxels
+        .checked_mul(4)
+        .ok_or_else(|| "Mesh SDF出力バイト数がu64範囲を超えています".to_string())?;
 
     // GPU制限チェック (legacyと同一式)
     let max_buf_size = device.limits().max_buffer_size;
@@ -2173,6 +2228,125 @@ mod tests {
                 neg_above_top, 0,
                 "close_open_boundaries={} において首上端より上空のボクセルが負符号（内部）にならないこと",
                 close_flag
+            );
+        }
+    }
+
+    #[test]
+    fn test_bone_sdf_batch_dispatch_over_batch_size() {
+        if GpuContext::get_or_init().is_err() {
+            println!("GPUが利用できない環境のためスキップします");
+            return;
+        }
+
+        // BONES_PER_BATCH (8) を超える 10 ボーンで第2バッチ以降も正しくベイクされることを検証
+        let n_bones = 10usize;
+        let half = 0.05f32;
+        let local_box = [
+            [-half, -half, -half],
+            [half, -half, -half],
+            [half, half, -half],
+            [-half, half, -half],
+            [-half, -half, half],
+            [half, -half, half],
+            [half, half, half],
+            [-half, half, half],
+        ];
+        // 外向き法線 CCW 三角形（12枚）
+        let box_tris: [[i32; 3]; 12] = [
+            [0, 2, 1], [0, 3, 2],
+            [4, 5, 6], [4, 6, 7],
+            [0, 1, 5], [0, 5, 4],
+            [1, 2, 6], [1, 6, 5],
+            [2, 3, 7], [2, 7, 6],
+            [3, 0, 4], [3, 4, 7],
+        ];
+
+        let mut verts = Vec::with_capacity(n_bones * 8);
+        let mut tris = Vec::with_capacity(n_bones * 12);
+        let mut weights_per_bone = vec![vec![0.0f32; n_bones * 8]; n_bones];
+
+        for b in 0..n_bones {
+            let base = (b * 8) as i32;
+            let shift_x = b as f32 * 1.0;
+            for (lv_idx, p) in local_box.iter().enumerate() {
+                verts.push([p[0] + shift_x, p[1], p[2]]);
+                weights_per_bone[b][b * 8 + lv_idx] = 1.0;
+            }
+            for t in &box_tris {
+                tris.push([base + t[0], base + t[1], base + t[2]]);
+            }
+        }
+
+        let bones: Vec<BoneInput> = (0..n_bones)
+            .map(|b| {
+                let shift_x = -(b as f32) * 1.0;
+                BoneInput {
+                    name: format!("Bone_{b}"),
+                    weights: weights_per_bone[b].clone(),
+                    bind_matrix: [
+                        1.0, 0.0, 0.0, shift_x,
+                        0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0,
+                        0.0, 0.0, 0.0, 1.0,
+                    ],
+                }
+            })
+            .collect();
+
+        let dim = 16usize;
+        let res = bake_bone_sdf_gpu_ext(
+            &verts,
+            &tris,
+            &bones,
+            dim,
+            0.25,
+            0.02,
+            0.0,
+            0.5,
+            0.0,
+            0.0,
+            false,
+        )
+        .expect("10ボーン（バッチ分割）ベイクが成功すること");
+
+        assert_eq!(res.active_bones.len(), n_bones);
+        let n_cols = (res.width as usize) / dim;
+        let n_rows = (res.height as usize) / dim;
+        let b_per_layer = n_cols * n_rows;
+
+        let read_voxel = |gx: usize, gy: usize, gz: usize| -> f32 {
+            let flat = ((gz * res.height as usize + gy) * res.width as usize + gx) * 4;
+            let packed = u32::from_le_bytes([
+                res.texture_bytes[flat],
+                res.texture_bytes[flat + 1],
+                res.texture_bytes[flat + 2],
+                res.texture_bytes[flat + 3],
+            ]);
+            half::f16::from_bits((packed & 0xFFFF) as u16).to_f32()
+        };
+
+        for b in [0usize, 1, 7, 8, 9] {
+            let l = b / b_per_layer;
+            let rem = b % b_per_layer;
+            let r = rem / n_cols;
+            let c = rem % n_cols;
+
+            // ボックス中心付近 (8,8,8) は内側負符号
+            let d_center = read_voxel(c * dim + 8, r * dim + 8, l * dim + 8);
+            // タイルの最外角 (0,0,0) は外側正符号
+            let d_corner = read_voxel(c * dim, r * dim, l * dim);
+            assert!(
+                d_center.is_finite() && d_center < -0.02,
+                "Bone {} の中心ボクセルが負（内部）にならない: d_center={}",
+                b,
+                d_center
+            );
+            assert!(
+                d_corner.is_finite() && d_corner > 0.0,
+                "Bone {} の角ボクセルが正（外部）にならない: d_corner={}",
+                b,
+                d_corner
             );
         }
     }

@@ -20,6 +20,10 @@ struct SimParams {
     sewing_compliance: f32,
     enable_sewing_lock: f32,
     sewing_lock_distance: f32,
+    tension_damping: f32,
+    compression_damping: f32,
+    shear_damping: f32,
+    bending_damping: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -39,7 +43,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var c = sewing_constraints[idx];
-    let dt = params.gravity.w;
+    let dt = max(params.gravity.w, 1e-8);
     c.current_rest_len = max(c.target_rest_len, c.current_rest_len - c.shrink_speed * dt);
     sewing_constraints[idx] = c;
 }

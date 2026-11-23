@@ -36,6 +36,10 @@ struct SimParams {
     sewing_compliance: f32,
     enable_sewing_lock: f32,
     sewing_lock_distance: f32,
+    tension_damping: f32,
+    compression_damping: f32,
+    shear_damping: f32,
+    bending_damping: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -53,7 +57,7 @@ const EPSILON: f32 = 1e-7;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
-    if (idx >= params.num_vertices || wrinkle_params.enabled == 0u) {
+    if (idx >= params.num_vertices || wrinkle_params.enabled == 0u || wrinkle_params.use_texture == 0u) {
         return;
     }
 
@@ -68,8 +72,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let diff = p - wrinkle_params.bone_origin.xyz;
     let axis = wrinkle_params.bone_axis.xyz;
     let z = dot(diff, axis);
+    if (z < wrinkle_params.z_range.x || z > wrinkle_params.z_range.y) {
+        return;
+    }
     let r_vec = diff - axis * z;
     let r = length(r_vec);
+    if (r <= 1e-5) {
+        return; // ボーン中心軸上の特異点を保護
+    }
+    if (wrinkle_params.bone_origin.w > 0.0 && wrinkle_params.r_range.y > 0.0) {
+        let r_cutoff = wrinkle_params.r_range.y + wrinkle_params.bone_origin.w;
+        if (r > r_cutoff) {
+            return; // 径方向の遠方部位へのリークを遮断
+        }
+    }
 
     let x_cross = dot(r_vec, wrinkle_params.bone_normal.xyz);
     let y_cross = dot(r_vec, wrinkle_params.bone_binormal.xyz);
@@ -101,7 +117,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let stiffness = wrinkle_params.bone_normal.w;
     let blend = wrinkle_params.bone_binormal.w;
 
-    let dt = params.gravity.w;
+    let dt = max(params.gravity.w, 1e-8);
 
     // 4. 谷の内向き外力加速度 (-r 方向の風・引力)
     var a_pull = 0.0;

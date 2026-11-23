@@ -2056,5 +2056,1487 @@ mod tests {
         assert!((d1[0].inv_mass - 3.0).abs() < 1e-6);
         assert!(frames[2].inv_mass_deltas.is_none());
     }
+
+    #[test]
+    fn test_pair_cache_workgroup_size_32_and_dynamic_switch() {
+        // workgroup_size=32 の PairCache でスロット番号 >= 32 の後半頂点群まで確実に自己衝突解決され、
+        // さらに set_workgroup_size(64) / (32) の動的切替後も全頂点が凍結せず動作することを検証
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let nx = 8usize;
+        let ny = 7usize;
+        let spacing = 0.15f32;
+        let thickness = 0.04f32;
+        let per_layer = nx * ny; // 56頂点/層、2層合計112頂点
+
+        let mut positions = Vec::with_capacity(per_layer * 2);
+        let mut edges = Vec::new();
+        let mut faces = Vec::new();
+        let mut layer_ids = Vec::with_capacity(per_layer * 2);
+        let mut inv_masses = Vec::with_capacity(per_layer * 2);
+
+        for layer in 0..2u32 {
+            // 上層 (layer=1) を下層 (layer=0, 表面法線 +Z) の表側に厚み (0.04*2=0.08) 未満の 0.005 で近接配置
+            let z = if layer == 0 { 0.0 } else { 0.005 };
+            let offset = (layer as usize) * per_layer;
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    positions.push([ix as f32 * spacing, iy as f32 * spacing, z]);
+                    layer_ids.push(layer);
+                    inv_masses.push(if layer == 0 { 0.0 } else { 1.0 });
+                }
+            }
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    let v0 = (offset + iy * nx + ix) as u32;
+                    if ix + 1 < nx {
+                        edges.push([v0, v0 + 1]);
+                    }
+                    if iy + 1 < ny {
+                        edges.push([v0, v0 + nx as u32]);
+                    }
+                    if ix + 1 < nx && iy + 1 < ny {
+                        let v1 = v0 + 1;
+                        let v2 = v0 + nx as u32 + 1;
+                        let v3 = v0 + nx as u32;
+                        edges.push([v0, v2]);
+                        faces.push([v0, v1, v2]);
+                        faces.push([v0, v2, v3]);
+                    }
+                }
+            }
+        }
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            Some(&layer_ids),
+            Some(&inv_masses),
+            0,
+            thickness,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::with_options(ctx, mesh, 32, 0);
+        sim.set_enable_self_collision(true);
+        sim.set_enable_pair_cache(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+        sim.step(1.0 / 60.0, 4);
+
+        let verts = sim.read_vertices();
+        let pushed_count = (per_layer..per_layer * 2)
+            .filter(|&i| verts[i].position[2] > 0.02)
+            .count();
+        assert!(
+            pushed_count > per_layer / 2,
+            "wg=32 の PairCache で上層 (index >= 56) が半数以上押し戻されるべき: pushed={}/{}",
+            pushed_count,
+            per_layer
+        );
+
+        // 動的切替: workgroup_size=64 でも後半50% (index >= 56) が凍結せず重力落下する
+        sim.set_enable_self_collision(false);
+        sim.set_workgroup_size(64);
+        assert_eq!(sim.workgroup_size, 64);
+        assert_eq!(sim.shared.workgroup_size, 64);
+        let reset_vel = vec![[0.0f32; 3]; positions.len()];
+        sim.set_positions_and_velocities(&positions, Some(&reset_vel));
+        let before_64 = sim.read_vertices();
+        sim.set_gravity(0.0, 0.0, -9.81);
+        sim.step(1.0 / 60.0, 2);
+        let after_64 = sim.read_vertices();
+        for i in per_layer..per_layer * 2 {
+            assert!(
+                after_64[i].position[2] < before_64[i].position[2] - 1e-4,
+                "wg=64 切替後に頂点 {} が重力落下していない: before={}, after={}",
+                i,
+                before_64[i].position[2],
+                after_64[i].position[2]
+            );
+        }
+
+        // 動的切替: workgroup_size=32 へ戻しても同様に動作する
+        sim.set_workgroup_size(32);
+        assert_eq!(sim.workgroup_size, 32);
+        assert_eq!(sim.shared.workgroup_size, 32);
+        let before_32 = after_64;
+        sim.step(1.0 / 60.0, 2);
+        let after_32 = sim.read_vertices();
+        for i in per_layer..per_layer * 2 {
+            assert!(
+                after_32[i].position[2] < before_32[i].position[2] - 1e-4,
+                "wg=32 復帰後に頂点 {} が重力落下していない",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_positions_non_multiple_of_32_with_virtual_vertices() {
+        // 実頂点数が32の倍数ではない (35頂点) かつ仮想頂点が生成される状態で
+        // extract_positions が compact_position_buffer に境界外書込しないことを検証
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let nx = 5usize;
+        let ny = 7usize; // 35 vertices (非32倍数)
+        let spacing = 0.20f32;
+        let thickness = 0.06f32; // target_spacing=0.09 < 0.20 -> 仮想頂点多数生成
+        let mut positions = Vec::with_capacity(nx * ny);
+        let mut edges = Vec::new();
+        let mut faces = Vec::new();
+        for iy in 0..ny {
+            for ix in 0..nx {
+                positions.push([ix as f32 * spacing, iy as f32 * spacing, 1.0]);
+            }
+        }
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let v0 = (iy * nx + ix) as u32;
+                if ix + 1 < nx {
+                    edges.push([v0, v0 + 1]);
+                }
+                if iy + 1 < ny {
+                    edges.push([v0, v0 + nx as u32]);
+                }
+                if ix + 1 < nx && iy + 1 < ny {
+                    let v1 = v0 + 1;
+                    let v2 = v0 + nx as u32 + 1;
+                    let v3 = v0 + nx as u32;
+                    edges.push([v0, v2]);
+                    faces.push([v0, v1, v2]);
+                    faces.push([v0, v2, v3]);
+                }
+            }
+        }
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            None,
+            None,
+            None,
+            None,
+            0,
+            thickness,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::with_options(ctx, mesh, 32, 0);
+        sim.set_enable_self_collision(true);
+        sim.set_self_collision_algorithm(2);
+        sim.step(1.0 / 60.0, 2);
+
+        let mut pos = vec![0.0f32; nx * ny * 3];
+        sim.get_positions_flat(&mut pos);
+        assert_eq!(pos.len(), nx * ny * 3);
+        assert!(pos.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_dynamic_resize_over_256_colliders_and_65536_mesh_tris() {
+        // コライダー数 > 256 および メッシュ三角形 > 65536 でバッファが動的拡張されパニックしないことを検証
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mesh = make_quad_mesh();
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+
+        // 初期上限256を超える300個の球コライダーを設定
+        for i in 0..300u32 {
+            sim.add_sphere_collider([10.0 + i as f32 * 0.5, 0.0, 0.0], 0.1, 0.3, 0.0);
+        }
+        assert_eq!(sim.colliders.len(), 300);
+        sim.step(1.0 / 60.0, 1);
+
+        // 初期上限65536を超える65540個のメッシュ三角形を設定
+        let tris = vec![
+            GpuMeshTriangle {
+                p0: [5.0, 0.0, 0.0],
+                friction: 0.3,
+                p1: [5.1, 0.0, 0.0],
+                thickness: 0.01,
+                p2: [5.0, 0.1, 0.0],
+                restitution: 0.0,
+                flags: 1,
+                _pad: [0.0; 3],
+            };
+            65540
+        ];
+        sim.set_mesh_triangles(&tris);
+        assert_eq!(sim.mesh_triangles.len(), 65540);
+        sim.step(1.0 / 60.0, 1);
+
+        let mut pos = vec![0.0f32; 12];
+        sim.get_positions_flat(&mut pos);
+        assert_eq!(pos.len(), 12);
+        assert!(pos.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_empty_mesh_simulator_creation_safe() {
+        // 0頂点メッシュでもバッファ生成・step・get_positions_flat がパニックしないことを検証
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mesh = ClothMesh::from_raw(
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.01,
+            1000.0,
+            1000.0,
+            500.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.step(1.0 / 60.0, 1);
+        let mut pos = Vec::<f32>::new();
+        sim.get_positions_flat(&mut pos);
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn test_quad_shear_and_bending_disjoint_and_symmetric() {
+        // 2x1 Quad メッシュ:
+        // 頂点: 0=(0,0,0), 1=(1,0,0), 2=(2,0,0), 3=(0,1,0), 4=(1,1,0), 5=(2,1,0)
+        // オリジナル辺7本（内部対角線 [0,4] と [1,5] は含まない）
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 1.0, 0.0],
+        ];
+        let edges = [
+            [0, 1], [1, 2], [3, 4], [4, 5],
+            [0, 3], [1, 4], [2, 5],
+        ];
+        let faces = [
+            [0, 1, 4], [0, 4, 3], // Quad 0 (分割対角線 0-4)
+            [1, 2, 5], [1, 5, 4], // Quad 1 (分割対角線 1-5)
+        ];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, Some(&faces),
+            None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 200.0, 10.0, 1.0,
+            None, None,
+        );
+
+        let stretch_pairs: std::collections::HashSet<(u32, u32)> = mesh
+            .distance_constraints
+            .iter()
+            .filter(|c| c.constraint_type == 0)
+            .map(|c| (c.v0.min(c.v1), c.v0.max(c.v1)))
+            .collect();
+        let shear_pairs: std::collections::HashSet<(u32, u32)> = mesh
+            .distance_constraints
+            .iter()
+            .filter(|c| c.constraint_type == 1)
+            .map(|c| (c.v0.min(c.v1), c.v0.max(c.v1)))
+            .collect();
+        let bend_pairs: std::collections::HashSet<(u32, u32)> = mesh
+            .bending_constraints
+            .iter()
+            .map(|c| (c.v2.min(c.v3), c.v2.max(c.v3)))
+            .collect();
+
+        // Stretch 7本、各QuadにX字対角線2本ずつでShear計4本、Quad間共有辺(1-4)の対向(0-5)にBending 1本
+        assert_eq!(stretch_pairs.len(), 7);
+        assert_eq!(
+            shear_pairs,
+            [(0, 4), (1, 3), (1, 5), (2, 4)].into_iter().collect()
+        );
+        assert_eq!(bend_pairs, [(0, 5)].into_iter().collect());
+        // Shear と Bending の頂点ペアは完全に非重複であること
+        assert!(shear_pairs.is_disjoint(&bend_pairs));
+
+        // 純粋 Tri メッシュ（全三角形辺がオリジナル辺に含まれる2三角形）では Shear=0本、Bending=1本
+        let tri_positions = [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.5, 0.0],
+            [1.0, 0.5, 0.0],
+        ];
+        let tri_edges = [[0, 1], [0, 2], [1, 2], [0, 3], [1, 3]];
+        let tri_faces = [[0, 1, 2], [1, 0, 3]];
+        let tri_mesh = ClothMesh::from_raw(
+            &tri_positions, &tri_edges, Some(&tri_faces),
+            None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 200.0, 10.0, 1.0,
+            None, None,
+        );
+        let tri_shear_count = tri_mesh
+            .distance_constraints
+            .iter()
+            .filter(|c| c.constraint_type == 1)
+            .count();
+        assert_eq!(tri_shear_count, 0);
+        assert_eq!(tri_mesh.bending_constraints.len(), 1);
+    }
+
+    #[test]
+    fn test_strand_1d_bending_compliance_preserved_after_set_stiffness_all() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 2D三角形 (0,1,2) + 共有辺で繋ぐ三角形 (1,0,3) + 1Dストランド (3-4-5)
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.5, 0.0],
+            [1.0, 0.5, 0.0],
+            [2.0, 0.5, 0.0],
+            [3.0, 0.5, 0.0],
+        ];
+        let edges = [
+            [0, 1], [0, 2], [1, 2], [0, 3], [1, 3],
+            [3, 4], [4, 5],
+        ];
+        let faces = [[0, 1, 2], [1, 0, 3]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, Some(&faces),
+            None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 200.0, 10.0, 1.0,
+            None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+
+        // bending_stiffness = 100.0 -> bend_comp = 0.01, strand = max(0.01 * 10, 0.5) = 0.5
+        sim.set_stiffness_all(1000.0, 500.0, 200.0, 100.0);
+
+        let face_bends: Vec<_> = sim
+            .bending_constraints
+            .iter()
+            .filter(|c| c._pad[0] < 0.5)
+            .collect();
+        let strand_bends: Vec<_> = sim
+            .bending_constraints
+            .iter()
+            .filter(|c| c._pad[0] > 1.5)
+            .collect();
+
+        assert_eq!(face_bends.len(), 1);
+        assert_eq!(strand_bends.len(), 1);
+        assert!((face_bends[0].compliance - 0.01).abs() < 1e-6);
+        assert!((strand_bends[0].compliance - 0.5).abs() < 1e-6);
+
+        // 非常に柔らかな曲げ (bending_stiffness = 2.0 -> bend_comp = 0.5) では strand = 5.0
+        sim.set_stiffness_all(1000.0, 500.0, 200.0, 2.0);
+        let strand_bends_soft: Vec<_> = sim
+            .bending_constraints
+            .iter()
+            .filter(|c| c._pad[0] > 1.5)
+            .collect();
+        assert!((strand_bends_soft[0].compliance - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_air_damping_single_application_and_internal_damping_rigid_invariance() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 1. 空気減衰の1回適用検証: g=-9.81, d=2.0, dt=1/60, substeps=10 を 60フレーム (計1.0秒)
+        let make_edge_sim = |air_damping: f32, internal: [f32; 4]| {
+            let pos = [[0.0, 0.0, 10.0], [1.0, 0.0, 10.0]];
+            let edges = [[0, 1]];
+            let mesh = ClothMesh::from_raw(
+                &pos, &edges, None, Some(&[1.0, 1.0]),
+                None, None, None,
+                0, 0.005, 1000.0, 1000.0, 500.0, 10.0, 1.0,
+                None, None,
+            );
+            let mut s = GpuClothSimulator::new(Arc::clone(&ctx), mesh);
+            s.set_gravity(0.0, 0.0, -9.81);
+            s.set_damping(air_damping);
+            s.set_damping_all(internal[0], internal[1], internal[2], internal[3]);
+            s
+        };
+
+        let dt_sub = (1.0f32 / 60.0) / 10.0;
+        let mut expected_vz = 0.0f32;
+        for _ in 0..600 {
+            expected_vz = expected_vz * (1.0 - 2.0 * dt_sub).max(0.0) + (-9.81) * dt_sub;
+        }
+
+        let mut sim_air = make_edge_sim(2.0, [0.0; 4]);
+        let mut sim_internal_only = make_edge_sim(0.0, [20.0, 20.0, 20.0, 20.0]);
+        let mut sim_zero = make_edge_sim(0.0, [0.0; 4]);
+        let mut sim_air_with_internal = make_edge_sim(2.0, [20.0, 20.0, 20.0, 20.0]);
+
+        for _ in 0..60 {
+            sim_air.step(1.0 / 60.0, 10);
+            sim_internal_only.step(1.0 / 60.0, 10);
+            sim_zero.step(1.0 / 60.0, 10);
+            sim_air_with_internal.step(1.0 / 60.0, 10);
+        }
+
+        let v_air = sim_air.read_vertices()[0].velocity[2];
+        let v_int = sim_internal_only.read_vertices()[0].velocity[2];
+        let v_zero = sim_zero.read_vertices()[0].velocity[2];
+        let v_both = sim_air_with_internal.read_vertices()[0].velocity[2];
+
+        // 空気減衰1回適用の理論値 (~ -4.24 m/s) と一致 (旧2回適用は ~ -2.41 m/s)
+        assert!(
+            (v_air - expected_vz).abs() < 1e-3,
+            "1回適用の理論値と不一致: actual={}, expected={}",
+            v_air,
+            expected_vz
+        );
+        // 内部減衰のみを大きく設定しても自由落下（剛体並進）には影響しないこと
+        assert!(
+            (v_int - v_zero).abs() < 1e-4,
+            "内部減衰が剛体並進自由落下を減衰させている: v_int={}, v_zero={}",
+            v_int,
+            v_zero
+        );
+        assert!(
+            (v_both - v_air).abs() < 1e-4,
+            "内部減衰が空気減衰へ合算されている: v_both={}, v_air={}",
+            v_both,
+            v_air
+        );
+    }
+
+    #[test]
+    fn test_xpbd_rayleigh_internal_damping_and_atomic_clamp() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let run_stretch_osc = |solver_mode: u32, substeps: u32, tension_damp: f32, compression_damp: f32| -> f32 {
+            let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+            let edges = [[0, 1]];
+            let mesh = ClothMesh::from_raw(
+                &positions, &edges, None, Some(&[0.0, 50.0]),
+                None, None, None,
+                0, 0.005, 200.0, 200.0, 200.0, 10.0, 1.0,
+                None, None,
+            );
+            let mut sim = GpuClothSimulator::with_options(Arc::clone(&ctx), mesh, 32, solver_mode);
+            sim.set_gravity(0.0, 0.0, 0.0);
+            sim.set_damping(0.0);
+            sim.set_damping_all(tension_damp, compression_damp, 0.0, 0.0);
+            sim.set_positions_and_velocities(&[[0.0, 0.0, 0.0], [1.2, 0.0, 0.0]], None);
+
+            let mut max_tail_speed = 0.0f32;
+            for frame in 0..90 {
+                sim.step(1.0 / 60.0, substeps);
+                if frame >= 60 {
+                    let v = sim.read_vertices()[1].velocity[0].abs();
+                    max_tail_speed = max_tail_speed.max(v);
+                }
+            }
+            max_tail_speed
+        };
+
+        // 1. 伸縮エッジの Rayleigh 引張・圧縮減衰 (Colored & Atomic 双方, m=0.02kg -> inv_mass=50, damp=25.0)
+        for solver_mode in [0u32, 1u32] {
+            let speed_undamped = run_stretch_osc(solver_mode, 20, 0.0, 0.0);
+            let speed_damped = run_stretch_osc(solver_mode, 20, 25.0, 25.0);
+            assert!(
+                speed_damped < speed_undamped * 0.4,
+                "solver_mode={} で伸縮Rayleigh減衰が効いていない: damped={}, undamped={}",
+                solver_mode,
+                speed_damped,
+                speed_undamped
+            );
+        }
+
+        // 2. 時間刻み幅 (substeps) 非依存性の確認: 同一 substeps 下の undamped 基準比で substeps=10 と 40 ともに明確減衰すること
+        // (陰的オイラー法自体の数値減衰量が substeps に依存するため、各条件ごとの無減衰基準と比較する)
+        let speed_sub10_undamped = run_stretch_osc(0, 10, 0.0, 0.0);
+        let speed_sub10_damped = run_stretch_osc(0, 10, 25.0, 25.0);
+        let speed_sub40_undamped = run_stretch_osc(0, 40, 0.0, 0.0);
+        let speed_sub40_damped = run_stretch_osc(0, 40, 25.0, 25.0);
+        assert!(
+            speed_sub10_damped < speed_sub10_undamped * 0.4
+                && speed_sub40_damped < speed_sub40_undamped * 0.4,
+            "時間刻み幅依存でRayleigh減衰が消失: sub10=({}/{}) sub40=({}/{})",
+            speed_sub10_damped,
+            speed_sub10_undamped,
+            speed_sub40_damped,
+            speed_sub40_undamped
+        );
+
+        // 3. 曲げ振動の Rayleigh 曲げ減衰 (90度L字ヒンジでの一次開閉振動; 平坦位置では距離曲げ勾配が二次微小となるため)
+        let run_bend_osc = |bending_damp: f32| -> f32 {
+            let positions = [
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.5, 0.0],
+                [0.0, 0.5, 1.0],
+            ];
+            let edges = [[0, 1], [0, 2], [1, 2], [0, 3], [1, 3]];
+            let faces = [[0, 1, 2], [1, 0, 3]];
+            let mesh = ClothMesh::from_raw(
+                &positions, &edges, Some(&faces), Some(&[0.0, 0.0, 0.0, 500.0]),
+                None, None, None,
+                0, 0.005, 5000.0, 5000.0, 500.0, 150.0, 1.0,
+                None, None,
+            );
+            let mut sim = GpuClothSimulator::new(Arc::clone(&ctx), mesh);
+            sim.set_gravity(0.0, 0.0, 0.0);
+            sim.set_damping(0.0);
+            sim.set_damping_all(0.0, 0.0, 0.0, bending_damp);
+            let phi: f32 = 0.35;
+            sim.set_positions_and_velocities(
+                &[
+                    [0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [-1.0, 0.5, 0.0],
+                    [phi.sin(), 0.5, phi.cos()],
+                ],
+                None,
+            );
+
+            let mut max_tail_vx = 0.0f32;
+            for frame in 0..90 {
+                sim.step(1.0 / 60.0, 20);
+                if frame >= 60 {
+                    let vx = sim.read_vertices()[3].velocity[0].abs();
+                    max_tail_vx = max_tail_vx.max(vx);
+                }
+            }
+            max_tail_vx
+        };
+
+        let bend_undamped = run_bend_osc(0.0);
+        let bend_damped = run_bend_osc(15.0);
+        assert!(
+            bend_damped < bend_undamped * 0.5,
+            "曲げRayleigh減衰が効いていない: damped={}, undamped={}",
+            bend_damped,
+            bend_undamped
+        );
+
+        // 4. Atomic モードで極端な初期伸長 (10000m) を与えても固定小数点クランプにより NaN/Inf が発生しないこと
+        let extreme_pos = [[0.0, 0.0, 0.0], [10000.0, 0.0, 0.0]];
+        let edges = [[0, 1]];
+        let extreme_mesh = ClothMesh::from_raw(
+            &extreme_pos, &edges, None, Some(&[0.0, 1.0]),
+            None, None, None,
+            0, 0.005, 5000.0, 5000.0, 500.0, 10.0, 1.0,
+            None, None,
+        );
+        let mut extreme_sim = GpuClothSimulator::with_options(ctx, extreme_mesh, 32, 1);
+        extreme_sim.set_gravity(0.0, 0.0, 0.0);
+        for _ in 0..5 {
+            extreme_sim.step(1.0 / 60.0, 5);
+        }
+        for v in extreme_sim.read_vertices() {
+            assert!(v.position.iter().all(|x| x.is_finite()));
+            assert!(v.velocity.iter().all(|x| x.is_finite()));
+        }
+    }
+
+    #[test]
+    fn test_static_pin_edge_low_index_blocks_dynamic_edge() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let thickness = 0.005;
+        let z_b = 0.008;
+        let positions = vec![
+            // パッチ A (edge 0 = [0, 1], 全頂点静止ピン留め)
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.3, -0.5],
+            [0.0, -0.3, -0.5],
+            // パッチ B (edge 5 = [4, 5], 動的)
+            [0.0, -1.0, z_b],
+            [0.0, 1.0, z_b],
+            [0.3, 0.0, z_b + 0.5],
+            [-0.3, 0.0, z_b + 0.5],
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0], [0, 3], [3, 1],
+            [4, 5], [5, 6], [6, 4], [4, 7], [7, 5],
+        ];
+        let faces = vec![
+            [0, 1, 2], [1, 0, 3],
+            [4, 5, 6], [5, 4, 7],
+        ];
+        let inv_masses = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, Some(&faces), Some(&inv_masses),
+            None, None, None,
+            0, thickness, 10000.0, 10000.0, 5000.0, 0.0, 1.0,
+            None, None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_self_collision_algorithm(0);
+        sim.set_enable_pair_cache(false);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        let velocities = vec![
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.2], [0.0, 0.0, -1.2], [0.0, 0.0, -1.2], [0.0, 0.0, -1.2],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+        sim.step(1.0 / 60.0, 1);
+
+        let verts = sim.read_vertices();
+        let z_mid_a = 0.5 * (verts[0].position[2] + verts[1].position[2]);
+        let z_mid_b = 0.5 * (verts[4].position[2] + verts[5].position[2]);
+        assert!(z_mid_a.abs() < 1e-6, "静止ピンエッジ A は移動しないこと: {}", z_mid_a);
+        assert!(
+            z_mid_b >= z_mid_a - 1e-4,
+            "低インデックス静止ピンエッジ A が動的エッジ B の通過をブロックするべき: z_mid_a={}, z_mid_b={}",
+            z_mid_a,
+            z_mid_b
+        );
+    }
+
+    #[test]
+    fn test_pair_cache_ee_ccd_blocks_high_speed_crossing() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let thickness = 0.005;
+        let z_b = 0.006;
+        // PairCache空間セル27近傍に確実に収まる 0.1m スケールの直交内部エッジペア
+        let positions = vec![
+            [-0.05, 0.0, 0.0],
+            [0.05, 0.0, 0.0],
+            [0.0, 0.03, -0.05],
+            [0.0, -0.03, -0.05],
+            [0.0, -0.05, z_b],
+            [0.0, 0.05, z_b],
+            [0.03, 0.0, z_b + 0.05],
+            [-0.03, 0.0, z_b + 0.05],
+        ];
+        let edges = vec![
+            [0, 1], [1, 2], [2, 0], [0, 3], [3, 1],
+            [4, 5], [5, 6], [6, 4], [4, 7], [7, 5],
+        ];
+        let faces = vec![
+            [0, 1, 2], [1, 0, 3],
+            [4, 5, 6], [5, 4, 7],
+        ];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, Some(&faces), None,
+            None, None, None,
+            0, thickness, 10000.0, 10000.0, 5000.0, 0.0, 1.0,
+            None, None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_self_collision(true);
+        sim.set_self_collision_algorithm(1);
+        sim.set_enable_pair_cache(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        // 1サブステップで -0.015m 移動 (z_pred = -0.009m): 距離は有効厚み 0.010m 内だが交差反転済み
+        let velocities = vec![
+            [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0],
+            [0.0, 0.0, -0.9], [0.0, 0.0, -0.9], [0.0, 0.0, -0.9], [0.0, 0.0, -0.9],
+        ];
+        sim.set_positions_and_velocities(&positions, Some(&velocities));
+        sim.step(1.0 / 60.0, 1);
+
+        let verts = sim.read_vertices();
+        let z_mid_a = 0.5 * (verts[0].position[2] + verts[1].position[2]);
+        let z_mid_b = 0.5 * (verts[4].position[2] + verts[5].position[2]);
+        assert!(
+            z_mid_b >= z_mid_a - 1e-4,
+            "PairCache モード E-E CCD が交差貫通を阻止するべき: z_mid_a={:.6}, z_mid_b={:.6}",
+            z_mid_a,
+            z_mid_b
+        );
+    }
+
+    #[test]
+    fn test_collision_departure_velocity_and_segment_culling() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 1. 接触押し出しにより厚み外へ退避し、非物理的な法線加速が起きないこと
+        let mesh_dep = ClothMesh::from_raw(
+            &[[0.0, 0.0, 0.005]], &[], None, None,
+            None, None, None,
+            0, 0.02, 10000.0, 10000.0, 5000.0, 0.0, 1.0,
+            None, None,
+        );
+        let mut sim_dep = GpuClothSimulator::new(Arc::clone(&ctx), mesh_dep);
+        sim_dep.set_gravity(0.0, 0.0, 0.0);
+        sim_dep.set_damping(0.0);
+        sim_dep.set_mesh_triangles(&[GpuMeshTriangle {
+            p0: [-1.0, -1.0, 0.0],
+            friction: 0.0,
+            p1: [1.0, -1.0, 0.0],
+            thickness: 0.02,
+            p2: [0.0, 1.0, 0.0],
+            restitution: 0.0,
+            flags: 0,
+            _pad: [0.0; 3],
+        }]);
+        sim_dep.set_positions_and_velocities(&[[0.0, 0.0, 0.005]], Some(&[[0.0, 0.0, 1.0]]));
+        sim_dep.step(1.0 / 60.0, 1);
+
+        let v_dep = sim_dep.read_vertices()[0];
+        assert!(
+            v_dep.position[2] >= 0.04 - 1e-3,
+            "接触押し出しにより厚み外へ退避すること: z={}",
+            v_dep.position[2]
+        );
+        assert!(
+            v_dep.velocity[2].is_finite() && v_dep.velocity[2] >= -1e-4 && v_dep.velocity[2] <= 1.0 + 1e-4,
+            "接触時の法線方向へ非物理的な加速が起きないこと: vz={}",
+            v_dep.velocity[2]
+        );
+
+        // 2. 始点・終点ともに境界球外を高速横断する移動でも線分-境界球カリングで捕捉・阻止されること (直接パス & クラスタパス)
+        let small_tri = GpuMeshTriangle {
+            p0: [-0.1, -0.1, 0.0],
+            friction: 0.0,
+            p1: [0.1, -0.1, 0.0],
+            thickness: 0.01,
+            p2: [0.0, 0.1, 0.0],
+            restitution: 0.0,
+            flags: 0,
+            _pad: [0.0; 3],
+        };
+        let mut cluster_tris = vec![small_tri];
+        for _ in 0..32 {
+            cluster_tris.push(GpuMeshTriangle {
+                p0: [10.0, 10.0, 10.0],
+                friction: 0.0,
+                p1: [10.1, 10.0, 10.0],
+                thickness: 0.01,
+                p2: [10.0, 10.1, 10.0],
+                restitution: 0.0,
+                flags: 0,
+                _pad: [0.0; 3],
+            });
+        }
+
+        for enable_cluster in [false, true] {
+            let mesh_seg = ClothMesh::from_raw(
+                &[[0.0, 0.0, 0.50]], &[], None, None,
+                None, None, None,
+                0, 0.01, 10000.0, 10000.0, 5000.0, 0.0, 1.0,
+                None, None,
+            );
+            let mut sim_seg = GpuClothSimulator::new(Arc::clone(&ctx), mesh_seg);
+            sim_seg.set_gravity(0.0, 0.0, 0.0);
+            sim_seg.set_damping(0.0);
+            sim_seg.set_collider_options(enable_cluster, false, 0.0);
+            if enable_cluster {
+                sim_seg.set_mesh_triangles(&cluster_tris);
+            } else {
+                sim_seg.set_mesh_triangles(&[small_tri]);
+            }
+            // dt=1/60 で z=+0.50 -> z=-0.50 へ 1.0m ジャンプ（両端点が半径 r~0.25m の境界球外）
+            sim_seg.set_positions_and_velocities(&[[0.0, 0.0, 0.50]], Some(&[[0.0, 0.0, -60.0]]));
+            sim_seg.step(1.0 / 60.0, 1);
+
+            let v_seg = sim_seg.read_vertices()[0];
+            assert!(
+                v_seg.position[2] >= 0.0,
+                "enable_cluster={}: 始点・終点とも境界球外の線分貫通がカリングされずブロックされること: z={}",
+                enable_cluster,
+                v_seg.position[2]
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_collision_single_sided_chord_pushes_outward() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 布エッジの両端は屋根斜面の表側非接触位置 (signed_dist = 0.0389m > target_dist 0.030m) に置き、
+        // 中点付近のみが片面凸稜線 (Z=0) の裏側へ弦状に潜り込んでいる状態 (z = -0.025m)
+        let positions = vec![
+            [0.0, -0.08, -0.025],
+            [0.0, 0.08, -0.025],
+        ];
+        let edges = vec![[0, 1]];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.01,
+            10000.0,
+            10000.0,
+            5000.0,
+            0.0,
+            1.0,
+            None,
+            None,
+        );
+
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_enable_edge_collision(true);
+        sim.set_gravity(0.0, 0.0, 0.0);
+        sim.set_damping(0.0);
+
+        // X軸凸稜線 (-0.5,0,0)-(0.5,0,0) を共有する45度屋根形片面コライダー (flags=1, エッジ平均法線 = +Z)
+        let roof_tris = [
+            GpuMeshTriangle {
+                p0: [-0.5, 0.0, 0.0],
+                friction: 0.0,
+                p1: [0.5, 0.0, 0.0],
+                thickness: 0.02,
+                p2: [0.0, 0.5, -0.5],
+                restitution: 0.0,
+                flags: 1,
+                _pad: [0.0; 3],
+            },
+            GpuMeshTriangle {
+                p0: [-0.5, 0.0, 0.0],
+                friction: 0.0,
+                p1: [0.0, -0.5, -0.5],
+                thickness: 0.02,
+                p2: [0.5, 0.0, 0.0],
+                restitution: 0.0,
+                flags: 1,
+                _pad: [0.0; 3],
+            },
+        ];
+        sim.set_mesh_triangles(&roof_tris);
+        sim.step(0.016, 5);
+
+        let verts = sim.read_vertices();
+        let mid_z = 0.5 * (verts[0].position[2] + verts[1].position[2]);
+        assert!(
+            mid_z > 0.0,
+            "片面凸稜線への弦状食い込みは内部(-Z)ではなく外向き法線(+Z)側へ押し戻されるべき (mid_z={})",
+            mid_z
+        );
+    }
+
+    #[test]
+    fn test_edge_stiffness_multipliers_and_stiffness_all_composition() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]];
+        let edges = vec![[0, 1], [1, 2]];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None, None, None,
+            0, 0.005, 1000.0, 1000.0, 500.0, 10.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+
+        // 初期コンプライアンス = 1/1000 = 0.001
+        assert!((sim.get_edge_tension_compliance(0) - 0.001).abs() < 1e-6);
+        assert!((sim.get_edge_tension_compliance(1) - 0.001).abs() < 1e-6);
+
+        // エッジ0のみ multiplier=4.0 を設定 -> コンプライアンス = 0.001 / 4 = 0.00025
+        sim.set_edge_stiffness_multipliers(&[0], &[4.0]);
+        assert!((sim.get_edge_tension_compliance(0) - 0.00025).abs() < 1e-6);
+        assert!((sim.get_edge_tension_compliance(1) - 0.001).abs() < 1e-6);
+
+        // set_stiffness_all でベース剛性を 2000.0 に変更しても multiplier=4.0 が維持され、
+        // export_config の tension_stiffness はベース値 2000.0 を返すこと
+        sim.set_stiffness_all(2000.0, 2000.0, 500.0, 10.0);
+        assert!((sim.get_edge_tension_compliance(0) - 0.000125).abs() < 1e-6);
+        assert!((sim.get_edge_tension_compliance(1) - 0.0005).abs() < 1e-6);
+        assert!((sim.export_config().tension_stiffness - 2000.0).abs() < 1e-3);
+
+        // リセットで 1.0 倍に戻ること
+        sim.reset_edge_stiffness_multipliers();
+        assert!((sim.get_edge_tension_compliance(0) - 0.0005).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dynamic_sewing_shrink_speed_preserves_rest_len() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let edges: Vec<[u32; 2]> = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, Some(&[[0u32, 1u32]]),
+            None, None, 0, 0.005, 1000.0, 1000.0, 500.0, 0.0, 0.5, Some(1000.0), Some(false),
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        // dt=0.1s, shrink_speed=0.5 m/s -> 1ステップで自然長 1.0 -> 0.95m に収縮
+        sim.step(0.1, 4);
+        let r1 = sim.read_sewing_current_rest_lengths()[0];
+        assert!((r1 - 0.95).abs() < 1e-3, "r1={}", r1);
+
+        // 実行中に shrink_speed を 2.0 m/s に動的変更しても進行済み自然長 r1 が 1.0 に巻き戻らず、
+        // 次ステップ dt=0.1s で 0.95 -> 0.75m へ加速収縮すること
+        sim.set_sewing_shrink_speed(2.0);
+        assert!((sim.export_config().sewing_shrink_speed - 2.0).abs() < 1e-6);
+        let r_after_set = sim.read_sewing_current_rest_lengths()[0];
+        assert!((r_after_set - 0.95).abs() < 1e-3, "r_after_set={}", r_after_set);
+
+        sim.step(0.1, 4);
+        let r2 = sim.read_sewing_current_rest_lengths()[0];
+        assert!((r2 - 0.75).abs() < 1e-3, "r2={}", r2);
+    }
+
+    #[test]
+    fn test_wrinkle_field_z_and_radial_range_guard() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+        // 頂点0: 範囲内 (r=0.07, z=0.0)
+        // 頂点1: Z範囲外 (r=0.07, z=0.50 > z_max=0.10)
+        // 頂点2: 径方向範囲外 (r=0.30 > r_max(0.10) + influence_radius(0.03))
+        // 頂点3: ボーン中心軸上特異点 (r=0.0, z=0.0)
+        let positions = vec![
+            [0.07, 0.0, 0.0],
+            [0.07, 0.0, 0.50],
+            [0.30, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let edges: Vec<[u32; 2]> = vec![];
+        let mesh = ClothMesh::from_raw(
+            &positions, &edges, None, None, None,
+            None, None, 0, 0.005, 1000.0, 1000.0, 500.0, 0.0, 1.0, None, None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_gravity(0.0, 0.0, 0.0);
+
+        let wf_params = crate::simulation::WrinkleFieldParams {
+            bone_origin: [0.0, 0.0, 0.0, 0.03],
+            bone_axis: [0.0, 0.0, 1.0, 0.05],
+            bone_normal: [1.0, 0.0, 0.0, 40.0],
+            bone_binormal: [0.0, 1.0, 0.0, 1.0],
+            z_range: [-0.10, 0.10],
+            r_range: [0.04, 0.10],
+            enabled: 1,
+            use_texture: 1,
+            valley_window: 0.015,
+            crest_window: 0.020,
+        };
+        sim.set_wrinkle_field_params(&wf_params);
+        // 全面で谷強度 R=255, G=0, B=0 (target_valley_r = 0.04), A=255
+        let tex_bytes: Vec<u8> = [255u8, 0, 0, 255].repeat(16 * 16);
+        sim.set_wrinkle_field_texture_2d(16, 16, &tex_bytes, -0.10, 0.10, 0.04, 0.10);
+        sim.set_enable_wrinkle_field(true);
+
+        sim.step(0.016, 2);
+        let verts = sim.read_vertices();
+        // 頂点0 (範囲内) は谷へ引き込まれて X < 0.07 になる
+        assert!(verts[0].position[0] < 0.069, "v0 should be pulled in: {:?}", verts[0].position);
+        // 頂点1 (Z範囲外)、頂点2 (径方向範囲外)、頂点3 (軸上特異点) は一切動かない
+        assert!((verts[1].position[0] - 0.07).abs() < 1e-6, "v1 leaked: {:?}", verts[1].position);
+        assert!((verts[2].position[0] - 0.30).abs() < 1e-6, "v2 leaked: {:?}", verts[2].position);
+        assert!(verts[3].position[0].abs() < 1e-6 && verts[3].position[1].abs() < 1e-6, "v3 jumped: {:?}", verts[3].position);
+    }
+
+    #[test]
+    fn test_untangling_no_false_positive_on_wrinkled_inner_and_face_to_face_flip() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // ケース1: 中央に凸シワが寄った内層(layer=0)の表側近傍(+3mm)に外層(layer=1)を配置
+        // 旧V-V接平面Untanglingでは斜め頂点法線により外層が裏側と誤認され突き上げ/引き込みが発生していた
+        let nx = 5usize;
+        let ny = 5usize;
+        let dx = 0.02f32;
+        let mut positions = Vec::new();
+        let mut edges = Vec::new();
+        let mut faces = Vec::new();
+        let mut layer_ids = Vec::new();
+        let mut inv_masses = Vec::new();
+
+        for layer in 0..2u32 {
+            let base = positions.len() as u32;
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    let x = (ix as f32 - 2.0) * dx;
+                    let y = (iy as f32 - 2.0) * dx;
+                    // 中央列 ix=2 に高さ 12mm の凸シワを形成（法線が左右へ大きく傾く）
+                    let wrinkle = if ix == 2 { 0.012 } else if ix == 1 || ix == 3 { 0.004 } else { 0.0 };
+                    let z = wrinkle + if layer == 1 { 0.003 } else { 0.0 };
+                    positions.push([x, y, z]);
+                    layer_ids.push(layer);
+                    // 両層の外周を固定、中央部は完全に動的として相互作用を確認
+                    let is_border = ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1;
+                    inv_masses.push(if is_border { 0.0 } else { 1.0 });
+                }
+            }
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    let v0 = base + (iy * nx + ix) as u32;
+                    if ix + 1 < nx { edges.push([v0, v0 + 1]); }
+                    if iy + 1 < ny { edges.push([v0, v0 + nx as u32]); }
+                    if ix + 1 < nx && iy + 1 < ny {
+                        let v1 = v0 + 1;
+                        let v2 = v0 + nx as u32 + 1;
+                        let v3 = v0 + nx as u32;
+                        edges.push([v0, v2]);
+                        faces.push([v0, v1, v2]);
+                        faces.push([v0, v2, v3]);
+                    }
+                }
+            }
+        }
+
+        let mesh1 = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            Some(&inv_masses),
+            None,
+            Some(&layer_ids),
+            None,
+            0,
+            0.0014,
+            1500.0,
+            150.0,
+            100.0,
+            15.0,
+            1.0,
+            None,
+            None,
+        );
+        let mut sim1 = GpuClothSimulator::new(Arc::clone(&ctx), mesh1);
+        sim1.set_gravity(0.0, 0.0, 0.0);
+        sim1.set_damping(2.0);
+        sim1.set_enable_self_collision(true);
+        sim1.set_self_collision_options(1.0, 0.5, true, true, 512);
+
+        for _ in 0..10 {
+            sim1.step(1.0 / 60.0, 10);
+        }
+        let verts1 = sim1.read_vertices();
+        let per_layer = nx * ny;
+        for i in 0..per_layer {
+            let z_in = verts1[i].position[2];
+            let z_out = verts1[per_layer + i].position[2];
+            assert!(
+                z_out > z_in - 1e-4,
+                "凸シワ表側近傍で外層が内層裏側へ引き込まれた: v{} z_in={:.5}, z_out={:.5}",
+                i, z_in, z_out
+            );
+            assert!(
+                (z_out - positions[per_layer + i][2]).abs() < 0.008,
+                "凸シワ誤爆により過剰変位が発生: v{} z_out={:.5} init={:.5}",
+                i, z_out, positions[per_layer + i][2]
+            );
+        }
+
+        // ケース2: 動的対向法線（表同士接触＝フード背中めくり状態）での衝突死角・誤発火防止
+        // inner(layer=0): 7x7 (-0.06..+0.06), z=0.0, 法線 +Z（外周固定、内部動的）
+        // outer(layer=1): 5x5 (-0.04..+0.04), z=0.006, 頂点順反転で法線 -Z（全面動的、内層内側領域へ落下）
+        let nx0 = 7usize;
+        let ny0 = 7usize;
+        let nx1 = 5usize;
+        let ny1 = 5usize;
+        let mut pos2 = Vec::new();
+        let mut edges2 = Vec::new();
+        let mut faces2 = Vec::new();
+        let mut layers2 = Vec::new();
+        let mut inv2 = Vec::new();
+        let mut vel2 = Vec::new();
+
+        // layer 0 (0..49)
+        for iy in 0..ny0 {
+            for ix in 0..nx0 {
+                let x = (ix as f32 - 3.0) * dx;
+                let y = (iy as f32 - 3.0) * dx;
+                pos2.push([x, y, 0.0]);
+                layers2.push(0u32);
+                let is_border = ix == 0 || ix == nx0 - 1 || iy == 0 || iy == ny0 - 1;
+                inv2.push(if is_border { 0.0 } else { 1.0 });
+                vel2.push([0.0, 0.0, 0.0]);
+            }
+        }
+        for iy in 0..ny0 {
+            for ix in 0..nx0 {
+                let v0 = (iy * nx0 + ix) as u32;
+                if ix + 1 < nx0 { edges2.push([v0, v0 + 1]); }
+                if iy + 1 < ny0 { edges2.push([v0, v0 + nx0 as u32]); }
+                if ix + 1 < nx0 && iy + 1 < ny0 {
+                    let v1 = v0 + 1;
+                    let v2 = v0 + nx0 as u32 + 1;
+                    let v3 = v0 + nx0 as u32;
+                    edges2.push([v0, v2]);
+                    faces2.push([v0, v1, v2]);
+                    faces2.push([v0, v2, v3]);
+                }
+            }
+        }
+
+        // layer 1 (49..74): 法線 -Z（内層の表面 +Z と表同士で向かい合う状態）
+        let base1 = pos2.len() as u32;
+        for iy in 0..ny1 {
+            for ix in 0..nx1 {
+                let x = (ix as f32 - 2.0) * dx;
+                let y = (iy as f32 - 2.0) * dx;
+                pos2.push([x, y, 0.006]);
+                layers2.push(1u32);
+                inv2.push(1.0);
+                vel2.push([0.0, 0.0, -0.5]);
+            }
+        }
+        for iy in 0..ny1 {
+            for ix in 0..nx1 {
+                let v0 = base1 + (iy * nx1 + ix) as u32;
+                if ix + 1 < nx1 { edges2.push([v0, v0 + 1]); }
+                if iy + 1 < ny1 { edges2.push([v0, v0 + nx1 as u32]); }
+                if ix + 1 < nx1 && iy + 1 < ny1 {
+                    let v1 = v0 + 1;
+                    let v2 = v0 + nx1 as u32 + 1;
+                    let v3 = v0 + nx1 as u32;
+                    edges2.push([v0, v2]);
+                    faces2.push([v0, v2, v1]);
+                    faces2.push([v0, v3, v2]);
+                }
+            }
+        }
+
+        let mesh2 = ClothMesh::from_raw(
+            &pos2,
+            &edges2,
+            Some(&faces2),
+            Some(&inv2),
+            None,
+            Some(&layers2),
+            None,
+            0,
+            0.002,
+            1500.0,
+            150.0,
+            100.0,
+            15.0,
+            1.0,
+            None,
+            None,
+        );
+        let mut sim2 = GpuClothSimulator::new(ctx, mesh2);
+        sim2.set_positions_and_velocities(&pos2, Some(&vel2));
+        sim2.set_gravity(0.0, 0.0, -9.81);
+        sim2.set_damping(1.0);
+        sim2.set_enable_self_collision(true);
+        sim2.set_self_collision_options(1.0, 0.5, true, true, 512);
+
+        for _ in 0..15 {
+            sim2.step(1.0 / 60.0, 15);
+        }
+        let verts2 = sim2.read_vertices();
+        let inner_tris: Vec<[usize; 3]> = faces2
+            .iter()
+            .filter(|f| f[0] < base1 && f[1] < base1 && f[2] < base1)
+            .map(|f| [f[0] as usize, f[1] as usize, f[2] as usize])
+            .collect();
+
+        let point_in_tri_xy = |px: f32, py: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]| -> Option<f32> {
+            let v0x = b[0] - a[0];
+            let v0y = b[1] - a[1];
+            let v1x = c[0] - a[0];
+            let v1y = c[1] - a[1];
+            let det = v0x * v1y - v1x * v0y;
+            if det.abs() < 1e-10 {
+                return None;
+            }
+            let qx = px - a[0];
+            let qy = py - a[1];
+            let u = (qx * v1y - v1x * qy) / det;
+            let v = (v0x * qy - qx * v0y) / det;
+            let w = 1.0 - u - v;
+            if u >= -1e-3 && v >= -1e-3 && w >= -1e-3 {
+                Some(w * a[2] + u * b[2] + v * c[2])
+            } else {
+                None
+            }
+        };
+
+        for out_idx in base1 as usize..verts2.len() {
+            let po = verts2[out_idx].position;
+            let mut matched_tri_z = None;
+            for tri in &inner_tris {
+                if let Some(tz) = point_in_tri_xy(
+                    po[0],
+                    po[1],
+                    verts2[tri[0]].position,
+                    verts2[tri[1]].position,
+                    verts2[tri[2]].position,
+                ) {
+                    matched_tri_z = Some(tz);
+                    break;
+                }
+            }
+            let z_in = matched_tri_z.expect("外層頂点が内層XY領域の外へ外れた");
+            assert!(
+                po[2] > z_in + 0.0005,
+                "表同士対向めくり接触で外層が内層を貫通した: out_idx={} pos={:?}, inner_z={:.5}",
+                out_idx, po, z_in
+            );
+        }
+    }
+
+    #[test]
+    fn test_untangling_1d_strand_behind_dynamic_inner_escapes() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 内層 L0 (0..24): 5x5 平板 (dx=0.006m, z=0.0, 法線 +Z, 外周固定・内部 3x3 は動的)
+        // 外層 1D ストランド L1 (25..29): L0 < L1 順序・faces なし・中央3頂点を裏側 z=-0.0018 に配置
+        let nx = 5usize;
+        let ny = 5usize;
+        let dx = 0.006f32;
+        let mut positions = Vec::new();
+        let mut edges = Vec::new();
+        let mut faces = Vec::new();
+        let mut layer_ids = Vec::new();
+        let mut inv_masses = Vec::new();
+        let mut thicknesses = Vec::new();
+
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let x = (ix as f32 - 2.0) * dx;
+                let y = (iy as f32 - 2.0) * dx;
+                positions.push([x, y, 0.0]);
+                layer_ids.push(0u32);
+                let is_border = ix == 0 || ix == nx - 1 || iy == 0 || iy == ny - 1;
+                inv_masses.push(if is_border { 0.0 } else { 200000.0 });
+                thicknesses.push(0.0014);
+            }
+        }
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let v0 = (iy * nx + ix) as u32;
+                if ix + 1 < nx { edges.push([v0, v0 + 1]); }
+                if iy + 1 < ny { edges.push([v0, v0 + nx as u32]); }
+                if ix + 1 < nx && iy + 1 < ny {
+                    let v1 = v0 + 1;
+                    let v2 = v0 + nx as u32 + 1;
+                    let v3 = v0 + nx as u32;
+                    edges.push([v0, v2]);
+                    faces.push([v0, v1, v2]);
+                    faces.push([v0, v2, v3]);
+                }
+            }
+        }
+
+        // L1 1D ストランド (25..29): x = -0.012 .. +0.012, y = 0.0
+        let strand_base = positions.len() as u32;
+        for i in 0..5usize {
+            let x = (i as f32 - 2.0) * dx;
+            let z = if i == 0 || i == 4 { 0.0025 } else { -0.0018 };
+            positions.push([x, 0.0, z]);
+            layer_ids.push(1u32);
+            inv_masses.push(40000.0);
+            thicknesses.push(0.0022);
+        }
+        for i in 0..4u32 {
+            edges.push([strand_base + i, strand_base + i + 1]);
+        }
+
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            Some(&faces),
+            Some(&inv_masses),
+            None,
+            Some(&layer_ids),
+            Some(&thicknesses),
+            0,
+            0.0014,
+            1500.0,
+            150.0,
+            100.0,
+            15.0,
+            1.0,
+            None,
+            None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        sim.set_gravity(0.0, 0.0, 0.0);
+        sim.set_damping(2.0);
+        sim.set_enable_self_collision(true);
+        sim.set_self_collision_options(1.0, 0.5, true, true, 512);
+
+        for _ in 0..5 {
+            sim.step(1.0 / 60.0, 15);
+        }
+        let verts = sim.read_vertices();
+        for i in 0..5usize {
+            let idx = strand_base as usize + i;
+            let po = verts[idx].position;
+            assert!(
+                po[2] > 0.0015,
+                "動的L0の裏側にある1Dストランドが表側へ脱出できていない: v{} pos={:?}",
+                idx, po
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_distance_compliances_preserves_disabled_sentinel_and_current_bending_quad() {
+        let ctx = match get_test_context() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // 1D ストランドのみ（_pad[0] == 2.0 が先頭になる構成）で曲げ剛性 200.0、伸縮剛性 0.0（無効 1e10）を設定
+        let positions = [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]];
+        let edges = [[0, 1], [1, 2]];
+        let mesh = ClothMesh::from_raw(
+            &positions,
+            &edges,
+            None,
+            Some(&[0.0, 1.0, 1.0]),
+            None,
+            None,
+            None,
+            0,
+            0.005,
+            0.0, // tension_stiffness = 0 -> base_tension_compliance = 1e10
+            0.0,
+            0.0,
+            200.0,
+            1.0,
+            None,
+            None,
+        );
+        let mut sim = GpuClothSimulator::new(ctx, mesh);
+        assert!(sim.base_tension_compliance >= 1e9);
+
+        // 個別剛性倍率 100.0 を与えても 1e10 が 1e8 へ復活しないこと
+        sim.edge_stiffness_multipliers = vec![100.0; sim.distance_constraints.len()];
+        sim.apply_distance_compliances();
+        for c in &sim.distance_constraints {
+            assert!(
+                c.tension_compliance >= 1e9 && c.compression_compliance >= 1e9,
+                "stiffness=0 の無効拘束が倍率適用で復活した: {:?}",
+                c
+            );
+        }
+
+        // 先頭が 1D ストランド (_pad[0] == 2.0, クランプ済み 0.5) でも export_config が 0.2 に誤逆算されないこと
+        let cfg = sim.export_config();
+        assert!(
+            (cfg.bending_stiffness - 200.0).abs() < 1e-4,
+            "1Dストランド先頭時の bending_stiffness が誤逆算された: {}",
+            cfg.bending_stiffness
+        );
+
+        sim.set_stiffness_all(1000.0, 1000.0, 500.0, 12.5);
+        let cfg2 = sim.export_config();
+        assert!(
+            (cfg2.bending_stiffness - 12.5).abs() < 1e-4,
+            "set_stiffness_all 後の bending_stiffness が一致しない: {}",
+            cfg2.bending_stiffness
+        );
+    }
+
+    #[test]
+    fn test_validate_dynamic_sdf_output_size_overflow_and_limits() {
+        // aligned_bytes_per_row が u32 上限を超える幅でパニックせず Err を返す
+        let err_row_u32 = GpuClothSimulator::validate_dynamic_sdf_output_size(
+            1u32 << 30,
+            1,
+            1,
+            64,
+            u64::MAX,
+            u64::MAX,
+        );
+        assert!(err_row_u32.is_err());
+
+        // u64 総バイト数乗算オーバーフローを起こす巨大寸法でパニックせず Err を返す
+        let err_total_u64 = GpuClothSimulator::validate_dynamic_sdf_output_size(
+            1u32 << 28,
+            1u32 << 20,
+            1u32 << 20,
+            64,
+            u64::MAX,
+            u64::MAX,
+        );
+        assert!(err_total_u64.is_err());
+
+        // GPU バインディング上限超過で安全に拒否される
+        let err_limit = GpuClothSimulator::validate_dynamic_sdf_output_size(
+            512,
+            512,
+            512,
+            64,
+            512 * 1024 * 1024,
+            128 * 1024 * 1024,
+        );
+        assert!(err_limit.is_err());
+
+        // 解像度 0 拒否
+        let err_zero = GpuClothSimulator::validate_dynamic_sdf_output_size(
+            0,
+            64,
+            64,
+            64,
+            u64::MAX,
+            u64::MAX,
+        );
+        assert!(err_zero.is_err());
+
+        // 正常値受理
+        let ok = GpuClothSimulator::validate_dynamic_sdf_output_size(
+            64,
+            64,
+            64,
+            64,
+            256 * 1024 * 1024,
+            128 * 1024 * 1024,
+        );
+        assert_eq!(ok.unwrap(), (256, 256 * 64 * 64));
+    }
 }
 

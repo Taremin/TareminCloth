@@ -55,6 +55,7 @@ impl GpuClothSimulator {
             edge_margin_scale: self.edge_margin_scale,
             edge_margin_offset: self.edge_margin_offset,
             sewing_stiffness: self.sewing_stiffness,
+            sewing_shrink_speed: self.sewing_shrink_speed,
             enable_sewing_lock: self.enable_sewing_lock,
             sewing_lock_distance: self.sewing_lock_distance,
             areal_density: self.areal_density,
@@ -74,33 +75,19 @@ impl GpuClothSimulator {
     }
 
     fn current_stiffness_quad(&self) -> (f32, f32, f32, f32) {
-        let mut tension_c = None;
-        let mut shear_c = None;
-        for dc in &self.distance_constraints {
-            if dc.constraint_type == 1 {
-                if shear_c.is_none() {
-                    shear_c = Some((dc.tension_compliance, dc.compression_compliance));
-                }
-            } else if tension_c.is_none() {
-                tension_c = Some((dc.tension_compliance, dc.compression_compliance));
-            }
-        }
-        let (t_t, t_c) = tension_c.unwrap_or((1.0 / 500.0, 1.0 / 500.0));
-        let (s_t, _) = shear_c.unwrap_or((1.0 / 250.0, 1.0 / 250.0));
-        let tension = compliance_to_stiffness(t_t, 1.0);
-        let compression = compliance_to_stiffness(t_c, 1.0);
-        let shear = compliance_to_stiffness(s_t, 1.0);
-        let bending = if let Some(bc) = self.bending_constraints.first() {
+        let tension = compliance_to_stiffness(self.base_tension_compliance, 1.0);
+        let compression = compliance_to_stiffness(self.base_compression_compliance, 1.0);
+        let shear = compliance_to_stiffness(self.base_shear_compliance, 1.0);
+        let bending = if let Some(bc) = self.bending_constraints.iter().find(|bc| bc._pad[0] <= 1.5) {
             compliance_to_stiffness(bc.compliance, 1.0)
         } else {
-            5.0
+            self.base_bending_stiffness
         };
         (tension, compression, shear, bending)
     }
 
     /// SimConfig をシミュレータに一括適用する (再生・初期化用).
     /// 既存 set_* の薄い集約であり、GPUバッファ更新も各 setter 経由で行う.
-    /// workgroup_size は生成後変更してもパイプライン再構築されないため記録のみ.
     pub fn apply_config(&mut self, c: &SimConfig) {
         self.set_gravity(c.gravity[0], c.gravity[1], c.gravity[2]);
         self.set_damping(c.damping);
@@ -118,7 +105,7 @@ impl GpuClothSimulator {
         );
         self.set_solver_iterations(c.solver_iterations);
         self.set_solver_mode(c.solver_mode);
-        self.workgroup_size = c.workgroup_size;
+        self.set_workgroup_size(c.workgroup_size);
         self.set_enable_self_collision(c.enable_self_collision);
         self.set_self_collision_options(
             c.relief_factor,
@@ -147,6 +134,7 @@ impl GpuClothSimulator {
         self.set_edge_margin_scale(c.edge_margin_scale);
         self.set_edge_margin_offset(c.edge_margin_offset);
         self.set_sewing_stiffness(c.sewing_stiffness);
+        self.set_sewing_shrink_speed(c.sewing_shrink_speed);
         self.set_enable_sewing_lock(c.enable_sewing_lock);
         self.set_sewing_lock_distance(c.sewing_lock_distance);
         self.set_areal_density(c.areal_density);
@@ -162,7 +150,6 @@ impl GpuClothSimulator {
             c.min_substeps,
             c.max_substeps,
         );
-        self.set_auto_coupled_on_low_substeps(c.auto_coupled_on_low_substeps);
         self.set_auto_compensate_iterations(c.auto_compensate_iterations);
         self.set_strain_adaptive_options(c.enable_strain_adaptive, c.strain_tolerance);
     }

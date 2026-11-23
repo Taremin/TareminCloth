@@ -83,10 +83,11 @@ impl GpuClothSimulator {
             original_edges: Some(self.original_mesh_edges()),
             original_rest_lengths: Some(self.original_mesh_rest_lengths()),
             bone_sdf: self.snapshot_bone_sdf(),
-            sewing_shrink_speed: self
-                .sewing_constraints
-                .first()
-                .map(|c| c.shrink_speed),
+            sewing_shrink_speed: if !self.sewing_constraints.is_empty() {
+                Some(self.sewing_shrink_speed)
+            } else {
+                None
+            },
             areal_density: self.areal_density,
             enable_coarse_constraints: self.coarse_constraint_count > 0,
             config: Some(self.export_config()),

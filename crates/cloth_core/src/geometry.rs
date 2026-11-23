@@ -38,14 +38,20 @@ fn edge_cross_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
     let o2 = orient2(a, b, d);
     let o3 = orient2(c, d, a);
     let o4 = orient2(c, d, b);
-    (o1 * o2 < -EPS * EPS) && (o3 * o4 < -EPS * EPS)
+    let tol_ab = (b[0] - a[0]).hypot(b[1] - a[1]) * 1e-6;
+    let tol_cd = (d[0] - c[0]).hypot(d[1] - c[1]) * 1e-6;
+    ((o1 > tol_ab && o2 < -tol_ab) || (o1 < -tol_ab && o2 > tol_ab))
+        && ((o3 > tol_cd && o4 < -tol_cd) || (o3 < -tol_cd && o4 > tol_cd))
 }
 
 fn point_in_tri2(p: [f64; 2], a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
     let o1 = orient2(a, b, p);
     let o2 = orient2(b, c, p);
     let o3 = orient2(c, a, p);
-    (o1 > EPS && o2 > EPS && o3 > EPS) || (o1 < -EPS && o2 < -EPS && o3 < -EPS)
+    let tol_ab = (b[0] - a[0]).hypot(b[1] - a[1]) * 1e-6;
+    let tol_bc = (c[0] - b[0]).hypot(c[1] - b[1]) * 1e-6;
+    let tol_ca = (a[0] - c[0]).hypot(a[1] - c[1]) * 1e-6;
+    (o1 > tol_ab && o2 > tol_bc && o3 > tol_ca) || (o1 < -tol_ab && o2 < -tol_bc && o3 < -tol_ca)
 }
 
 fn coplanar_tri_tri_2d(p0: V3, p1: V3, p2: V3, q0: V3, q1: V3, q2: V3, ax0: usize, ax1: usize) -> bool {
@@ -92,7 +98,12 @@ pub fn tri_tri_intersect(
 
     let e1 = sub(v1, v0);
     let e2 = sub(v2, v0);
-    let n1 = cross(e1, e2);
+    let n1_raw = cross(e1, e2);
+    let n1_len = dot(n1_raw, n1_raw).sqrt();
+    if n1_len <= 1e-15 {
+        return false;
+    }
+    let n1 = [n1_raw[0] / n1_len, n1_raw[1] / n1_len, n1_raw[2] / n1_len];
     let d1 = -dot(n1, v0);
     let mut du = [dot(n1, u0) + d1, dot(n1, u1) + d1, dot(n1, u2) + d1];
     for d in du.iter_mut() {
@@ -106,7 +117,12 @@ pub fn tri_tri_intersect(
 
     let e1u = sub(u1, u0);
     let e2u = sub(u2, u0);
-    let n2 = cross(e1u, e2u);
+    let n2_raw = cross(e1u, e2u);
+    let n2_len = dot(n2_raw, n2_raw).sqrt();
+    if n2_len <= 1e-15 {
+        return false;
+    }
+    let n2 = [n2_raw[0] / n2_len, n2_raw[1] / n2_len, n2_raw[2] / n2_len];
     let d2 = -dot(n2, u0);
     let mut dv = [dot(n2, v0) + d2, dot(n2, v1) + d2, dot(n2, v2) + d2];
     for d in dv.iter_mut() {
@@ -119,7 +135,12 @@ pub fn tri_tri_intersect(
     }
 
     let d = cross(n1, n2);
-    if dot(d, d) < 1e-10 {
+    let all_du_zero = du[0] == 0.0 && du[1] == 0.0 && du[2] == 0.0;
+    let all_dv_zero = dv[0] == 0.0 && dv[1] == 0.0 && dv[2] == 0.0;
+    if dot(d, d) < 1e-10 || all_du_zero || all_dv_zero {
+        if dot(d, d) < 1e-10 && !(all_du_zero && all_dv_zero) {
+            return false;
+        }
         let abs_n = [n1[0].abs(), n1[1].abs(), n1[2].abs()];
         let max_idx = if abs_n[0] >= abs_n[1] && abs_n[0] >= abs_n[2] {
             0
@@ -148,17 +169,27 @@ pub fn tri_tri_intersect(
         if d0d1 > 0.0 {
             (
                 p2 + (p0 - p2) * (d2 / (d2 - d0)),
-                p2 + (p1 - p2) * (d2 / (d1 - d2)),
+                p2 + (p1 - p2) * (d2 / (d2 - d1)),
             )
         } else if d0d2 > 0.0 {
             (
                 p1 + (p0 - p1) * (d1 / (d1 - d0)),
-                p1 + (p2 - p1) * (d1 / (d2 - d1)),
+                p1 + (p2 - p1) * (d1 / (d1 - d2)),
             )
-        } else {
+        } else if d1 * d2 > 0.0 || d0 != 0.0 {
             (
                 p0 + (p1 - p0) * (d0 / (d0 - d1)),
                 p0 + (p2 - p0) * (d0 / (d0 - d2)),
+            )
+        } else if d1 != 0.0 {
+            (
+                p1 + (p0 - p1) * (d1 / (d1 - d0)),
+                p1 + (p2 - p1) * (d1 / (d1 - d2)),
+            )
+        } else {
+            (
+                p2 + (p0 - p2) * (d2 / (d2 - d0)),
+                p2 + (p1 - p2) * (d2 / (d2 - d1)),
             )
         }
     }
@@ -202,6 +233,8 @@ pub fn find_triangle_intersections(
     let mut maxs = vec![[0.0f64; 3]; m];
     let mut tris = vec![[[0.0f64; 3]; 3]; m];
     let mut edge_lens = Vec::with_capacity(m);
+    let mut global_min = [f64::INFINITY; 3];
+    let mut global_max = [f64::NEG_INFINITY; 3];
     for (k, &(_, [a, b, c])) in valid_faces.iter().enumerate() {
         let t = [pos64[a as usize], pos64[b as usize], pos64[c as usize]];
         tris[k] = t;
@@ -219,20 +252,37 @@ pub fn find_triangle_intersections(
         }
         mins[k] = mn;
         maxs[k] = mx;
-        let dx = t[1][0] - t[0][0];
-        let dy = t[1][1] - t[0][1];
-        let dz = t[1][2] - t[0][2];
-        edge_lens.push((dx * dx + dy * dy + dz * dz).sqrt());
+        for ax in 0..3 {
+            global_min[ax] = global_min[ax].min(mn[ax]);
+            global_max[ax] = global_max[ax].max(mx[ax]);
+        }
+        let d01 = ((t[1][0] - t[0][0]).powi(2)
+            + (t[1][1] - t[0][1]).powi(2)
+            + (t[1][2] - t[0][2]).powi(2))
+        .sqrt();
+        let d12 = ((t[2][0] - t[1][0]).powi(2)
+            + (t[2][1] - t[1][1]).powi(2)
+            + (t[2][2] - t[1][2]).powi(2))
+        .sqrt();
+        let d20 = ((t[0][0] - t[2][0]).powi(2)
+            + (t[0][1] - t[2][1]).powi(2)
+            + (t[0][2] - t[2][2]).powi(2))
+        .sqrt();
+        edge_lens.push((d01 + d12 + d20) / 3.0);
     }
+    let max_span = (global_max[0] - global_min[0])
+        .max(global_max[1] - global_min[1])
+        .max(global_max[2] - global_min[2])
+        .max(0.0);
     let cell = match cell_size {
-        Some(c) if c > 0.0 => c as f64,
+        Some(c) if c > 0.0 => (c as f64).max(max_span / 128.0).max(1e-4),
         _ => {
             let mean = if edge_lens.is_empty() {
                 0.05
             } else {
                 edge_lens.iter().sum::<f64>() / edge_lens.len() as f64
             };
-            (mean * 2.0).max(1e-4)
+            (mean * 2.0).max(max_span / 128.0).max(1e-4)
         }
     };
     let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
@@ -439,5 +489,55 @@ mod tests {
         let out = find_proximity_violations(&pos, &faces, 0.005, true);
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].0, out[0].1), (3, 0));
+    }
+
+    #[test]
+    fn test_small_parallel_separated_triangles_not_false_positive() {
+        // 辺長 1cm の平行三角形ペアが Z=2mm 離れている場合は非交差であること
+        let v0 = [0.0, 0.0, 0.0];
+        let v1 = [0.01, 0.0, 0.0];
+        let v2 = [0.0, 0.01, 0.0];
+        let u0 = [0.0, 0.0, 0.002];
+        let u1 = [0.01, 0.0, 0.002];
+        let u2 = [0.0, 0.01, 0.002];
+        assert!(!tri_tri_intersect(v0, v1, v2, u0, u1, u2));
+
+        // 辺長 1cm で同一平面重なりがある場合は交差を検出すること
+        let o0 = [0.002, 0.002, 0.0];
+        let o1 = [0.012, 0.002, 0.0];
+        let o2 = [0.002, 0.012, 0.0];
+        assert!(tri_tri_intersect(v0, v1, v2, o0, o1, o2));
+    }
+
+    #[test]
+    fn test_moller_denominator_sign_and_vertex_on_plane() {
+        let v0 = [0.0, 0.0, 0.0];
+        let v1 = [1.0, 0.0, 0.0];
+        let v2 = [0.0, 1.0, 0.0];
+
+        // d0*d1 > 0 分岐と d0*d2 > 0 分岐（頂点入替）の双方で真の交差を正しく検出すること
+        let u0 = [1.2, 0.2, 0.5];
+        let u1 = [1.2, 0.25, 0.5];
+        let u2 = [-0.5, 0.2, -1.0];
+        assert!(tri_tri_intersect(v0, v1, v2, u0, u1, u2));
+        assert!(tri_tri_intersect(v0, v1, v2, u0, u2, u1));
+
+        // X+Y > 1 の外側へ抜ける非交差ペア
+        let nu0 = [2.0, 0.2, 0.5];
+        let nu1 = [2.0, 0.25, 0.5];
+        let nu2 = [0.5, 0.2, -1.0];
+        assert!(!tri_tri_intersect(v0, v1, v2, nu0, nu1, nu2));
+        assert!(!tri_tri_intersect(v0, v1, v2, nu0, nu2, nu1));
+
+        // 1頂点が相手平面上 (d0 == 0) で他2頂点がZ両側に跨ぐ場合
+        let p_in0 = [0.2, 0.2, 0.0];
+        let p_in1 = [0.3, 0.3, 1.0];
+        let p_in2 = [0.4, 0.2, -1.0];
+        assert!(tri_tri_intersect(v0, v1, v2, p_in0, p_in1, p_in2));
+
+        let p_out0 = [2.0, 2.0, 0.0];
+        let p_out1 = [2.0, 2.0, 1.0];
+        let p_out2 = [2.5, 2.5, -1.0];
+        assert!(!tri_tri_intersect(v0, v1, v2, p_out0, p_out1, p_out2));
     }
 }

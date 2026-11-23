@@ -93,6 +93,8 @@ pub struct GpuColliderEdge {
     pub thickness: f32,
     pub p1: [f32; 3],
     pub friction: f32,
+    pub normal: [f32; 3],
+    pub flags: u32,
 }
 
 #[repr(C)]
@@ -121,6 +123,10 @@ pub struct SimParams {
     pub sewing_compliance: f32,
     pub enable_sewing_lock: f32,
     pub sewing_lock_distance: f32,
+    pub tension_damping: f32,
+    pub compression_damping: f32,
+    pub shear_damping: f32,
+    pub bending_damping: f32,
     pub _pad0: [f32; 3],
 }
 
@@ -343,12 +349,14 @@ pub struct ClothMesh {
     pub initial_distance_rest_lengths: Vec<f32>,
 
     pub bending_constraints: Vec<GpuBendingConstraint>,
+    pub base_bending_stiffness: f32,
     pub bend_color_offsets: Vec<u32>,
     pub bend_color_counts: Vec<u32>,
 
     pub sewing_constraints: Vec<GpuSewingConstraint>,
     pub sew_color_offsets: Vec<u32>,
     pub sew_color_counts: Vec<u32>,
+    pub sewing_shrink_speed: f32,
 
     pub adj_offsets: Vec<u32>,
     pub adj_indices: Vec<u32>,
@@ -490,10 +498,21 @@ impl ClothMesh {
             }
         }
 
-        // せん断拘束 (Shear: 対向頂点ペアまたはQuadクロスエッジ)
+        // オリジナル辺集合（三角形分割前のメッシュ実エッジ。Shear対角線とBending共有辺の分離に使用）
+        let original_edges: std::collections::HashSet<(u32, u32)> = edges
+            .iter()
+            .filter(|&&[a, b]| (a as usize) < n_verts && (b as usize) < n_verts && a != b)
+            .map(|&[a, b]| (a.min(b), a.max(b)))
+            .collect();
+
+        // せん断拘束 (Shear: Quad/N角形の内部分割対角線ペアのX字クロスエッジのみ)
+        // オリジナル辺をヒンジとする隣接三角形ペアは曲げ拘束 (Bending) のみが担当し、重複を防止する。
         if let Some(triangles) = faces {
             let mut edge_to_opp: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
             for &[f0, f1, f2] in triangles {
+                if (f0 as usize) >= n_verts || (f1 as usize) >= n_verts || (f2 as usize) >= n_verts {
+                    continue;
+                }
                 let es = [
                     (f0.min(f1), f0.max(f1), f2),
                     (f1.min(f2), f1.max(f2), f0),
@@ -504,36 +523,37 @@ impl ClothMesh {
                 }
             }
 
-            let mut existing_edges: std::collections::HashSet<(u32, u32)> = edges
-                .iter()
-                .map(|&[a, b]| (a.min(b), a.max(b)))
-                .collect();
+            let mut existing_edges = original_edges.clone();
 
             let mut shear_edge_keys: Vec<(u32, u32)> = edge_to_opp.keys().copied().collect();
             shear_edge_keys.sort_unstable();
             for key in shear_edge_keys {
+                if original_edges.contains(&key) {
+                    continue;
+                }
                 let opps = &edge_to_opp[&key];
                 if opps.len() == 2 {
-                    let v0 = opps[0].min(opps[1]);
-                    let v1 = opps[0].max(opps[1]);
-                    if v0 != v1 && existing_edges.insert((v0, v1)) {
-                        let p0 = positions[v0 as usize];
-                        let p1 = positions[v1 as usize];
-                        let dx = p0[0] - p1[0];
-                        let dy = p0[1] - p1[1];
-                        let dz = p0[2] - p1[2];
-                        let rest_length = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let cross = (opps[0].min(opps[1]), opps[0].max(opps[1]));
+                    for (v0, v1) in [key, cross] {
+                        if v0 != v1 && existing_edges.insert((v0, v1)) {
+                            let p0 = positions[v0 as usize];
+                            let p1 = positions[v1 as usize];
+                            let dx = p0[0] - p1[0];
+                            let dy = p0[1] - p1[1];
+                            let dz = p0[2] - p1[2];
+                            let rest_length = (dx * dx + dy * dy + dz * dz).sqrt();
 
-                        dist_constraints.push(GpuDistanceConstraint {
-                            v0,
-                            v1,
-                            rest_length,
-                            tension_compliance: shear_compliance,
-                            compression_compliance: shear_compliance,
-                            constraint_type: 1,
-                            _pad0: 0.0,
-                            _pad1: 0.0,
-                        });
+                            dist_constraints.push(GpuDistanceConstraint {
+                                v0,
+                                v1,
+                                rest_length,
+                                tension_compliance: shear_compliance,
+                                compression_compliance: shear_compliance,
+                                constraint_type: 1,
+                                _pad0: 0.0,
+                                _pad1: 0.0,
+                            });
+                        }
                     }
                 }
             }
@@ -637,6 +657,9 @@ impl ClothMesh {
             let mut edge_to_opp_verts: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
 
             for &[f0, f1, f2] in triangles {
+                if (f0 as usize) >= n_verts || (f1 as usize) >= n_verts || (f2 as usize) >= n_verts {
+                    continue;
+                }
                 let edges = [
                     (f0.min(f1), f0.max(f1), f2),
                     (f1.min(f2), f1.max(f2), f0),
@@ -651,8 +674,12 @@ impl ClothMesh {
             edge_keys.sort_unstable();
 
             for (v0, v1) in edge_keys {
+                if !original_edges.contains(&(v0, v1)) {
+                    // 三角形分割の内部対角線は Shear 拘束が担当するため、Bending との二重適用を防ぐ
+                    continue;
+                }
                 let opps = &edge_to_opp_verts[&(v0, v1)];
-                if opps.len() == 2 {
+                if opps.len() == 2 && opps[0] != opps[1] {
                     let v2 = opps[0];
                     let v3 = opps[1];
 
@@ -663,6 +690,7 @@ impl ClothMesh {
                     let dz = p2[2] - p3[2];
                     let rest_length = (dx * dx + dy * dy + dz * dz).sqrt();
 
+                    // _pad[0]: 0.0 = 通常面間曲げ、1.0 = シーム跨ぎゲート付き曲げ、2.0 = 1Dストランド曲げ
                     bending_constraints.push(GpuBendingConstraint {
                         v0,
                         v1,
@@ -857,6 +885,7 @@ impl ClothMesh {
                                     let rest_length = (dx * dx + dy * dy + dz * dz).sqrt();
 
                                     // 1Dストランドは引き絞り（距離拘束の動的短縮）を阻害しないよう適度に柔軟なコンプライアンスを持たせる
+                                    // _pad[0] = 2.0 により set_stiffness_all 更新時もストランド用柔軟倍率を保護する
                                     let strand_bend_compliance = (bend_compliance * 10.0).max(0.5);
                                     bending_constraints.push(GpuBendingConstraint {
                                         v0: u,
@@ -865,7 +894,7 @@ impl ClothMesh {
                                         v3: b,
                                         rest_length,
                                         compliance: strand_bend_compliance,
-                                        _pad: [0.0; 2],
+                                        _pad: [2.0, 0.0],
                                     });
                                 }
                             }
@@ -905,7 +934,7 @@ impl ClothMesh {
                         v1,
                         current_rest_len: initial_len,
                         target_rest_len: 0.0,
-                        shrink_speed: sewing_shrink_speed.max(0.1),
+                        shrink_speed: sewing_shrink_speed.max(0.0),
                         compliance: sew_compliance,
                         lock_on_close: lock_val,
                         _pad1: 0.0,
@@ -1323,11 +1352,13 @@ impl ClothMesh {
             original_edge_to_constraint,
             initial_distance_rest_lengths,
             bending_constraints: sorted_bend,
+            base_bending_stiffness: if bending_stiffness > 0.0 { bending_stiffness } else { 0.0 },
             bend_color_offsets,
             bend_color_counts,
             sewing_constraints: sorted_sew,
             sew_color_offsets,
             sew_color_counts,
+            sewing_shrink_speed: sewing_shrink_speed.max(0.0),
             adj_offsets,
             adj_indices,
             two_hop_offsets,
@@ -1472,6 +1503,21 @@ fn canonical_edge_key(a: [f32; 3], b: [f32; 3]) -> ([u32; 3], [u32; 3]) {
 pub fn extract_collider_edges(triangles: &[GpuMeshTriangle]) -> Vec<GpuColliderEdge> {
     let mut edge_map = HashMap::new();
     for t in triangles {
+        let e1 = [t.p1[0] - t.p0[0], t.p1[1] - t.p0[1], t.p1[2] - t.p0[2]];
+        let e2 = [t.p2[0] - t.p0[0], t.p2[1] - t.p0[1], t.p2[2] - t.p0[2]];
+        let cr = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let cr_len = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+        let tri_n = if cr_len > 1e-12 {
+            [cr[0] / cr_len, cr[1] / cr_len, cr[2] / cr_len]
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+        let tri_single_sided = t.flags & 1;
+
         let edges = [
             (t.p0, t.p1),
             (t.p1, t.p2),
@@ -1484,16 +1530,40 @@ pub fn extract_collider_edges(triangles: &[GpuMeshTriangle]) -> Vec<GpuColliderE
                 .and_modify(|e: &mut GpuColliderEdge| {
                     e.thickness = e.thickness.max(t.thickness);
                     e.friction = (e.friction + t.friction) * 0.5;
+                    e.normal[0] += tri_n[0];
+                    e.normal[1] += tri_n[1];
+                    e.normal[2] += tri_n[2];
+                    e.flags &= tri_single_sided;
                 })
                 .or_insert(GpuColliderEdge {
                     p0: a,
                     thickness: t.thickness,
                     p1: b,
                     friction: t.friction,
+                    normal: tri_n,
+                    flags: tri_single_sided,
                 });
         }
     }
-    edge_map.into_values().collect()
+    edge_map
+        .into_values()
+        .map(|mut e| {
+            let n_len = (e.normal[0] * e.normal[0]
+                + e.normal[1] * e.normal[1]
+                + e.normal[2] * e.normal[2])
+                .sqrt();
+            if n_len > 1e-6 {
+                e.normal = [
+                    e.normal[0] / n_len,
+                    e.normal[1] / n_len,
+                    e.normal[2] / n_len,
+                ];
+            } else {
+                e.normal = [0.0, 0.0, 0.0];
+            }
+            e
+        })
+        .collect()
 }
 
 #[cfg(test)]

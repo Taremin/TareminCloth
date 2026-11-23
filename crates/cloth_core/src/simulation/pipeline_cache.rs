@@ -63,6 +63,7 @@ pub struct PairPipelines {
 /// 遅延生成: 自己衝突ダイレクト走査用パイプライン群
 pub struct SelfCollisionPipelines {
     pub solve: wgpu::ComputePipeline,
+    pub untangle: wgpu::ComputePipeline,
     pub solve_ee: wgpu::ComputePipeline,
     pub apply: wgpu::ComputePipeline,
     pub normals: wgpu::ComputePipeline,
@@ -183,13 +184,34 @@ fn pipeline_layout(
     })
 }
 
-impl SharedPipelines {
-    fn build(context: &Arc<GpuContext>, workgroup_size: u32) -> Self {
-        let device = &context.device;
-        let timings: Mutex<Vec<(String, f32)>> = Mutex::new(Vec::new());
-        let t_all = Instant::now();
+#[derive(Clone)]
+struct SharedLayouts {
+    predict_bgl: wgpu::BindGroupLayout,
+    constraint_bgl: wgpu::BindGroupLayout,
+    sewing_bgl: wgpu::BindGroupLayout,
+    pin_bgl: wgpu::BindGroupLayout,
+    collision_bgl: wgpu::BindGroupLayout,
+    edge_collision_bgl: wgpu::BindGroupLayout,
+    update_vel_bgl: wgpu::BindGroupLayout,
+    distance_atomic_bgl: wgpu::BindGroupLayout,
+    extract_positions_bgl: wgpu::BindGroupLayout,
+    self_collision_bgl: wgpu::BindGroupLayout,
+    self_collision_ee_bgl: wgpu::BindGroupLayout,
+    self_collision_apply_bgl: wgpu::BindGroupLayout,
+    compute_normals_bgl: wgpu::BindGroupLayout,
+    pair_collect_bgl: wgpu::BindGroupLayout,
+    pair_solve_vt_bgl: wgpu::BindGroupLayout,
+    pair_solve_ee_bgl: wgpu::BindGroupLayout,
+    hash_bgl: wgpu::BindGroupLayout,
+    edge_hash_bgl: wgpu::BindGroupLayout,
+    sew_shrink_bgl: wgpu::BindGroupLayout,
+    wrinkle_field_bgl: wgpu::BindGroupLayout,
+    virtual_forward_bgl: wgpu::BindGroupLayout,
+    self_collision_vv_bgl: wgpu::BindGroupLayout,
+}
 
-        // --- BGL (安価・eager) ---
+impl SharedLayouts {
+    fn build(device: &wgpu::Device) -> Self {
         let storage_rw = wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -476,6 +498,82 @@ impl SharedPipelines {
             ],
         });
 
+        Self {
+            predict_bgl,
+            constraint_bgl,
+            sewing_bgl,
+            pin_bgl,
+            collision_bgl,
+            edge_collision_bgl,
+            update_vel_bgl,
+            distance_atomic_bgl,
+            extract_positions_bgl,
+            self_collision_bgl,
+            self_collision_ee_bgl,
+            self_collision_apply_bgl,
+            compute_normals_bgl,
+            pair_collect_bgl,
+            pair_solve_vt_bgl,
+            pair_solve_ee_bgl,
+            hash_bgl,
+            edge_hash_bgl,
+            sew_shrink_bgl,
+            wrinkle_field_bgl,
+            virtual_forward_bgl,
+            self_collision_vv_bgl,
+        }
+    }
+}
+
+type LayoutCacheKey = (u64, usize);
+
+static LAYOUT_CACHE: LazyLock<Mutex<HashMap<LayoutCacheKey, Arc<SharedLayouts>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn get_or_create_layouts(context: &Arc<GpuContext>) -> Arc<SharedLayouts> {
+    let key = (context.epoch, Arc::as_ptr(context) as usize);
+    let mut map = LAYOUT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(layouts) = map.get(&key) {
+        return Arc::clone(layouts);
+    }
+    let layouts = Arc::new(SharedLayouts::build(&context.device));
+    map.retain(|(epoch, _), _| *epoch == context.epoch);
+    map.insert(key, Arc::clone(&layouts));
+    layouts
+}
+
+impl SharedPipelines {
+    fn build(context: &Arc<GpuContext>, workgroup_size: u32) -> Self {
+        let device = &context.device;
+        let timings: Mutex<Vec<(String, f32)>> = Mutex::new(Vec::new());
+        let t_all = Instant::now();
+
+        // --- BGL (workgroup_size 間で共有し、動的切替時の BindGroup 互換性を維持) ---
+        let SharedLayouts {
+            predict_bgl,
+            constraint_bgl,
+            sewing_bgl,
+            pin_bgl,
+            collision_bgl,
+            edge_collision_bgl,
+            update_vel_bgl,
+            distance_atomic_bgl,
+            extract_positions_bgl,
+            self_collision_bgl,
+            self_collision_ee_bgl,
+            self_collision_apply_bgl,
+            compute_normals_bgl,
+            pair_collect_bgl,
+            pair_solve_vt_bgl,
+            pair_solve_ee_bgl,
+            hash_bgl,
+            edge_hash_bgl,
+            sew_shrink_bgl,
+            wrinkle_field_bgl,
+            virtual_forward_bgl,
+            self_collision_vv_bgl,
+        } = SharedLayouts::clone(&get_or_create_layouts(context));
+
         // --- 常時シェーダ (eager・8 本) ---
         let predict_shader = create_shader_with_wg_size(
             device,
@@ -760,6 +858,12 @@ impl SharedPipelines {
                 include_str!("../shaders/self_collision.wgsl"),
                 wg,
             );
+            let untangle_shader = create_shader_with_wg_size(
+                device,
+                "Self Collision Untangle Shader",
+                include_str!("../shaders/self_collision_untangle.wgsl"),
+                wg,
+            );
             let apply_shader = create_shader_with_wg_size(
                 device,
                 "Self Collision Apply Shader",
@@ -782,6 +886,9 @@ impl SharedPipelines {
                 pipeline_layout(device, "Self Collision Pipeline Layout", &self.self_collision_bgl);
             let solve = timed(&self.timings, "self_collision", || {
                 compute_pipeline(device, "Self Collision Pipeline", &solve_pl, &solve_shader, "main")
+            });
+            let untangle = timed(&self.timings, "self_collision_untangle", || {
+                compute_pipeline(device, "Self Collision Untangle Pipeline", &solve_pl, &untangle_shader, "main")
             });
             let solve_ee_pl = pipeline_layout(
                 device,
@@ -807,7 +914,7 @@ impl SharedPipelines {
             let normals = timed(&self.timings, "compute_normals", || {
                 compute_pipeline(device, "Compute Normals Pipeline", &normals_pl, &normals_shader, "main")
             });
-            SelfCollisionPipelines { solve, solve_ee, apply, normals }
+            SelfCollisionPipelines { solve, untangle, solve_ee, apply, normals }
         })
     }
 
@@ -1032,4 +1139,6 @@ pub fn cache_info() -> Vec<SharedCacheEntry> {
 pub fn clear_cache() {
     let mut map = lock_cache();
     map.clear();
+    let mut layouts = LAYOUT_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    layouts.clear();
 }

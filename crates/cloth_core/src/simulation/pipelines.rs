@@ -11,8 +11,8 @@ use crate::mesh::{
 use crate::spatial_hash::{GpuSpatialHash, GpuEdgeSpatialHash, GpuColliderEdgeSpatialHash};
 use super::pipeline_cache::{get_or_create_shared, SharedPipelines};
 use super::types::{
-    CollisionParams, DispatchInfo, GpuBoneInfo, GpuBoneTransform, GpuSelfCollisionAccum,
-    NormalParams, PinParams,
+    CollisionParams, DispatchInfo, GpuAtomicAccum, GpuBoneInfo, GpuBoneTransform,
+    GpuSelfCollisionAccum, NormalParams, PinParams,
 };
 
 pub struct SimulationResources {
@@ -59,10 +59,8 @@ pub struct SimulationResources {
     pub spatial_hash: GpuSpatialHash,
     pub edge_spatial_hash: GpuEdgeSpatialHash,
     pub self_collision_bind_group: wgpu::BindGroup,
-    pub self_collision_bind_group_ee_off: wgpu::BindGroup,
     pub self_collision_ee_bind_group: wgpu::BindGroup,
     pub self_collision_params_buffer: wgpu::Buffer,
-    pub self_collision_params_buffer_ee_off: wgpu::Buffer,
     pub self_collision_accum_buffer: wgpu::Buffer,
     pub self_collision_apply_bind_group: wgpu::BindGroup,
     pub num_edges: u32,
@@ -183,12 +181,11 @@ pub fn build_simulation_resources(
         default_thick,
         target_spacing,
     );
+    let mut virtual_defs = virtual_sampling.virtual_defs;
     let mut is_virtual_sampling_clamped = virtual_sampling.is_clamped;
-    let num_virtual_vertices = virtual_sampling.virtual_defs.len() as u32;
-    let num_total_particles = num_vertices + num_virtual_vertices;
 
     let mut all_initial_vertices = mesh.vertices.clone();
-    for def in &virtual_sampling.virtual_defs {
+    for def in &virtual_defs {
         let v0 = &mesh.vertices[def.parent_indices[0] as usize];
         let v1 = &mesh.vertices[def.parent_indices[1] as usize];
         let v2 = &mesh.vertices[def.parent_indices[2] as usize];
@@ -221,12 +218,32 @@ pub fn build_simulation_resources(
         );
         is_virtual_sampling_clamped = true;
         let max_verts = (max_buf_size / std::mem::size_of::<GpuVertex>() as u64) as usize;
-        all_initial_vertices.truncate(max_verts.max(mesh.vertices.len()));
+        let clamped_total = max_verts.max(mesh.vertices.len());
+        all_initial_vertices.truncate(clamped_total);
+        let clamped_virtual = clamped_total.saturating_sub(mesh.vertices.len());
+        virtual_defs.truncate(clamped_virtual);
     }
+
+    let num_virtual_vertices = virtual_defs.len() as u32;
+    let num_total_particles = num_vertices + num_virtual_vertices;
+
+    let dummy_vert = [GpuVertex {
+        position: [0.0; 3],
+        inv_mass: 0.0,
+        prev_pos: [0.0; 3],
+        layer_id: 0,
+        velocity: [0.0; 3],
+        thickness: 0.0,
+    }];
+    let vertex_contents: &[u8] = if all_initial_vertices.is_empty() {
+        bytemuck::cast_slice(&dummy_vert)
+    } else {
+        bytemuck::cast_slice(&all_initial_vertices)
+    };
 
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth Vertex Buffer"),
-        contents: bytemuck::cast_slice(&all_initial_vertices),
+        contents: vertex_contents,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST
@@ -448,6 +465,10 @@ pub fn build_simulation_resources(
         sewing_compliance: 0.0,
         enable_sewing_lock: 1.0,
         sewing_lock_distance: 0.02,
+        tension_damping: 0.0,
+        compression_damping: 0.0,
+        shear_damping: 0.0,
+        bending_damping: 0.0,
         _pad0: [0.0; 3],
     };
 
@@ -479,8 +500,9 @@ pub fn build_simulation_resources(
         mapped_at_creation: false,
     });
 
-    // アトミック加算蓄積バッファ (各頂点: i32 dx, dy, dz, u32 count = 16 bytes)
-    let accum_buffer_size = ((num_vertices as u64) * 16).max(64);
+    // アトミック加算蓄積バッファ (各頂点: GpuAtomicAccum = 16 bytes)
+    let accum_buffer_size =
+        ((num_vertices as u64) * std::mem::size_of::<GpuAtomicAccum>() as u64).max(64);
     let accum_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("TareminCloth Atomic Accum Buffer"),
         size: accum_buffer_size,
@@ -920,16 +942,6 @@ pub fn build_simulation_resources(
             | wgpu::BufferUsages::COPY_DST,
     });
 
-    let mut self_col_params_ee_off = self_col_params;
-    self_col_params_ee_off.enable_ee = 0;
-    let self_collision_params_buffer_ee_off = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Self Collision Params Buffer (EE Off)"),
-        contents: bytemuck::bytes_of(&self_col_params_ee_off),
-        usage: wgpu::BufferUsages::UNIFORM
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-    });
-
     let normals_buffer_size = ((num_vertices as u64) * 16).max(64);
     let normals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Normals Buffer"),
@@ -1097,73 +1109,6 @@ pub fn build_simulation_resources(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: self_collision_params_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: normals_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: local_edge_lengths_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: adj_offsets_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 7,
-                resource: adj_indices_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 8,
-                resource: island_ids_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 9,
-                resource: star_offsets_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 10,
-                resource: star_indices_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 11,
-                resource: self_collision_accum_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 12,
-                resource: two_hop_offsets_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 13,
-                resource: two_hop_indices_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 14,
-                resource: two_hop_rest_lengths_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let self_collision_bind_group_ee_off = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Self Collision Bind Group (EE Off)"),
-        layout: &shared.self_collision_bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: vertex_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: spatial_hash.cell_starts_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: spatial_hash.sorted_indices_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: self_collision_params_buffer_ee_off.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
@@ -1505,10 +1450,10 @@ pub fn build_simulation_resources(
     });
 
     let dummy_virt_def = crate::virtual_mesh::GpuVirtualVertexDef::default();
-    let virt_defs_contents: &[u8] = if virtual_sampling.virtual_defs.is_empty() {
+    let virt_defs_contents: &[u8] = if virtual_defs.is_empty() {
         bytemuck::bytes_of(&dummy_virt_def)
     } else {
-        bytemuck::cast_slice(&virtual_sampling.virtual_defs)
+        bytemuck::cast_slice(&virtual_defs)
     };
     let virt_defs_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Virtual Vertices Defs Buffer"),
@@ -1563,7 +1508,11 @@ pub fn build_simulation_resources(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    let rest_positions_vec: Vec<[f32; 4]> = positions_slice.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect();
+    let rest_positions_vec: Vec<[f32; 4]> = if positions_slice.is_empty() {
+        vec![[0.0; 4]]
+    } else {
+        positions_slice.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect()
+    };
     let rest_positions_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("TareminCloth Rest Positions Buffer"),
         contents: bytemuck::cast_slice(&rest_positions_vec),
@@ -1664,10 +1613,8 @@ pub fn build_simulation_resources(
         spatial_hash,
         edge_spatial_hash,
         self_collision_bind_group,
-        self_collision_bind_group_ee_off,
         self_collision_ee_bind_group,
         self_collision_params_buffer,
-        self_collision_params_buffer_ee_off,
         self_collision_accum_buffer,
         self_collision_apply_bind_group,
         num_edges: mesh.edges.len() as u32,

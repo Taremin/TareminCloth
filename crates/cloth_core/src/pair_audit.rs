@@ -329,8 +329,8 @@ pub fn audit_pairs(
                 continue;
             }
             if near[i].contains(&(f[0] as usize))
-                && near[i].contains(&(f[1] as usize))
-                && near[i].contains(&(f[2] as usize))
+                || near[i].contains(&(f[1] as usize))
+                || near[i].contains(&(f[2] as usize))
             {
                 continue;
             }
@@ -428,7 +428,11 @@ pub fn audit_pairs(
             if a == c || a == dd || b == c || b == dd {
                 continue;
             }
-            if near[a].contains(&c) {
+            if near[a].contains(&c)
+                || near[a].contains(&dd)
+                || near[b].contains(&c)
+                || near[b].contains(&dd)
+            {
                 continue;
             }
             let dist = seg_seg_distance(ep0[ei], ep1[ei], ep0[ej], ep1[ej]);
@@ -454,11 +458,14 @@ pub fn audit_pairs(
     let (mut ee_miss_horizon, mut ee_miss_other) = (0usize, 0usize);
     for (ei, ej) in &ee_missed {
         let a = edges[*ei][0] as usize;
+        let b = edges[*ei][1] as usize;
+        let c = edges[*ej][0] as usize;
+        let dd = edges[*ej][1] as usize;
         let d0 = seg_seg_distance(prev_ep0[*ei], prev_ep1[*ei], prev_ep0[*ej], prev_ep1[*ej]);
         let check_start = eff_thick
             + safety_margin
-            + horizon[a]
-            + horizon[edges[*ej][0] as usize];
+            + horizon[a].max(horizon[b])
+            + horizon[c].max(horizon[dd]);
         if d0 > check_start {
             ee_miss_horizon += 1;
         } else {
@@ -559,5 +566,29 @@ mod tests {
             [1.0, 0.0, 0.0],
         );
         assert!((d - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_vt_two_hop_or_exclusion_matches_gpu() {
+        // 頂点鎖 0-1-2-3 と三角形 [2, 3, 4]:
+        // 頂点 0 から見て 2 は 2ホップ以内、3・4 は 3ホップ以上。OR 条件により vt_ground から除外されること
+        let pos = vec![
+            [0.0, 0.0, 0.0],   // 0
+            [0.05, 0.0, 0.0],  // 1
+            [0.02, 0.02, 0.0], // 2 (0と2ホップ)
+            [0.02, -0.02, 0.0],// 3 (0と3ホップ)
+            [0.06, 0.0, 0.01], // 4 (0と3ホップ)
+        ];
+        let faces = vec![[2, 3, 4]];
+        let edges = vec![[0, 1], [1, 2], [2, 3], [3, 4], [4, 2]];
+        let r = audit_pairs(
+            &pos, None, &pos, &[], &[], 0, 0, &faces, &edges,
+            0.05, 0.05, 1.0, 0.1, 0, 1.0 / 60.0, 1024, 1024,
+        );
+        assert_eq!(
+            r.vt_ground, 0,
+            "1頂点のみ2ホップ以内の三角形は GPU 同様 OR 除外されるべき (vt_ground={})",
+            r.vt_ground
+        );
     }
 }

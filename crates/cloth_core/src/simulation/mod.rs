@@ -21,8 +21,8 @@ use crate::mesh::{
 use crate::spatial_hash::{GpuColliderEdgeSpatialHash, GpuEdgeSpatialHash, GpuSpatialHash};
 use crate::sdf_baker::{GpuBakeParams, GpuBakeTriangle};
 pub use self::types::{
-    CollisionParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuSkinningVertex,
-    GpuWrinkleProfileSample, PinParams, WrinkleFieldParams,
+    CollisionParams, GpuAtomicAccum, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource,
+    GpuSkinningVertex, PinParams, WrinkleFieldParams,
 };
 use self::pipelines::build_simulation_resources;
 use self::pipeline_cache::SharedPipelines;
@@ -72,6 +72,11 @@ pub struct GpuClothSimulator {
     pub(crate) distance_constraints: Vec<GpuDistanceConstraint>,
     pub original_edge_to_constraint: Vec<usize>,
     pub initial_distance_rest_lengths: Vec<f32>,
+    pub edge_stiffness_multipliers: Vec<f32>,
+    pub(crate) base_tension_compliance: f32,
+    pub(crate) base_compression_compliance: f32,
+    pub(crate) base_shear_compliance: f32,
+    pub(crate) base_bending_stiffness: f32,
     pub(crate) bending_constraints: Vec<GpuBendingConstraint>,
     pub(crate) sewing_constraints: Vec<GpuSewingConstraint>,
 
@@ -176,11 +181,8 @@ pub struct GpuClothSimulator {
     pub(crate) spatial_hash: GpuSpatialHash,
     pub(crate) edge_spatial_hash: GpuEdgeSpatialHash,
     pub(crate) self_collision_bind_group: wgpu::BindGroup,
-    #[allow(dead_code)]
-    pub(crate) self_collision_bind_group_ee_off: wgpu::BindGroup,
     pub(crate) self_collision_ee_bind_group: wgpu::BindGroup,
     pub(crate) self_collision_params_buffer: wgpu::Buffer,
-    pub(crate) self_collision_params_buffer_ee_off: wgpu::Buffer,
     #[allow(dead_code)]
     pub(crate) self_collision_accum_buffer: wgpu::Buffer,
     pub(crate) self_collision_apply_bind_group: wgpu::BindGroup,
@@ -281,6 +283,7 @@ pub struct GpuClothSimulator {
     pub(crate) edge_collision_bind_group: wgpu::BindGroup,
 
     pub sewing_stiffness: f32,
+    pub sewing_shrink_speed: f32,
     pub enable_sewing_lock: bool,
     pub sewing_lock_distance: f32,
     /// 布の面密度 (kg/m2)。三角形面積と掛けて頂点質量を算出する条件の記録・再現用。
@@ -416,6 +419,23 @@ impl GpuClothSimulator {
         let mesh_diameter_hops = ((diag_len / avg_edge_len).ceil() as u32).clamp(10, 60);
         let prev_step_positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
 
+        let mut init_tension_c = None;
+        let mut init_shear_c = None;
+        for dc in &mesh.distance_constraints {
+            if dc.constraint_type == 1 {
+                if init_shear_c.is_none() {
+                    init_shear_c = Some(dc.tension_compliance);
+                }
+            } else if init_tension_c.is_none() {
+                init_tension_c = Some((dc.tension_compliance, dc.compression_compliance));
+            }
+        }
+        let (base_tension_compliance, base_compression_compliance) =
+            init_tension_c.unwrap_or((1.0 / 500.0, 1.0 / 500.0));
+        let base_shear_compliance = init_shear_c.unwrap_or(1.0 / 250.0);
+        let edge_stiffness_multipliers = vec![1.0f32; mesh.distance_constraints.len()];
+        let initial_sewing_shrink_speed = mesh.sewing_shrink_speed;
+
         let sim = Self {
             context: Arc::clone(&context),
             num_vertices,
@@ -432,6 +452,11 @@ impl GpuClothSimulator {
             distance_constraints: mesh.distance_constraints,
             original_edge_to_constraint: mesh.original_edge_to_constraint,
             initial_distance_rest_lengths: mesh.initial_distance_rest_lengths,
+            edge_stiffness_multipliers,
+            base_tension_compliance,
+            base_compression_compliance,
+            base_shear_compliance,
+            base_bending_stiffness: mesh.base_bending_stiffness,
             bending_constraints: mesh.bending_constraints,
             sewing_constraints: mesh.sewing_constraints,
             vertex_buffer: res.vertex_buffer,
@@ -445,7 +470,7 @@ impl GpuClothSimulator {
             staging_idx: 0,
             async_pending: false,
             async_receiver: None,
-            workgroup_size,
+            workgroup_size: res.shared.workgroup_size,
             solver_mode,
             accum_buffer: res.accum_buffer,
             distance_atomic_bind_group: res.distance_atomic_bind_group,
@@ -532,10 +557,8 @@ impl GpuClothSimulator {
             spatial_hash: res.spatial_hash,
             edge_spatial_hash: res.edge_spatial_hash,
             self_collision_bind_group: res.self_collision_bind_group,
-            self_collision_bind_group_ee_off: res.self_collision_bind_group_ee_off,
             self_collision_ee_bind_group: res.self_collision_ee_bind_group,
             self_collision_params_buffer: res.self_collision_params_buffer,
-            self_collision_params_buffer_ee_off: res.self_collision_params_buffer_ee_off,
             self_collision_accum_buffer: res.self_collision_accum_buffer,
             self_collision_apply_bind_group: res.self_collision_apply_bind_group,
             num_edges: res.num_edges,
@@ -612,6 +635,7 @@ impl GpuClothSimulator {
             edge_collision_params_buffer: res.edge_collision_params_buffer,
             edge_collision_bind_group: res.edge_collision_bind_group,
             sewing_stiffness: 10000.0,
+            sewing_shrink_speed: initial_sewing_shrink_speed,
             enable_sewing_lock: true,
             sewing_lock_distance: 0.02,
             areal_density: 0.15,
@@ -907,7 +931,7 @@ impl GpuClothSimulator {
         self.enable_normal_untangling = enable_normal_untangling;
         self.self_collision_max_iterations = max_iterations;
 
-        let mut params = SelfCollisionParams {
+        let params = SelfCollisionParams {
             cell_size: self.spatial_hash.cell_size,
             table_size: self.spatial_hash.table_size,
             num_vertices: self.num_vertices,
@@ -924,13 +948,6 @@ impl GpuClothSimulator {
 
         self.context.queue.write_buffer(
             &self.self_collision_params_buffer,
-            0,
-            bytemuck::bytes_of(&params),
-        );
-
-        params.enable_ee = 0;
-        self.context.queue.write_buffer(
-            &self.self_collision_params_buffer_ee_off,
             0,
             bytemuck::bytes_of(&params),
         );
@@ -1117,22 +1134,15 @@ impl GpuClothSimulator {
             1e10
         };
 
-        for c in &mut self.distance_constraints {
-            if c.constraint_type == 1 {
-                c.tension_compliance = shear_comp;
-                c.compression_compliance = shear_comp;
-            } else {
-                c.tension_compliance = tension_comp;
-                c.compression_compliance = compression_comp;
-            }
-        }
-        if !self.distance_constraints.is_empty() {
-            self.context.queue.write_buffer(
-                &self.dist_buffer,
-                0,
-                bytemuck::cast_slice(&self.distance_constraints),
-            );
-        }
+        self.base_tension_compliance = tension_comp;
+        self.base_compression_compliance = compression_comp;
+        self.base_shear_compliance = shear_comp;
+        self.base_bending_stiffness = if bending_stiffness > 0.0 {
+            bending_stiffness
+        } else {
+            0.0
+        };
+        self.apply_distance_compliances();
 
         let bend_comp = if bending_stiffness > 0.0 {
             1.0 / bending_stiffness
@@ -1140,7 +1150,12 @@ impl GpuClothSimulator {
             1e10
         };
         for c in &mut self.bending_constraints {
-            c.compliance = bend_comp;
+            c.compliance = if c._pad[0] > 1.5 {
+                // 1Dストランド曲げ拘束は柔軟倍率を保護する
+                (bend_comp * 10.0).max(0.5)
+            } else {
+                bend_comp
+            };
         }
         if !self.bending_constraints.is_empty() {
             self.context.queue.write_buffer(
@@ -1151,8 +1166,74 @@ impl GpuClothSimulator {
         }
     }
 
+    /// ベースコンプライアンスに対して無効値 (1e9 以上) および剛性無限大 (0.0 以下) を保持したまま倍率除算する
+    #[inline]
+    pub(crate) fn scale_compliance(base: f32, mult: f32) -> f32 {
+        if base >= 1e9 {
+            base
+        } else if base <= 0.0 {
+            0.0
+        } else {
+            base / mult
+        }
+    }
+
+    /// ベースコンプライアンスとエッジ個別剛性倍率 (stiffness_multiplier) を合成してGPUバッファを更新する
+    pub(crate) fn apply_distance_compliances(&mut self) {
+        let tension_comp = self.base_tension_compliance;
+        let compression_comp = self.base_compression_compliance;
+        let shear_comp = self.base_shear_compliance;
+
+        for (idx, c) in self.distance_constraints.iter_mut().enumerate() {
+            let mult = self
+                .edge_stiffness_multipliers
+                .get(idx)
+                .copied()
+                .unwrap_or(1.0)
+                .max(1e-3);
+            if c.constraint_type == 1 {
+                c.tension_compliance = Self::scale_compliance(shear_comp, mult);
+                c.compression_compliance = Self::scale_compliance(shear_comp, mult);
+            } else {
+                c.tension_compliance = Self::scale_compliance(tension_comp, mult);
+                c.compression_compliance = Self::scale_compliance(compression_comp, mult);
+            }
+        }
+        if !self.distance_constraints.is_empty() {
+            self.context.queue.write_buffer(
+                &self.dist_buffer,
+                0,
+                bytemuck::cast_slice(&self.distance_constraints),
+            );
+        }
+    }
+
     pub fn set_sewing_stiffness(&mut self, stiffness: f32) {
         self.sewing_stiffness = stiffness.max(1.0);
+    }
+
+    /// 縫合の収縮速度 (m/s) を動的に更新し、進行中の自然長を維持したまま GPU バッファへ反映する
+    pub fn set_sewing_shrink_speed(&mut self, speed: f32) {
+        let clamped = if speed.is_finite() { speed.max(0.0) } else { 1.0 };
+        let changed = (self.sewing_shrink_speed - clamped).abs() > 1e-7;
+        self.sewing_shrink_speed = clamped;
+        if !changed || self.sewing_constraints.is_empty() {
+            return;
+        }
+        let current_rests = self.read_sewing_current_rest_lengths();
+        for (i, c) in self.sewing_constraints.iter_mut().enumerate() {
+            if let Some(&cur_len) = current_rests.get(i) {
+                if cur_len.is_finite() && cur_len >= 0.0 {
+                    c.current_rest_len = cur_len;
+                }
+            }
+            c.shrink_speed = clamped;
+        }
+        self.context.queue.write_buffer(
+            &self.sew_buffer,
+            0,
+            bytemuck::cast_slice(&self.sewing_constraints),
+        );
     }
 
     /// 布の面密度 (kg/m2) を設定する。記録・署名用の値であり、
@@ -1338,15 +1419,11 @@ impl GpuClothSimulator {
         closed as f32 / total as f32
     }
 
-    /// 大域空気減衰率（Air Damping / Velocity Damping）を設定する
-    /// 空気減衰と4種内部減衰から実効減衰率 (self.damping) を決定論的に再計算する
+    /// 大域空気減衰率（Air Damping / Velocity Damping）を設定する。
+    /// 4種内部減衰（tension/compression/shear/bending）は SimParams 経由で各拘束シェーダーの
+    /// XPBD Rayleigh 減衰として適用されるため、空気減衰には合算しない。
     fn recompute_effective_damping(&mut self) {
-        let internal_damp = (self.tension_damping
-            + self.compression_damping
-            + self.shear_damping
-            + self.bending_damping)
-            * 0.05;
-        self.damping = (self.air_damping + internal_damp).max(0.0);
+        self.damping = self.air_damping.max(0.0);
     }
 
     pub fn set_damping(&mut self, damping: f32) {
@@ -1411,6 +1488,59 @@ impl GpuClothSimulator {
                 bytemuck::cast_slice(&self.distance_constraints),
             );
         }
+    }
+
+    /// 指定された元エッジインデックス群に対して剛性倍率 (stiffness_multiplier) を設定し、GPUバッファに反映する
+    pub fn set_edge_stiffness_multipliers(&mut self, edge_indices: &[u32], multipliers: &[f32]) {
+        if self.edge_stiffness_multipliers.len() != self.distance_constraints.len() {
+            self.edge_stiffness_multipliers
+                .resize(self.distance_constraints.len(), 1.0);
+        }
+        let count = edge_indices.len().min(multipliers.len());
+        let mut changed = false;
+
+        for i in 0..count {
+            let edge_idx = edge_indices[i] as usize;
+            if edge_idx < self.original_edge_to_constraint.len() {
+                let constraint_idx = self.original_edge_to_constraint[edge_idx];
+                if constraint_idx != usize::MAX && constraint_idx < self.edge_stiffness_multipliers.len() {
+                    let mult = if multipliers[i].is_finite() {
+                        multipliers[i].max(1e-3)
+                    } else {
+                        1.0
+                    };
+                    if (self.edge_stiffness_multipliers[constraint_idx] - mult).abs() > 1e-6 {
+                        self.edge_stiffness_multipliers[constraint_idx] = mult;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if changed {
+            self.apply_distance_compliances();
+        }
+    }
+
+    /// 全エッジの剛性倍率を 1.0 にリセットし、GPUバッファに反映する
+    pub fn reset_edge_stiffness_multipliers(&mut self) {
+        if self.edge_stiffness_multipliers.iter().all(|&m| (m - 1.0).abs() <= 1e-6) {
+            return;
+        }
+        self.edge_stiffness_multipliers.fill(1.0);
+        self.apply_distance_compliances();
+    }
+
+    /// 指定された元エッジインデックスの現在の実効引張コンプライアンスを取得する
+    pub fn get_edge_tension_compliance(&self, edge_idx: u32) -> f32 {
+        let edge_idx = edge_idx as usize;
+        if edge_idx < self.original_edge_to_constraint.len() {
+            let constraint_idx = self.original_edge_to_constraint[edge_idx];
+            if constraint_idx != usize::MAX && constraint_idx < self.distance_constraints.len() {
+                return self.distance_constraints[constraint_idx].tension_compliance;
+            }
+        }
+        0.0
     }
 
     /// 指定された元エッジインデックスの現在の自然長を取得する
@@ -1655,9 +1785,17 @@ impl GpuClothSimulator {
 
         let slice = staging.slice(..total);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
         self.context.device.poll(wgpu::Maintain::Wait);
-        pollster::block_on(receiver.receive()).unwrap().ok()?;
+        match pollster::block_on(receiver.receive()) {
+            Some(Ok(())) => {}
+            other => {
+                eprintln!("[TareminCloth] ボーンSDFリードバックに失敗しました: {:?}", other);
+                return None;
+            }
+        }
 
         let data = slice.get_mapped_range();
         let mut out = Vec::with_capacity((unpadded * (h as u64) * (d as u64)) as usize);
@@ -1819,6 +1957,43 @@ impl GpuClothSimulator {
         self.dynamic_sdf_update_interval = interval.max(1);
     }
 
+    /// 動的ボーンSDF出力バッファの行ピッチ (bytes) と総バイト数をオーバーフロー・GPU上限チェック付きで算出する
+    pub(crate) fn validate_dynamic_sdf_output_size(
+        width: u32,
+        height: u32,
+        depth: u32,
+        res: u32,
+        max_buffer_size: u64,
+        max_storage_binding: u64,
+    ) -> Result<(u32, u64), String> {
+        if width == 0 || height == 0 || depth == 0 || res == 0 {
+            return Err(format!(
+                "無効な動的SDF解像度です: width={}, height={}, depth={}, res={}",
+                width, height, depth, res
+            ));
+        }
+        let bytes_per_row = u64::from(width)
+            .checked_mul(4)
+            .ok_or_else(|| "動的SDF bytes_per_row がオーバーフローしました".to_string())?;
+        let aligned_bytes_per_row_u64 = bytes_per_row
+            .checked_add(255)
+            .map(|v| v & !255)
+            .ok_or_else(|| "動的SDF aligned_bytes_per_row がオーバーフローしました".to_string())?;
+        let aligned_bytes_per_row = u32::try_from(aligned_bytes_per_row_u64)
+            .map_err(|_| "動的SDF aligned_bytes_per_row が u32 上限を超過しました".to_string())?;
+        let total_output_bytes = aligned_bytes_per_row_u64
+            .checked_mul(u64::from(height))
+            .and_then(|v| v.checked_mul(u64::from(depth)))
+            .ok_or_else(|| "動的SDF total_output_bytes が u64 オーバーフローしました".to_string())?;
+        if total_output_bytes > max_buffer_size || total_output_bytes > max_storage_binding {
+            return Err(format!(
+                "動的SDF出力バッファ ({} bytes) がGPU上限 (max_buffer={}, max_storage_binding={}) を超過しました",
+                total_output_bytes, max_buffer_size, max_storage_binding
+            ));
+        }
+        Ok((aligned_bytes_per_row, total_output_bytes))
+    }
+
     /// 動的ボーンSDF（GPU LBS + インメモリSDF更新）パイプラインのセットアップ
     pub fn setup_dynamic_bone_sdf(&mut self, setup: DynamicBoneSdfSetup) {
         let num_verts = setup.rest_verts.len();
@@ -1828,6 +2003,23 @@ impl GpuClothSimulator {
         if num_verts == 0 || num_tris == 0 || num_bones == 0 {
             return;
         }
+
+        let limits = self.context.device.limits();
+        let (aligned_bytes_per_row, total_output_bytes) = match Self::validate_dynamic_sdf_output_size(
+            setup.width,
+            setup.height,
+            setup.depth,
+            setup.res,
+            limits.max_buffer_size,
+            u64::from(limits.max_storage_buffer_binding_size),
+        ) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("[TareminCloth] setup_dynamic_bone_sdf 中止: {}", msg);
+                self.enable_dynamic_bone_sdf = false;
+                return;
+            }
+        };
 
         // 1. 3Dテクスチャを setup.width, setup.height, setup.depth で作成
         self.bone_sdf_texture = self.context.device.create_texture(&wgpu::TextureDescriptor {
@@ -1848,11 +2040,52 @@ impl GpuClothSimulator {
         });
         self.bone_sdf_texture_view = self.bone_sdf_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 2. ボーン静的情報をセット
+        // 2. ボーン静的情報および変換行列バッファをリサイズ・初期化してから BindGroup を再作成
         self.bone_infos = setup.bone_infos.clone();
         if !self.bone_infos.is_empty() {
+            let req_size = (self.bone_infos.len() * std::mem::size_of::<GpuBoneInfo>()) as u64;
+            if self.bone_info_buffer.size() < req_size {
+                self.bone_info_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Bone Info Buffer (Resized)"),
+                    size: req_size.max(32768),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
             self.context.queue.write_buffer(&self.bone_info_buffer, 0, bytemuck::cast_slice(&self.bone_infos));
         }
+
+        let req_transform_bones = num_bones.max(self.bone_infos.len());
+        if req_transform_bones > 0 {
+            let identity_mat = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ];
+            let identity_trans = GpuBoneTransform {
+                world_matrix: identity_mat,
+                inv_world_matrix: identity_mat,
+            };
+            if self.bone_transforms.len() < req_transform_bones {
+                self.bone_transforms.resize(req_transform_bones, identity_trans);
+            }
+            let req_trans_size = (self.bone_transforms.len() * std::mem::size_of::<GpuBoneTransform>()) as u64;
+            if self.bone_transform_buffer.size() < req_trans_size {
+                self.bone_transform_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Bone Transform Buffer (Resized)"),
+                    size: req_trans_size.max(65536),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.context.queue.write_buffer(
+                &self.bone_transform_buffer,
+                0,
+                bytemuck::cast_slice(&self.bone_transforms),
+            );
+        }
+
         self.enable_bone_sdf = !self.bone_infos.is_empty();
         self.recreate_collider_bind_group();
         self.upload_colliders();
@@ -1907,10 +2140,7 @@ impl GpuClothSimulator {
         });
 
         // 5. ベイク用バッファ
-        let bytes_per_pixel = 4u32;
-        let bytes_per_row = setup.width * bytes_per_pixel;
-        let aligned_bytes_per_row = (bytes_per_row + 255) & !255;
-        let row_pitch = aligned_bytes_per_row / bytes_per_pixel;
+        let row_pitch = aligned_bytes_per_row / 4;
 
         let mut setup = setup;
         for p in &mut setup.bake_params {
@@ -1925,7 +2155,6 @@ impl GpuClothSimulator {
         });
         queue.write_buffer(&bake_params_buf, 0, bytemuck::cast_slice(&setup.bake_params));
 
-        let total_output_bytes = (aligned_bytes_per_row * setup.height * setup.depth) as u64;
         let sdf_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Dynamic SDF Output Voxels Buffer"),
             size: total_output_bytes,
@@ -2202,11 +2431,12 @@ impl GpuClothSimulator {
         }
 
         // 5. Pass 4: 3D テクスチャへの直接GPU内コピー
-        let bytes_per_pixel = 4u32;
-        let bytes_per_row = setup.width * bytes_per_pixel;
-        let aligned_bytes_per_row = (bytes_per_row + 255) & !255;
+        let bytes_per_row_u64 = u64::from(setup.width).saturating_mul(4);
+        let aligned_bytes_per_row = u32::try_from((bytes_per_row_u64.saturating_add(255)) & !255)
+            .unwrap_or(0);
         if let Some(ref out_buf) = self.dynamic_sdf_output_buffer {
-            encoder.copy_buffer_to_texture(
+            if aligned_bytes_per_row > 0 {
+                encoder.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
                     buffer: out_buf,
                     layout: wgpu::TexelCopyBufferLayout {
@@ -2227,6 +2457,7 @@ impl GpuClothSimulator {
                     depth_or_array_layers: setup.depth,
                 },
             );
+            }
         }
 
         self.dynamic_sdf_initial_baked = true;
@@ -2349,8 +2580,22 @@ impl GpuClothSimulator {
     }
 
     pub(crate) fn upload_colliders(&mut self) {
+        let mut need_recreate_collider_bg = false;
         let num_colliders = self.colliders.len() as u32;
         if num_colliders > 0 {
+            let req_collider_bytes = (self.colliders.len() * std::mem::size_of::<GpuCollider>()) as u64;
+            if self.collider_buffer.size() < req_collider_bytes {
+                let min_bytes = (256 * std::mem::size_of::<GpuCollider>()) as u64;
+                self.collider_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Collider Buffer (Resized)"),
+                    size: req_collider_bytes.max(min_bytes),
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                need_recreate_collider_bg = true;
+            }
             self.context.queue.write_buffer(
                 &self.collider_buffer,
                 0,
@@ -2388,6 +2633,19 @@ impl GpuClothSimulator {
                 crate::mesh::morton_code_3d(c, bmin, inv_ext)
             });
 
+            let req_tris_bytes = (self.mesh_triangles.len() * std::mem::size_of::<GpuMeshTriangle>()) as u64;
+            if self.mesh_triangles_buffer.size() < req_tris_bytes {
+                let min_bytes = (65536 * std::mem::size_of::<GpuMeshTriangle>()) as u64;
+                self.mesh_triangles_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Mesh Triangles Buffer (Resized)"),
+                    size: req_tris_bytes.max(min_bytes),
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                need_recreate_collider_bg = true;
+            }
             self.context.queue.write_buffer(
                 &self.mesh_triangles_buffer,
                 0,
@@ -2405,6 +2663,17 @@ impl GpuClothSimulator {
                 let d2 = (t.p2[0] - cx).powi(2) + (t.p2[1] - cy).powi(2) + (t.p2[2] - cz).powi(2);
                 let r = d0.max(d1).max(d2).sqrt() + t.thickness;
                 bounds.push([cx, cy, cz, r]);
+            }
+            let req_bounds_bytes = (bounds.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+            if self.mesh_bounds_buffer.size() < req_bounds_bytes {
+                let min_bytes = (65536 * std::mem::size_of::<[f32; 4]>()) as u64;
+                self.mesh_bounds_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TareminCloth Mesh Bounds Buffer (Resized)"),
+                    size: req_bounds_bytes.max(min_bytes),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                need_recreate_collider_bg = true;
             }
             self.context.queue.write_buffer(
                 &self.mesh_bounds_buffer,
@@ -2436,12 +2705,26 @@ impl GpuClothSimulator {
                 group_bounds.push([g_cx, g_cy, g_cz, g_r]);
             }
             if !group_bounds.is_empty() {
+                let req_group_bytes = (group_bounds.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+                if self.collider_group_bounds_buffer.size() < req_group_bytes {
+                    let min_bytes = (65536usize.div_ceil(16) * std::mem::size_of::<[f32; 4]>()) as u64;
+                    self.collider_group_bounds_buffer = self.context.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("TareminCloth Collider Group Bounds Buffer (Resized)"),
+                        size: req_group_bytes.max(min_bytes),
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    need_recreate_collider_bg = true;
+                }
                 self.context.queue.write_buffer(
                     &self.collider_group_bounds_buffer,
                     0,
                     bytemuck::cast_slice(&group_bounds),
                 );
             }
+        }
+        if need_recreate_collider_bg {
+            self.recreate_collider_bind_group();
         }
 
         // コライダー稜線の一意抽出および空間ハッシュの構築・更新
@@ -2700,9 +2983,14 @@ impl GpuClothSimulator {
         self.solver_mode = mode;
     }
 
-    /// ワークグループサイズを設定する
+    /// ワークグループサイズを設定する（共有パイプラインを差し替えて実効サイズを同期）
     pub fn set_workgroup_size(&mut self, wg_size: u32) {
-        self.workgroup_size = wg_size;
+        let normalized = crate::simulation::pipeline_cache::normalize_workgroup_size(wg_size);
+        if normalized != self.shared.workgroup_size {
+            let (shared, _) = crate::simulation::pipeline_cache::get_or_create_shared(&self.context, normalized);
+            self.shared = shared;
+        }
+        self.workgroup_size = self.shared.workgroup_size;
     }
 
     /// ドレープガイド有効フラグを設定する

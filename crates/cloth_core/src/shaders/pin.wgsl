@@ -34,6 +34,10 @@ struct SimParams {
     sewing_compliance: f32,
     enable_sewing_lock: f32,
     sewing_lock_distance: f32,
+    tension_damping: f32,
+    compression_damping: f32,
+    shear_damping: f32,
+    bending_damping: f32,
     _pad0: f32,
     _pad1: f32,
     _pad2: f32,
@@ -80,7 +84,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let n = d / dist;
-    let dt = params.gravity.w;
+    let dt = max(params.gravity.w, 1e-8);
     let compliance = PIN_COMPLIANCE_REF * (1.0 - w) / max(w, 1e-6);
     let alpha = compliance / (dt * dt);
     let corr = -dist / (inv_m + alpha);

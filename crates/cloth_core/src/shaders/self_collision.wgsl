@@ -42,7 +42,7 @@ struct SelfCollisionAccum {
     ccd_neg_x: atomic<i32>,
     ccd_neg_y: atomic<i32>,
     ccd_neg_z: atomic<i32>,
-    _pad0: u32,
+    untangle_cand_v: atomic<u32>,
     ee_ccd_count: atomic<u32>,
 };
 
@@ -70,13 +70,14 @@ struct ClosestBaryResult {
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
 const INV_FIXED_SCALE: f32 = 1.0 / FIXED_SCALE;
+const MAX_ATOMIC_FIXED: f32 = 50000000.0;
 // V-T CCD 変位の倍率（1.0 = 非緩和。0.5 緩和では Direct/PairCache 双方で裏抜け貫通が増加するため厳密遮断を維持。詳細は docs/algorithms.md 5.7節）
 const VT_CCD_RELAXATION: f32 = 1.0;
 
 fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     atomicAdd(&accum[v_idx].dx, ix);
     atomicAdd(&accum[v_idx].dy, iy);
     atomicAdd(&accum[v_idx].dz, iz);
@@ -84,9 +85,9 @@ fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
 }
 
 fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     atomicAdd(&accum[v_idx].pin_dx, ix);
     atomicAdd(&accum[v_idx].pin_dy, iy);
     atomicAdd(&accum[v_idx].pin_dz, iz);
@@ -95,9 +96,9 @@ fn add_pin_disp_atomic(v_idx: u32, disp: vec3<f32>) {
 
 fn add_ccd_atomic(v_idx: u32, disp: vec3<f32>) {
     let scaled_disp = disp * VT_CCD_RELAXATION;
-    let ix = i32(clamp(scaled_disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(scaled_disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(scaled_disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(scaled_disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(scaled_disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(scaled_disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     if (ix > 0) {
         atomicMax(&accum[v_idx].ccd_pos_x, ix);
     } else if (ix < 0) {
@@ -333,12 +334,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let cell = vec3<i32>(floor(p_i / params.cell_size));
 
-    let thick_margin = vec3<f32>(thick_i * 2.5);
-    let sweep_min = min(x_old_i, p_i) - thick_margin;
-    let sweep_max = max(x_old_i, p_i) + thick_margin;
-
     let min_cell = cell - vec3<i32>(1);
     let max_cell = cell + vec3<i32>(1);
+
+    let track_untangle = (params.enable_normal_untangling != 0u) && !is_pinned_i && (v_i.layer_id > 0u);
+    var best_inner_dist_sq = 1e20;
+    var best_inner_j = 0xFFFFFFFFu;
 
     // Sweep AABB 内の全セルを走査 (CCD による飛び越え遮断を保証)
     for (var cx = min_cell.x; cx <= max_cell.x; cx = cx + 1) {
@@ -375,6 +376,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         // 自身および相手の最大エッジ長と布厚みを合算し、布の伸長に備えて 1.3 倍の安全マージン
                         let max_geom_dist = effective_thick + (local_len_i + local_len_j) * 1.3;
 
+                        // 多層布 Untangling 候補記録: 外層自由頂点に対する最近傍の非2ホップ内層頂点 j を 1 件保持
+                        if (track_untangle && v_j.layer_id < v_i.layer_id && dist_sq_vv < best_inner_dist_sq) {
+                            let ut_search_r = effective_thick * 2.5 + local_len_j * 1.3;
+                            if (dist_sq_vv <= ut_search_r * ut_search_r && !is_within_two_hops(index, j)) {
+                                best_inner_dist_sq = dist_sq_vv;
+                                best_inner_j = j;
+                            }
+                        }
+
                         // 【早期枝切り 1】外接球の外側にあるペアは幾何学的に衝突し得ないため、
                         // 重いトポロジー判定（is_topologically_near_folded）を含め全処理を即座にスキップ！
                         if (dist_sq_vv <= max_geom_dist * max_geom_dist) {
@@ -390,77 +400,49 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                 // 相手がピン留め（v_j.inv_mass <= 0）の場合は相手スレッドが処理しないため、
                                 // index < j の有無にかかわらず自スレッドが必ず処理して自頂点を退避させる。
                                 let both_dynamic = (v_j.inv_mass > 0.0);
-                                let n_j_raw = normals[j].xyz;
-                                let n_j_len = length(n_j_raw);
-                                let h_j_vv = select(0.0, dot(delta_vv, n_j_raw / max(n_j_len, EPSILON)), n_j_len > 0.5);
-                                let is_untangling_vv = (params.enable_normal_untangling != 0u)
-                                    && (v_i.layer_id > v_j.layer_id)
-                                    && (n_j_len > 0.5)
-                                    && (h_j_vv < -effective_thick * 0.25);
-
                                 let eff_thick_sq = effective_thick * effective_thick;
 
-                                if (!is_pinned_i && !is_untangling_vv && (!both_dynamic || index < j)) {
-                                    if (dist_sq_vv < eff_thick_sq && dist_sq_vv > EPSILON) {
-                                        let dist_vv = sqrt(dist_sq_vv);
-                                        let n = delta_vv / dist_vv;
-                                        let pen = effective_thick - dist_vv;
-                                        let w_i = v_i.inv_mass;
-                                        let w_j = v_j.inv_mass;
-                                        let w_sum = w_i + w_j;
-
-                                        if (w_sum > EPSILON) {
-                                            if (w_j <= 0.0) {
-                                                // 相手がピン留め（相手スレッドは停止しているため、自頂点のみ退避）
-                                                let v_j_move = p_j - p_j_old;
-                                                let col_disp = n * pen + v_j_move * 0.5;
-                                                add_pin_disp_atomic(index, col_disp);
-                                            } else {
-                                                // 動的頂点同士：index < j により1回のみ評価され、質量比に応じて対称分配
-                                                let disp = n * (pen * 0.5);
-                                                add_disp_atomic(index, disp * (w_i / w_sum));
-                                                add_disp_atomic(j, -disp * (w_j / w_sum));
+                                if (!is_pinned_i && (!both_dynamic || index < j)) {
+                                    if (dist_sq_vv < eff_thick_sq && dist_sq_vv > EPSILON * EPSILON) {
+                                        var is_untangling_vv = false;
+                                        if (params.enable_normal_untangling != 0u && v_i.layer_id != v_j.layer_id) {
+                                            let n_i_raw_vv = normals[index].xyz;
+                                            let n_i_len_vv = length(n_i_raw_vv);
+                                            let n_j_raw_vv = normals[j].xyz;
+                                            let n_j_len_vv = length(n_j_raw_vv);
+                                            if (v_i.layer_id > v_j.layer_id) {
+                                                if (n_j_len_vv > 0.5) {
+                                                    let n_j_unit = n_j_raw_vv / n_j_len_vv;
+                                                    let allow_ut_vv = (v_j.inv_mass <= 0.0)
+                                                        || (n_i_len_vv <= 0.5)
+                                                        || (dot(n_i_raw_vv / max(n_i_len_vv, EPSILON), n_j_unit) > 0.0);
+                                                    is_untangling_vv = allow_ut_vv && (dot(delta_vv, n_j_unit) < 0.0);
+                                                }
+                                            } else if (both_dynamic && n_i_len_vv > 0.5) {
+                                                let n_i_unit_vv = n_i_raw_vv / n_i_len_vv;
+                                                let allow_ut_vv = (n_j_len_vv <= 0.5)
+                                                    || (dot(n_j_raw_vv / max(n_j_len_vv, EPSILON), n_i_unit_vv) > 0.0);
+                                                is_untangling_vv = allow_ut_vv && (dot(-delta_vv, n_i_unit_vv) < 0.0);
                                             }
                                         }
-                                    }
-                                }
+                                        if (!is_untangling_vv) {
+                                            let n = delta_vv / dist_vv;
+                                            let pen = effective_thick - dist_vv;
+                                            let w_i = v_i.inv_mass;
+                                            let w_j = v_j.inv_mass;
+                                            let w_sum = w_i + w_j;
 
-                                // 多層布Untangling (動的背中合わせ山折りを除く裏側潜り込みのみ法線脱出)
-                                if (params.enable_normal_untangling != 0u && !is_pinned_i) {
-                                    let layer_i = v_i.layer_id;
-                                    let layer_j = v_j.layer_id;
-                                    let n_j = normals[j].xyz;
-                                    let n_j_len = length(n_j);
-                                    if (layer_i > layer_j && n_j_len > 0.5) {
-                                        let n_j_unit = n_j / n_j_len;
-                                        let delta = p_i - p_j;
-                                        let h_j = dot(delta, n_j_unit); // 相手法線方向の高さ (< 0 なら裏側)
-                                        let n_i_push = normals[index].xyz;
-                                        let n_i_push_len = length(n_i_push);
-                                        if ((n_i_push_len <= 0.5 || dot(n_i_push, n_j_unit) > 0.0 || dot(delta, n_i_push) <= 0.0 || v_j.inv_mass == 0.0) && h_j < 0.0) {
-                                            let d_tangent = delta - h_j * n_j_unit;
-                                            let r_sq = dot(d_tangent, d_tangent);
-                                            let r_max = effective_thick * 2.5;
-                                            let h_max = effective_thick * 2.5;
-                                            if (r_sq < r_max * r_max && h_j > -h_max) {
-                                                let r = sqrt(max(r_sq, 0.0));
-                                                let radial_w = clamp(1.0 - r / r_max, 0.0, 1.0);
-                                                // h_j = 0 境界でのステップ不連続（チャタリング振動）を防ぐ連続ランプ係数
-                                                let depth_w = clamp(-h_j / max(effective_thick * 0.5, EPSILON), 0.0, 1.0);
-                                                let pen = min(effective_thick - h_j, effective_thick * 2.0) * radial_w * depth_w;
-                                                let w_i = v_i.inv_mass;
-                                                let w_j = v_j.inv_mass;
-                                                let w_sum = w_i + w_j;
-                                                if (w_sum > EPSILON) {
-                                                    if (w_j <= 0.0) {
-                                                        // 相手がピン留め基準面の場合は自頂点のみ脱出
-                                                        add_disp_atomic(index, n_j_unit * pen);
-                                                    } else {
-                                                        // 動的頂点同士は運動量保存則に従い質量比で作用・反作用を対称分配
-                                                        let disp = n_j_unit * (pen * 0.5);
-                                                        add_disp_atomic(index, disp * (w_i / w_sum));
-                                                        add_disp_atomic(j, -disp * (w_j / w_sum));
-                                                    }
+                                            if (w_sum > EPSILON) {
+                                                if (w_j <= 0.0) {
+                                                    // 相手がピン留め（相手スレッドは停止しているため、自頂点のみ退避）
+                                                    let v_j_move = p_j - p_j_old;
+                                                    let col_disp = n * pen + v_j_move * 0.5;
+                                                    add_pin_disp_atomic(index, col_disp);
+                                                } else {
+                                                    // 動的頂点同士：index < j により1回のみ評価され、質量比に応じて対称分配
+                                                    let disp = n * (pen * 0.5);
+                                                    add_disp_atomic(index, disp * (w_i / w_sum));
+                                                    add_disp_atomic(j, -disp * (w_j / w_sum));
                                                 }
                                             }
                                         }
@@ -559,17 +541,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 let tri_n_ccd = select(vec3<f32>(0.0, 1.0, 0.0), tri_cross_ccd / tri_len_ccd, tri_len_ccd > 1e-12);
                                                 let h_old_raw = dot(rel_old_i - p_j, tri_n_ccd);
 
-                                                // 表側復帰保護: 自由な外層頂点(!is_pinned_i)が裏側(h_old < 0)から表面(+tri_n方向)へ戻る軌道(動的背中合わせ山折りを除く)のみ通す
+                                                // 表側復帰保護: 自由な外層頂点(!is_pinned_i)が裏側(h_old < 0)から表面(+tri_n方向)へ戻る軌道(動的対向法線を除く)のみ通す
                                                 var is_untangling_vt_ccd = false;
-                                                if (params.enable_normal_untangling != 0u && !is_pinned_i && tri_len_ccd > 1e-12 && v_i.layer_id > v_j.layer_id) {
-                                                    let n_i_vt_ccd = normals[index].xyz;
-                                                    let n_i_vt_ccd_len = length(n_i_vt_ccd);
-                                                    let is_dynamic_b2b = (v_j.inv_mass > 0.0) && !tri_has_pin
-                                                        && (n_i_vt_ccd_len > 0.5)
-                                                        && (dot(n_i_vt_ccd, tri_n_ccd) <= 0.0)
-                                                        && (dot(rel_old_i - p_j, n_i_vt_ccd) > 0.0);
+                                                if (params.enable_normal_untangling != 0u && !is_pinned_i && (v_i.layer_id > v_j.layer_id) && tri_len_ccd > 1e-12) {
+                                                    let n_i_raw_ccd = normals[index].xyz;
+                                                    let n_i_len_ccd = length(n_i_raw_ccd);
+                                                    let allow_untangle_vt_ccd = tri_has_pin
+                                                        || (n_i_len_ccd <= 0.5)
+                                                        || (dot(n_i_raw_ccd / max(n_i_len_ccd, EPSILON), tri_n_ccd) > 0.0);
                                                     let returning_front_ccd = (h_old_raw < 0.0) && (dot(move_vec, tri_n_ccd) > 0.0);
-                                                    is_untangling_vt_ccd = !is_dynamic_b2b && returning_front_ccd;
+                                                    is_untangling_vt_ccd = allow_untangle_vt_ccd && returning_front_ccd;
                                                 }
 
                                                 if (!is_untangling_vt_ccd) {
@@ -624,47 +605,57 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                 // B) 最近傍点幾何反発（重心座標による作用反作用の対称分配）
                                                 let res_vt = closest_point_on_triangle_bary(p_i, p_j, p_v0, p_v1);
                                                 let delta_vt = p_i - res_vt.pt;
-                                                let dist_vt = length(delta_vt);
+                                                let dist_sq_vt = dot(delta_vt, delta_vt);
 
-                                                let tri_cross = cross(p_v0 - p_j, p_v1 - p_j);
-                                                let tri_len = length(tri_cross);
-                                                let h_vt = select(0.0, dot(delta_vt, tri_cross / max(tri_len, EPSILON)), tri_len > EPSILON);
-                                                let is_behind = (tri_len > EPSILON) && (h_vt < -effective_thick * 0.25);
-
-                                                // 多層布Untangling (外側レイヤー i が内側レイヤー j の裏側に潜り込んだ場合のみ法線脱出)
-                                                let is_untangling_vt = (params.enable_normal_untangling != 0u)
-                                                    && (v_i.layer_id > v_j.layer_id)
-                                                    && is_behind;
-
-                                                if (!is_pinned_i && !is_untangling_vt && dist_vt < effective_thick && dist_vt > EPSILON) {
-                                                    let n_vt = delta_vt / dist_vt;
-                                                    let pen_vt = effective_thick - dist_vt;
-                                                    if (tri_has_pin) {
-                                                        // 相手三角形がピン留め頂点を含む場合は自頂点のみコライダー押し出し
-                                                        let col_disp = n_vt * pen_vt + tri_move * 0.5;
-                                                        add_pin_disp_atomic(index, col_disp);
-                                                    } else {
-                                                        let w_i = v_i.inv_mass;
-                                                        let bary = res_vt.bary;
-                                                        let w_j = v_j.inv_mass;
-                                                        let w_v0 = v_v0.inv_mass;
-                                                        let w_v1 = v_v1.inv_mass;
-                                                        let w_tri = bary.x * bary.x * w_j + bary.y * bary.y * w_v0 + bary.z * bary.z * w_v1;
-                                                        let w_tot = w_i + w_tri;
-
-                                                        if (w_tot > EPSILON) {
-                                                            let total_pen = n_vt * (pen_vt * 0.6);
-                                                            // 自頂点
-                                                            add_disp_atomic(index, total_pen * (w_i / w_tot));
-                                                            // 相手三角形の3頂点（反作用）
-                                                            if (w_j > 0.0) {
-                                                                add_disp_atomic(j, -total_pen * (bary.x * w_j / w_tot));
+                                                if (!is_pinned_i && dist_sq_vt < eff_thick_sq && dist_sq_vt > EPSILON * EPSILON) {
+                                                    let dist_vt = sqrt(dist_sq_vt);
+                                                    var is_untangling_vt = false;
+                                                    if (params.enable_normal_untangling != 0u && v_i.layer_id > v_j.layer_id) {
+                                                        let tri_cross = cross(p_v0 - p_j, p_v1 - p_j);
+                                                        let tri_len = length(tri_cross);
+                                                        if (tri_len > EPSILON) {
+                                                            let tri_n = tri_cross / tri_len;
+                                                            let h_vt = dot(delta_vt, tri_n);
+                                                            if (h_vt < 0.0) {
+                                                                let n_i_raw_vt = normals[index].xyz;
+                                                                let n_i_len_vt = length(n_i_raw_vt);
+                                                                is_untangling_vt = tri_has_pin
+                                                                    || (n_i_len_vt <= 0.5)
+                                                                    || (dot(n_i_raw_vt / max(n_i_len_vt, EPSILON), tri_n) > 0.0);
                                                             }
-                                                            if (w_v0 > 0.0) {
-                                                                add_disp_atomic(v0, -total_pen * (bary.y * w_v0 / w_tot));
-                                                            }
-                                                            if (w_v1 > 0.0) {
-                                                                add_disp_atomic(v1, -total_pen * (bary.z * w_v1 / w_tot));
+                                                        }
+                                                    }
+
+                                                    if (!is_untangling_vt) {
+                                                        let n_vt = delta_vt / dist_vt;
+                                                        let pen_vt = effective_thick - dist_vt;
+                                                        if (tri_has_pin) {
+                                                            // 相手三角形がピン留め頂点を含む場合は自頂点のみコライダー押し出し
+                                                            let col_disp = n_vt * pen_vt + tri_move * 0.5;
+                                                            add_pin_disp_atomic(index, col_disp);
+                                                        } else {
+                                                            let w_i = v_i.inv_mass;
+                                                            let bary = res_vt.bary;
+                                                            let w_j = v_j.inv_mass;
+                                                            let w_v0 = v_v0.inv_mass;
+                                                            let w_v1 = v_v1.inv_mass;
+                                                            let w_tri = bary.x * bary.x * w_j + bary.y * bary.y * w_v0 + bary.z * bary.z * w_v1;
+                                                            let w_tot = w_i + w_tri;
+
+                                                            if (w_tot > EPSILON) {
+                                                                let total_pen = n_vt * (pen_vt * 0.6);
+                                                                // 自頂点
+                                                                add_disp_atomic(index, total_pen * (w_i / w_tot));
+                                                                // 相手三角形の3頂点（反作用）
+                                                                if (w_j > 0.0) {
+                                                                    add_disp_atomic(j, -total_pen * (bary.x * w_j / w_tot));
+                                                                }
+                                                                if (w_v0 > 0.0) {
+                                                                    add_disp_atomic(v0, -total_pen * (bary.y * w_v0 / w_tot));
+                                                                }
+                                                                if (w_v1 > 0.0) {
+                                                                    add_disp_atomic(v1, -total_pen * (bary.z * w_v1 / w_tot));
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -680,6 +671,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     }
                 }
             }
-}
+        }
+    }
+
+    // Direct 経路は同一スレッド内で最小距離候補を決定済み（上位10bit=0、下位22bitに j+1u を格納）
+    if (track_untangle && best_inner_j < 0x3FFFFEu) {
+        atomicStore(&accum[index].untangle_cand_v, best_inner_j + 1u);
     }
 }

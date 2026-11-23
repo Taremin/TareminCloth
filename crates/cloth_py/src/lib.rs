@@ -573,7 +573,7 @@ fn compute_combined_inv_masses<'py>(
         Some(strand_storage.as_slice())
     };
 
-    let pin_vec: Option<Vec<f32>> = pin_weights.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
+    let pin_vec: Option<Vec<f32>> = pin_weights.map(|arr| arr.as_array().to_vec());
     let inv = core_combined_inv_masses(&pos_vec, faces_opt, strand_opt, pin_vec.as_deref(), areal_density, linear_density);
     Ok(PyArray1::from_vec(py, inv))
 }
@@ -1064,42 +1064,71 @@ fn bake_bone_sdf_gpu<'py>(
     restitution: f32,
     close_open_boundaries: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
+    if resolution == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "resolution は 1 以上である必要があります",
+        ));
+    }
+
     let verts_view = mesh_verts.as_array();
+    if verts_view.ndim() != 2 || verts_view.shape()[1] < 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "mesh_verts は shape (N, 3) である必要があります",
+        ));
+    }
     let n_verts = verts_view.shape()[0];
     let mut verts_vec = Vec::with_capacity(n_verts);
     for row in verts_view.outer_iter() {
-        if row.len() >= 3 {
-            verts_vec.push([row[0], row[1], row[2]]);
-        }
+        verts_vec.push([row[0], row[1], row[2]]);
     }
 
     let tris_view = mesh_tris.as_array();
+    if tris_view.ndim() != 2 || tris_view.shape()[1] < 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "mesh_tris は shape (M, 3) である必要があります",
+        ));
+    }
     let n_tris = tris_view.shape()[0];
     let mut tris_vec = Vec::with_capacity(n_tris);
     for row in tris_view.outer_iter() {
-        if row.len() >= 3 {
-            tris_vec.push([row[0], row[1], row[2]]);
-        }
+        tris_vec.push([row[0], row[1], row[2]]);
     }
 
     let bind_mats_view = bone_bind_matrices.as_array();
     let n_bones = bone_names.len();
+    if bone_weights.len() != n_bones {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "bone_names と bone_weights の要素数が一致しません",
+        ));
+    }
+    if bind_mats_view.shape()[0] < n_bones
+        || bind_mats_view.shape()[1] != 4
+        || bind_mats_view.shape()[2] != 4
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "bone_bind_matrices は shape (N_bones, 4, 4) である必要があります",
+        ));
+    }
     let mut bones_input = Vec::with_capacity(n_bones);
 
     for (b_idx, name) in bone_names.into_iter().enumerate() {
         let w_view = bone_weights[b_idx].as_array();
+        if w_view.len() != n_verts {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "bone_weights[{}] の長さ ({}) が頂点数 ({}) と一致しません",
+                b_idx,
+                w_view.len(),
+                n_verts
+            )));
+        }
         let weights = w_view.to_vec();
 
         let mut bind_mat = [0.0f32; 16];
-        if b_idx < bind_mats_view.shape()[0] {
-            let mut k = 0;
-            for r in 0..4 {
-                for c in 0..4 {
-                    if k < 16 {
-                        bind_mat[k] = bind_mats_view[[b_idx, r, c]];
-                        k += 1;
-                    }
-                }
+        let mut k = 0;
+        for r in 0..4 {
+            for c in 0..4 {
+                bind_mat[k] = bind_mats_view[[b_idx, r, c]];
+                k += 1;
             }
         }
 
@@ -1110,19 +1139,23 @@ fn bake_bone_sdf_gpu<'py>(
         });
     }
 
-    let res = core_bake_bone_sdf_gpu_ext(
-        &verts_vec,
-        &tris_vec,
-        &bones_input,
-        resolution,
-        margin,
-        weight_threshold,
-        blend_k,
-        friction,
-        thickness,
-        restitution,
-        close_open_boundaries,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU SDFベイク失敗: {e}")))?;
+    let res = py
+        .allow_threads(|| {
+            core_bake_bone_sdf_gpu_ext(
+                &verts_vec,
+                &tris_vec,
+                &bones_input,
+                resolution,
+                margin,
+                weight_threshold,
+                blend_k,
+                friction,
+                thickness,
+                restitution,
+                close_open_boundaries,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU SDFベイク失敗: {e}")))?;
 
     let dict = PyDict::new(py);
     dict.set_item("texture_bytes", PyBytes::new(py, &res.texture_bytes))?;
@@ -1199,16 +1232,20 @@ fn bake_mesh_sdf_gpu<'py>(
         }
     }
 
-    let res = core_bake_mesh_sdf_gpu_ext(
-        &verts_vec,
-        &tris_vec,
-        voxel_size,
-        margin,
-        friction,
-        thickness,
-        restitution,
-        close_open_boundaries,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU Mesh SDFベイク失敗: {e}")))?;
+    let res = py
+        .allow_threads(|| {
+            core_bake_mesh_sdf_gpu_ext(
+                &verts_vec,
+                &tris_vec,
+                voxel_size,
+                margin,
+                friction,
+                thickness,
+                restitution,
+                close_open_boundaries,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU Mesh SDFベイク失敗: {e}")))?;
 
     let dict = PyDict::new(py);
     dict.set_item("texture_bytes", PyBytes::new(py, &res.texture_bytes))?;
@@ -1264,16 +1301,20 @@ fn bake_mesh_sdf_hierarchical_gpu<'py>(
         }
     }
 
-    let res = core_bake_mesh_sdf_hierarchical_ext(
-        &verts_vec,
-        &tris_vec,
-        voxel_size,
-        margin,
-        friction,
-        thickness,
-        restitution,
-        close_open_boundaries,
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU階層Mesh SDFベイク失敗: {e}")))?;
+    let res = py
+        .allow_threads(|| {
+            core_bake_mesh_sdf_hierarchical_ext(
+                &verts_vec,
+                &tris_vec,
+                voxel_size,
+                margin,
+                friction,
+                thickness,
+                restitution,
+                close_open_boundaries,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU階層Mesh SDFベイク失敗: {e}")))?;
 
     let dict = PyDict::new(py);
     dict.set_item("texture_bytes", PyBytes::new(py, &res.texture_bytes))?;
@@ -1408,16 +1449,34 @@ impl ClothSimulator {
                     "edges配列の各エッジは2要素 (v0, v1) である必要があります",
                 ));
             }
+            if (row[0] as usize) >= n_verts || (row[1] as usize) >= n_verts {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "edges に頂点数 ({}) 以上のインデックスが含まれています: [{}, {}]",
+                    n_verts, row[0], row[1]
+                )));
+            }
             edge_vec.push([row[0], row[1]]);
         }
 
         let mut face_vec = Vec::new();
         if let Some(f_arr) = faces {
             let f_view = f_arr.as_array();
+            if f_view.shape()[1] != 3 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "faces配列の各面は3頂点 (v0, v1, v2) である必要があります",
+                ));
+            }
             for row in f_view.outer_iter() {
-                if row.len() == 3 {
-                    face_vec.push([row[0], row[1], row[2]]);
+                if (row[0] as usize) >= n_verts
+                    || (row[1] as usize) >= n_verts
+                    || (row[2] as usize) >= n_verts
+                {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "faces に頂点数 ({}) 以上のインデックスが含まれています: [{}, {}, {}]",
+                        n_verts, row[0], row[1], row[2]
+                    )));
                 }
+                face_vec.push([row[0], row[1], row[2]]);
             }
         }
         let faces_opt = if face_vec.is_empty() {
@@ -1429,10 +1488,19 @@ impl ClothSimulator {
         let mut sew_vec = Vec::new();
         if let Some(s_arr) = sewing_springs {
             let s_view = s_arr.as_array();
+            if s_view.shape()[1] != 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "sewing_springs配列の各ペアは2頂点 (v0, v1) である必要があります",
+                ));
+            }
             for row in s_view.outer_iter() {
-                if row.len() == 2 {
-                    sew_vec.push([row[0], row[1]]);
+                if (row[0] as usize) >= n_verts || (row[1] as usize) >= n_verts {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "sewing_springs に頂点数 ({}) 以上のインデックスが含まれています: [{}, {}]",
+                        n_verts, row[0], row[1]
+                    )));
                 }
+                sew_vec.push([row[0], row[1]]);
             }
         }
         let sew_opt = if sew_vec.is_empty() {
@@ -1442,21 +1510,51 @@ impl ClothSimulator {
         };
 
         let inv_m_vec: Option<Vec<f32>> = match inv_masses {
-            Some(arr) => Some(arr.to_vec().map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("inv_massesの変換失敗: {e}"))
-            })?),
+            Some(arr) => {
+                let v = arr.to_vec().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("inv_massesの変換失敗: {e}"))
+                })?;
+                if v.len() != n_verts {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "inv_masses の長さ ({}) が頂点数 ({}) と一致しません",
+                        v.len(),
+                        n_verts
+                    )));
+                }
+                Some(v)
+            }
             None => None,
         };
         let layer_id_vec: Option<Vec<u32>> = match layer_ids {
-            Some(arr) => Some(arr.to_vec().map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("layer_idsの変換失敗: {e}"))
-            })?),
+            Some(arr) => {
+                let v = arr.to_vec().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("layer_idsの変換失敗: {e}"))
+                })?;
+                if v.len() != n_verts {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "layer_ids の長さ ({}) が頂点数 ({}) と一致しません",
+                        v.len(),
+                        n_verts
+                    )));
+                }
+                Some(v)
+            }
             None => None,
         };
         let thick_vec: Option<Vec<f32>> = match thicknesses {
-            Some(arr) => Some(arr.to_vec().map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!("thicknessesの変換失敗: {e}"))
-            })?),
+            Some(arr) => {
+                let v = arr.to_vec().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("thicknessesの変換失敗: {e}"))
+                })?;
+                if v.len() != n_verts {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "thicknesses の長さ ({}) が頂点数 ({}) と一致しません",
+                        v.len(),
+                        n_verts
+                    )));
+                }
+                Some(v)
+            }
             None => None,
         };
 
@@ -1514,12 +1612,20 @@ impl ClothSimulator {
     /// substeps が None の場合、コアの適応サブステップ設定（または既定値）に基づき実効ステップ数を自動算出
     /// 戻り値: 実際に実行された実効サブステップ数
     #[pyo3(signature = (dt=0.016666667, substeps=None, solver_iterations=None))]
-    fn step(&mut self, dt: f32, substeps: Option<u32>, solver_iterations: Option<u32>) -> u32 {
+    fn step(
+        &mut self,
+        py: Python<'_>,
+        dt: f32,
+        substeps: Option<u32>,
+        solver_iterations: Option<u32>,
+    ) -> u32 {
         if let Some(iters) = solver_iterations {
             self.simulator.set_solver_iterations(iters);
         }
         let requested = substeps.unwrap_or(0);
-        self.simulator.step(dt, requested);
+        py.allow_threads(|| {
+            self.simulator.step(dt, requested);
+        });
         self.simulator.effective_substeps()
     }
 
@@ -1545,16 +1651,18 @@ impl ClothSimulator {
 
     /// 単一サブステップのみ計算を進める（オンデマンド・サブステップ顕微鏡解析用）
     #[pyo3(signature = (dt_sub=0.0016666667))]
-    fn step_single_substep(&mut self, dt_sub: f32) {
-        self.simulator.step_single_substep(dt_sub);
+    fn step_single_substep(&mut self, py: Python<'_>, dt_sub: f32) {
+        py.allow_threads(|| {
+            self.simulator.step_single_substep(dt_sub);
+        });
     }
 
     /// 準静的一瞬ドレープを実行し、重力・衝突・拘束の釣り合い位置へ即座に収束させる
     #[pyo3(signature = (substeps=40, damping=0.85))]
-    fn instant_drape(&mut self, substeps: Option<u32>, damping: Option<f32>) -> u32 {
+    fn instant_drape(&mut self, py: Python<'_>, substeps: Option<u32>, damping: Option<f32>) -> u32 {
         let actual_substeps = substeps.unwrap_or(40);
         let actual_damping = damping.unwrap_or(0.85);
-        self.simulator.instant_drape(actual_substeps, actual_damping)
+        py.allow_threads(|| self.simulator.instant_drape(actual_substeps, actual_damping))
     }
 
     /// シミュレーションを非同期に 1 フレーム進める（GPU計算を発行しCPUブロックなしで即座に復帰）
@@ -1569,26 +1677,39 @@ impl ClothSimulator {
 
     /// 非同期実行された前フレームの頂点位置を回収する（成功時 True, 未実行/失敗時 False）
     fn fetch_positions<'py>(&mut self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<bool> {
-        let out_slice = unsafe { out_array.as_slice_mut()? };
+        let mut out_rw = out_array.try_readwrite().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "out_array は書き込み可能な NumPy 配列である必要があります: {}",
+                e
+            ))
+        })?;
+        let out_slice = out_rw.as_slice_mut()?;
         let ok = self.simulator.fetch_positions_flat(out_slice);
         Ok(ok)
     }
 
     /// シミュレーションを 1 フレーム進め、計算結果座標をGPU内部のリングバッファに保存する（待機・転送ゼロで即座に復帰）
     /// 戻り値: 現在バッファリングされているフレーム数 (1 ..= 8)
-    #[pyo3(signature = (dt=0.016666667, substeps=20, solver_iterations=None))]
-    fn step_buffered(&mut self, dt: f32, substeps: u32, solver_iterations: Option<u32>) -> u32 {
+    #[pyo3(signature = (dt=0.016666667, substeps=None, solver_iterations=None))]
+    fn step_buffered(&mut self, dt: f32, substeps: Option<u32>, solver_iterations: Option<u32>) -> u32 {
         if let Some(iters) = solver_iterations {
             self.simulator.set_solver_iterations(iters);
         }
-        self.simulator.step_buffered(dt, substeps)
+        let requested = substeps.unwrap_or(0);
+        self.simulator.step_buffered(dt, requested)
     }
 
     /// リングバッファにたまっている全フレームの頂点座標を一度のPCIe転送でまとめて取得する
     /// out_array の長さは (buffered_frame_count * num_vertices * 3) 以上である必要があります
     /// 戻り値: 取得したフレーム数
     fn fetch_buffered_positions<'py>(&mut self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<u32> {
-        let out_slice = unsafe { out_array.as_slice_mut()? };
+        let mut out_rw = out_array.try_readwrite().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "out_array は書き込み可能な NumPy 配列である必要があります: {}",
+                e
+            ))
+        })?;
+        let out_slice = out_rw.as_slice_mut()?;
         let count = self.simulator.fetch_buffered_positions(out_slice);
         Ok(count)
     }
@@ -1832,7 +1953,13 @@ impl ClothSimulator {
 
     /// 頂点位置を NumPy フラット配列 (len = num_vertices * 3) に同期的に書き戻す
     fn get_positions<'py>(&self, _py: Python<'py>, out_array: Bound<'py, PyArray1<f32>>) -> PyResult<()> {
-        let out_slice = unsafe { out_array.as_slice_mut()? };
+        let mut out_rw = out_array.try_readwrite().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "out_array は書き込み可能な NumPy 配列である必要があります: {}",
+                e
+            ))
+        })?;
+        let out_slice = out_rw.as_slice_mut()?;
         self.simulator.get_positions_flat(out_slice);
         Ok(())
     }
@@ -1905,6 +2032,13 @@ impl ClothSimulator {
         let default_flags = if single_sided { 1u32 } else { 0u32 };
 
         let attr_opt = attributes.as_ref().map(|a| a.as_array());
+        if let Some(ref attr_view) = attr_opt {
+            if attr_view.shape()[0] < n_triangles || attr_view.shape()[1] < 4 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "attributes は shape (N_triangles, >=4) である必要があります",
+                ));
+            }
+        }
 
         for (i, tri) in tri_view.outer_iter().enumerate() {
             if tri.shape() != [3, 3] {
@@ -2004,9 +2138,14 @@ impl ClothSimulator {
         let w_view = world_matrices.as_array();
         let inv_view = inv_world_matrices.as_array();
         let n_bones = w_view.shape()[0];
-        if inv_view.shape()[0] != n_bones {
+        if w_view.shape()[1] != 4
+            || w_view.shape()[2] != 4
+            || inv_view.shape()[0] != n_bones
+            || inv_view.shape()[1] != 4
+            || inv_view.shape()[2] != 4
+        {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "world_matrices と inv_world_matrices のボーン数が一致しません",
+                "world_matrices と inv_world_matrices は一致する shape (N, 4, 4) である必要があります",
             ));
         }
 
@@ -2030,7 +2169,7 @@ impl ClothSimulator {
 
         self.simulator.update_bone_transforms(&transforms);
 
-        let dirty_vec = dirty_bone_indices.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
+        let dirty_vec = dirty_bone_indices.map(|arr| arr.as_array().to_vec());
         self.simulator.set_dynamic_bone_sdf_dirty_bones(dirty_vec);
         Ok(())
     }
@@ -2041,7 +2180,7 @@ impl ClothSimulator {
         &mut self,
         dirty_bone_indices: Option<PyReadonlyArray1<u32>>,
     ) {
-        let dirty_vec = dirty_bone_indices.map(|arr| arr.as_slice().unwrap_or(&[]).to_vec());
+        let dirty_vec = dirty_bone_indices.map(|arr| arr.as_array().to_vec());
         self.simulator.set_dynamic_bone_sdf_dirty_bones(dirty_vec);
     }
 
@@ -2080,6 +2219,11 @@ impl ClothSimulator {
         bone_bind_inv_matrices: PyReadonlyArray3<f32>,
         update_interval: u32,
     ) -> PyResult<()> {
+        if res == 0 || width == 0 || height == 0 || depth == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "width, height, depth, res はすべて 1 以上である必要があります",
+            ));
+        }
         let info_view = bone_infos.as_array();
         let n_bones = info_view.shape()[0];
         let mut gpu_bone_infos = Vec::with_capacity(n_bones);
@@ -2103,6 +2247,11 @@ impl ClothSimulator {
         let bw_view = bone_weights.as_array();
         let n_verts = rv_view.shape()[0];
 
+        if rv_view.shape()[1] < 3 || bi_view.shape()[1] < 4 || bw_view.shape()[1] < 4 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "rest_verts は >=3 列、bone_indices / bone_weights は >=4 列である必要があります",
+            ));
+        }
         if bi_view.shape()[0] != n_verts || bw_view.shape()[0] != n_verts {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "rest_verts, bone_indices, bone_weights の頂点数が一致しません",
@@ -2142,6 +2291,10 @@ impl ClothSimulator {
         }
 
         let mut gpu_tri_sources = Vec::with_capacity(n_tris);
+        let mut seen_tris: std::collections::HashSet<[u32; 3]> =
+            std::collections::HashSet::with_capacity(n_tris);
+        let mut unique_tris: Vec<[i32; 3]> = Vec::with_capacity(n_tris);
+
         for i in 0..n_tris {
             let ts_row = ts_view.row(i);
             let tw_row = tw_view.row(i);
@@ -2150,10 +2303,22 @@ impl ClothSimulator {
                     "tri_sources は 4要素 (i0, i1, i2, bone_idx)、tri_weights は 3要素 (w0, w1, w2) 必要です",
                 ));
             }
+            let (i0, i1, i2) = (ts_row[0], ts_row[1], ts_row[2]);
+            let mut sorted = [i0, i1, i2];
+            sorted.sort_unstable();
+            if seen_tris.insert(sorted) {
+                if let (Ok(a), Ok(b), Ok(c)) = (
+                    i32::try_from(i0),
+                    i32::try_from(i1),
+                    i32::try_from(i2),
+                ) {
+                    unique_tris.push([a, b, c]);
+                }
+            }
             gpu_tri_sources.push(GpuBoneTriangleSource {
-                i0: ts_row[0],
-                i1: ts_row[1],
-                i2: ts_row[2],
+                i0,
+                i1,
+                i2,
                 bone_idx: ts_row[3],
                 w0: tw_row[0],
                 w1: tw_row[1],
@@ -2162,10 +2327,40 @@ impl ClothSimulator {
             });
         }
 
+        // 重複排除済み元メッシュ三角形から開放境界エッジビットマスク (1|2|4) を構築し動的スキニングへ伝播
+        let open_edges = cloth_core::sdf_baker::collect_open_boundary_undirected_edges(
+            &unique_tris,
+            gpu_rest_verts.len(),
+        );
+        for ts in &mut gpu_tri_sources {
+            if let (Ok(i0), Ok(i1), Ok(i2)) = (
+                i32::try_from(ts.i0),
+                i32::try_from(ts.i1),
+                i32::try_from(ts.i2),
+            ) {
+                if i0 != i1 && i1 != i2 && i2 != i0 {
+                    let mut bmask = 0u32;
+                    if open_edges.contains(&(i0.min(i1), i0.max(i1))) {
+                        bmask |= 1;
+                    }
+                    if open_edges.contains(&(i1.min(i2), i1.max(i2))) {
+                        bmask |= 2;
+                    }
+                    if open_edges.contains(&(i2.min(i0), i2.max(i0))) {
+                        bmask |= 4;
+                    }
+                    ts._pad = bmask as f32;
+                }
+            }
+        }
+
         let inv_view = bone_bind_inv_matrices.as_array();
-        if inv_view.shape()[0] != n_bones {
+        if inv_view.shape()[0] < n_bones
+            || inv_view.shape()[1] != 4
+            || inv_view.shape()[2] != 4
+        {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "bone_bind_inv_matrices のボーン数が bone_infos と一致しません",
+                "bone_bind_inv_matrices は shape (N_bones, 4, 4) である必要があります",
             ));
         }
         let mut bind_inv_mats = Vec::with_capacity(n_bones);
@@ -2348,6 +2543,30 @@ impl ClothSimulator {
         self.simulator.reset_edge_rest_lengths();
     }
 
+    /// 指定された元エッジインデックス群に対して剛性倍率 (stiffness_multiplier) を設定
+    #[pyo3(signature = (edge_indices, multipliers))]
+    fn set_edge_stiffness_multipliers(
+        &mut self,
+        edge_indices: PyReadonlyArray1<u32>,
+        multipliers: PyReadonlyArray1<f32>,
+    ) -> PyResult<()> {
+        let indices_slice = edge_indices.as_slice()?;
+        let mult_slice = multipliers.as_slice()?;
+        self.simulator
+            .set_edge_stiffness_multipliers(indices_slice, mult_slice);
+        Ok(())
+    }
+
+    /// 全エッジの剛性倍率を初期状態 (1.0) にリセット
+    fn reset_edge_stiffness_multipliers(&mut self) {
+        self.simulator.reset_edge_stiffness_multipliers();
+    }
+
+    /// 指定エッジの現在の実効引張コンプライアンスを取得
+    fn get_edge_tension_compliance(&self, edge_idx: u32) -> f32 {
+        self.simulator.get_edge_tension_compliance(edge_idx)
+    }
+
     /// 指定エッジの現在の自然長を取得
     fn get_edge_rest_length(&self, edge_idx: u32) -> f32 {
         self.simulator.get_edge_rest_length(edge_idx)
@@ -2425,6 +2644,17 @@ impl ClothSimulator {
     #[pyo3(signature = (stiffness=10000.0))]
     fn set_sewing_stiffness(&mut self, stiffness: f32) {
         self.simulator.set_sewing_stiffness(stiffness);
+    }
+
+    /// 縫合の収縮速度 (m/s) を動的に設定する
+    #[pyo3(signature = (speed=1.0))]
+    fn set_sewing_shrink_speed(&mut self, speed: f32) {
+        self.simulator.set_sewing_shrink_speed(speed);
+    }
+
+    /// 縫合の収縮速度 (m/s) を取得する
+    fn get_sewing_shrink_speed(&self) -> f32 {
+        self.simulator.sewing_shrink_speed
     }
 
     /// 縫合完了時の密着ロック有効/無効を動的に設定する
@@ -2690,24 +2920,25 @@ impl ClothSimulator {
         valley_window: f32,
         crest_window: f32,
     ) {
-        let mut p = cloth_core::simulation::types::WrinkleFieldParams {
+        let existing = &self.simulator.wrinkle_field_params;
+        let p = cloth_core::simulation::types::WrinkleFieldParams {
             bone_origin: [origin[0], origin[1], origin[2], influence_radius],
             bone_axis: [axis[0], axis[1], axis[2], bone_radius],
             bone_normal: [normal[0], normal[1], normal[2], stiffness],
             bone_binormal: [binormal[0], binormal[1], binormal[2], blend_weight],
-            z_range: [z_min.unwrap_or(0.0), z_max.unwrap_or(0.0)],
-            r_range: [r_min.unwrap_or(0.0), r_max.unwrap_or(0.0)],
+            z_range: [
+                z_min.unwrap_or(existing.z_range[0]),
+                z_max.unwrap_or(existing.z_range[1]),
+            ],
+            r_range: [
+                r_min.unwrap_or(existing.r_range[0]),
+                r_max.unwrap_or(existing.r_range[1]),
+            ],
             enabled: if self.simulator.wrinkle_field_enabled() { 1 } else { 0 },
             use_texture: 1,
             valley_window: if valley_window > 0.0 { valley_window } else { 0.015 },
             crest_window: if crest_window > 0.0 { crest_window } else { 0.020 },
         };
-        // 既存のz_range / r_rangeが設定済みなら維持
-        if z_min.is_none() && z_max.is_none() {
-            // パラメータのみの更新時
-            p.z_range = self.simulator.wrinkle_field_params.z_range;
-            p.r_range = self.simulator.wrinkle_field_params.r_range;
-        }
         self.simulator.set_wrinkle_field_params(&p);
     }
 
@@ -2723,7 +2954,16 @@ impl ClothSimulator {
         r_min: f32,
         r_max: f32,
     ) -> PyResult<()> {
-        let expected_len = (width * height * 4) as usize;
+        let expected_len = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|v| v.checked_mul(4))
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "テクスチャサイズ計算がオーバーフローしました (width={}, height={})",
+                    width, height
+                ))
+            })?;
         if texture_bytes.len() != expected_len {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "texture_bytes のサイズが不正です: actual={}, expected={} (width={}, height={})",
@@ -2757,6 +2997,10 @@ impl ClothSimulator {
         d.set_item("sewing_compliance", p.sewing_compliance)?;
         d.set_item("enable_sewing_lock", p.enable_sewing_lock)?;
         d.set_item("sewing_lock_distance", p.sewing_lock_distance)?;
+        d.set_item("tension_damping", p.tension_damping)?;
+        d.set_item("compression_damping", p.compression_damping)?;
+        d.set_item("shear_damping", p.shear_damping)?;
+        d.set_item("bending_damping", p.bending_damping)?;
         Ok(Some(d))
     }
 

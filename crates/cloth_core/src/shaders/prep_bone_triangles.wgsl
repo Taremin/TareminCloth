@@ -61,7 +61,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     tri.p2 = p2;
     tri.w2 = src.w2;
     tri.normal = norm;
-    tri._pad = 0.0;
+    tri._pad = src._pad;
 
     out_triangles[t_idx] = tri;
 }

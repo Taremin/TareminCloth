@@ -48,7 +48,7 @@ struct SelfCollisionAccum {
     ccd_neg_x: atomic<i32>,
     ccd_neg_y: atomic<i32>,
     ccd_neg_z: atomic<i32>,
-    _pad0: u32,
+    untangle_cand_v: atomic<u32>,
     ee_ccd_count: atomic<u32>,
 };
 
@@ -65,11 +65,12 @@ struct SelfCollisionAccum {
 
 const EPSILON: f32 = 1e-7;
 const FIXED_SCALE: f32 = 1000000.0;
+const MAX_ATOMIC_FIXED: f32 = 50000000.0;
 
 fn add_disp_atomic(v_idx: u32, disp: vec3<f32>) {
-    let ix = i32(clamp(disp.x * FIXED_SCALE, -2e9, 2e9));
-    let iy = i32(clamp(disp.y * FIXED_SCALE, -2e9, 2e9));
-    let iz = i32(clamp(disp.z * FIXED_SCALE, -2e9, 2e9));
+    let ix = i32(clamp(disp.x * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iy = i32(clamp(disp.y * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
+    let iz = i32(clamp(disp.z * FIXED_SCALE, -MAX_ATOMIC_FIXED, MAX_ATOMIC_FIXED));
     atomicAdd(&accum[v_idx].dx, ix);
     atomicAdd(&accum[v_idx].dy, iy);
     atomicAdd(&accum[v_idx].dz, iz);
@@ -243,7 +244,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     // 幾何学的に min_dist 未満に近づいていないペアは即座に早期枝切り
                     let delta = p_i - p_j;
                     let dist_sq = dot(delta, delta);
-                    if (dist_sq >= min_dist * min_dist || dist_sq <= EPSILON) {
+                    if (dist_sq >= min_dist * min_dist || dist_sq <= EPSILON * EPSILON) {
                         continue;
                     }
                     let dist_val = sqrt(dist_sq);

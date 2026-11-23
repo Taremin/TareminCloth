@@ -100,7 +100,7 @@ fn is_within_two_hops(vert_a: u32, vert_b: u32) -> bool {
     var low = start;
     var high = end - 1u;
 
-    for (var step = 0u; step < 7u; step = step + 1u) {
+    for (var step = 0u; step < 32u; step = step + 1u) {
         if (low > high) {
             break;
         }
@@ -132,7 +132,7 @@ fn is_topologically_near_folded(vert_a: u32, vert_b: u32, current_dist: f32) -> 
     var low = start;
     var high = end - 1u;
 
-    for (var step = 0u; step < 7u; step = step + 1u) {
+    for (var step = 0u; step < 32u; step = step + 1u) {
         if (low > high) {
             break;
         }
@@ -548,7 +548,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                                                         let dist_sq_ee = dot(diff_ee, diff_ee);
                                                         let check_thick = effective_thick + margin + horizon_i_eff + horizon_j;
 
-                                                        if (dist_sq_ee < check_thick * check_thick && dist_sq_ee > EPSILON) {
+                                                        if (dist_sq_ee < check_thick * check_thick && dist_sq_ee > EPSILON * EPSILON) {
                                                             if (params.exclude_neighbors != 0u) {
                                                                 if (is_topologically_near_folded(index, vj, length(p_i - p_vj)) ||
                                                                     is_topologically_near_folded(ui, j, length(p_ui - p_j)) ||
