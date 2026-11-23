@@ -440,7 +440,8 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
                     all_terms.add(t)
 
         # 1. 全登録クラス (Panel, Operator, Menu) の bl_label, bl_description
-        for mod in [panels, presets, preferences, ops.basic, ops.bake, ops.gui, ops.interactive, ops.pose, ops.tools, ops.wrinkle]:
+        from taremin_cloth.ops import pattern as ops_pattern
+        for mod in [panels, presets, preferences, ops.basic, ops.bake, ops.gui, ops.interactive, ops.pose, ops.tools, ops.wrinkle, ops_pattern]:
             for name, cls in inspect.getmembers(mod, inspect.isclass):
                 if issubclass(cls, (bpy.types.Panel, bpy.types.Operator, bpy.types.Menu)):
                     lbl = getattr(cls, "bl_label", None)
@@ -474,6 +475,7 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
             properties.TareminClothColliderSettings,
             properties.TareminClothColliderAnimSettings,
             properties.TareminClothElasticGroup,
+            properties.TareminClothStringPart,
             properties.TareminClothBrushSettings,
             properties.TareminWrinkleCurveSettings,
             preferences.TareminClothPreferences,
@@ -490,7 +492,14 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
                             record(itm.description)
 
         # 4. Scene に動的追加されたプロパティ
-        for prop_id in ["taremin_cloth_fast_playback", "taremin_cloth_ui_mode", "taremin_cloth_active_config_preset", "taremin_cloth_config_presets_json"]:
+        for prop_id in [
+            "taremin_cloth_fast_playback",
+            "taremin_cloth_ui_mode",
+            "taremin_cloth_active_config_preset",
+            "taremin_cloth_config_presets_json",
+            "taremin_pattern_document",
+            "taremin_pattern_editor_active",
+        ]:
             prop = bpy.types.Scene.bl_rna.properties.get(prop_id)
             if prop:
                 record(prop.name)
@@ -536,7 +545,7 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
                 except Exception:
                     pass
 
-        # 7. panels.py 内の動的フォールバックタイトル
+        # 7. panels.py 内の動的フォールバックタイトルおよびプリセット辞書
         record("Config Preset")
         record("Material Preset")
         record("Quality Preset")
@@ -547,6 +556,8 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
         record("Capsule")
         record("Mesh (Simple)")
         record("Taremin Cloth")
+        for preset_name in presets.BUILTIN_FABRIC_PRESETS.keys():
+            record(preset_name)
 
         # 8. インタラクティブモード実行時メッセージ (ステータスバー、ピン操作、開始/停止/ベンチマーク、初期化ステージ)
         record("Taremin Cloth: [Left Drag] Move Vertex | [P] Toggle Pin | [Right Click / ESC] Exit")
@@ -561,8 +572,18 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
             "Preparing cloth...", "Syncing colliders...", "Setting up viewport...",
         ]:
             record(st_msg)
+        for st_msg in ops.basic.TAREMIN_CLOTH_OT_instant_drape._STAGE_MESSAGES:
+            record(st_msg)
 
-        # 9. brush パッケージのEnumアイテムおよびプロパティ
+        # 9. 型紙エディタのツール表示名・操作ガイド・変形バリデーション文言
+        from taremin_cloth.pattern import strings as pattern_strings
+        for t_name in pattern_strings.TOOL_NAMES.values():
+            record(t_name)
+        for t_guide in pattern_strings.TOOL_GUIDES.values():
+            record(t_guide)
+        record("Select 2+ nodes, an edge, or a piece to rotate/scale")
+
+        # 10. brush パッケージのEnumアイテムおよびプロパティ
         from taremin_cloth import brush
         for brush_mod in [brush.base, brush.single_grab, brush.range_grab, brush.smooth]:
             for _, b_cls in inspect.getmembers(brush_mod, inspect.isclass):
@@ -594,6 +615,11 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
     def test_all_rna_properties_have_taremin_cloth_context(self):
         """全オペレータープロパティおよびPropertyGroupプロパティが専用コンテキスト 'TareminCloth' を保持していることを厳格検証"""
         missing_context = []
+        try:
+            from bpy_extras.io_utils import ExportHelper, ImportHelper
+            io_helper_bases = (ExportHelper, ImportHelper)
+        except ImportError:
+            io_helper_bases = ()
 
         # 1. オペレータープロパティ
         if hasattr(bpy.ops, "taremin_cloth"):
@@ -603,8 +629,17 @@ class TestI18nStrictBlenderUsage(unittest.TestCase):
                 op_func = getattr(bpy.ops.taremin_cloth, op_name)
                 if hasattr(op_func, "get_rna_type"):
                     op_rna = op_func.get_rna_type()
+                    op_cls = bpy.types.Operator.bl_rna_get_subclass_py(op_rna.identifier)
+                    is_io_helper = bool(
+                        io_helper_bases
+                        and op_cls is not None
+                        and isinstance(op_cls, type)
+                        and issubclass(op_cls, io_helper_bases)
+                    )
                     for prop in op_rna.properties:
                         if prop.identifier in ("rna_type", "name") or prop.type in ('POINTER', 'COLLECTION'):
+                            continue
+                        if is_io_helper and prop.identifier in ("filepath", "check_existing"):
                             continue
                         ctx = getattr(prop, "translation_context", None)
                         if ctx != i18n.CONTEXT:

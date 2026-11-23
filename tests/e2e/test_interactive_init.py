@@ -27,10 +27,7 @@ def _make_cloth_grid():
 class TestInteractiveInitE2E(unittest.TestCase):
     def setUp(self):
         taremin_cloth.register()
-        for obj in list(bpy.context.scene.objects):
-            bpy.data.objects.remove(obj, do_unlink=True)
-        for mesh in list(bpy.data.meshes):
-            bpy.data.meshes.remove(mesh, do_unlink=True)
+        bpy.ops.wm.read_factory_settings(use_empty=True)
         from taremin_cloth.engine.cache import clear_simulators
         clear_simulators()
         drawing.clear_init_overlay_info()
@@ -49,10 +46,7 @@ class TestInteractiveInitE2E(unittest.TestCase):
         drawing.clear_init_overlay_info()
         from taremin_cloth.engine.cache import clear_simulators
         clear_simulators()
-        for obj in list(bpy.context.scene.objects):
-            bpy.data.objects.remove(obj, do_unlink=True)
-        for mesh in list(bpy.data.meshes):
-            bpy.data.meshes.remove(mesh, do_unlink=True)
+        bpy.ops.wm.read_factory_settings(use_empty=True)
         taremin_cloth.unregister()
 
     def test_background_invoke_runs_all_stages(self):

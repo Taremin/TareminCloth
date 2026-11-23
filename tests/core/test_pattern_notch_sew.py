@@ -198,6 +198,8 @@ class TestPatternNotchGeometryAndDocument(unittest.TestCase):
         """1つの辺をノッチで2分割し、前半をPieceB、後半をPieceCとそれぞれ縫合した3Dビルド検証."""
         from taremin_cloth.pattern.build_types import build_garment_mesh_geometry
 
+        from taremin_cloth.pattern.document import Placement
+
         doc = Document.new()
         # PieceA: 40cm x 20cm (下辺: 40cm)
         p_a = doc.add_rectangle_piece((0.0, 0.0), (0.4, 0.2), name="PieceA")
@@ -205,6 +207,11 @@ class TestPatternNotchGeometryAndDocument(unittest.TestCase):
         p_b = doc.add_rectangle_piece((0.0, -0.3), (0.2, -0.1), name="PieceB")
         # PieceC: 20cm x 20cm
         p_c = doc.add_rectangle_piece((0.2, -0.3), (0.4, -0.1), name="PieceC")
+
+        # 重心中心化に対して 2D 座標位置に対応する 3D オフセットを指定
+        doc.placements[p_a.id] = Placement(piece_id=p_a.id, offset_3d=(0.2, 0.0, 0.1))
+        doc.placements[p_b.id] = Placement(piece_id=p_b.id, offset_3d=(0.1, 0.0, -0.2))
+        doc.placements[p_c.id] = Placement(piece_id=p_c.id, offset_3d=(0.3, 0.0, -0.2))
 
         outer_a = p_a.paths[p_a.outer_path_id]
         outer_b = p_b.paths[p_b.outer_path_id]
@@ -256,10 +263,13 @@ class TestPatternNotchGeometryAndDocument(unittest.TestCase):
     def test_build_notch_alignment_seam(self) -> None:
         """2つのピースにそれぞれノッチがあり、合印頂点同士が正確に Loose Edge で接続されることの検証."""
         from taremin_cloth.pattern.build_types import build_garment_mesh_geometry
+        from taremin_cloth.pattern.document import Placement
 
         doc = Document.new()
         p1 = doc.add_rectangle_piece((0.0, 0.0), (0.3, 0.2), name="Front")
         p2 = doc.add_rectangle_piece((0.0, 0.4), (0.3, 0.6), name="Back")
+        doc.placements[p1.id] = Placement(piece_id=p1.id, offset_3d=(0.15, 0.0, 0.1))
+        doc.placements[p2.id] = Placement(piece_id=p2.id, offset_3d=(0.15, 0.0, 0.5))
 
         outer1 = p1.paths[p1.outer_path_id]
         outer2 = p2.paths[p2.outer_path_id]

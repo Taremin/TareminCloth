@@ -12,6 +12,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 python_dir = os.path.join(project_root, "python")
 if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from taremin_cloth.utils import drawing
 from taremin_cloth import properties, i18n
@@ -23,11 +25,15 @@ class TestDrawingHud(unittest.TestCase):
     def setUp(self):
         drawing.clear_interactive_fps_info()
         drawing.clear_bake_overlay_info()
+        drawing.clear_init_overlay_info()
+        drawing.clear_toast_overlay_info()
         drawing.set_interactive_active(False)
 
     def tearDown(self):
         drawing.clear_interactive_fps_info()
         drawing.clear_bake_overlay_info()
+        drawing.clear_init_overlay_info()
+        drawing.clear_toast_overlay_info()
         drawing.set_interactive_active(False)
 
     def test_set_and_get_interactive_fps_info_with_help(self):
@@ -304,6 +310,48 @@ class TestDrawingHud(unittest.TestCase):
 
         # 背景ボックスと進捗バーの描画が行われたことを確認
         self.assertTrue(mock_batch.draw.called)
+
+    @patch.dict("sys.modules", {"blf": MagicMock()})
+    @patch("taremin_cloth.utils.drawing._draw_bottom_center_progress")
+    @patch("taremin_cloth.utils.drawing._draw_bottom_badge_2row")
+    @patch("taremin_cloth.utils.drawing.gpu")
+    @patch("taremin_cloth.utils.drawing.bpy")
+    def test_draw_callback_2d_bottom_exclusivity(self, mock_bpy, mock_gpu, mock_draw_guide, mock_draw_progress):
+        """下部中央の Guidance / Progress / Toast が排他表示され重複描画しないことを確認"""
+        mock_region = MagicMock()
+        mock_region.width = 1920
+        mock_region.height = 1080
+        mock_bpy.context.region = mock_region
+        mock_gpu.shader.from_builtin.return_value = MagicMock()
+
+        drawing.set_interactive_active(True)
+        drawing.set_interactive_fps_info(
+            fps=60.0,
+            frame_ms=16.6,
+            show_overlay=False,
+            position='TOP_CENTER',
+            show_help=True,
+        )
+        drawing.set_bake_overlay_info(current_frame=10, end_frame=100, pct=10)
+        drawing.set_init_overlay_info(message="Init", current=1, total=3)
+        drawing.set_toast_overlay_info(message="Toast", duration=0.0)
+
+        drawing.draw_callback_2d()
+
+        mock_draw_guide.assert_not_called()
+        mock_draw_progress.assert_called_once()
+        # 最優先の Bake が描画されたことを確認
+        self.assertIn("10 / 100", mock_draw_progress.call_args.args[2])
+
+        # Bake / Init / Toast がなければ Guidance が描画される
+        mock_draw_guide.reset_mock()
+        mock_draw_progress.reset_mock()
+        drawing.clear_bake_overlay_info()
+        drawing.clear_init_overlay_info()
+        drawing.clear_toast_overlay_info()
+        drawing.draw_callback_2d()
+        mock_draw_guide.assert_called_once()
+        mock_draw_progress.assert_not_called()
 
 
 if __name__ == "__main__":

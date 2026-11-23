@@ -19,22 +19,34 @@ class TestFfiBoundary(unittest.TestCase):
                 self.skipTest("taremin_cloth_core が利用できないためスキップします")
 
     def test_non_contiguous_numpy_slices_handled_safely(self):
-        """非連続メモリレイアウト (step slice) のNumPy配列を渡した際にクラッシュやメモリ破壊が起きないこと"""
+        """非連続メモリレイアウト (step slice) のNumPy配列を事前変換なしで渡しても安全かつ正確に処理されること"""
         raw_pos = np.zeros((10, 3), dtype=np.float32)
         raw_pos[:, 0] = np.arange(10, dtype=np.float32) * 0.1
-        sliced_pos = raw_pos[::2]  # 非C-contiguous (5頂点)
+        sliced_pos = raw_pos[::2]  # 非C-contiguous (5頂点, X=[0.0, 0.2, 0.4, 0.6, 0.8])
         self.assertFalse(sliced_pos.flags["C_CONTIGUOUS"])
 
         edges = np.array([[0, 1], [1, 2], [2, 3], [3, 4]], dtype=np.uint32)
-        # PyO3/rust-numpy が非連続配列を拒否して TypeError/ValueError を投げるか、コピーして正常処理すること
-        try:
-            sim = self.core.ClothSimulator(positions=np.ascontiguousarray(sliced_pos), edges=edges)
-            sim.step(1.0 / 60.0, 5)
-            out = np.zeros(5 * 3, dtype=np.float32)
-            sim.get_positions(out)
-            self.assertTrue(np.all(np.isfinite(out)))
-        except (TypeError, ValueError, RuntimeError):
-            pass
+        sim = self.core.ClothSimulator(positions=sliced_pos, edges=edges)
+        out = np.zeros(5 * 3, dtype=np.float32)
+        sim.get_positions(out)
+        np.testing.assert_allclose(out.reshape(-1, 3), sliced_pos, atol=1e-6)
+
+        sim.step(1.0 / 60.0, 5)
+        sim.get_positions(out)
+        self.assertTrue(np.all(np.isfinite(out)))
+
+        # compute_combined_inv_masses へ非連続 pin_weights を渡してもサイレント空化せずピンが反映されること
+        pw_raw = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        pw_sliced = pw_raw[::2]  # [1.0, 0.0, 1.0]
+        self.assertFalse(pw_sliced.flags["C_CONTIGUOUS"])
+        pos3 = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        faces3 = np.array([[0, 1, 2]], dtype=np.uint32)
+        inv = self.core.compute_combined_inv_masses(
+            pos3, faces3, None, pw_sliced, 0.15, 0.0
+        )
+        self.assertEqual(float(inv[0]), 0.0)
+        self.assertGreater(float(inv[1]), 0.0)
+        self.assertEqual(float(inv[2]), 0.0)
 
     def test_zero_or_extreme_substeps_and_dt(self):
         """substeps=1, solver_iterations=1, 極小dt や負の減衰値でNaNやゼロ除算パニックが起きないこと"""

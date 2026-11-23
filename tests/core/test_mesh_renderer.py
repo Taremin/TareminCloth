@@ -9,10 +9,12 @@ import tempfile
 import unittest
 import numpy as np
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from taremin_cloth.mesh_renderer import (
     render_mesh_to_image,

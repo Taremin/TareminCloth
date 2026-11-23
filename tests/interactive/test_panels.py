@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 # pythonディレクトリをsys.pathに追加
-addon_dir = Path(__file__).parent.parent / "python"
+addon_dir = Path(__file__).resolve().parents[2] / "python"
 if str(addon_dir) not in sys.path:
     sys.path.insert(0, str(addon_dir))
 
@@ -14,7 +14,6 @@ from taremin_cloth.panels import (
     TAREMIN_CLOTH_PT_objects_panel,
     TAREMIN_CLOTH_PT_main_panel,
     TAREMIN_CLOTH_PT_collider_panel,
-    TAREMIN_CLOTH_PT_pattern_piece,
 )
 from tests.fixtures.panel_test_utils import render_panel, MockLayout
 
@@ -484,22 +483,53 @@ class TestPanels(unittest.TestCase):
         self.assertEqual(TAREMIN_CLOTH_PT_collisions.bl_order, 3)
         self.assertEqual(TAREMIN_CLOTH_PT_forces.bl_order, 4)
 
-    def test_pattern_piece_panel_draw(self):
-        """型紙パネル（TAREMIN_CLOTH_PT_pattern_piece）の描画テスト"""
-        # 型紙パーツを有効化
-        self.obj.taremin_pattern.is_pattern_piece = True
-
-        # パネル描画の検証（オペレーターの未登録やプロパティ不整合がないこと）
-        layout = render_panel(TAREMIN_CLOTH_PT_pattern_piece)
-        labels = layout.get_labels()
-        self.assertTrue(any("Pattern:" in lbl or "型紙:" in lbl for lbl in labels))
-        self.assertTrue(any("3D Placement & Arrangement" in lbl or "3D配置・アセンブリ" in lbl for lbl in labels))
-
-        # オペレーターの存在確認
+    def test_main_panel_pattern_drafting_box_and_proxies(self):
+        """メインパネル上の統一型紙操作ボックスに3Dプロキシボタン等が存在し旧オペレーターが廃止されていること"""
+        layout = render_panel(TAREMIN_CLOTH_PT_main_panel)
         operators = layout.get_operators()
-        self.assertIn("taremin_cloth.apply_quick_arrangement", operators)
-        self.assertIn("taremin_cloth.edit_arrangement_3d", operators)
+        self.assertIn("taremin_cloth.pattern_editor", operators)
         self.assertIn("taremin_cloth.build_garment", operators)
+        self.assertIn("taremin_cloth.edit_pattern_proxies_3d", operators)
+        self.assertIn("taremin_cloth.sync_pattern_proxies_3d", operators)
+        self.assertIn("taremin_cloth.import_pattern_json", operators)
+        self.assertIn("taremin_cloth.export_pattern_json", operators)
+        self.assertNotIn("taremin_cloth.migrate_curves_to_pattern", operators)
+        self.assertNotIn("taremin_cloth.create_pattern_piece", operators)
+
+    def test_advanced_panels_expose_seven_properties(self):
+        """Phase 3.2 で追加露出した7プロパティが対応するAdvancedサブパネルに描画されること"""
+        from taremin_cloth.panels import (
+            TAREMIN_CLOTH_PT_quality,
+            TAREMIN_CLOTH_PT_pinning,
+            TAREMIN_CLOTH_PT_pattern,
+        )
+
+        self.obj.taremin_cloth.is_cloth = True
+        bpy.context.scene.taremin_cloth_ui_mode = 'ADVANCED'
+
+        # Elastic group と String part を1件ずつ作成して詳細UIも描画させる
+        grp = self.obj.taremin_cloth.elastic_groups.add()
+        grp.name = "TestElastic"
+        self.obj.taremin_cloth.active_elastic_group_index = 0
+        self.obj.taremin_cloth.show_elastic_overlay = True
+
+        sp = self.obj.taremin_cloth.string_parts.add()
+        sp.name = "TestString"
+        self.obj.taremin_cloth.active_string_part_index = 0
+
+        quality_props = {prop for _, prop in render_panel(TAREMIN_CLOTH_PT_quality).get_props()}
+        self.assertIn("enable_coarse_constraints", quality_props)
+        self.assertIn("enable_compact_readback", quality_props)
+
+        pinning_props = {prop for _, prop in render_panel(TAREMIN_CLOTH_PT_pinning).get_props()}
+        self.assertIn("pin_overlay_interactive_only", pinning_props)
+
+        pattern_layout = render_panel(TAREMIN_CLOTH_PT_pattern)
+        pattern_props = {prop for _, prop in pattern_layout.get_props()}
+        self.assertIn("stiffness_multiplier", pattern_props)
+        self.assertIn("elastic_overlay_interactive_only", pattern_props)
+        self.assertIn("tail_vert_count_left", pattern_props)
+        self.assertIn("tail_vert_count_right", pattern_props)
 
 
 import tests

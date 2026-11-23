@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # pythonディレクトリおよびプロジェクトルートをsys.pathに追加
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -93,8 +93,9 @@ class TestElasticGroups(unittest.TestCase):
 
         settings = obj.taremin_cloth
         settings.is_cloth = True
-        settings.gravity = 0.0 # 無重力
+        settings.gravity = 0.0  # 無重力
         settings.tension_stiffness = 10000.0
+        settings.substeps = 20
 
         # 頂点0をPin固定
         vg = obj.vertex_groups.new(name="Pin")
@@ -107,17 +108,13 @@ class TestElasticGroups(unittest.TestCase):
         grp.set_edge_indices([0])
         grp.scale = 0.5
 
-        # シミュレータ取得とフレーム進行
-        from taremin_cloth.operators import get_or_create_simulator, sync_cloth_parameters
-        sim, coords = get_or_create_simulator(obj)
-        sync_cloth_parameters(sim, obj, scene=bpy.context.scene)
-
-        # 40ステップシミュレーション
+        # step_cloth_scene 経由で 40 ステップシミュレーション
+        scene = bpy.context.scene
+        res = {}
         for _ in range(40):
-            sync_cloth_parameters(sim, obj, scene=bpy.context.scene)
-            sim.step(dt=1.0 / 60.0, substeps=20)
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
 
-        sim.get_positions(coords)
+        _, coords = res[obj.name]
         p0 = coords[0:3]
         p1 = coords[3:6]
         dist = float(np.linalg.norm(p1 - p0))

@@ -110,9 +110,10 @@ class TestPairCaching(unittest.TestCase):
         self.assertTrue((free_verts_z < 0.0).all(), "自由頂点が重力方向に変位していません")
 
     def test_double_layer_collision_repulsion(self):
-        """2層の近接した布（上下に重なる）がペアキャッシュ有効下で正常に衝突・反発することを検証"""
-        # 上下の2枚の布を作成 (z=0 と z=0.003: 厚み 0.005 未満で接近)
-        pos1, e1, f1, inv1 = self.create_grid_cloth(nx=3, ny=3, dx=0.05, z=0.0, pin_first_row=True)
+        """2層の近接した布（上下に重なる）がペアキャッシュ単独有効下で実際に押し戻され裏抜けしないこと"""
+        # 上下の2枚の布を作成 (z=0 全固定下層 と z=0.003 上層: 厚み 0.005+0.005=0.010 未満で接近)
+        pos1, e1, f1, inv1 = self.create_grid_cloth(nx=3, ny=3, dx=0.05, z=0.0, pin_first_row=False)
+        inv1[:] = 0.0  # 下層を完全固定床とする
         pos2, e2, f2, inv2 = self.create_grid_cloth(nx=3, ny=3, dx=0.05, z=0.003, pin_first_row=False)
 
         n1 = len(pos1)
@@ -126,14 +127,22 @@ class TestPairCaching(unittest.TestCase):
             thickness=0.005,
             enable_pair_cache=True,
         )
+        sim.set_gravity(0.0, 0.0, 0.0)
         sim.set_enable_self_collision(True)
+        sim.set_enable_pair_cache_final_fallback(False)
         sim.set_self_collision_options(relief_factor=1.0, max_displacement_ratio=0.5)
 
         out_pos = np.zeros(len(positions) * 3, dtype=np.float32)
-        sim.step(1.0 / 60.0, 2)
+        sim.step(1.0 / 60.0, 4)
         sim.get_positions(out_pos)
         self.assertFalse(np.isnan(out_pos).any())
         self.assertEqual(len(out_pos), len(positions) * 3)
+
+        upper_pos = out_pos.reshape((-1, 3))[n1:]
+        mean_z = float(np.mean(upper_pos[:, 2]))
+        below_zero = int(np.sum(upper_pos[:, 2] < 0.0))
+        self.assertEqual(below_zero, 0, f"下層未満への裏抜けが発生しました: below_zero={below_zero}")
+        self.assertGreater(mean_z, 0.006, f"上層布が+Z方向へ十分押し戻されていません: mean_z={mean_z:.5f}")
 
     def test_swept_collection_catches_approaching_pairs(self):
         """速度スイープ収集がフレーム先頭で離れた接近ペアを捕捉することの検証"""

@@ -3,15 +3,17 @@ taremin_cloth.engine.sdf_baker モジュールのスタンドアロン・ユニ�
 ボーン局所SDFベイク処理、内外符号、Alpha減衰、キャッシュ保存・復元の検証
 """
 
-import os
+from pathlib import Path
 import sys
 import unittest
 import numpy as np
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-python_pkg = os.path.join(project_root, "python")
-if python_pkg not in sys.path:
-    sys.path.insert(0, python_pkg)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PYTHON_DIR = _REPO_ROOT / "python"
+if str(_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(_PYTHON_DIR))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from taremin_cloth.engine.sdf_baker import (
     bake_bone_sdf_from_data,
@@ -293,30 +295,91 @@ class TestBoneSdfBaker(unittest.TestCase):
         self.assertEqual(len(indices_noise), 0)
 
     def test_smoothstep_alpha_fade(self):
-        """Smoothstep減衰によるAlpha連続遷移の検証"""
-        joint_weight_threshold = 0.85
-        min_t = joint_weight_threshold * 0.4  # 0.34
+        """bake_bone_sdf_from_data の実Alpha場連続遷移と collision.wgsl でのハイブリッドリトラクト動作を検証"""
+        import taremin_cloth_core
 
-        test_alphas = np.array([0.0, 0.2, 0.34, 0.5, 0.85, 1.0], dtype=np.float32)
-        t = np.clip((test_alphas - min_t) / (joint_weight_threshold - min_t), 0.0, 1.0)
-        fade = t * t * (3.0 - 2.0 * t)
-        faded_alphas = test_alphas * fade
+        verts, tris = create_cube_mesh(center=(0.0, 0.0, 0.0), size=1.0)
+        # 下半分 (z=-0.5): Bone_A=1.0, Bone_B=0.0
+        # 上半分 (z=+0.5): Bone_A=0.25, Bone_B=0.75 (0.25〜1.0 に重心補間される境界)
+        w_a = np.array([1.0, 1.0, 1.0, 1.0, 0.25, 0.25, 0.25, 0.25], dtype=np.float32)
+        w_b = np.array([0.0, 0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0.75], dtype=np.float32)
+        res = 16
+        bake_res = bake_bone_sdf_from_data(
+            mesh_verts=verts,
+            mesh_tris=tris,
+            bone_weights={"Bone_A": w_a, "Bone_B": w_b},
+            bone_bind_matrices={
+                "Bone_A": np.eye(4, dtype=np.float32),
+                "Bone_B": np.eye(4, dtype=np.float32),
+            },
+            resolution=res,
+            margin=0.2,
+            weight_threshold=0.02,
+            enable_joint_mesh=False,
+        )
 
-        # min_t (0.34) 以下では fade = 0.0
-        self.assertEqual(faded_alphas[0], 0.0)
-        self.assertEqual(faded_alphas[1], 0.0)
-        self.assertEqual(faded_alphas[2], 0.0)
+        # 1. GPU ベイク結果から Bone_A タイル (x: 0..res) の Alpha チャンネルを読み出し、
+        #    剛体底面付近 > 中間領域 >= ブレンド上面付近 へ連続遷移していることを実測検証
+        tex = np.frombuffer(bake_res.texture_bytes, dtype=np.float16).reshape(
+            (bake_res.depth, bake_res.height, bake_res.width, 2)
+        )
+        alpha_a = tex[:, :, :res, 1].astype(np.float32)
+        mid = res // 2
+        z_profile = alpha_a[:, mid, mid]  # Z=-0.7 .. +0.7 を縦断する中心柱
 
-        # threshold (0.85) 以上では fade = 1.0
-        self.assertAlmostEqual(faded_alphas[4], 0.85, places=5)
-        self.assertAlmostEqual(faded_alphas[5], 1.0, places=5)
+        bottom_alpha = float(np.max(z_profile[1:4]))   # 底面 (w_a=1.0) 近傍
+        top_alpha = float(z_profile[-3])              # 上面 (w_a=0.25) 近傍
+        self.assertGreater(bottom_alpha, 0.85, f"剛体底面のベイクAlphaが1.0付近であること: {bottom_alpha}")
+        self.assertLess(top_alpha, 0.45, f"ブレンド上面のベイクAlphaが0.25付近へ低下していること: {top_alpha}")
+        self.assertGreater(top_alpha, 0.15)
+        self.assertGreater(bottom_alpha, top_alpha)
 
-        # 中間値 (0.5) では滑らかに減衰 (0 < faded < 0.5)
-        self.assertGreater(faded_alphas[3], 0.0)
-        self.assertLess(faded_alphas[3], 0.5)
+        # 2. GPU collision.wgsl の smoothstep(threshold, 0.7, alpha) 経路:
+        #    上面 (alpha≈0.25 < 0.7) はハイブリッドメッシュ有り時のみリトラクトされ、
+        #    メッシュ無し時より押し出されにくい（一方、底面側 alpha≈1.0 は両方とも強く押し出される）
+        cloth_pos = np.array([
+            [0.0, 0.0, -0.502],  # 底面直外 (Bone_A 剛体部, alpha≈1.0)
+            [0.0, 0.0, 0.502],   # 上面直外 (ブレンド遷移部, Bone_A=0.25 単独ではリトラクト対象)
+        ], dtype=np.float32)
+        eye4 = np.eye(4, dtype=np.float32).reshape((1, 4, 4))
 
-        # 単調増加性の検証
-        self.assertTrue(np.all(np.diff(faded_alphas) >= 0.0))
+        def _run_case(*, with_mesh_tri: bool) -> np.ndarray:
+            # Bone_A 単独のSDFで smoothstep リトラクト効果を分離確認するため Bone_A 情報のみ登録
+            single_info = bake_res.bone_infos[:1].copy()
+            # single bone 時は width=res*2 を保ったまま tex_a 全体を使うか、または 1 bone 用に再ベイク無しでそのまま登録
+            sim = taremin_cloth_core.ClothSimulator(
+                positions=cloth_pos.copy(),
+                edges=np.empty((0, 2), dtype=np.uint32),
+                thickness=0.02,
+            )
+            sim.set_gravity(0.0, 0.0, 0.0)
+            # 2ボーン分で登録すると Bone_B (w_b=0.75) が上面を守るため、w_a のみのリトラクト確認には 1 ボーン情報を使う
+            b0_info = bake_res.bone_infos[:1].copy()
+            b0_info[0, 3] = 0.0
+            sim.set_bone_sdf_colliders(
+                bake_res.width, bake_res.height, bake_res.depth,
+                bake_res.texture_bytes, b0_info,
+            )
+            sim.update_bone_transforms(eye4, eye4)
+            if with_mesh_tri:
+                # num_mesh_triangles > 0 でハイブリッドリトラクトを有効化（遠方ダミー三角形で直接衝突は避ける）
+                far_tri = np.array([[[10.0, 10.0, 10.0], [11.0, 10.0, 10.0], [10.0, 11.0, 10.0]]], dtype=np.float32)
+                sim.set_mesh_collider_triangles(far_tri, friction=0.2, thickness=0.01)
+            sim.step(1.0 / 60.0, 10)
+            out = np.zeros(len(cloth_pos) * 3, dtype=np.float32)
+            sim.get_positions(out)
+            return out.reshape((-1, 3))
+
+        pos_no_hybrid = _run_case(with_mesh_tri=False)
+        pos_hybrid = _run_case(with_mesh_tri=True)
+
+        # 底面側 (alpha≈1.0): ハイブリッド有無に関わらず -Z 外側へ押し出されること
+        self.assertLess(float(pos_no_hybrid[0, 2]), -0.505)
+        self.assertLess(float(pos_hybrid[0, 2]), -0.505)
+        # 上面遷移側 (alpha≈0.25): メッシュ無し時は外側 (+Z) へ押し出されるが、
+        # ハイブリッド時は smoothstep リトラクトにより押し出しが大きく減衰（後退）すること
+        self.assertGreater(float(pos_no_hybrid[1, 2]), 0.505)
+        self.assertLess(float(pos_hybrid[1, 2]), float(pos_no_hybrid[1, 2]) - 0.002)
 
     def test_extract_limb_joint_mesh(self):
         """大関節ペアテスト"""

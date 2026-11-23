@@ -1,11 +1,10 @@
 import unittest
-import bpy
 import numpy as np
 import sys
 from pathlib import Path
 
 # pythonディレクトリおよびプロジェクトルートをsys.pathに追加
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -13,10 +12,38 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 import tests
+import bpy
 import taremin_cloth
 from taremin_cloth.utils import topology
 from taremin_cloth.panels import TAREMIN_CLOTH_PT_main_panel, TAREMIN_CLOTH_PT_topology
 from tests.fixtures.panel_test_utils import render_panel
+
+
+class TestCrossSubdivisionPure(unittest.TestCase):
+    """Blender 非依存の最適対角線判定純粋テスト"""
+
+    def test_optimal_diagonal_selection(self):
+        """最適対角線の幾何判定ロジック検証"""
+        # p0-p2 間の山折り: p1とp3が下に下がり、p0, pc, p2 が稜線上に残る
+        p0_fold = np.array([0.0, 0.0, 1.0])
+        p1_fold = np.array([1.0, 0.0, 0.0])
+        p2_fold = np.array([1.0, 1.0, 1.0])
+        p3_fold = np.array([0.0, 1.0, 0.0])
+        pc_fold = np.array([0.5, 0.5, 1.0])  # 稜線上の中心
+
+        # (p0, p2) の中点は (0.5, 0.5, 1.0) -> pc との距離 0.0
+        # (p1, p3) の中点は (0.5, 0.5, 0.0) -> pc との距離 1.0
+        use_02 = topology.evaluate_optimal_diagonal(p0_fold, p1_fold, p2_fold, p3_fold, pc_fold)
+        self.assertTrue(use_02, "p0-p2の稜線に沿う対角線が選ばれること")
+
+        # 逆に p1-p3 間の山折り:
+        p0_fold2 = np.array([0.0, 0.0, 0.0])
+        p1_fold2 = np.array([1.0, 0.0, 1.0])
+        p2_fold2 = np.array([1.0, 1.0, 0.0])
+        p3_fold2 = np.array([0.0, 1.0, 1.0])
+        pc_fold2 = np.array([0.5, 0.5, 1.0])  # 稜線上の中心
+        use_02_rev = topology.evaluate_optimal_diagonal(p0_fold2, p1_fold2, p2_fold2, p3_fold2, pc_fold2)
+        self.assertFalse(use_02_rev, "p1-p3の稜線に沿う対角線が選ばれること")
 
 
 @unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
@@ -60,29 +87,6 @@ class TestCrossSubdivision(unittest.TestCase):
         self.assertEqual(len(obj.data.vertices), 4)
         self.assertEqual(len(obj.data.polygons), 1)
         self.assertEqual(len(obj.data.polygons[0].vertices), 4)
-
-    def test_optimal_diagonal_selection(self):
-        """最適対角線の幾何判定ロジック検証"""
-        # p0-p2 間の山折り: p1とp3が下に下がり、p0, pc, p2 が稜線上に残る
-        p0_fold = np.array([0.0, 0.0, 1.0])
-        p1_fold = np.array([1.0, 0.0, 0.0])
-        p2_fold = np.array([1.0, 1.0, 1.0])
-        p3_fold = np.array([0.0, 1.0, 0.0])
-        pc_fold = np.array([0.5, 0.5, 1.0])  # 稜線上の中心
-
-        # (p0, p2) の中点は (0.5, 0.5, 1.0) -> pc との距離 0.0
-        # (p1, p3) の中点は (0.5, 0.5, 0.0) -> pc との距離 1.0
-        use_02 = topology.evaluate_optimal_diagonal(p0_fold, p1_fold, p2_fold, p3_fold, pc_fold)
-        self.assertTrue(use_02, "p0-p2の稜線に沿う対角線が選ばれること")
-
-        # 逆に p1-p3 間の山折り:
-        p0_fold2 = np.array([0.0, 0.0, 0.0])
-        p1_fold2 = np.array([1.0, 0.0, 1.0])
-        p2_fold2 = np.array([1.0, 1.0, 0.0])
-        p3_fold2 = np.array([0.0, 1.0, 1.0])
-        pc_fold2 = np.array([0.5, 0.5, 1.0])  # 稜線上の中心
-        use_02_rev = topology.evaluate_optimal_diagonal(p0_fold2, p1_fold2, p2_fold2, p3_fold2, pc_fold2)
-        self.assertFalse(use_02_rev, "p1-p3の稜線に沿う対角線が選ばれること")
 
     def test_post_process_optimal_triangles(self):
         """最適2三角面へのトポロジー変換検証"""

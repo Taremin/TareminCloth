@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 import bpy
 
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))

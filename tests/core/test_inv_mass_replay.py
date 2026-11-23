@@ -15,6 +15,8 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import taremin_cloth_core
 from taremin_cloth.engine.waypoint import WaypointManager

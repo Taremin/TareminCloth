@@ -29,6 +29,7 @@ STATE_EXCLUDE = {
     "set_dynamic_bone_sdf_enabled",
     "set_dynamic_bone_sdf_update_interval",
     "set_edge_rest_length_scales",
+    "set_edge_stiffness_multipliers",
     "set_collider_options",
     "set_sewing_priority_options",  # SimConfigには含むが旧metadata個別フィールドにもあるため別枠検証
     "set_solver_iterations",  # FrameRecord側にもあるため別枠
@@ -143,6 +144,7 @@ class TestConfigParity(unittest.TestCase):
             "set_edge_margin_scale": ["edge_margin_scale"],
             "set_edge_margin_offset": ["edge_margin_offset"],
             "set_sewing_stiffness": ["sewing_stiffness"],
+            "set_sewing_shrink_speed": ["sewing_shrink_speed"],
             "set_enable_sewing_lock": ["enable_sewing_lock"],
             "set_sewing_lock_distance": ["sewing_lock_distance"],
             "set_areal_density": ["areal_density"],

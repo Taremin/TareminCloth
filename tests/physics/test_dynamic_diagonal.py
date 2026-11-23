@@ -1,11 +1,10 @@
 import unittest
-import bpy
 import numpy as np
 import sys
 from pathlib import Path
 
 # pythonディレクトリおよびプロジェクトルートをsys.pathに追加
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -13,19 +12,13 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 import tests
+import bpy
 import taremin_cloth
 from taremin_cloth.utils import topology
 
 
-@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
-class TestDynamicDiagonal(unittest.TestCase):
-    def setUp(self):
-        taremin_cloth.register()
-        bpy.ops.wm.read_factory_settings(use_empty=True)
-
-    def tearDown(self):
-        taremin_cloth.unregister()
-        bpy.ops.wm.read_factory_settings(use_empty=True)
+class TestDynamicDiagonalPure(unittest.TestCase):
+    """Blender 非依存の歪み対角線評価テスト"""
 
     def test_evaluate_quad_diagonal_by_strain_horizontal_compression(self):
         """
@@ -71,6 +64,17 @@ class TestDynamicDiagonal(unittest.TestCase):
             p0_curr, p1_curr, p2_curr, p3_curr
         )
         self.assertTrue(use_02, "歪み率が大きい（保たれている）v0-v2方向が選択されること")
+
+
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
+class TestDynamicDiagonal(unittest.TestCase):
+    def setUp(self):
+        taremin_cloth.register()
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+
+    def tearDown(self):
+        taremin_cloth.unregister()
+        bpy.ops.wm.read_factory_settings(use_empty=True)
 
     def test_apply_dynamic_diagonal_and_restore_quad(self):
         """動的対角線分割の適用とQuad復元ライフサイクル検証"""

@@ -1,63 +1,115 @@
-import os
-import sys
 import math
+from pathlib import Path
+import sys
 import unittest
 import numpy as np
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-python_pkg = os.path.join(project_root, "python")
-if python_pkg not in sys.path:
-    sys.path.insert(0, python_pkg)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PYTHON_DIR = _REPO_ROOT / "python"
+if str(_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(_PYTHON_DIR))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
+import tests  # noqa: F401
+from taremin_cloth.engine.collider import _extract_active_joint_mesh_triangles
 from taremin_cloth.engine.sdf_baker import BoneSdfBakeResult
 
 
-class MockPoseBone:
-    def __init__(self, rotation_quaternion=(1.0, 0.0, 0.0, 0.0), rotation_mode='QUATERNION'):
+class _MockPoseBone:
+    def __init__(
+        self,
+        rotation_quaternion=(1.0, 0.0, 0.0, 0.0),
+        rotation_mode='QUATERNION',
+        rotation_axis_angle=(0.0, 1.0, 0.0, 0.0),
+        rotation_euler=(0.0, 0.0, 0.0),
+    ):
         self.rotation_quaternion = rotation_quaternion
         self.rotation_mode = rotation_mode
+        self.rotation_axis_angle = rotation_axis_angle
+        self.rotation_euler = type("_Eul", (), {
+            "x": rotation_euler[0], "y": rotation_euler[1], "z": rotation_euler[2]
+        })()
 
 
-class MockPose:
+class _MockPose:
     def __init__(self, bones_dict):
         self.bones = bones_dict
 
 
-class MockArmatureObject:
+class _MockArmatureObject:
     def __init__(self, bones_dict):
-        self.pose = MockPose(bones_dict)
+        self.pose = _MockPose(bones_dict)
 
 
-def compute_active_joint_faces(bake_res, arm_obj, rot_threshold_deg=2.0):
-    """collider.py の動的アクティブ化判定ロジックの参照実装"""
-    rot_threshold_rad = math.radians(rot_threshold_deg)
+class _MockArmMod:
+    def __init__(self, arm_obj):
+        self.object = arm_obj
 
-    if rot_threshold_deg <= 0.0 or not bake_res.joint_faces_by_pair:
-        return bake_res.joint_face_indices
 
-    active_pair_faces = []
-    if arm_obj and arm_obj.pose:
-        for (p_name, c_name), p_faces in bake_res.joint_faces_by_pair.items():
-            pb_c = arm_obj.pose.bones.get(c_name)
-            if not pb_c:
-                continue
-            delta_angle = 0.0
-            rot_mode = pb_c.rotation_mode
-            if rot_mode == 'QUATERNION':
-                q = pb_c.rotation_quaternion
-                delta_angle = 2.0 * math.acos(min(abs(float(q[0])), 1.0))
-            elif rot_mode == 'AXIS_ANGLE':
-                delta_angle = abs(float(pb_c.rotation_axis_angle[0]))
-            else:
-                e = pb_c.rotation_euler
-                delta_angle = math.sqrt(float(e.x)**2 + float(e.y)**2 + float(e.z)**2)
+class _MockColSettings:
+    def __init__(self, rot_threshold_deg: float):
+        self.enable_joint_mesh = True
+        self.joint_rotation_threshold = rot_threshold_deg
+        self.friction = 0.4
+        self.thickness = 0.02
+        self.restitution = 0.0
+        self.single_sided = True
+        self.enable_single_sided_recovery = True
 
-            if delta_angle >= rot_threshold_rad:
-                active_pair_faces.append(p_faces)
 
-    if active_pair_faces:
-        return np.unique(np.concatenate(active_pair_faces))
-    return np.empty(0, dtype=np.int32)
+class _FakeVerts:
+    def __init__(self, coords_flat: np.ndarray):
+        self._co = coords_flat
+        self._n = len(coords_flat) // 3
+
+    def __len__(self):
+        return self._n
+
+    def foreach_get(self, attr, out):
+        assert attr == "co"
+        out[:] = self._co
+
+
+class _FakeLoopTris:
+    def __init__(self, indices_flat: np.ndarray):
+        self._idx = indices_flat
+        self._n = len(indices_flat) // 3
+
+    def __len__(self):
+        return self._n
+
+    def foreach_get(self, attr, out):
+        assert attr == "vertices"
+        out[:] = self._idx
+
+
+class _FakeMesh:
+    """三角形 f の第0頂点 x 座標に float(f) を格納した識別用テストメッシュ。"""
+
+    def __init__(self, n_tris: int = 40):
+        verts = []
+        tris = []
+        for f in range(n_tris):
+            base = f * 3
+            verts.extend([
+                [float(f), 0.0, 0.0],
+                [float(f), 0.1, 0.0],
+                [float(f), 0.0, 0.1],
+            ])
+            tris.append([base, base + 1, base + 2])
+        self.vertices = _FakeVerts(np.asarray(verts, dtype=np.float32).ravel())
+        self.loop_triangles = _FakeLoopTris(np.asarray(tris, dtype=np.int32).ravel())
+
+    def calc_loop_triangles(self):
+        pass
+
+
+class _FakeTargetObj:
+    def __init__(self, n_tris: int = 40):
+        self.data = _FakeMesh(n_tris)
+        self.matrix_world = np.eye(4, dtype=np.float32)
+        self.modifiers = []
 
 
 class TestJointMeshDynamicActivation(unittest.TestCase):
@@ -82,62 +134,101 @@ class TestJointMeshDynamicActivation(unittest.TestCase):
             joint_face_indices=all_faces,
             joint_faces_by_pair=joint_faces_by_pair,
         )
+        self.obj = _FakeTargetObj(n_tris=40)
+
+    @staticmethod
+    def _extracted_face_ids(tri_coords):
+        if tri_coords is None:
+            return []
+        return sorted(int(round(float(tri[0, 0]))) for tri in tri_coords)
 
     def test_static_pose_returns_zero_faces(self):
-        """直立静止ポーズ（回転角0度）ではアクティブ面数が0面（SDF単体モード）になること"""
+        """直立静止ポーズ（回転角0度）では本番関数が None (SDF単体モード) を返すこと"""
         bones = {
-            "spine": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
-            "shin.L": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
-            "shin.R": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "spine": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "shin.L": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "shin.R": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
         }
-        arm = MockArmatureObject(bones)
+        arm_mod = _MockArmMod(_MockArmatureObject(bones))
 
-        active = compute_active_joint_faces(self.bake_res, arm, rot_threshold_deg=2.0)
-        self.assertEqual(len(active), 0)
+        tri_coords, attr_block, dict_list = _extract_active_joint_mesh_triangles(
+            self.obj,
+            _MockColSettings(rot_threshold_deg=2.0),
+            arm_mod=arm_mod,
+            bake_res=self.bake_res,
+            depsgraph=None,
+        )
+        self.assertIsNone(tri_coords)
+        self.assertIsNone(attr_block)
+        self.assertIsNone(dict_list)
 
     def test_below_threshold_returns_zero_faces(self):
-        """閾値（2.0度）未満の微小な回転（1.0度）ではアクティブ面数が0面になること"""
-        # 1度回転: q = cos(0.5 deg), sin(0.5 deg)
+        """閾値（2.0度）未満の微小な回転（1.0度）では本番関数がアクティブ面を返さないこと"""
         ang_rad = math.radians(1.0)
         q = (math.cos(ang_rad * 0.5), math.sin(ang_rad * 0.5), 0.0, 0.0)
         bones = {
-            "spine": MockPoseBone(q),
-            "shin.L": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
-            "shin.R": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "spine": _MockPoseBone(q),
+            "shin.L": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "shin.R": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
         }
-        arm = MockArmatureObject(bones)
+        arm_mod = _MockArmMod(_MockArmatureObject(bones))
 
-        active = compute_active_joint_faces(self.bake_res, arm, rot_threshold_deg=2.0)
-        self.assertEqual(len(active), 0)
+        tri_coords, attr_block, dict_list = _extract_active_joint_mesh_triangles(
+            self.obj,
+            _MockColSettings(rot_threshold_deg=2.0),
+            arm_mod=arm_mod,
+            bake_res=self.bake_res,
+            depsgraph=None,
+        )
+        self.assertIsNone(tri_coords)
+        self.assertIsNone(attr_block)
+        self.assertIsNone(dict_list)
 
     def test_bent_joint_selectively_activated(self):
-        """背骨のみ前屈（30度）した際、腰・背骨関節面のみが正確にアクティブ化されること"""
+        """背骨のみ前屈（30度）した際、本番関数が腰・背骨関節面のみを正確に抽出すること"""
         ang_rad = math.radians(30.0)
         q = (math.cos(ang_rad * 0.5), math.sin(ang_rad * 0.5), 0.0, 0.0)
         bones = {
-            "spine": MockPoseBone(q),
-            "shin.L": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
-            "shin.R": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "spine": _MockPoseBone(q),
+            "shin.L": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "shin.R": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
         }
-        arm = MockArmatureObject(bones)
+        arm_mod = _MockArmMod(_MockArmatureObject(bones))
 
-        active = compute_active_joint_faces(self.bake_res, arm, rot_threshold_deg=2.0)
-        # 背骨関節面のみアクティブ
-        self.assertEqual(len(active), len(self.faces_spine))
-        np.testing.assert_array_equal(active, self.faces_spine)
+        tri_coords, attr_block, dict_list = _extract_active_joint_mesh_triangles(
+            self.obj,
+            _MockColSettings(rot_threshold_deg=2.0),
+            arm_mod=arm_mod,
+            bake_res=self.bake_res,
+            depsgraph=None,
+        )
+        self.assertIsNotNone(tri_coords)
+        self.assertEqual(tri_coords.shape, (len(self.faces_spine), 3, 3))
+        self.assertEqual(attr_block.shape, (len(self.faces_spine), 4))
+        self.assertEqual(len(dict_list), len(self.faces_spine))
+        self.assertEqual(self._extracted_face_ids(tri_coords), self.faces_spine.tolist())
 
     def test_zero_threshold_activates_all(self):
-        """閾値0度では常時全関節面がアクティブになること"""
+        """閾値0度では本番関数が全関節面を抽出すること"""
         bones = {
-            "spine": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
-            "shin.L": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
-            "shin.R": MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "spine": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "shin.L": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
+            "shin.R": _MockPoseBone((1.0, 0.0, 0.0, 0.0)),
         }
-        arm = MockArmatureObject(bones)
+        arm_mod = _MockArmMod(_MockArmatureObject(bones))
 
-        active = compute_active_joint_faces(self.bake_res, arm, rot_threshold_deg=0.0)
-        self.assertEqual(len(active), len(self.bake_res.joint_face_indices))
-        np.testing.assert_array_equal(active, self.bake_res.joint_face_indices)
+        tri_coords, attr_block, dict_list = _extract_active_joint_mesh_triangles(
+            self.obj,
+            _MockColSettings(rot_threshold_deg=0.0),
+            arm_mod=arm_mod,
+            bake_res=self.bake_res,
+            depsgraph=None,
+        )
+        self.assertIsNotNone(tri_coords)
+        expected = self.bake_res.joint_face_indices.tolist()
+        self.assertEqual(self._extracted_face_ids(tri_coords), expected)
+        self.assertEqual(attr_block.shape, (len(expected), 4))
+        self.assertEqual(len(dict_list), len(expected))
 
 
 if __name__ == "__main__":

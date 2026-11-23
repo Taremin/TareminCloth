@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 import unittest
 
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -113,7 +113,7 @@ class TestInteractiveOptimization(unittest.TestCase):
         self.assertTrue(cloth_obj.select_get())
 
     def test_pin_drawing_cache(self):
-        """ピン描画のインデックスキャッシュが正しく生成・クリアされるか検証"""
+        """ピン描画のインデックスキャッシュが本番関数経由で生成・再利用・クリアされるか検証"""
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=5, y_subdivisions=5)
         obj = bpy.context.active_object
         obj.taremin_cloth.is_cloth = True
@@ -128,21 +128,21 @@ class TestInteractiveOptimization(unittest.TestCase):
         drawing.set_interactive_active(True)
         self.assertTrue(drawing.is_interactive_active())
 
-        # drawing._pin_indices_cache へのアクセス確認
+        # 本番関数 get_cached_pin_indices によりピンインデックスとキャッシュが構築されること
+        pin_indices = drawing.get_cached_pin_indices(obj, vg_name="Pin")
+        self.assertEqual(sorted(pin_indices), [0, 1, 2])
+
         cache_key = (obj.name, "Pin")
-        vert_count = len(obj.data.vertices)
-        self.assertEqual(vert_count, 36)  # (5+1)*(5+1) = 36
-
-        pin_indices = [
-            v.index for v in obj.data.vertices
-            for g in v.groups if g.group == vg.index and g.weight > 0.0
-        ]
-        drawing._pin_indices_cache[cache_key] = (pin_indices, vert_count)
-
         self.assertIn(cache_key, drawing._pin_indices_cache)
         cached_indices, cached_count = drawing._pin_indices_cache[cache_key]
-        self.assertEqual(cached_indices, [0, 1, 2])
-        self.assertEqual(cached_count, 36)
+        self.assertEqual(sorted(cached_indices), [0, 1, 2])
+        self.assertEqual(cached_count, 36)  # (5+1)*(5+1) = 36
+
+        # 2回目呼び出しはキャッシュヒットして同一リストオブジェクトを返すこと
+        self.assertIs(drawing.get_cached_pin_indices(obj, vg_name="Pin"), cached_indices)
+
+        # 未存在グループは空リストを返しキャッシュを汚さないこと
+        self.assertEqual(drawing.get_cached_pin_indices(obj, vg_name="NoSuchGroup"), [])
 
         # インタラクティブ終了時にキャッシュがクリアされること
         drawing.set_interactive_active(False)

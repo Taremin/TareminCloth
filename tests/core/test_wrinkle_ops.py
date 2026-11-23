@@ -13,6 +13,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 python_dir = os.path.join(project_root, "python")
 if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from taremin_cloth.ops import wrinkle
 from taremin_cloth import i18n
@@ -404,8 +406,9 @@ class TestWrinkleOps(unittest.TestCase):
         res_confirm = op.modal(mock_context, event_confirm)
         self.assertEqual(res_confirm, {'FINISHED'})
 
-        # 5. フェイズ1で ESC -> キャンセル & 初期配置を維持 (カーブオブジェクトは削除しない)
+        # 5. フェイズ1で ESC (is_new_addition=True) -> 新規追加のゴミカーブを自動削除
         op._phase = 'PICK_BONE'
+        op._is_new_addition = True
         event_esc = MagicMock()
         event_esc.type = 'ESC'
         event_esc.value = 'PRESS'
@@ -414,7 +417,19 @@ class TestWrinkleOps(unittest.TestCase):
              patch.object(op, "_restore_initial_geometry") as mock_restore:
             res_esc = op.modal(mock_context, event_esc)
             self.assertEqual(res_esc, {'CANCELLED'})
-            # プリセット追加後のESCでもカーブが勝手に消えないこと (削除が呼ばれない)
+            mock_remove_obj.assert_called_once_with(curve_obj, do_unlink=True)
+            mock_remove_curve.assert_called_once_with(curve_data)
+            mock_restore.assert_not_called()
+
+        # 6. 既存調整時 (is_new_addition=False) で ESC -> 削除せず初期位置へ復元
+        op._phase = 'SLIDE'
+        op._is_new_addition = False
+        op._target_curves = [curve_obj]
+        with patch("bpy.data.objects.remove") as mock_remove_obj, \
+             patch("bpy.data.curves.remove") as mock_remove_curve, \
+             patch.object(op, "_restore_initial_geometry") as mock_restore:
+            res_esc2 = op.modal(mock_context, event_esc)
+            self.assertEqual(res_esc2, {'CANCELLED'})
             mock_remove_obj.assert_not_called()
             mock_remove_curve.assert_not_called()
             mock_restore.assert_called_once()

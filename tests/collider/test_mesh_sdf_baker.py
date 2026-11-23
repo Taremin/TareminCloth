@@ -8,7 +8,7 @@ import unittest
 import time
 import numpy as np
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
@@ -90,9 +90,9 @@ class TestMeshSdfBaker(unittest.TestCase):
         self.assertAlmostEqual(float(alphas[cz, cy, cx]), 1.0, places=2)
 
         # パラメータが正しく設定されていること
-        self.assertEqual(result.bone_info[16], 0.6)   # friction
-        self.assertEqual(result.bone_info[17], 0.01)  # thickness
-        self.assertEqual(result.bone_info[18], 0.1)   # restitution
+        self.assertAlmostEqual(float(result.bone_info[16]), 0.6, places=5)   # friction
+        self.assertAlmostEqual(float(result.bone_info[17]), 0.01, places=5)  # thickness
+        self.assertAlmostEqual(float(result.bone_info[18]), 0.1, places=5)   # restitution
 
         print(f"[テスト成功] GPUメッシュSDFベイク (立方体: {result.width}x{result.height}x{result.depth}): {elapsed*1000:.2f} ms")
 

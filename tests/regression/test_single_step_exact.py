@@ -1,11 +1,22 @@
 import os
+import sys
+from pathlib import Path
 import unittest
 import numpy as np
+
+_PROJECT_ROOT = os.path.abspath(str(Path(__file__).resolve().parents[2]))
+_PYTHON_DIR = os.path.join(_PROJECT_ROOT, "python")
+if _PYTHON_DIR not in sys.path:
+    sys.path.insert(0, _PYTHON_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+import tests  # noqa: F401
 import taremin_cloth_core
 
 GOLDEN_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures", "golden_master")
 
-#: 物理質量の面密度 (再生成スクリプト scratch/regen_golden.py と同一値)
+#: 物理質量の面密度 (再生成スクリプトと同一値)
 CASE3_AREAL_DENSITY = 0.15
 
 
@@ -25,6 +36,7 @@ def areal_inv_masses(pos, faces, density):
     masses = np.maximum(masses, 1e-9)
     return (1.0 / masses).astype(np.float32)
 
+
 class TestSingleStepExact(unittest.TestCase):
     """
     基準フィクスチャ結果と 1ステップ（1フレーム）で高精度一致（誤差 < 10um）することを
@@ -32,11 +44,63 @@ class TestSingleStepExact(unittest.TestCase):
     自己完結したフィクスチャデータのみを用いて決定論的に検証する。
     """
 
+    def test_case1_cloth_body_step_exact(self):
+        c1_data = np.load(os.path.join(GOLDEN_DIR, "case1_cloth_body.npz"))
+        step_data = np.load(os.path.join(GOLDEN_DIR, "step_case1_f1.npz"))
+        pos_in = step_data["pos_in"]
+        pos_out_golden = step_data["pos_out"]
+
+        sim = taremin_cloth_core.ClothSimulator(
+            positions=pos_in,
+            edges=c1_data["edges"],
+            faces=c1_data["faces"],
+            inv_masses=c1_data["inv_masses"],
+            thickness=0.005,
+            stiffness=1500.0,
+            bending_stiffness=15.0,
+        )
+        sim.set_gravity(0.0, 0.0, -9.81)
+
+        sim.step(1.0 / 60.0, 20, 2)
+        out = np.empty(len(pos_in) * 3, dtype=np.float32)
+        sim.get_positions(out)
+        actual = out.reshape(-1, 3)
+
+        diff = float(np.linalg.norm(actual - pos_out_golden, axis=1).max())
+        self.assertLess(diff, 1e-5, f"Case 1 Single-step Frame 1 diverged: diff = {diff*1e6:.4f} um")
+
+    def test_case2_plane_sphere_step_exact(self):
+        c2_data = np.load(os.path.join(GOLDEN_DIR, "case2_plane_sphere.npz"))
+        step_data = np.load(os.path.join(GOLDEN_DIR, "step_case2_f1.npz"))
+        pos_in = step_data["pos_in"]
+        pos_out_golden = step_data["pos_out"]
+
+        sim = taremin_cloth_core.ClothSimulator(
+            positions=pos_in,
+            edges=c2_data["edges"],
+            faces=c2_data["faces"],
+            inv_masses=c2_data["inv_masses"],
+            thickness=0.005,
+            stiffness=1200.0,
+            bending_stiffness=5.0,
+        )
+        sim.set_gravity(0.0, 0.0, -9.81)
+        sim.add_sphere_collider([0.0, 0.0, 0.16], radius=0.14, friction=0.4, restitution=0.0)
+
+        sim.step(1.0 / 60.0, 20, 2)
+        out = np.empty(len(pos_in) * 3, dtype=np.float32)
+        sim.get_positions(out)
+        actual = out.reshape(-1, 3)
+
+        diff = float(np.linalg.norm(actual - pos_out_golden, axis=1).max())
+        self.assertLess(diff, 1e-5, f"Case 2 Single-step Frame 1 diverged: diff = {diff*1e6:.4f} um")
+
     def test_case3_multi_collider_step_exact(self):
         c3_data = np.load(os.path.join(GOLDEN_DIR, "case3_multi_collider.npz"))
         pos_c3_init = c3_data["initial_pos"]
         edges_c3 = c3_data["edges"]
         faces_c3 = c3_data["faces"]
+        inv_masses = c3_data["inv_masses"] if "inv_masses" in c3_data.files else areal_inv_masses(pos_c3_init, faces_c3, CASE3_AREAL_DENSITY)
 
         step_data = np.load(os.path.join(GOLDEN_DIR, "step_case3_f1.npz"))
         pos_out_golden = step_data["pos_out"]
@@ -45,7 +109,7 @@ class TestSingleStepExact(unittest.TestCase):
             positions=pos_c3_init,
             edges=edges_c3,
             faces=faces_c3,
-            inv_masses=areal_inv_masses(pos_c3_init, faces_c3, CASE3_AREAL_DENSITY),
+            inv_masses=inv_masses,
             thickness=0.005,
             stiffness=1000.0,
             bending_stiffness=10.0,
@@ -56,14 +120,15 @@ class TestSingleStepExact(unittest.TestCase):
         sim.add_sphere_collider([0.0, 0.0, 0.3], radius=0.12, friction=0.5, restitution=0.0)
         sim.add_plane_collider([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], friction=0.6, restitution=0.0)
 
-        sim.step(1.0/60.0, 20, 2)
+        sim.step(1.0 / 60.0, 20, 2)
         out = np.empty(len(pos_c3_init) * 3, dtype=np.float32)
         sim.get_positions(out)
         actual = out.reshape(-1, 3)
 
         # 許容誤差: 0.01mm (10um) 未満
-        diff = np.linalg.norm(actual - pos_out_golden, axis=1).max()
+        diff = float(np.linalg.norm(actual - pos_out_golden, axis=1).max())
         self.assertLess(diff, 1e-5, f"Case 3 Single-step Frame 1 diverged: diff = {diff*1e6:.4f} um")
+
 
 if __name__ == '__main__':
     unittest.main()

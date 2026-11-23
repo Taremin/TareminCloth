@@ -1,15 +1,15 @@
 import unittest
-import bpy
 import sys
 import shutil
 from pathlib import Path
 
 # pythonディレクトリをsys.pathに追加
-addon_dir = Path(__file__).parent.parent / "python"
+addon_dir = Path(__file__).resolve().parents[2] / "python"
 if str(addon_dir) not in sys.path:
     sys.path.insert(0, str(addon_dir))
 
 import tests
+import bpy
 import taremin_cloth
 from taremin_cloth.presets import (
     BUILTIN_FABRIC_PRESETS,
@@ -22,26 +22,8 @@ from taremin_cloth.presets import (
 )
 
 
-@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
-class TestPresets(unittest.TestCase):
-    def setUp(self):
-        taremin_cloth.register()
-        bpy.ops.mesh.primitive_plane_add()
-        self.obj = bpy.context.active_object
-        self.created_custom_files = []
-
-    def tearDown(self):
-        # クリーンアップ: 作成されたテスト用カスタムプリセットを削除
-        for p in self.created_custom_files:
-            if p.exists():
-                try:
-                    p.unlink()
-                except Exception:
-                    pass
-
-        if self.obj and self.obj.name in bpy.data.objects:
-            bpy.data.objects.remove(self.obj, do_unlink=True)
-        taremin_cloth.unregister()
+class TestPresetsPure(unittest.TestCase):
+    """Blender 非依存のビルトインプリセット構造テスト"""
 
     def test_builtin_presets_structure(self):
         """ビルトインプリセットが正しいデータ構造とパラメータを持っているか検証"""
@@ -79,6 +61,28 @@ class TestPresets(unittest.TestCase):
             self.assertIn("thickness", params)
             self.assertGreaterEqual(params["friction"], 0.0)
             self.assertLessEqual(params["friction"], 1.0)
+
+
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
+class TestPresets(unittest.TestCase):
+    def setUp(self):
+        taremin_cloth.register()
+        bpy.ops.mesh.primitive_plane_add()
+        self.obj = bpy.context.active_object
+        self.created_custom_files = []
+
+    def tearDown(self):
+        # クリーンアップ: 作成されたテスト用カスタムプリセットを削除
+        for p in self.created_custom_files:
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+
+        if self.obj and self.obj.name in bpy.data.objects:
+            bpy.data.objects.remove(self.obj, do_unlink=True)
+        taremin_cloth.unregister()
 
     def test_apply_fabric_preset(self):
         """布素材プリセットの適用オペレーターの動作確認"""

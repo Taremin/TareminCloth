@@ -18,8 +18,6 @@ from taremin_cloth.pattern.geometry import (
     subdivide_cubic,
     build_arc_table,
     closest_point_on_table,
-    compute_seam_subdivision_count,
-    sample_edge_range_by_count,
     signed_area,
     ensure_ccw,
     point_in_polygon,
@@ -109,29 +107,6 @@ class TestPatternGeometry(unittest.TestCase):
         mid_eval = evaluate_cubic(c0, c1, c2, c3, 0.5)
         self.assertAlmostEqual(left[3][0], mid_eval[0])
         self.assertAlmostEqual(left[3][1], mid_eval[1])
-
-    def test_sampling_and_seam_subdivision(self):
-        """弧長サンプリングと分割数計算."""
-        count = compute_seam_subdivision_count(0.30, 0.30, spacing=0.015)
-        self.assertEqual(count, 20)
-
-        # 範囲外の spacing は例外
-        with self.assertRaises(ValueError):
-            compute_seam_subdivision_count(0.30, 0.30, spacing=0.001)
-
-        c0 = (0.0, 0.0)
-        c3 = (1.0, 0.0)
-        ctrls = make_segment_controls(c0, None, None, c3)
-        tbl = build_arc_table(*ctrls)
-
-        sampled = sample_edge_range_by_count([tbl], 4)
-        self.assertEqual(len(sampled), 5)
-        np.testing.assert_allclose(sampled[:, 0], [0.0, 0.25, 0.5, 0.75, 1.0], atol=1e-5)
-
-        # 部分サンプリング [0.2, 0.8]
-        sub_sampled = sample_edge_range_by_count([tbl], 2, t0=0.2, t1=0.8)
-        self.assertEqual(len(sub_sampled), 3)
-        np.testing.assert_allclose(sub_sampled[:, 0], [0.2, 0.5, 0.8], atol=1e-5)
 
     def test_polygon_signed_area_and_ccw(self):
         """符号付き面積とCCW正規化."""

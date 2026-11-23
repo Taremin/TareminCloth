@@ -101,6 +101,36 @@ class TestQuadRemesh3D(unittest.TestCase):
         max_z_err = float(np.max(np.abs(quad_pos[:, 2] - expected_z)))
         self.assertLess(max_z_err, 0.0015, f"Barycentric 3D surface error {max_z_err*1000:.2f}mm exceeds 1.5mm")
 
+        # 4. keep_structured_when_possible=False を明示して Boundary Quad Belt + Paving 分岐を直接通過・検証
+        if hasattr(_core, "remesh_cloth_to_quad_3d_ext"):
+            out_belt = _core.remesh_cloth_to_quad_3d_ext(
+                sim_positions_3d=sim_pos,
+                sim_uvs_2d=sim_uv,
+                sim_triangles=sim_tris,
+                boundary_loop_2d=boundary_uv,
+                hole_loops_2d=None,
+                target_quad_size=0.020,
+                boundary_belt_loops=1,
+                smoothing_iterations=10,
+                keep_structured_when_possible=False,
+                target_size_in_3d=False,
+            )
+            belt_pos = np.asarray(out_belt["positions_3d"], dtype=np.float32)
+            belt_uv = np.asarray(out_belt["uvs_2d"], dtype=np.float32)
+            belt_quads = np.asarray(out_belt["quads"], dtype=np.uint32)
+            belt_tris = np.asarray(out_belt["triangles"], dtype=np.uint32)
+            belt_bnd = np.asarray(out_belt["boundary_vertex_indices"], dtype=np.uint32)
+
+            self.assertEqual(len(belt_bnd), len(boundary_uv))
+            np.testing.assert_allclose(belt_uv[belt_bnd], boundary_uv, atol=1e-5)
+            # 非構造化 Boundary Quad Belt + Paving を通った証拠として triangles > 0 かつ 85%以上 Quad
+            self.assertGreater(len(belt_tris), 0, "keep_structured_when_possible=False では非構造化ベルト分岐を通ること")
+            belt_ratio = len(belt_quads) / max(1, len(belt_quads) + len(belt_tris))
+            self.assertGreater(belt_ratio, 0.85)
+            belt_expected_z = 0.015 * np.sin(2.0 * np.pi * (belt_uv[:, 0] + 0.5 * belt_uv[:, 1]) / 0.12)
+            belt_max_err = float(np.max(np.abs(belt_pos[:, 2] - belt_expected_z)))
+            self.assertLess(belt_max_err, 0.005, f"Boundary Quad Belt 3D surface error {belt_max_err*1000:.2f}mm exceeds 5mm")
+
     def test_independent_uv_islands_with_zero_gap_3d_seam_snapping(self):
         """UVアイランドを独立維持したまま、縫合ペア境界の3D座標のみが中点スナップされて隙間ゼロになること."""
         pos_a, uv_a, tris_a, bnd_a = _create_wavy_simulated_patch(offset_x=0.0, nx=10, ny=10)

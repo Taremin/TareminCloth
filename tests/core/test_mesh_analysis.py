@@ -9,11 +9,15 @@ import tempfile
 import unittest
 import numpy as np
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 python_pkg = os.path.join(project_root, "python")
 if python_pkg not in sys.path:
     sys.path.insert(0, python_pkg)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
+from unittest import mock
+from taremin_cloth import analysis as analysis_mod
 from taremin_cloth.analysis import (
     tri_tri_intersection_sat,
     find_triangle_intersections,
@@ -135,6 +139,46 @@ class TestMeshAnalysis(unittest.TestCase):
                 content = f.read()
             self.assertIn("v 0.000000 0.000000 0.000000", content)
             self.assertIn("f 1 2 3", content)
+
+    def test_small_parallel_and_moller_denominator_both_backends(self):
+        """1cm微小平行離反ペアとMöller斜め交差・頂点平面上ケースをRust/NumPy双方で検証"""
+        v0 = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        v1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        v2 = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+        sv0 = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        sv1 = np.array([0.01, 0.0, 0.0], dtype=np.float32)
+        sv2 = np.array([0.0, 0.01, 0.0], dtype=np.float32)
+        su0 = np.array([0.0, 0.0, 0.002], dtype=np.float32)
+        su1 = np.array([0.01, 0.0, 0.002], dtype=np.float32)
+        su2 = np.array([0.0, 0.01, 0.002], dtype=np.float32)
+        so0 = np.array([0.002, 0.002, 0.0], dtype=np.float32)
+        so1 = np.array([0.012, 0.002, 0.0], dtype=np.float32)
+        so2 = np.array([0.002, 0.012, 0.0], dtype=np.float32)
+
+        u0 = np.array([1.2, 0.2, 0.5], dtype=np.float32)
+        u1 = np.array([1.2, 0.25, 0.5], dtype=np.float32)
+        u2 = np.array([-0.5, 0.2, -1.0], dtype=np.float32)
+        nu0 = np.array([2.0, 0.2, 0.5], dtype=np.float32)
+        nu1 = np.array([2.0, 0.25, 0.5], dtype=np.float32)
+        nu2 = np.array([0.5, 0.2, -1.0], dtype=np.float32)
+        p_in0 = np.array([0.2, 0.2, 0.0], dtype=np.float32)
+        p_in1 = np.array([0.3, 0.3, 1.0], dtype=np.float32)
+        p_in2 = np.array([0.4, 0.2, -1.0], dtype=np.float32)
+
+        def assert_cases():
+            self.assertFalse(tri_tri_intersection_sat(sv0, sv1, sv2, su0, su1, su2))
+            self.assertTrue(tri_tri_intersection_sat(sv0, sv1, sv2, so0, so1, so2))
+            self.assertTrue(tri_tri_intersection_sat(v0, v1, v2, u0, u1, u2))
+            self.assertTrue(tri_tri_intersection_sat(v0, v1, v2, u0, u2, u1))
+            self.assertFalse(tri_tri_intersection_sat(v0, v1, v2, nu0, nu1, nu2))
+            self.assertTrue(tri_tri_intersection_sat(v0, v1, v2, p_in0, p_in1, p_in2))
+
+        # 現在のデフォルト経路 (Rust利用可能時はRust経路)
+        assert_cases()
+        # Python/NumPy フォールバック経路
+        with mock.patch.object(analysis_mod, "_RUST_GEOMETRY", False):
+            assert_cases()
 
 
 if __name__ == "__main__":

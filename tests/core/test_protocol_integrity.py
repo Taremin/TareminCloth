@@ -74,6 +74,7 @@ class TestProtocolIntegrity(unittest.TestCase):
 
         sim.set_gravity(test_gravity[0], test_gravity[1], test_gravity[2])
         sim.set_damping(test_damping)
+        sim.set_damping_all(1.5, 2.5, 3.5, 0.75)
         sim.set_sewing_stiffness(test_sewing_stiffness)
         sim.set_enable_sewing_lock(True)
         sim.set_sewing_lock_distance(test_sewing_lock_dist)
@@ -93,8 +94,12 @@ class TestProtocolIntegrity(unittest.TestCase):
         self.assertAlmostEqual(gpu_params["gravity"][2], test_gravity[2], places=5)
         self.assertAlmostEqual(gpu_params["substep_dt"], expected_substep_dt, places=6)
 
-        # 2. 減衰およびステップ数
+        # 2. 減衰（空気減衰と4種内部減衰が独立して転送されていること）およびステップ数
         self.assertAlmostEqual(gpu_params["damping"], test_damping, places=5)
+        self.assertAlmostEqual(gpu_params["tension_damping"], 1.5, places=5)
+        self.assertAlmostEqual(gpu_params["compression_damping"], 2.5, places=5)
+        self.assertAlmostEqual(gpu_params["shear_damping"], 3.5, places=5)
+        self.assertAlmostEqual(gpu_params["bending_damping"], 0.75, places=5)
         self.assertEqual(gpu_params["substeps"], substeps)
         self.assertEqual(gpu_params["num_vertices"], 3)
         self.assertEqual(gpu_params["num_distance_constraints"], 3)

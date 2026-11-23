@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 # pythonディレクトリをsys.pathに追加
-addon_dir = Path(__file__).parent.parent / "python"
+addon_dir = Path(__file__).resolve().parents[2] / "python"
 if str(addon_dir) not in sys.path:
     sys.path.insert(0, str(addon_dir))
 

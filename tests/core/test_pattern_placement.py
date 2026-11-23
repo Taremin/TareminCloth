@@ -31,12 +31,12 @@ class TestPatternPlacement(unittest.TestCase):
         """各プリセットが幾何学的に正しい位置と回転角を返す."""
         ref = estimate_body_reference_pure(body_height=1.7)
 
-        # 前身頃: Yがマイナス (手前), X=0, Z=胸の高さ, X軸90度回転
+        # 前身頃: Yがマイナス (手前), X=0, Z=胸の高さ, XZ直立基準のためX軸回転は0
         off_cf, rot_cf = get_quick_placement_transform("CHEST_FRONT", ref=ref)
         self.assertEqual(off_cf[0], 0.0)
         self.assertLess(off_cf[1], 0.0)
         self.assertAlmostEqual(off_cf[2], ref["chest_z"])
-        self.assertAlmostEqual(rot_cf[0], math.pi * 0.5)
+        self.assertAlmostEqual(rot_cf[0], 0.0)
 
         # 後身頃: Yがプラス (奥), X=0, Z=胸の高さ, Z軸180度反転
         off_bk, rot_bk = get_quick_placement_transform("BACK", ref=ref)

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # pythonディレクトリおよびプロジェクトルートをsys.pathに追加
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -38,7 +38,7 @@ class TestSimulationE2E(unittest.TestCase):
         taremin_cloth.unregister()
 
     def test_blender_cloth_simulation(self):
-        """Blenderメッシュからデータを取得しGPU Clothシミュレーションを実行して座標を反映するE2Eテスト"""
+        """Blenderメッシュから step_cloth_scene 経由でGPU Clothシミュレーションを実行し座標を反映するE2Eテスト"""
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0)
         obj = bpy.context.active_object
         mesh = obj.data
@@ -46,53 +46,35 @@ class TestSimulationE2E(unittest.TestCase):
         n_verts = len(mesh.vertices)
         self.assertEqual(n_verts, 25)
 
-        # 頂点座標の取得 (NumPy配列)
-        coords = np.empty(n_verts * 3, dtype=np.float32)
-        mesh.vertices.foreach_get("co", coords)
-        pos_2d = coords.reshape((n_verts, 3))
-
-        # エッジの取得
-        n_edges = len(mesh.edges)
-        edge_indices = np.empty(n_edges * 2, dtype=np.uint32)
-        mesh.edges.foreach_get("vertices", edge_indices)
-        edges_2d = edge_indices.reshape((n_edges, 2))
-
-        # 面の取得
-        tri_list = []
-        mesh.calc_loop_triangles()
-        for tri in mesh.loop_triangles:
-            tri_list.append(tri.vertices)
-        faces_2d = np.array(tri_list, dtype=np.uint32)
+        init_coords = np.empty(n_verts * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("co", init_coords)
+        pos_2d = init_coords.reshape((n_verts, 3))
 
         # ピン留め: 上端の頂点（Y座標が最大のもの）を固定
         max_y = np.max(pos_2d[:, 1])
-        inv_masses = np.ones(n_verts, dtype=np.float32)
+        vg = obj.vertex_groups.new(name="Pin")
         for i, pos in enumerate(pos_2d):
             if abs(pos[1] - max_y) < 1e-4:
-                inv_masses[i] = 0.0
+                vg.add([i], 1.0, 'REPLACE')
 
-        # シミュレータ作成
-        sim = taremin_cloth_core.ClothSimulator(
-            positions=pos_2d,
-            edges=edges_2d,
-            faces=faces_2d,
-            inv_masses=inv_masses,
-            layer_id=0,
-            thickness=0.005,
-            stiffness=10000.0,
-            bending_stiffness=50.0,
-        )
+        obj.taremin_cloth.is_cloth = True
+        obj.taremin_cloth.layer_id = 0
+        obj.taremin_cloth.thickness = 0.005
+        obj.taremin_cloth.tension_stiffness = 10000.0
+        obj.taremin_cloth.bending_stiffness = 50.0
+        obj.taremin_cloth.substeps = 20
+        obj.taremin_cloth.pin_vertex_group = vg.name
 
+        scene = bpy.context.scene
+        res = {}
+        for _ in range(60):
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
+
+        sim, _ = res[obj.name]
         self.assertGreater(sim.num_bending_constraints, 0)
 
-        # 60フレーム進める
-        for _ in range(60):
-            sim.step(dt=1.0 / 60.0, substeps=20)
-
-        # 頂点座標の更新
-        sim.get_positions(coords)
-        mesh.vertices.foreach_set("co", coords)
-        mesh.update()
+        coords = np.empty(n_verts * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("co", coords)
 
         # 検証: 最下端の頂点がZ軸下向きに落下しているか
         updated_pos = coords.reshape((n_verts, 3))
@@ -104,7 +86,6 @@ class TestSimulationE2E(unittest.TestCase):
             if abs(pos[1] - max_y) < 1e-4:
                 np.testing.assert_allclose(updated_pos[i], pos, atol=1e-5)
 
-        # クリーンアップ
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh, do_unlink=True)
 
@@ -263,7 +244,7 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.data.objects.remove(obj, do_unlink=True)
 
     def test_sewing_e2e(self):
-        """2枚の型紙メッシュが縫合エッジ（Loose edge）により引き合わされるE2Eテスト"""
+        """2枚の型紙メッシュが縫合エッジ（Loose edge）により step_cloth_scene 経由で引き合わされるE2Eテスト"""
         mesh = bpy.data.meshes.new(name="SewingTestMesh")
         verts = [
             [-1.0, 0.0, 0.0], [-1.0, 1.0, 0.0], [-2.0, 0.5, 0.0],
@@ -287,20 +268,18 @@ class TestSimulationE2E(unittest.TestCase):
         obj.taremin_cloth.is_cloth = True
         obj.taremin_cloth.enable_sewing = True
         obj.taremin_cloth.sewing_shrink_speed = 5.0
+        obj.taremin_cloth.gravity = 0.0
+        obj.taremin_cloth.substeps = 20
 
-        from taremin_cloth.operators import get_or_create_simulator, clear_simulators
-        clear_simulators()
-        sim, coords = get_or_create_simulator(obj)
+        scene = bpy.context.scene
+        res = {}
+        for _ in range(60):
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
+
+        sim, coords = res[obj.name]
         self.assertEqual(sim.num_sewing_constraints, 2)
 
-        sim.set_gravity(0.0, 0.0, 0.0)
-
-        for _ in range(60):
-            sim.step(dt=1.0 / 60.0, substeps=20)
-
-        sim.get_positions(coords)
         cur_pos = coords.reshape((-1, 3))
-
         dist03 = np.linalg.norm(cur_pos[0] - cur_pos[3])
         dist14 = np.linalg.norm(cur_pos[1] - cur_pos[4])
         print(f"\n[Test Sewing E2E] Dist 0-3: {dist03:.4f}, Dist 1-4: {dist14:.4f}")
@@ -311,7 +290,7 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.data.meshes.remove(mesh, do_unlink=True)
 
     def test_primitive_collider_e2e(self):
-        """Blenderシーン内の球コライダーに布が接触して貫通しないE2Eテスト"""
+        """Blenderシーン内の球コライダーに布が step_cloth_scene 経由で接触して貫通しないE2Eテスト"""
         bpy.ops.mesh.primitive_uv_sphere_add(radius=0.5, location=(0.0, 0.0, 0.0))
         collider_obj = bpy.context.active_object
         collider_obj.taremin_cloth_collider.is_collider = True
@@ -321,17 +300,17 @@ class TestSimulationE2E(unittest.TestCase):
 
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=4, y_subdivisions=4, size=1.0, location=(0.0, 0.0, 1.0))
         cloth_obj = bpy.context.active_object
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         cloth_obj.taremin_cloth.is_cloth = True
-        cloth_obj.taremin_cloth.stiffness = 10000.0
+        cloth_obj.taremin_cloth.tension_stiffness = 10000.0
+        cloth_obj.taremin_cloth.substeps = 20
 
-        from taremin_cloth.operators import get_or_create_simulator, clear_simulators
-        clear_simulators()
-        sim, coords = get_or_create_simulator(cloth_obj)
-
+        scene = bpy.context.scene
+        res = {}
         for _ in range(60):
-            sim.step(dt=1.0 / 60.0, substeps=20)
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
 
-        sim.get_positions(coords)
+        _, coords = res[cloth_obj.name]
         cur_pos = coords.reshape((-1, 3))
 
         for i, p in enumerate(cur_pos):
@@ -342,7 +321,7 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.data.objects.remove(collider_obj, do_unlink=True)
 
     def test_mesh_collider_e2e(self):
-        """Blenderシーン内のカスタムメッシュコライダー (Suzanne) に布が接触して貫通しないE2Eテスト"""
+        """Blenderシーン内のカスタムメッシュコライダー (Suzanne) に step_cloth_scene 経由で接触し貫通しないE2Eテスト"""
         bpy.ops.mesh.primitive_monkey_add(size=1.0, location=(0.0, 0.0, 0.0))
         monkey_obj = bpy.context.active_object
         monkey_obj.taremin_cloth_collider.is_collider = True
@@ -354,16 +333,15 @@ class TestSimulationE2E(unittest.TestCase):
         cloth_obj = bpy.context.active_object
         bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         cloth_obj.taremin_cloth.is_cloth = True
-        cloth_obj.taremin_cloth.stiffness = 10000.0
+        cloth_obj.taremin_cloth.tension_stiffness = 10000.0
+        cloth_obj.taremin_cloth.substeps = 20
 
-        from taremin_cloth.operators import get_or_create_simulator, clear_simulators
-        clear_simulators()
-        sim, coords = get_or_create_simulator(cloth_obj)
-
+        scene = bpy.context.scene
+        res = {}
         for _ in range(60):
-            sim.step(dt=1.0 / 60.0, substeps=20)
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
 
-        sim.get_positions(coords)
+        _, coords = res[cloth_obj.name]
         cur_pos = coords.reshape((-1, 3))
 
         # 布が自由落下しきらず、Suzanneメッシュ上に留まっていること (サルの底面 z=-0.492 より上)
@@ -377,7 +355,7 @@ class TestSimulationE2E(unittest.TestCase):
         bpy.data.objects.remove(monkey_obj, do_unlink=True)
 
     def test_multilayer_e2e(self):
-        """2枚の重ね着布（インナーとアウター）のマルチレイヤーE2Eテスト"""
+        """2枚の重ね着布（インナーとアウター）の step_cloth_scene 経由マルチレイヤーE2Eテスト"""
         mesh = bpy.data.meshes.new(name="MultiLayerMesh")
         verts = [
             [-0.2, -0.2, 0.0], [0.2, -0.2, 0.0], [-0.2, 0.2, 0.0], [0.2, 0.2, 0.0],
@@ -394,36 +372,29 @@ class TestSimulationE2E(unittest.TestCase):
         mesh.from_pydata(verts, edges, faces)
         mesh.update()
 
+        attr = mesh.attributes.new(name="cloth_layer", type='INT', domain='POINT')
+        attr.data.foreach_set("value", [0, 0, 0, 0, 1, 1, 1, 1])
+
         obj = bpy.data.objects.new("MultiLayerObj", mesh)
         bpy.context.collection.objects.link(obj)
 
         vg = obj.vertex_groups.new(name="Pin")
         vg.add([0, 1, 2, 3], 1.0, 'REPLACE')
 
-        layer_ids = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.uint32)
-        thicknesses = np.array([0.05] * 8, dtype=np.float32)
+        obj.taremin_cloth.is_cloth = True
+        obj.taremin_cloth.pin_vertex_group = "Pin"
+        obj.taremin_cloth.self_collision_purpose = 'CUSTOM'
+        obj.taremin_cloth.enable_self_collision = True
+        obj.taremin_cloth.thickness = 0.05
+        obj.taremin_cloth.tension_stiffness = 10000.0
+        obj.taremin_cloth.substeps = 20
 
-        coords = np.empty(8 * 3, dtype=np.float32)
-        mesh.vertices.foreach_get("co", coords)
-        pos_2d = coords.reshape((8, 3))
-        edges_2d = np.array(edges, dtype=np.uint32)
-        faces_2d = np.array(faces, dtype=np.uint32)
-        inv_masses = np.array([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
-
-        sim = taremin_cloth_core.ClothSimulator(
-            positions=pos_2d,
-            edges=edges_2d,
-            faces=faces_2d,
-            inv_masses=inv_masses,
-            layer_ids=layer_ids,
-            thicknesses=thicknesses,
-            stiffness=10000.0,
-        )
-
+        scene = bpy.context.scene
+        res = {}
         for _ in range(60):
-            sim.step(dt=1.0 / 60.0, substeps=20)
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
 
-        sim.get_positions(coords)
+        _, coords = res[obj.name]
         cur_pos = coords.reshape((8, 3))
 
         for i in range(4, 8):
@@ -438,8 +409,12 @@ class TestSimulationE2E(unittest.TestCase):
         self.assertTrue(hasattr(bpy.ops.taremin_cloth, "reset_simulation"))
 
     def test_interactive_raycast_picking_and_depth(self):
-        """インタラクティブモードのレイキャスト頂点ピッキングと深度計算の検証"""
+        """本番 SingleGrabTool を用いたレイキャスト頂点ピッキング・ゼロ変位・深度維持・ピン保護の検証"""
         import mathutils
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from taremin_cloth.brush.base import BrushContext
+        from taremin_cloth.brush.single_grab import SingleGrabTool
 
         # 手前(z=1.0)と奥(z=0.0)に面を持つ2層メッシュを作成
         mesh = bpy.data.meshes.new(name="DoubleLayerMesh")
@@ -456,68 +431,60 @@ class TestSimulationE2E(unittest.TestCase):
         obj.location = (2.0, 0.0, 0.0)  # ワールドオフセット
         bpy.context.view_layer.update()
 
-        # カメラ視線レイ: z軸正方向(z=5.0)から真下(z=-1.0方向)へ
+        n_verts = len(mesh.vertices)
+        world_coords = np.empty((n_verts, 3), dtype=np.float32)
+        for i, v in enumerate(mesh.vertices):
+            wp = obj.matrix_world @ v.co
+            world_coords[i] = [wp.x, wp.y, wp.z]
+
         ray_origin_world = mathutils.Vector((2.0, 0.0, 5.0))
-        ray_dir_world = mathutils.Vector((0.0, 0.0, -1.0))
+        ray_dir_initial = mathutils.Vector((0.0, 0.0, -1.0))
+        ray_dir_drag = mathutils.Vector((0.3, 0.4, -1.0)).normalized()
+        current_dir = [ray_dir_initial]
 
-        # ローカル変換
-        matrix_inv = obj.matrix_world.inverted()
-        ray_origin_local = matrix_inv @ ray_origin_world
-        ray_dir_local = (matrix_inv.to_3x3() @ ray_dir_world).normalized()
-
-        hit, hit_loc, hit_normal, face_idx = obj.ray_cast(ray_origin_local, ray_dir_local)
-        self.assertTrue(hit, "レイキャストがメッシュ表面にヒットすること")
-        self.assertEqual(face_idx, 0, "手前の面 (face_idx=0) が優先してヒットすること（奥の面ではない）")
-
-        # 頂点選択
-        polygon = obj.data.polygons[face_idx]
-        best_idx = None
-        min_dist_sq = float('inf')
-        for v_idx in polygon.vertices:
-            v_co = obj.data.vertices[v_idx].co
-            dist_sq = (v_co - hit_loc).length_squared
-            if dist_sq < min_dist_sq:
-                min_dist_sq = dist_sq
-                best_idx = v_idx
-
-        self.assertIn(best_idx, [0, 1, 2], "手前ポリゴンの頂点が選択されること")
-
-        # 選択された頂点自身の位置を基準とするビュー平面の定義
-        camera_forward = mathutils.Vector((0.0, 0.0, -1.0))
-        v_initial_local = mesh.vertices[best_idx].co.copy()
-        v_initial_world = obj.matrix_world @ v_initial_local
-        grab_plane_point = v_initial_world
-
-        # クリック時の初期レイとビュー平面の初期交点
-        denom0 = ray_dir_world.dot(camera_forward)
-        t0 = (grab_plane_point - ray_origin_world).dot(camera_forward) / denom0
-        initial_plane_hit = ray_origin_world + ray_dir_world * t0
-
-        # 検証1: マウス移動ゼロ（静止時）では、目標位置が初期頂点位置と完全に一致すること（交点スナップが発生しないこと）
-        delta_world_zero = initial_plane_hit - initial_plane_hit
-        delta_local_zero = matrix_inv.to_3x3() @ delta_world_zero
-        target_pos_local_zero = v_initial_local + delta_local_zero
-        np.testing.assert_allclose(
-            [target_pos_local_zero.x, target_pos_local_zero.y, target_pos_local_zero.z],
-            [v_initial_local.x, v_initial_local.y, v_initial_local.z],
-            atol=1e-5,
-            err_msg="静止状態では頂点が1ミリも動かず初期位置に留まること"
+        dummy_ctx = SimpleNamespace(
+            region=SimpleNamespace(width=800, height=600),
+            region_data=SimpleNamespace(view_matrix=mathutils.Matrix.Identity(4)),
         )
+        sim_mock = MagicMock()
+        tool = SingleGrabTool()
 
-        # 斜め方向へのマウス移動（視線レイ）をシミュレート
-        drag_dir_world = mathutils.Vector((0.3, 0.4, -1.0)).normalized()
-        denom = drag_dir_world.dot(camera_forward)
-        self.assertGreater(abs(denom), 1e-6)
-        t = (grab_plane_point - ray_origin_world).dot(camera_forward) / denom
-        current_plane_hit = ray_origin_world + drag_dir_world * t
+        with patch("taremin_cloth.brush.single_grab.view3d_utils.region_2d_to_origin_3d", return_value=ray_origin_world), \
+             patch("taremin_cloth.brush.single_grab.view3d_utils.region_2d_to_vector_3d", side_effect=lambda *_args: current_dir[0]):
+            press_ctx = BrushContext(None, dummy_ctx, obj, sim_mock, world_coords, None, (400.0, 300.0))
+            self.assertTrue(tool.on_press(press_ctx), "SingleGrabTool.on_press が最前面ポリゴン頂点を掴むこと")
+            self.assertIn(tool.grabbed_vert, [0, 1, 2], "奥のポリゴン [3,4,5] ではなく手前の [0,1,2] が選ばれること")
 
-        # 相対オフセットの計算
-        delta_world = current_plane_hit - initial_plane_hit
-        delta_local = matrix_inv.to_3x3() @ delta_world
-        target_pos_local = v_initial_local + delta_local
+            init_world = world_coords[tool.grabbed_vert].copy()
 
-        # 検証2: 斜めにドラッグしても、頂点本来のZ深度が完全に一定に保たれること
-        self.assertAlmostEqual(target_pos_local.z, v_initial_local.z, places=4, msg="相対オフセット移動により頂点本来のZ深度が維持されること")
+            # 検証1: マウス移動ゼロでの on_move では、初期位置から1ミリも飛び跳ねないこと
+            sim_mock.set_pin.reset_mock()
+            self.assertTrue(tool.on_move(press_ctx))
+            self.assertGreaterEqual(sim_mock.set_pin.call_count, 1)
+            zero_target = sim_mock.set_pin.call_args_list[-1][0][1]
+            np.testing.assert_allclose(zero_target, init_world, atol=1e-5, err_msg="静止状態では初期位置に留まること")
+
+            # 検証2: 斜めレイへのドラッグで XY が移動しつつ頂点本来の Z 深度が維持されること
+            current_dir[0] = ray_dir_drag
+            sim_mock.set_pin.reset_mock()
+            move_ctx = BrushContext(None, dummy_ctx, obj, sim_mock, world_coords, None, (450.0, 350.0))
+            self.assertTrue(tool.on_move(move_ctx))
+            drag_target = sim_mock.set_pin.call_args_list[-1][0][1]
+            self.assertGreater(abs(drag_target[0] - init_world[0]), 0.1, "X方向へドラッグ移動していること")
+            self.assertAlmostEqual(drag_target[2], float(init_world[2]), places=4, msg="ビュー平面ドラッグ後もZ深度が維持されること")
+
+            # 検証3: ピン保護された状態では release_pin されず、非ピン頂点なら release_pin されること
+            sim_mock.release_pin.reset_mock()
+            tool.on_release(move_ctx, {tool.grabbed_vert})
+            sim_mock.release_pin.assert_not_called()
+
+            # 再掴みして非ピン頂点解放を検証
+            current_dir[0] = ray_dir_initial
+            self.assertTrue(tool.on_press(press_ctx))
+            grabbed_id = tool.grabbed_vert
+            tool.on_release(press_ctx, set())
+            released_ids = [c[0][0] for c in sim_mock.release_pin.call_args_list]
+            self.assertIn(grabbed_id, released_ids)
 
         bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh, do_unlink=True)
@@ -985,14 +952,12 @@ class TestSimulationE2E(unittest.TestCase):
         cloth_obj.taremin_cloth.edge_margin_offset = 0.002
         cloth_obj.taremin_cloth.substeps = 20
 
-        from taremin_cloth.operators import get_or_create_simulator, clear_simulators
-        clear_simulators()
-        sim, coords = get_or_create_simulator(cloth_obj)
-
+        scene = bpy.context.scene
+        res = {}
         for _ in range(60):
-            sim.step(dt=1.0 / 60.0, substeps=cloth_obj.taremin_cloth.substeps)
+            res = taremin_cloth.step_cloth_scene(scene, dt=1.0 / 60.0, update_mesh=True)
 
-        sim.get_positions(coords)
+        _, coords = res[cloth_obj.name]
         cur_pos = coords.reshape((-1, 3))
 
         # 布が自由落下せず、球コライダー上に留まっていること

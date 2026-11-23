@@ -12,6 +12,8 @@ root_dir = Path(__file__).parent.parent.parent
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 from taremin_cloth.utils import drawing
 
@@ -60,21 +62,28 @@ class TestDrawingOverlayOptimization(unittest.TestCase):
         self.assertEqual(len(drawing._sewing_edge_indices_cache), 0)
 
     def test_draw_callback_3d_early_return_when_not_interactive(self):
-        """非インタラクティブ実行時は draw_callback_3d が即座に早期リターンすること"""
+        """非インタラクティブ実行時かつ常時表示対象布がない場合は GPU 描画処理に入らず早期リターンすること"""
         drawing.set_interactive_active(False)
 
-        # bpy.context.scene がアクセスされても例外が起きない・オブジェクト走査が行われないことを確認
-        with patch.object(drawing, "bpy") as mock_bpy:
-            # scene.objects が参照されたら例外を発生させるモックを設定
-            mock_scene = MagicMock()
-            type(mock_scene).objects = property(lambda self: (_ for _ in ()).throw(RuntimeError("objects should not be accessed")))
-            mock_bpy.context.scene = mock_scene
+        mock_obj = MagicMock()
+        mock_obj.type = "MESH"
+        mock_obj.taremin_cloth.is_cloth = True
+        mock_obj.taremin_cloth.pin_overlay_interactive_only = True
+        mock_obj.taremin_cloth.elastic_overlay_interactive_only = True
+        mock_obj.visible_get = MagicMock(return_value=True)
 
-            # 非アクティブ時は objects に触れず即 return するためエラーにならない
-            try:
+        for objs in ([], [mock_obj]):
+            mock_scene = MagicMock()
+            mock_scene.objects = objs
+            with (
+                patch.object(drawing, "bpy") as mock_bpy,
+                patch.object(drawing, "get_point_shader", side_effect=AssertionError("should not fetch point shader")),
+                patch.object(drawing, "get_line_shader", side_effect=AssertionError("should not fetch line shader")),
+                patch.object(drawing, "get_smooth_color_line_shader", side_effect=AssertionError("should not fetch smooth shader")),
+                patch.object(drawing, "batch_for_shader", side_effect=AssertionError("should not build batch")),
+            ):
+                mock_bpy.context.scene = mock_scene
                 drawing.draw_callback_3d()
-            except RuntimeError:
-                self.fail("draw_callback_3d should return immediately when not interactive")
 
     def test_shader_caching(self):
         """シェーダー取得関数がキャッシュを保持し再利用すること"""

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 # プロジェクトルートと python ディレクトリをパスに追加
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))

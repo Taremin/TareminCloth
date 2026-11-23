@@ -255,6 +255,99 @@ class TestRecordingOptions(unittest.TestCase):
             pass
         self.assertFalse(self.sc.apply_recording_options(OldSim(), {"full_stride": 5}))
 
+    def test_sync_elastic_groups_stiffness_multiplier_and_string_isolation(self):
+        """sync_elastic_groups が stiffness_multiplier を同期し、削除時に string_parts を巻き添えにしないこと"""
+        from taremin_cloth.engine.params import sync_elastic_groups
+        from taremin_cloth.engine.cache import _prev_elastic_scales, _prev_elastic_multipliers, _prev_string_scales
+
+        scale_calls = []
+        mult_calls = []
+        reset_called = []
+
+        class MockSim:
+            def set_edge_rest_length_scales(self, idx_arr, scales_arr):
+                scale_calls.append((idx_arr.tolist(), scales_arr.tolist()))
+
+            def set_edge_stiffness_multipliers(self, idx_arr, mult_arr):
+                mult_calls.append((idx_arr.tolist(), mult_arr.tolist()))
+
+            def reset_edge_rest_lengths(self):
+                reset_called.append(True)
+
+        class MockGroup:
+            def __init__(self, edges, scale=0.7, mult=3.5, enabled=True):
+                self._edges = edges
+                self.scale = scale
+                self.stiffness_multiplier = mult
+                self.enabled = enabled
+
+            def get_edge_indices(self):
+                return list(self._edges)
+
+        sim = MockSim()
+        g0 = MockGroup([10, 11], scale=0.6, mult=4.0, enabled=True)
+        obj = SimpleNamespace(
+            name="TestCloth_Elastic31",
+            taremin_cloth=SimpleNamespace(elastic_groups=[g0]),
+        )
+        _prev_string_scales["TestCloth_Elastic31"] = {99: 0.5}
+
+        try:
+            sync_elastic_groups(sim, obj)
+            self.assertEqual(len(scale_calls), 1)
+            self.assertEqual(scale_calls[-1][0], [10, 11])
+            self.assertEqual(len(mult_calls), 1)
+            self.assertEqual(mult_calls[-1][0], [10, 11])
+            np.testing.assert_allclose(mult_calls[-1][1], [4.0, 4.0], rtol=1e-5)
+
+            # グループを無効化した際、reset_edge_rest_lengths は呼ばれず、
+            # 該当エッジ [10, 11] のみが scale=1.0, multiplier=1.0 に戻り、_prev_string_scales は保持されること
+            g0.enabled = False
+            sync_elastic_groups(sim, obj)
+            self.assertEqual(reset_called, [])
+            self.assertIn("TestCloth_Elastic31", _prev_string_scales)
+            self.assertEqual(scale_calls[-1][0], [10, 11])
+            np.testing.assert_allclose(scale_calls[-1][1], [1.0, 1.0], rtol=1e-5)
+            self.assertEqual(mult_calls[-1][0], [10, 11])
+            np.testing.assert_allclose(mult_calls[-1][1], [1.0, 1.0], rtol=1e-5)
+        finally:
+            _prev_elastic_scales.pop("TestCloth_Elastic31", None)
+            _prev_elastic_multipliers.pop("TestCloth_Elastic31", None)
+            _prev_string_scales.pop("TestCloth_Elastic31", None)
+
+    def test_joint_weight_threshold_to_min_blend_conversion(self):
+        """joint_weight_threshold (0.5〜0.99) が最小第2ウェイトへ単調逆変換されること"""
+        from taremin_cloth.engine.sdf_baker import (
+            _joint_weight_threshold_to_min_blend,
+            extract_hierarchy_joint_mesh_indices,
+        )
+
+        self.assertAlmostEqual(_joint_weight_threshold_to_min_blend(0.85), 0.15, places=5)
+        self.assertAlmostEqual(_joint_weight_threshold_to_min_blend(0.95), 0.05, places=5)
+        self.assertAlmostEqual(_joint_weight_threshold_to_min_blend(0.50), 0.49, places=5)
+
+        # ウェイト (0.90, 0.10) のブレンド頂点を含むメッシュ
+        verts = np.zeros((6, 3), dtype=np.float32)
+        tris = np.array([[0, 1, 2], [2, 3, 4], [3, 4, 5]], dtype=np.int32)
+        w_parent = np.array([1.0, 1.0, 0.90, 0.90, 0.90, 0.90], dtype=np.float32)
+        w_child = np.array([0.0, 0.0, 0.10, 0.10, 0.10, 0.10], dtype=np.float32)
+        b_weights = {"Parent": w_parent, "Child": w_child}
+        p_map = {"Child": "Parent", "Parent": None}
+
+        # threshold=0.85 (min_blend=0.15) では 0.10 <= 0.15 のため抽出されない
+        faces_85, _ = extract_hierarchy_joint_mesh_indices(
+            verts, tris, b_weights, p_map,
+            min_blend_weight=_joint_weight_threshold_to_min_blend(0.85),
+        )
+        self.assertEqual(len(faces_85), 0)
+
+        # threshold=0.95 (min_blend=0.05) では 0.10 > 0.05 のため全3面が抽出される
+        faces_95, _ = extract_hierarchy_joint_mesh_indices(
+            verts, tris, b_weights, p_map,
+            min_blend_weight=_joint_weight_threshold_to_min_blend(0.95),
+        )
+        self.assertEqual(len(faces_95), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

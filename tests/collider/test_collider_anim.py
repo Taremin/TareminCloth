@@ -3,13 +3,11 @@
 """
 
 import unittest
-import bpy
 import math
-import mathutils
 import sys
 from pathlib import Path
 
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -17,36 +15,14 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 import tests
+import bpy
+import mathutils
 import taremin_cloth
 from taremin_cloth.utils import anim_driver
 
 
-@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
-class TestColliderAnimation(unittest.TestCase):
-    def setUp(self):
-        taremin_cloth.register()
-        bpy.ops.wm.read_factory_settings(use_empty=True)
-
-    def tearDown(self):
-        taremin_cloth.unregister()
-
-    def test_properties_initialization(self):
-        """コライダーアニメーション設定プロパティが正しく初期化されるかテスト"""
-        bpy.ops.mesh.primitive_cube_add(size=1.0)
-        obj = bpy.context.active_object
-        col_settings = obj.taremin_cloth_collider
-        col_settings.is_collider = True
-
-        self.assertTrue(hasattr(col_settings, "anim"))
-        anim = col_settings.anim
-        self.assertFalse(anim.enabled)
-        self.assertEqual(anim.target_type, 'POSE_BLEND')
-        self.assertEqual(anim.play_mode, 'ONCE')
-        self.assertEqual(anim.cycle_frames, 60)
-        self.assertEqual(anim.loop_count, 1)
-        self.assertFalse(anim.infinite_loop)
-        self.assertEqual(anim.easing, 'SMOOTH')
-        self.assertAlmostEqual(anim.progress, 0.0)
+class TestColliderAnimPure(unittest.TestCase):
+    """Blender 非依存のコライダーアニメーション純粋計算テスト"""
 
     def test_cycle_progress_computation(self):
         """再生モードごとの進行度計算（ONCE, REPEAT, PINGPONG）のテスト"""
@@ -119,6 +95,34 @@ class TestColliderAnimation(unittest.TestCase):
         # Smoothstepは0.25時点で Linear (0.25) より緩やか (速度が低い)
         t_smooth = anim_driver.apply_easing(0.25, 'SMOOTH')
         self.assertLess(t_smooth, 0.25)
+
+
+@unittest.skipUnless(getattr(tests, "_IS_REAL_BLENDER", False), "Blender実行環境が必要です")
+class TestColliderAnimation(unittest.TestCase):
+    def setUp(self):
+        taremin_cloth.register()
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+
+    def tearDown(self):
+        taremin_cloth.unregister()
+
+    def test_properties_initialization(self):
+        """コライダーアニメーション設定プロパティが正しく初期化されるかテスト"""
+        bpy.ops.mesh.primitive_cube_add(size=1.0)
+        obj = bpy.context.active_object
+        col_settings = obj.taremin_cloth_collider
+        col_settings.is_collider = True
+
+        self.assertTrue(hasattr(col_settings, "anim"))
+        anim = col_settings.anim
+        self.assertFalse(anim.enabled)
+        self.assertEqual(anim.target_type, 'POSE_BLEND')
+        self.assertEqual(anim.play_mode, 'ONCE')
+        self.assertEqual(anim.cycle_frames, 60)
+        self.assertEqual(anim.loop_count, 1)
+        self.assertFalse(anim.infinite_loop)
+        self.assertEqual(anim.easing, 'SMOOTH')
+        self.assertAlmostEqual(anim.progress, 0.0)
 
     def test_shape_key_animation(self):
         """シェイプキーのアニメーション補間テスト"""

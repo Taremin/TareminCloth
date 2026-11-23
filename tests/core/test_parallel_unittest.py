@@ -63,10 +63,38 @@ class TestParallelUnittestDiscovery(unittest.TestCase):
         for u in standalone_units:
             self.assertFalse(u.requires_blender, f"Blender必須テストが standalone に混入: {u.file_path}")
 
-        # standalone と blender でファイルが重複しないこと
-        standalone_files = {u.file_path.resolve() for u in standalone_units}
-        blender_files = {u.file_path.resolve() for u in blender_units}
-        self.assertFalse(standalone_files & blender_files)
+        # standalone と blender でターゲットが重複しないこと（混在ファイルはクラス/メソッド単位で排他分離）
+        standalone_targets = {u.target for u in standalone_units}
+        blender_targets = {u.target for u in blender_units}
+        self.assertFalse(standalone_targets & blender_targets)
+
+        # test_i18n.py は非Blender 3クラスが standalone、Blender 3クラスが blender に振り分けられること
+        standalone_i18n_classes = {
+            u.target.split(".")[3]
+            for u in standalone_units
+            if u.target.startswith("tests.core.test_i18n.")
+        }
+        blender_i18n_classes = {
+            u.target.split(".")[3]
+            for u in blender_units
+            if u.target.startswith("tests.core.test_i18n.")
+        }
+        self.assertEqual(
+            standalone_i18n_classes,
+            {
+                "TestI18nDictionary",
+                "TestI18nRNACoverage",
+                "TestI18nDeadKeys",
+            },
+        )
+        self.assertEqual(
+            blender_i18n_classes,
+            {
+                "TestI18nStrictBlenderUsage",
+                "TestI18nDynamicUIDraw",
+                "TestI18nBlenderIntegration",
+            },
+        )
 
         loader = unittest.TestLoader()
         standalone_total = sum(loader.loadTestsFromName(u.target).countTestCases() for u in standalone_units)
@@ -83,9 +111,10 @@ class TestParallelUnittestDiscovery(unittest.TestCase):
         self.assertEqual(standalone_total + blender_non_e2e_total, traditional_total)
 
     def test_blender_scope_excludes_non_blender_tests(self):
-        """blender スコープは e2e と _IS_REAL_BLENDER 依存ファイルのみを正確に抽出すること"""
+        """blender スコープは e2e と _?IS_REAL_BLENDER 依存ユニットのみを正確に抽出すること"""
         units = discover_test_units(REPO_ROOT, granularity="file", scope="blender")
         rel_paths = {u.file_path.relative_to(REPO_ROOT).as_posix() for u in units}
+        targets = {u.target for u in units}
 
         all_units = discover_test_units(REPO_ROOT, granularity="file", scope="all")
         expected_blender_paths = {
@@ -99,8 +128,91 @@ class TestParallelUnittestDiscovery(unittest.TestCase):
         self.assertIn("tests/e2e/test_simulation_e2e.py", rel_paths)
         self.assertIn("tests/interactive/test_panels.py", rel_paths)
         self.assertIn("tests/physics/test_adaptive_substep.py", rel_paths)
+        self.assertIn("tests/core/test_i18n.py", rel_paths)
+        self.assertIn("tests.core.test_i18n.TestI18nStrictBlenderUsage", targets)
+        self.assertIn("tests.core.test_i18n.TestI18nDynamicUIDraw", targets)
+        self.assertIn("tests.core.test_i18n.TestI18nBlenderIntegration", targets)
+        self.assertNotIn("tests.core.test_i18n.TestI18nDictionary", targets)
         self.assertNotIn("tests/core/test_cloth_core.py", rel_paths)
-        self.assertNotIn("tests/core/test_i18n.py", rel_paths)
+        self.assertNotIn("tests/core/test_mesh_analysis.py", rel_paths)
+
+    def test_mixed_blender_file_splits_by_class_and_method(self):
+        """IS_REAL_BLENDER / _IS_REAL_BLENDER 混在ファイルが class / method 単位で分離されること"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            pkg = tmp_root / "tests" / "mixed"
+            pkg.mkdir(parents=True)
+            (tmp_root / "tests" / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "__init__.py").write_text("", encoding="utf-8")
+            mixed_file = pkg / "test_mixed_sample.py"
+            mixed_file.write_text(
+                "import unittest\n"
+                "IS_REAL_BLENDER = False\n"
+                "_IS_REAL_BLENDER = False\n"
+                "\n"
+                "class TestStandaloneOnly(unittest.TestCase):\n"
+                "    def test_alpha(self): pass\n"
+                "\n"
+                "@unittest.skipUnless(_IS_REAL_BLENDER, 'needs blender')\n"
+                "class TestBlenderClass(unittest.TestCase):\n"
+                "    def test_beta(self): pass\n"
+                "\n"
+                "class TestMixedMethods(unittest.TestCase):\n"
+                "    def test_plain(self): pass\n"
+                "    @unittest.skipUnless(IS_REAL_BLENDER, 'needs blender')\n"
+                "    def test_blender_only(self): pass\n",
+                encoding="utf-8",
+            )
+
+            for gran in ("file", "auto"):
+                sa = discover_test_units(
+                    tmp_root,
+                    test_roots=[pkg],
+                    granularity=gran,
+                    scope="standalone",
+                )
+                bl = discover_test_units(
+                    tmp_root,
+                    test_roots=[pkg],
+                    granularity=gran,
+                    scope="blender",
+                )
+                sa_targets = {u.target for u in sa}
+                bl_targets = {u.target for u in bl}
+                self.assertFalse(sa_targets & bl_targets)
+                self.assertTrue(all(not u.requires_blender for u in sa))
+                self.assertTrue(all(u.requires_blender for u in bl))
+
+                if gran == "file":
+                    self.assertEqual(
+                        sa_targets,
+                        {
+                            "tests.mixed.test_mixed_sample.TestStandaloneOnly",
+                            "tests.mixed.test_mixed_sample.TestMixedMethods.test_plain",
+                        },
+                    )
+                    self.assertEqual(
+                        bl_targets,
+                        {
+                            "tests.mixed.test_mixed_sample.TestBlenderClass",
+                            "tests.mixed.test_mixed_sample.TestMixedMethods.test_blender_only",
+                        },
+                    )
+                else:
+                    self.assertEqual(
+                        sa_targets,
+                        {
+                            "tests.mixed.test_mixed_sample.TestStandaloneOnly.test_alpha",
+                            "tests.mixed.test_mixed_sample.TestMixedMethods.test_plain",
+                        },
+                    )
+                    self.assertEqual(
+                        bl_targets,
+                        {
+                            "tests.mixed.test_mixed_sample.TestBlenderClass.test_beta",
+                            "tests.mixed.test_mixed_sample.TestMixedMethods.test_blender_only",
+                        },
+                    )
 
     def test_keep_class_directive_does_not_leak_to_following_class(self):
         """# parallel: keep-class は対象クラス直上連続コメント/本体のみに効き、直前クラスから漏れないこと"""

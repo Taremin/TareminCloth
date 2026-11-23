@@ -40,7 +40,7 @@ def _create_cloth_grid(*, name="AdaptiveCloth", location=(0.0, 0.0, 1.0), pin_al
     if pin_all:
         vg = obj.vertex_groups.new(name="Pin")
         vg.add(list(range(len(obj.data.vertices))), 1.0, 'REPLACE')
-        settings.pin_group = vg.name
+        settings.pin_vertex_group = vg.name
 
     return obj
 

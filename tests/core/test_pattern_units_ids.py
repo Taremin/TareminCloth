@@ -10,6 +10,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 python_dir = os.path.join(project_root, "python")
 if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from taremin_cloth.pattern.ids import new_id, is_valid_id
 from taremin_cloth.pattern.units import m_to_cm, cm_to_m, format_cm, parse_length_input

@@ -371,6 +371,15 @@ class TestAuditCacheCommand(unittest.TestCase):
         self.assertIn("released at F2", out)
         self.assertTrue(os.path.exists(out_path))
 
+    def test_segment_segment_distances_degenerate_second_segment(self):
+        """第2線分が退化 (p2 == q2) の場合でもパラメータs/t逆転せず最短距離を算出すること"""
+        p1 = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        q1 = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        p2 = np.array([[0.2, 0.5, 0.0]], dtype=np.float64)
+        q2 = np.array([[0.2, 0.5, 0.0]], dtype=np.float64)
+        dist = self.pa.segment_segment_distances(p1, q1, p2, q2)
+        self.assertAlmostEqual(float(dist[0]), 0.5, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

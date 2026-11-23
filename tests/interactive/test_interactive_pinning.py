@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 # pythonディレクトリおよびプロジェクトルートをsys.pathに追加
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -98,46 +98,48 @@ class TestInteractivePinning(unittest.TestCase):
         self.assertFalse(drawing.is_interactive_active())
 
     def test_auto_create_pin_vertex_group(self):
-        """ピン留め操作時に頂点グループが存在しない場合、自動的に'Pin'グループが作成されるかテスト"""
+        """ピン留め操作時に頂点グループが存在しない場合、本番関数により自動的に'Pin'グループが作成されるかテスト"""
+        from taremin_cloth.ops.interactive import ensure_pin_vertex_group
+
         settings = self.obj.taremin_cloth
         settings.pin_vertex_group = ""
         self.assertEqual(len(self.obj.vertex_groups), 0)
 
-        # 頂点グループ取得・自動作成ロジックの検証
-        vg_name = settings.pin_vertex_group or "Pin"
-        vg = self.obj.vertex_groups.get(vg_name)
-        if not vg:
-            vg = self.obj.vertex_groups.new(name="Pin")
-            settings.pin_vertex_group = "Pin"
+        vg = ensure_pin_vertex_group(self.obj)
 
         self.assertIsNotNone(vg)
         self.assertEqual(vg.name, "Pin")
         self.assertEqual(settings.pin_vertex_group, "Pin")
 
-        # 頂点0をウェイト1.0でピン留め
+        # 既存のピン頂点グループ名を再指定しても同じグループが返ること
+        vg_again = ensure_pin_vertex_group(self.obj)
+        self.assertEqual(vg_again, vg)
+
+        # 頂点0をウェイト1.0でピン留め・解除
         vg.add([0], 1.0, 'REPLACE')
         self.assertAlmostEqual(vg.weight(0), 1.0)
-
-        # ピン解除
         vg.remove([0])
         with self.assertRaises(RuntimeError):
             vg.weight(0)
 
     def test_drawing_overlay_conditional_display(self):
-        """インタラクティブモード非実行時にオーバーレイが非表示判定されるかテスト"""
+        """インタラクティブモード状態と設定に応じた本番オーバーレイ描画判定の検証"""
         settings = self.obj.taremin_cloth
         settings.pin_overlay_interactive_only = True
         settings.elastic_overlay_interactive_only = True
 
-        # モード非実行時は描画が無効判定
+        # モード非実行時は Interactive Only=True なら非表示
         drawing.set_interactive_active(False)
-        show_pin = not (settings.pin_overlay_interactive_only and not drawing.is_interactive_active())
-        self.assertFalse(show_pin)
+        self.assertFalse(drawing.should_draw_pin_overlay(settings))
 
-        # モード実行中は描画が有効判定
+        # モード実行中は表示
         drawing.set_interactive_active(True)
-        show_pin = not (settings.pin_overlay_interactive_only and not drawing.is_interactive_active())
-        self.assertTrue(show_pin)
+        self.assertTrue(drawing.should_draw_pin_overlay(settings))
+
+        # Interactive Only=False なら非実行時でも表示
+        settings.pin_overlay_interactive_only = False
+        drawing.set_interactive_active(False)
+        self.assertTrue(drawing.should_draw_pin_overlay(settings))
 
     def test_apply_view_depth_bias(self):
         """深度バイアス計算関数のテスト（透視投影・正射影・フォールバック）"""

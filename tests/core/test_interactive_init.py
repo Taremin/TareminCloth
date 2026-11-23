@@ -11,6 +11,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 python_dir = os.path.join(project_root, "python")
 if python_dir not in sys.path:
     sys.path.insert(0, python_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from taremin_cloth.utils import drawing
 from taremin_cloth import i18n
@@ -330,6 +332,48 @@ class TestStagedInitStateMachine(unittest.TestCase):
         end(op, ctx, success=True)
         ctx.window_manager.progress_end.assert_called_once()
         ctx.window_manager.cursor_modal_restore.assert_called_once()
+
+
+class TestInteractiveStepLimit(unittest.TestCase):
+    """フレーム予算付きステップ上限算出ロジックの検証 (Spiral of Death 防止)"""
+
+    def test_compute_interactive_step_limit(self):
+        from taremin_cloth.ops.interactive import compute_interactive_step_limit
+
+        # 実時間同期OFFでは常に 1 ステップ
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=False, max_steps=4, ema_step_ms=2.0),
+            1,
+        )
+        # 初回（コスト未計測）および非正値は安全のため 1 ステップ
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=True, max_steps=4, ema_step_ms=None),
+            1,
+        )
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=True, max_steps=4, ema_step_ms=0.0),
+            1,
+        )
+        # 軽量（2ms/step, 予算16.67ms）なら上限 max_steps=4 まで許可
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=True, max_steps=4, ema_step_ms=2.0),
+            4,
+        )
+        # 中負荷（6ms/step -> 16.67 // 6 = 2 ステップまで）
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=True, max_steps=4, ema_step_ms=6.0),
+            2,
+        )
+        # 高負荷（48ms/step, 85%予算超過）では 1 ステップに制限してFPS急落を防止
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=True, max_steps=4, ema_step_ms=48.0),
+            1,
+        )
+        # 範囲外 max_steps は 8 でクランプ
+        self.assertEqual(
+            compute_interactive_step_limit(realtime_sync=True, max_steps=99, ema_step_ms=1.0),
+            8,
+        )
 
 
 if __name__ == "__main__":

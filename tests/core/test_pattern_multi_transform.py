@@ -136,7 +136,7 @@ class TestPatternMultiTransform(unittest.TestCase):
 
         self.ctrl.snap_settings.enabled = True
         self.ctrl.snap_settings.snap_grid = True
-        self.ctrl.snap_settings.grid_step = 0.05
+        self.ctrl.snap_settings.grid_size = 0.05
         self.ctrl.snap_settings.snap_nodes = False
 
         self.ctrl.selection.select_node(rect.id, n2.id)

@@ -4,10 +4,12 @@ import sys
 from pathlib import Path
 
 # pythonディレクトリをsys.pathに追加
-repo_root = Path(__file__).resolve().parent.parent
+repo_root = Path(__file__).resolve().parents[2]
 python_dir = repo_root / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 from taremin_cloth.operators import FPSCounter
 from taremin_cloth.utils import drawing

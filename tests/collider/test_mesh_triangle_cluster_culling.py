@@ -124,22 +124,29 @@ class TestMeshTriangleClusterCulling(unittest.TestCase):
         # 3. オプション ON (16面クラスタカリング) でシミュレーション実行
         pos_on = run_simulation(enable_cluster_culling=True)
 
-        # 4. 検証: NaN / Inf が含まれないこと
+        # 4. 検証: NaN / Inf 不在・球コライダー非貫通・ON/OFF高一致
         self.assertFalse(np.isnan(pos_on).any(), "Cluster culling produced NaN positions")
         self.assertFalse(np.isinf(pos_on).any(), "Cluster culling produced Inf positions")
 
-        # 5. 重心位置の一致 (大域的に同一の軌道、差分 < 25mm)
+        min_radius_on = float(np.min(np.linalg.norm(pos_on, axis=1)))
+        self.assertGreaterEqual(
+            min_radius_on,
+            0.50 - 0.005,
+            f"布が半径0.5mの球コライダーに貫通しています: min_r={min_radius_on:.5f}",
+        )
+
+        # 5. 重心位置の一致 (2mm 以内)
         center_off = pos_off.mean(axis=0)
         center_on = pos_on.mean(axis=0)
-        center_diff = np.linalg.norm(center_off - center_on)
-        self.assertLess(center_diff, 0.025, f"Center of mass diverged between ON and OFF: {center_diff*1000:.4f} mm")
+        center_diff = float(np.linalg.norm(center_off - center_on))
+        self.assertLess(center_diff, 0.002, f"Center of mass diverged between ON and OFF: {center_diff*1000:.4f} mm")
 
-        # 6. 局所差分 (平均誤差 25mm 以内、最大局所差分 60mm 以内)
+        # 6. 局所差分 (平均誤差 2mm 以内、最大局所差分 5mm 以内)
         diffs = np.linalg.norm(pos_off - pos_on, axis=1)
-        mean_diff = diffs.mean()
-        max_diff = diffs.max()
-        self.assertLess(mean_diff, 0.025, f"Mean diff between ON and OFF too large: {mean_diff*1000:.4f} mm")
-        self.assertLess(max_diff, 0.060, f"Max local diff between ON and OFF too large: {max_diff*1000:.4f} mm")
+        mean_diff = float(diffs.mean())
+        max_diff = float(diffs.max())
+        self.assertLess(mean_diff, 0.002, f"Mean diff between ON and OFF too large: {mean_diff*1000:.4f} mm")
+        self.assertLess(max_diff, 0.005, f"Max local diff between ON and OFF too large: {max_diff*1000:.4f} mm")
 
 
 if __name__ == "__main__":

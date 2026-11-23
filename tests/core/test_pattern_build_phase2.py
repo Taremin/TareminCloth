@@ -42,18 +42,17 @@ class TestPatternBuildPhase2(unittest.TestCase):
         self.assertGreater(len(geom.vertices_3d), 0)
         self.assertGreater(len(geom.faces), 0)
 
-        # 内部線の両端点 (0.1, 0.2) と (0.3, 0.2) が頂点に含まれることを確認
+        # 外周重心 (0.2, 0.2) 中心化後の相対位置で内部線の両端点 (-0.1, 0.0) と (+0.1, 0.0) が頂点に含まれることを確認
         v3d = np.array(geom.vertices_3d, dtype=np.float32)
-        # 初期配置は (u, 0, v)
         u_coords = v3d[:, 0]
         v_coords = v3d[:, 2]
 
-        # (0.1, 0.2) 近傍の頂点を探索
-        dists_p1 = np.hypot(u_coords - 0.1, v_coords - 0.2)
+        # (0.1, 0.2) - (0.2, 0.2) = (-0.1, 0.0) 近傍の頂点を探索
+        dists_p1 = np.hypot(u_coords - (-0.1), v_coords - 0.0)
         self.assertLess(np.min(dists_p1), 1e-4)
 
-        # (0.3, 0.2) 近傍の頂点を探索
-        dists_p2 = np.hypot(u_coords - 0.3, v_coords - 0.2)
+        # (0.3, 0.2) - (0.2, 0.2) = (0.1, 0.0) 近傍の頂点を探索
+        dists_p2 = np.hypot(u_coords - 0.1, v_coords - 0.0)
         self.assertLess(np.min(dists_p2), 1e-4)
 
     def test_notch_boundary_vertex_pinning(self) -> None:
@@ -77,14 +76,14 @@ class TestPatternBuildPhase2(unittest.TestCase):
         geom = build_garment_mesh_geometry(doc)
         self.assertGreater(len(geom.vertices_3d), 0)
 
-        # 境界頂点の中に (0.2, 0.0) と一致する頂点が存在することを検証
+        # 外周重心 (0.2, 0.15) 中心化後の相対位置 (0.0, -0.15) と一致する境界頂点が存在することを検証
         v3d = np.array(geom.vertices_3d, dtype=np.float32)
         u_coords = v3d[:, 0]
         v_coords = v3d[:, 2]
 
-        dists = np.hypot(u_coords - 0.2, v_coords - 0.0)
+        dists = np.hypot(u_coords - 0.0, v_coords - (-0.15))
         min_dist = float(np.min(dists))
-        self.assertLess(min_dist, 1e-4, f"ノッチ位置 (0.2, 0.0) に頂点が見つかりません。最短距離: {min_dist}")
+        self.assertLess(min_dist, 1e-4, f"ノッチ位置 (0.0, -0.15) に頂点が見つかりません。最短距離: {min_dist}")
 
     def test_ellipse_piece_mesh_build(self) -> None:
         """楕円ベジェピースから妥当な3Dメッシュがビルドできることを検証."""

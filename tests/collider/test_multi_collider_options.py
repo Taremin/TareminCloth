@@ -6,16 +6,99 @@
 - GPU物理シミュレータにおいて、Recovery ONの面は押し戻され、Recovery OFFの面は素通りすること
 """
 
+from pathlib import Path
 import sys
-import os
 import unittest
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../python")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../python/taremin_cloth")))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PYTHON_DIR = _REPO_ROOT / "python"
+_PKG_DIR = _PYTHON_DIR / "taremin_cloth"
+for _p in (str(_REPO_ROOT), str(_PYTHON_DIR), str(_PKG_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+import tests  # noqa: F401
 import taremin_cloth_core
 from taremin_cloth import properties
+from taremin_cloth.engine.collider import (
+    _extract_mesh_collider_triangles,
+    extract_all_scene_colliders,
+)
+
+
+class _DummyVerts:
+    def __init__(self, coords: np.ndarray):
+        self._co = coords.astype(np.float32).ravel()
+        self._n = len(coords)
+
+    def __len__(self):
+        return self._n
+
+    def foreach_get(self, attr, out):
+        assert attr == "co"
+        out[:] = self._co
+
+
+class _DummyLoopTris:
+    def __init__(self, tris: np.ndarray):
+        self._idx = tris.astype(np.int32).ravel()
+        self._n = len(tris)
+
+    def __len__(self):
+        return self._n
+
+    def foreach_get(self, attr, out):
+        assert attr == "vertices"
+        out[:] = self._idx
+
+
+class _DummyMesh:
+    def __init__(self, verts: np.ndarray, tris: np.ndarray):
+        self.vertices = _DummyVerts(verts)
+        self.loop_triangles = _DummyLoopTris(tris)
+
+    def calc_loop_triangles(self):
+        pass
+
+
+class _DummyObj:
+    def __init__(self, name: str, *, col_settings, obj_type: str = 'MESH'):
+        self.name = name
+        self.type = obj_type
+        self.taremin_cloth_collider = col_settings
+        self.matrix_world = np.eye(4, dtype=np.float32)
+        self.modifiers = []
+        self.scale = (1.0, 1.0, 1.0)
+        self.data = _DummyMesh(
+            np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32),
+            np.array([[0, 1, 2]], dtype=np.int32),
+        )
+
+
+class _DummyColliderSettings:
+    def __init__(
+        self,
+        *,
+        c_type: str = 'MESH',
+        single_sided: bool = True,
+        enable_recovery: bool = True,
+        enable_culling: bool = False,
+        sweep_margin: float = 0.05,
+        radius: float = 0.5,
+    ):
+        self.is_collider = True
+        self.enabled = True
+        self.collider_type = c_type
+        self.friction = 0.25
+        self.thickness = 0.015
+        self.restitution = 0.1
+        self.single_sided = single_sided
+        self.enable_single_sided_recovery = enable_recovery
+        self.enable_cluster_culling = enable_culling
+        self.sweep_margin_offset = sweep_margin
+        self.close_open_boundaries = False
+        self.radius = radius
 
 
 class TestMultiColliderOptions(unittest.TestCase):
@@ -37,64 +120,51 @@ class TestMultiColliderOptions(unittest.TestCase):
         self.assertNotIn("collider_sweep_margin_offset", cloth_annotations)
 
     def test_face_flags_calculation(self):
-        """コライダーごとの設定に応じて正しいビットフラグが計算されること"""
+        """コライダーごとの設定に応じて本番抽出関数が正しいビットフラグ(1/3/0)を返すこと"""
+        target_obj = _DummyObj("MeshCol", col_settings=_DummyColliderSettings())
+
         # ケース1: 片面 + リカバリー有効 (デフォルト) -> flags = 1.0 (bit 0=1, bit 1=0)
-        is_single = True
-        is_recovery = True
-        flags_val = 0.0
-        if is_single:
-            flags_val += 1.0
-            if not is_recovery:
-                flags_val += 2.0
-        self.assertEqual(flags_val, 1.0)
+        col1 = _DummyColliderSettings(single_sided=True, enable_recovery=True)
+        _, attr1, dicts1 = _extract_mesh_collider_triangles(target_obj.data, target_obj, col1)
+        self.assertEqual(float(attr1[0, 3]), 1.0)
+        self.assertEqual(dicts1[0]["flags"], 1)
 
         # ケース2: 片面 + リカバリー無効 -> flags = 3.0 (bit 0=1, bit 1=1: recovery_disabled)
-        is_single = True
-        is_recovery = False
-        flags_val = 0.0
-        if is_single:
-            flags_val += 1.0
-            if not is_recovery:
-                flags_val += 2.0
-        self.assertEqual(flags_val, 3.0)
+        col2 = _DummyColliderSettings(single_sided=True, enable_recovery=False)
+        _, attr2, dicts2 = _extract_mesh_collider_triangles(target_obj.data, target_obj, col2)
+        self.assertEqual(float(attr2[0, 3]), 3.0)
+        self.assertEqual(dicts2[0]["flags"], 3)
 
         # ケース3: 両面 -> flags = 0.0
-        is_single = False
-        is_recovery = True
-        flags_val = 0.0
-        if is_single:
-            flags_val += 1.0
-            if not is_recovery:
-                flags_val += 2.0
-        self.assertEqual(flags_val, 0.0)
+        col3 = _DummyColliderSettings(single_sided=False, enable_recovery=True)
+        _, attr3, dicts3 = _extract_mesh_collider_triangles(target_obj.data, target_obj, col3)
+        self.assertEqual(float(attr3[0, 3]), 0.0)
+        self.assertEqual(dicts3[0]["flags"], 0)
 
     def test_multi_collider_culling_aggregation(self):
-        """複数コライダー存在時、カリング設定とマージンが正しく集約されること"""
-        class MockCollider:
-            def __init__(self, c_type, enable_culling, sweep_margin):
-                self.collider_type = c_type
-                self.enable_cluster_culling = enable_culling
-                self.sweep_margin_offset = sweep_margin
-
-        colliders = [
-            MockCollider('MESH', False, 0.02),
-            MockCollider('SPHERE', False, 0.05),
-            MockCollider('MESH', True, 0.08),
-            MockCollider('MESH', False, 0.03),
+        """複数コライダー存在時、本番関数 extract_all_scene_colliders がカリング設定と最大スウィープマージンを集約すること"""
+        objs = [
+            _DummyObj("M1", col_settings=_DummyColliderSettings(c_type='MESH', enable_culling=False, sweep_margin=0.02)),
+            _DummyObj("S1", col_settings=_DummyColliderSettings(c_type='SPHERE', enable_culling=False, sweep_margin=0.20, radius=0.4)),
+            _DummyObj("M2", col_settings=_DummyColliderSettings(c_type='MESH', enable_culling=True, sweep_margin=0.08)),
+            _DummyObj("M3", col_settings=_DummyColliderSettings(c_type='MESH', enable_culling=False, sweep_margin=0.03)),
         ]
+        scene = type("_DummyScene", (), {"objects": objs})()
 
-        has_cluster_culling = False
-        max_sweep_margin = 0.05
-        for col_s in colliders:
-            if col_s.collider_type == 'MESH':
-                if getattr(col_s, "enable_cluster_culling", False):
-                    has_cluster_culling = True
-                sweep_m = float(getattr(col_s, "sweep_margin_offset", 0.05))
-                if sweep_m > max_sweep_margin:
-                    max_sweep_margin = sweep_m
-
-        self.assertTrue(has_cluster_culling, "いずれかのMESHコライダーでカリングが有効ならTrueになること")
-        self.assertAlmostEqual(max_sweep_margin, 0.08, places=4, msg="最大のスウィープマージンが採用されること")
+        extracted = extract_all_scene_colliders(scene=scene, depsgraph=None)
+        self.assertEqual(len(extracted["analytic_colliders"]), 1)
+        self.assertEqual(len(extracted["mesh_triangles_data"]), 3)
+        self.assertTrue(
+            extracted["has_cluster_culling"],
+            "いずれかのMESHコライダーでカリングが有効ならTrueになること",
+        )
+        # SPHERE の sweep_margin=0.20 は MESH 専用集約に混入しないことも合わせて検証
+        self.assertAlmostEqual(
+            extracted["max_sweep_margin"],
+            0.08,
+            places=4,
+            msg="MESHコライダーの最大スウィープマージンが採用されること",
+        )
 
     def test_gpu_individual_single_sided_recovery_behavior(self):
         """GPUシミュレータ上で、リカバリーONの面とOFFの面が個別に動作すること"""

@@ -10,7 +10,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -90,69 +90,40 @@ class TestBoneSdfE2E(unittest.TestCase):
         return arm_obj, body_obj
 
     def test_bone_sdf_collision_and_animation(self):
-        """BONE_SDFコライダーを用いた布シミュレーションとボーンアニメーション追従の検証"""
+        """BONE_SDFコライダーを用いた step_cloth_scene 経由の布シミュレーションとボーンアニメーション追従の検証"""
         arm_obj, body_obj = self.create_skinned_character()
 
         # 布メッシュ作成 (素体の上部 Z=2.3 付近に水平グリッドを配置)
         bpy.ops.mesh.primitive_grid_add(x_subdivisions=5, y_subdivisions=5, size=0.8, location=(0.0, 0.0, 2.3))
         cloth_obj = bpy.context.active_object
         cloth_obj.name = "Cloth_Grid"
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
         cloth_settings = cloth_obj.taremin_cloth
         cloth_settings.is_cloth = True
-        cloth_settings.collision_distance = 0.02
+        cloth_settings.thickness = 0.02
+        cloth_settings.tension_stiffness = 5000.0
+        cloth_settings.bending_stiffness = 20.0
+        cloth_settings.substeps = 5
 
-        mesh = cloth_obj.data
-        n_verts = len(mesh.vertices)
-        coords = np.empty(n_verts * 3, dtype=np.float32)
-        mesh.vertices.foreach_get("co", coords)
-        pos = coords.reshape((n_verts, 3)) + np.array([0.0, 0.0, 2.3], dtype=np.float32)
+        n_verts = len(cloth_obj.data.vertices)
+        scene = bpy.context.scene
 
-        n_edges = len(mesh.edges)
-        edge_indices = np.empty(n_edges * 2, dtype=np.uint32)
-        mesh.edges.foreach_get("vertices", edge_indices)
-        edges = edge_indices.reshape((n_edges, 2))
-
-        tri_list = []
-        mesh.calc_loop_triangles()
-        for tri in mesh.loop_triangles:
-            tri_list.append(tri.vertices)
-        faces = np.array(tri_list, dtype=np.uint32)
-
-        inv_masses = np.ones(n_verts, dtype=np.float32)
-
-        import taremin_cloth_core
-        sim = taremin_cloth_core.ClothSimulator(
-            positions=pos,
-            edges=edges,
-            faces=faces,
-            inv_masses=inv_masses,
-            layer_id=0,
-            thickness=0.02,
-            stiffness=5000.0,
-            bending_stiffness=20.0,
-        )
-        sim.set_gravity(0.0, 0.0, -9.8)
-
-        # 1. 初回 sync_colliders: BONE_SDF の自動ベイクと登録
-        sync_colliders(sim, bpy.context.scene)
-
-        # 2. 自由落下シミュレーション (15ステップ)
+        # 1. 自由落下シミュレーション (15ステップ: step_cloth_scene 内でBONE_SDF自動ベイク＆同期)
+        res = {}
         for _ in range(15):
-            sim.step(dt=0.016, substeps=5)
+            res = taremin_cloth.step_cloth_scene(scene, dt=0.016, update_mesh=True)
 
-        out_coords = np.empty(n_verts * 3, dtype=np.float32)
-        sim.get_positions(out_coords)
+        _, out_coords = res[cloth_obj.name]
         res_pos = out_coords.reshape((n_verts, 3))
         min_z = np.min(res_pos[:, 2])
 
         # 素体頂上は Z=2.0、厚み 0.02 + 0.02 なので、布は Z >= 2.0 付近で停止し貫通しないこと
         self.assertGreaterEqual(min_z, 1.95, f"布がBONE_SDF素体コライダーを貫通していないこと: min_z={min_z}")
 
-        # 3. ボーンアニメーション追従テスト
-        # 中央頂点（素体円柱の真上にある頂点）のZ座標を記録
+        # 2. ボーンアニメーション追従テスト
         center_idx = n_verts // 2
-        center_z_initial = res_pos[center_idx, 2]
+        center_z_initial = float(res_pos[center_idx, 2])
 
         # アーマチュアの Bone2 をボーン長軸（+Zワールド方向＝ボーンローカル+Y方向）に 0.3m 上昇させるポーズ
         bpy.context.view_layer.objects.active = arm_obj
@@ -162,16 +133,13 @@ class TestBoneSdfE2E(unittest.TestCase):
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.context.view_layer.update()
 
-        # ボーン行列を更新同期
-        sync_colliders(sim, bpy.context.scene)
-
-        # 追加でシミュレーション (15ステップ)
+        # 追加でシミュレーション (15ステップ: 毎フレーム step_cloth_scene 内でボーン行列更新同期)
         for _ in range(15):
-            sim.step(dt=0.016, substeps=5)
+            res = taremin_cloth.step_cloth_scene(scene, dt=0.016, update_mesh=True)
 
-        sim.get_positions(out_coords)
-        new_res_pos = out_coords.reshape((n_verts, 3))
-        new_center_z = new_res_pos[center_idx, 2]
+        _, new_coords = res[cloth_obj.name]
+        new_res_pos = new_coords.reshape((n_verts, 3))
+        new_center_z = float(new_res_pos[center_idx, 2])
 
         # ボーンの上昇に伴って布中央が押し上げられていること (Z >= initial + 0.15)
         self.assertGreater(new_center_z, center_z_initial + 0.15, f"ボーン上昇に伴い布中央が押し上げられていること: {new_center_z} > {center_z_initial + 0.15}")

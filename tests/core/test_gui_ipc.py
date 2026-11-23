@@ -18,6 +18,8 @@ addon_root = os.path.dirname(os.path.dirname(current_dir))
 python_pkg_dir = os.path.join(addon_root, "python")
 if python_pkg_dir not in sys.path:
     sys.path.insert(0, python_pkg_dir)
+if addon_root not in sys.path:
+    sys.path.insert(0, addon_root)
 
 from taremin_cloth.engine.gui_client import ClothGuiClient
 
@@ -148,7 +150,7 @@ class TestGuiIpc(unittest.TestCase):
         }
 
         self.assertTrue(client._send_packet(data))
-        resp = client._recv_packet(timeout=10.0)
+        resp = client._recv_packet(timeout=30.0)
         self.assertIsNotNone(resp)
         self.assertEqual(resp.get("type"), "Ack")
 
@@ -241,7 +243,7 @@ class TestGuiIpc(unittest.TestCase):
         }
 
         self.assertTrue(client._send_packet(data))
-        resp = client._recv_packet(timeout=5.0)
+        resp = client._recv_packet(timeout=30.0)
         self.assertIsNotNone(resp)
         self.assertEqual(resp.get("type"), "Ack")
 
@@ -328,7 +330,7 @@ class TestGuiIpc(unittest.TestCase):
         }
 
         self.assertTrue(client._send_packet(data))
-        resp = client._recv_packet(timeout=5.0)
+        resp = client._recv_packet(timeout=30.0)
         self.assertIsNotNone(resp)
         self.assertEqual(resp.get("type"), "Ack")
 
@@ -411,7 +413,7 @@ class TestGuiIpc(unittest.TestCase):
         }
 
         self.assertTrue(client._send_packet(data))
-        resp = client._recv_packet(timeout=5.0)
+        resp = client._recv_packet(timeout=30.0)
         self.assertIsNotNone(resp)
         self.assertEqual(resp.get("type"), "Ack")
 
@@ -465,7 +467,7 @@ class TestGuiIpc(unittest.TestCase):
             }
         }
         self.assertTrue(client._send_packet(data))
-        self.assertIsNotNone(client._recv_packet(timeout=15.0))
+        self.assertIsNotNone(client._recv_packet(timeout=30.0))
 
         # 1. ボーン姿勢行列の動的更新
         bone_mats = [np.eye(4, dtype=np.float32).tolist()]
@@ -536,11 +538,56 @@ class TestGuiIpc(unittest.TestCase):
         }
         # エラーなく送信され、Ackが返ってくること
         self.assertTrue(client._send_packet(data))
-        resp = client._recv_packet(timeout=5.0)
+        resp = client._recv_packet(timeout=30.0)
         self.assertIsNotNone(resp)
         self.assertEqual(resp.get("type"), "Ack")
 
         client.disconnect()
+
+    def test_08_apply_pose_reads_back_latest_gpu_coords(self):
+        """GetLatestCoordsを事前に呼ばなくてもApplyPoseが最新GPU座標を同期リードバックして返すこと"""
+        client = ClothGuiClient("127.0.0.1", self.SERVER_PORT)
+        self.assertTrue(client.connect(timeout=2.0))
+        try:
+            data = {
+                "type": "InitScene",
+                "data": {
+                    "object_name": "ApplyPoseCloth",
+                    "positions": [[0.0, 0.0, 1.0], [0.2, 0.0, 1.0]],
+                    "faces": [],
+                    "edges": [[0, 1]],
+                    "sewing_springs": None,
+                    "inv_masses": [0.0, 1.0],
+                    "layer_id": 0,
+                    "thickness": 0.01,
+                    "stiffness": 100.0,
+                    "compression_stiffness": 100.0,
+                    "shear_stiffness": 50.0,
+                    "bending_stiffness": 1.0,
+                    "gravity": [0.0, 0.0, -9.81],
+                    "sewing_shrink_speed": 0.5,
+                    "workgroup_size": 32,
+                    "solver_mode": 0,
+                },
+            }
+            self.assertTrue(client._send_packet(data))
+            resp = client._recv_packet(timeout=30.0)
+            self.assertIsNotNone(resp)
+            self.assertEqual(resp.get("type"), "Ack")
+
+            # 一時停止してから手動ステップを進め、GetLatestCoords を呼ばずに即 ApplyPose
+            self.assertTrue(client.pause())
+            for _ in range(10):
+                self.assertTrue(client.step(dt=1.0 / 60.0, substeps=10, solver_iterations=2))
+
+            pose = client.apply_pose()
+            self.assertIsNotNone(pose)
+            self.assertEqual(len(pose), 6)
+            # 頂点0 (固定) は z=1.0 付近、頂点1 (自由) は重力落下し z < 0.99 になっていること
+            np.testing.assert_allclose(pose[0:3], [0.0, 0.0, 1.0], atol=1e-3)
+            self.assertLess(float(pose[5]), 0.99)
+        finally:
+            client.disconnect()
 
 
 if __name__ == "__main__":

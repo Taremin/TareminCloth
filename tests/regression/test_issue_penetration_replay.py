@@ -166,8 +166,8 @@ class TestPenetrationReplayRedGreen(unittest.TestCase):
         )
         print(f"[Rust Renderer] Saved: {img_path} (Back-face red pixels: {red_px})")
 
-        # 元ログの交差数（45組）から大幅に抑制されていることをアサート
-        self.assertLess(cross_count, 30, f"新設定での布間交差が抑制されていません: {cross_count} 組 (元ログ: 45組)")
+        # 新設定では布間交差数ゼロを達成していることを厳格アサート
+        self.assertEqual(cross_count, 0, f"新設定での布間交差がゼロではありません: {cross_count} 組 (元ログ: 45組)")
 
 
 if __name__ == "__main__":

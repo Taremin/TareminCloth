@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Milestone 3 & 4: Blender 2D型紙（Curve / Mesh）から単一3D衣装メッシュへの統合ビルド & シミュレーション連携 E2Eテスト."""
+"""Document ベース 2D型紙統合ビルド・3Dプロキシ同期・シミュレーション連携 E2Eテスト."""
 import sys
 import unittest
 from pathlib import Path
 import bpy
 import numpy as np
 
-root_dir = Path(__file__).parent.parent
+root_dir = Path(__file__).resolve().parents[2]
 python_dir = root_dir / "python"
 if str(python_dir) not in sys.path:
     sys.path.insert(0, str(python_dir))
@@ -15,6 +15,9 @@ if str(root_dir) not in sys.path:
 
 import taremin_cloth
 from taremin_cloth import step_cloth_scene
+from taremin_cloth.pattern.bridge import load_document_from_scene, save_document_to_scene
+from taremin_cloth.pattern.build import build_garment_mesh_in_place
+from taremin_cloth.pattern.document import Document, EdgeRange, Placement, Seam
 from taremin_cloth.utils.mesh_extract import extract_cloth_mesh_data
 
 
@@ -27,6 +30,7 @@ class TestPatternBuilderE2E(unittest.TestCase):
             bpy.data.meshes.remove(mesh, do_unlink=True)
         for curve in list(bpy.data.curves):
             bpy.data.curves.remove(curve, do_unlink=True)
+        bpy.context.scene.taremin_pattern_document = ""
         from taremin_cloth.engine.cache import _timeline_frame_cache, clear_simulators
         clear_simulators()
         _timeline_frame_cache.clear()
@@ -38,63 +42,57 @@ class TestPatternBuilderE2E(unittest.TestCase):
             bpy.data.meshes.remove(mesh, do_unlink=True)
         for curve in list(bpy.data.curves):
             bpy.data.curves.remove(curve, do_unlink=True)
+        bpy.context.scene.taremin_pattern_document = ""
         from taremin_cloth.engine.cache import _timeline_frame_cache, clear_simulators
         clear_simulators()
         _timeline_frame_cache.clear()
         taremin_cloth.unregister()
 
-    def _create_2d_curve_pattern(self, name: str, width: float, height: float, offset_3d=(0.0, 0.0, 0.5)):
-        """2D Curve オブジェクトで矩形型紙を作成する."""
-        curve_data = bpy.data.curves.new(name=f"{name}_Curve", type='CURVE')
-        curve_data.dimensions = '2D'
-        spline = curve_data.splines.new(type='POLY')
-        spline. points.add(3)  # 計4頂点
-        coords = [(0.0, 0.0, 0.0, 1.0), (width, 0.0, 0.0, 1.0), (width, height, 0.0, 1.0), (0.0, height, 0.0, 1.0)]
-        for i, co in enumerate(coords):
-            spline.points[i].co = co
-        spline.use_cyclic_u = True
+    def _build_two_piece_document(self) -> tuple[Document, str, str]:
+        """前後身頃2ピースと縫合を持つサンプルDocumentを作成する."""
+        doc = Document.new(name="E2E_Garment")
+        p_front = doc.add_rectangle_piece((-0.10, -0.10), (0.10, 0.15), name="FrontPiece")
+        p_back = doc.add_rectangle_piece((0.20, -0.10), (0.40, 0.15), name="BackPiece")
+        p_front.target_edge_length = 0.025
+        p_back.target_edge_length = 0.025
 
-        obj = bpy.data.objects.new(name, curve_data)
-        bpy.context.collection.objects.link(obj)
-        if hasattr(obj, "taremin_pattern"):
-            obj.taremin_pattern.is_pattern_piece = True
-            obj.taremin_pattern.target_edge_length = 0.025
-            obj.taremin_pattern.arrangement_offset = offset_3d
-        return obj
+        doc.placements[p_front.id] = Placement(piece_id=p_front.id, offset_3d=(0.0, -0.10, 0.50))
+        doc.placements[p_back.id] = Placement(piece_id=p_back.id, offset_3d=(0.0, 0.10, 0.50))
 
-    def test_curve_and_mesh_patterns_build_into_single_garment_mesh(self):
-        """Curve型紙(案A)と平面Mesh型紙(案B)から単一3Dメッシュ・UV・頂点グループ・縫合Loose Edgeが生成されること."""
-        try:
-            from taremin_cloth.utils.pattern_builder import build_garment_from_patterns
-        except ImportError:
-            self.skipTest("taremin_cloth.utils.pattern_builder 未実装のためスキップ")
+        outer_f = p_front.paths[p_front.outer_path_id]
+        outer_b = p_back.paths[p_back.outer_path_id]
+        doc.seams["seam_side"] = Seam(
+            id="seam_side",
+            a=EdgeRange(
+                piece_id=p_front.id,
+                path_id=p_front.outer_path_id,
+                start_node_id=outer_f.nodes[1].id,
+                end_node_id=outer_f.nodes[2].id,
+            ),
+            b=EdgeRange(
+                piece_id=p_back.id,
+                path_id=p_back.outer_path_id,
+                start_node_id=outer_b.nodes[0].id,
+                end_node_id=outer_b.nodes[3].id,
+            ),
+        )
+        return doc, p_front.id, p_back.id
 
-        # 1. Curve型紙 (Front)
-        front_obj = self._create_2d_curve_pattern("FrontPiece", 0.20, 0.25, offset_3d=(0.0, -0.10, 0.50))
-
-        # 2. 平面Mesh型紙 (Back)
-        bpy.ops.mesh.primitive_plane_add(size=0.20, location=(0.30, 0.0, 0.0))
-        back_obj = bpy.context.active_object
-        back_obj.name = "BackPiece"
-        if hasattr(back_obj, "taremin_pattern"):
-            back_obj.taremin_pattern.is_pattern_piece = True
-            back_obj.taremin_pattern.target_edge_length = 0.025
-            back_obj.taremin_pattern.arrangement_offset = (0.0, 0.10, 0.50)
-
-        garment_obj = build_garment_from_patterns(
-            bpy.context.scene,
-            pattern_objects=[front_obj, back_obj],
-            target_name="TestGarment",
+    def test_document_build_and_simulate(self):
+        """Documentから単一3Dメッシュ・UV・頂点グループ・縫合が生成されステップ実行できること."""
+        doc, _, _ = self._build_two_piece_document()
+        garment_obj = build_garment_mesh_in_place(
+            doc,
+            target_object_name="TestGarment",
+            scene=bpy.context.scene,
         )
 
         self.assertIsNotNone(garment_obj)
         self.assertEqual(garment_obj.type, 'MESH')
         self.assertTrue(garment_obj.taremin_cloth.is_cloth)
+        self.assertTrue(garment_obj.taremin_cloth.enable_sewing)
 
-        # UVマップ 'UVMap_Pattern' が自動生成されていること
-        self.assertIn("UVMap_Pattern", garment_obj.data.uv_layers)
-
-        # パーツ別の頂点グループが自動生成されていること
+        self.assertGreater(len(garment_obj.data.uv_layers), 0)
         self.assertIn("Piece_FrontPiece", garment_obj.vertex_groups)
         self.assertIn("Piece_BackPiece", garment_obj.vertex_groups)
 
@@ -105,26 +103,31 @@ class TestPatternBuilderE2E(unittest.TestCase):
         data = extract_cloth_mesh_data(garment_obj)
         self.assertTrue(np.all(np.isfinite(data.positions)))
 
-    def test_edit_arrangement_3d_proxy_operator(self):
-        """edit_arrangement_3d オペレーター実行により3Dプロキシが正しく生成・アクティブ化されること."""
-        front_obj = self._create_2d_curve_pattern("FrontPiece", 0.20, 0.25, offset_3d=(0.1, -0.2, 0.8))
-        bpy.context.view_layer.objects.active = front_obj
+    def test_edit_and_sync_pattern_proxies_3d_roundtrip(self):
+        """edit_pattern_proxies_3d と sync_pattern_proxies_3d で3DプロキシとDocumentが往復同期されること."""
+        doc, front_id, _ = self._build_two_piece_document()
+        save_document_to_scene(doc, scene=bpy.context.scene, push_undo=False)
 
-        # edit_arrangement_3d オペレーターを実行
-        res = bpy.ops.taremin_cloth.edit_arrangement_3d()
+        res = bpy.ops.taremin_cloth.edit_pattern_proxies_3d()
         self.assertEqual(res, {'FINISHED'})
 
-        # プロキシオブジェクトが生成されアクティブになっていること
-        proxy_obj = bpy.context.scene.objects.get("FrontPiece_Proxy3D")
+        proxy_obj = bpy.context.scene.objects.get("Proxy_FrontPiece")
         self.assertIsNotNone(proxy_obj)
-        self.assertEqual(bpy.context.active_object, proxy_obj)
         self.assertEqual(proxy_obj.display_type, 'WIRE')
         self.assertTrue(proxy_obj.show_in_front)
+        self.assertAlmostEqual(proxy_obj.location.y, -0.10, places=3)
+        self.assertAlmostEqual(proxy_obj.location.z, 0.50, places=3)
 
-        # 初期位置が arrangement_offset と一致していること
-        self.assertAlmostEqual(proxy_obj.location.x, 0.1, places=3)
-        self.assertAlmostEqual(proxy_obj.location.y, -0.2, places=3)
-        self.assertAlmostEqual(proxy_obj.location.z, 0.8, places=3)
+        # プロキシを3D移動して同期
+        proxy_obj.location = (0.15, -0.22, 0.85)
+        res_sync = bpy.ops.taremin_cloth.sync_pattern_proxies_3d()
+        self.assertEqual(res_sync, {'FINISHED'})
+
+        reloaded = load_document_from_scene(bpy.context.scene)
+        pl_front = reloaded.placements[front_id]
+        self.assertAlmostEqual(pl_front.offset_3d[0], 0.15, places=3)
+        self.assertAlmostEqual(pl_front.offset_3d[1], -0.22, places=3)
+        self.assertAlmostEqual(pl_front.offset_3d[2], 0.85, places=3)
 
 
 if __name__ == "__main__":

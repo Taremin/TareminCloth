@@ -1,26 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Phase 4 Step 4.2 & 4.3: パターン外部JSON保存・読込、下絵画像、Curveマイグレーションの単体テスト."""
+"""パターン外部JSON保存・読込および下絵画像の単体テスト."""
 
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock
 
 from taremin_cloth.pattern.document import (
     Document,
-    NodeKind,
     Notch,
     NotchKind,
     Placement,
     ReferenceImage,
 )
 from taremin_cloth.pattern.editor import EditorController
-from taremin_cloth.pattern.migration import migrate_curve_objects_to_document
 from taremin_cloth.pattern.renderer import DrawCommandKind, build_render_commands
 
 
-class TestPatternIOMigration(unittest.TestCase):
-    """JSON入出力・下絵画像・Curveマイグレーションのテストケース."""
+class TestPatternIO(unittest.TestCase):
+    """JSON入出力・下絵画像のテストケース."""
 
     def test_json_file_export_import_roundtrip(self) -> None:
         """複合Documentを外部JSONファイルに保存し、同一内容で読み込めること."""
@@ -87,63 +84,6 @@ class TestPatternIOMigration(unittest.TestCase):
         self.assertEqual(image_cmds[0].image_path, "sketch.png")
         self.assertAlmostEqual(image_cmds[0].color[3], 0.7)
         self.assertEqual(len(image_cmds[0].points), 4)
-
-    def test_migrate_curve_objects_to_document(self) -> None:
-        """Blender CurveモックオブジェクトからDocumentへ正常に変換されること."""
-        # モックBezierスプライン
-        pt0 = MagicMock()
-        pt0.co.x, pt0.co.y = 0.0, 0.0
-        pt0.handle_left.x, pt0.handle_left.y = -0.02, 0.0
-        pt0.handle_right.x, pt0.handle_right.y = 0.02, 0.0
-        pt0.handle_left_type = "ALIGNED"
-        pt0.handle_right_type = "ALIGNED"
-
-        pt1 = MagicMock()
-        pt1.co.x, pt1.co.y = 0.2, 0.0
-        pt1.handle_left.x, pt1.handle_left.y = 0.18, 0.0
-        pt1.handle_right.x, pt1.handle_right.y = 0.22, 0.0
-        pt1.handle_left_type = "VECTOR"
-        pt1.handle_right_type = "VECTOR"
-
-        pt2 = MagicMock()
-        pt2.co.x, pt2.co.y = 0.2, 0.3
-        pt2.handle_left.x, pt2.handle_left.y = 0.2, 0.28
-        pt2.handle_right.x, pt2.handle_right.y = 0.2, 0.32
-        pt2.handle_left_type = "VECTOR"
-        pt2.handle_right_type = "VECTOR"
-
-        spline = MagicMock()
-        spline.type = "BEZIER"
-        spline.bezier_points = [pt0, pt1, pt2]
-        spline.use_cyclic_u = True
-
-        mock_obj = MagicMock()
-        mock_obj.type = "CURVE"
-        mock_obj.name = "Bodice_Front"
-        mock_obj.location.x, mock_obj.location.y = 0.5, 0.5
-        mock_obj.rotation_euler.z = 0.0
-        mock_obj.data.splines = [spline]
-        mock_obj.taremin_pattern.is_pattern_piece = True
-        mock_obj.taremin_pattern.arrangement_offset = (0.0, -0.2, 1.2)
-        mock_obj.taremin_pattern.arrangement_euler = (1.57, 0.0, 0.0)
-
-        doc = migrate_curve_objects_to_document([mock_obj])
-        self.assertEqual(len(doc.pieces), 1)
-
-        piece = next(iter(doc.pieces.values()))
-        self.assertEqual(piece.name, "Bodice_Front")
-        self.assertEqual(piece.transform.tx, 0.5)
-        self.assertEqual(piece.transform.ty, 0.5)
-
-        outer = piece.paths[piece.outer_path_id]
-        self.assertEqual(len(outer.nodes), 3)
-        self.assertEqual(outer.nodes[0].kind, NodeKind.SMOOTH)
-        self.assertEqual(outer.nodes[1].kind, NodeKind.CORNER)
-
-        # 3D配置パラメータの移行確認
-        self.assertIn(piece.id, doc.placements)
-        self.assertAlmostEqual(doc.placements[piece.id].offset_3d[1], -0.2)
-
 
 class TestReferenceImageSerialization(unittest.TestCase):
     """下絵参照画像 (ReferenceImage) のシリアライズ・複製・履歴テスト。"""
