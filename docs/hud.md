@@ -1,7 +1,7 @@
 # HUD表示指針
 
 > `python/taremin_cloth/utils/drawing.py` を唯一の描画集約点とする。
-> 実装変更時は本書と `docs/architecture.md:1.4` を同期すること。
+> 実装変更時は本書と `docs/architecture.md:1.5` を同期すること。
 
 ## 1. 目的・適用範囲
 - 3Dビューポートの `POST_PIXEL` HUD（2D）と `POST_VIEW` オーバーレイ（3D）の表示内容・描画方法を統一する。
@@ -13,7 +13,7 @@
 3. 表示文字列は `i18n.trans()` 必須。
 4. 見た目の既定値を変えずに共通化する（後方互換維持）。
 
-## 3. HudTheme（予定値・現行踏襲）
+## 3. HudTheme（現行値）
 | 項目 | 値 | 由来 |
 |---|---|---|
 | 背景（上部バッジ/ガイド） | `(0.12, 0.12, 0.14, 0.75)` | `drawing.py` `_draw_top_badge`/`_draw_bottom_badge_2row` |
@@ -25,7 +25,7 @@
 | 縫合中/通常 | シアン`(0.35,0.85,1.0)` / 緑 | `drawing.py` `draw_callback_2d` |
 | font | 上部13 / 下部12、`box_h=28`（2行時50）、pad 12-18 | `drawing.py` 共通ヘルパー |
 
-## 4. 描画基盤（API草案）
+## 4. 描画基盤（共通描画ヘルパー）
 - `_draw_top_badge(region, shader, x, y_top, text, color)` — FPS/縫合フェーズ用。FPSの固定幅も `min_w` で吸収する。
 - `_draw_bottom_badge_2row(region, shader, line1, line2)` — Guidance用。下部中央・最大2行。1行連結の肥大化を防ぐ。
 - `_draw_bottom_center_progress(region, shader, text, pct, bar_color)` — ベイク/起動準備/トースト通知用。下部中央配置に統一。
@@ -57,5 +57,5 @@
 
 ## 6. 配置
 - 上部: FPSアンカー5択（既定TOP_CENTER）→縫合は直下スタック。
-- 下部中央: GuidanceとProgressは排他（同時表示しない）。
+- 下部中央: Guidance・Progress（ベイク/起動準備）・Toast は排他表示（優先順: Bake > Init > Toast > Guidance、同時表示しない）。
 - 3Dは `overlay_depth_test` 既定OFF、`apply_view_depth_bias` 併用は維持。
