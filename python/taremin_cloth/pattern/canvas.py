@@ -24,6 +24,7 @@ from .editor import EditorController
 from .geometry import triangulate_polygon_2d
 from .placement import (
     compute_bone_aligned_frame,
+    compute_piece_outline_centroid_2d,
     compute_tubular_waypoints_for_pair,
     project_2d_points_to_bone_plane,
     resolve_seam_bone_wrap_target,
@@ -300,11 +301,16 @@ class PatternCanvasRenderer:
     def _draw_polygon(self, shader, points: Sequence[tuple[float, float]], *, color) -> None:
         if len(points) < 3:
             return
-        # 単純なファン分割で三角形化
-        tri_pts = []
-        p0 = points[0]
-        for i in range(1, len(points) - 1):
-            tri_pts.extend([p0, points[i], points[i + 1]])
+        # 耳刈り法による三角形分割で凹ポリゴンも正しく塗りつぶす
+        tri_indices = triangulate_polygon_2d(points)
+        tri_pts: list[tuple[float, float]] = []
+        if tri_indices:
+            for i0, i1, i2 in tri_indices:
+                tri_pts.extend([points[i0], points[i1], points[i2]])
+        else:
+            p0 = points[0]
+            for i in range(1, len(points) - 1):
+                tri_pts.extend([p0, points[i], points[i + 1]])
 
         shader.bind()
         shader.uniform_float("color", color)
@@ -376,17 +382,15 @@ class PatternCanvasRenderer:
         local_pt = piece.transform.inverse_apply(world_pt_2d)
         pl = doc.placements.get(piece_id)
 
+        if piece_id not in centroid_cache:
+            outer = piece.paths.get(piece.outer_path_id)
+            if outer and outer.nodes:
+                centroid_cache[piece_id] = compute_piece_outline_centroid_2d(piece)
+            else:
+                centroid_cache[piece_id] = local_pt
+
         bone_info = bone_map.get(pl.target_bone) if (pl and pl.target_bone) else None
         if bone_info is not None and pl is not None:
-            if piece_id not in centroid_cache:
-                outer = piece.paths.get(piece.outer_path_id)
-                pts = outer.sample_outline_points(steps_per_segment=16) if outer else []
-                if pts:
-                    cx = sum(p[0] for p in pts) / len(pts)
-                    cy = sum(p[1] for p in pts) / len(pts)
-                    centroid_cache[piece_id] = (cx, cy)
-                else:
-                    centroid_cache[piece_id] = local_pt
             projected = project_2d_points_to_bone_plane(
                 [local_pt],
                 head_3d=bone_info.head_3d,
@@ -400,10 +404,11 @@ class PatternCanvasRenderer:
             p0 = projected[0]
             return (float(p0[0]), float(p0[1]), float(p0[2]))
 
+        cx, cy = centroid_cache[piece_id]
         offset_3d = np.array(pl.offset_3d if pl else (0.0, 0.0, 0.0), dtype=np.float32)
         euler_3d = pl.euler_3d if pl else (0.0, 0.0, 0.0)
         R = _euler_to_rotation_matrix(euler_3d)
-        local_3d = np.array([local_pt[0], 0.0, local_pt[1]], dtype=np.float32)
+        local_3d = np.array([local_pt[0] - cx, 0.0, local_pt[1] - cy], dtype=np.float32)
         world = (R @ local_3d) + offset_3d
         return (float(world[0]), float(world[1]), float(world[2]))
 
@@ -412,9 +417,9 @@ class PatternCanvasRenderer:
         if not _HAS_GPU:
             return
 
+        import numpy as np
+
         overlay_bones = self._get_overlay_bones()
-        if not overlay_bones:
-            return
 
         from ..utils.drawing import (
             draw_wrinkle_armature_overlay,
@@ -423,7 +428,7 @@ class PatternCanvasRenderer:
         )
 
         # 1. Pick Bone モード中のボーン八面体オーバーレイ (X-Ray)
-        if self.controller.picking_bone:
+        if self.controller.picking_bone and overlay_bones:
             draw_wrinkle_armature_overlay(
                 overlay_bones,
                 active_bone_name=self.controller.hovered_bone,
@@ -441,16 +446,18 @@ class PatternCanvasRenderer:
         gpu.state.depth_test_set('NONE')
 
         try:
-            # 2. 選択中ピースの3D配置リアルタイムプレビュー
+            # 2. 選択中ピースの3D配置リアルタイムプレビュー（ボーン追従 / 非ボーン両対応）
             selected_pid: str | None = None
             if len(self.controller.selection.piece_ids) == 1:
                 pid = next(iter(self.controller.selection.piece_ids))
                 selected_pid = pid
                 piece = doc.pieces.get(pid)
                 pl = doc.placements.get(pid)
-                if piece and pl and pl.target_bone:
+                rendered_bone_preview = False
+                if piece and pl and pl.target_bone and overlay_bones:
                     target_item = next((b for b in overlay_bones if b[0] == pl.target_bone), None)
                     if target_item:
+                        rendered_bone_preview = True
                         if not self.controller.picking_bone:
                             draw_wrinkle_armature_overlay(
                                 [target_item],
@@ -502,10 +509,11 @@ class PatternCanvasRenderer:
                         )
                         batch_up.draw(shader)
 
-                        # 2.3 型紙ピースの 3D 平面メッシュプレビュー (ローカル座標基準でビルドと一致させる)
+                        # 2.3 型紙ピースの 3D 平面メッシュプレビュー (外周重心基準でビルドと一致させる)
                         outer = piece.paths.get(piece.outer_path_id)
                         poly_2d = outer.sample_outline_points(steps_per_segment=16) if outer else []
                         if len(poly_2d) >= 3:
+                            c2d = compute_piece_outline_centroid_2d(piece)
                             world_3d = project_2d_points_to_bone_plane(
                                 poly_2d,
                                 head_3d=head_3d,
@@ -514,6 +522,7 @@ class PatternCanvasRenderer:
                                 bone_angle_deg=pl.bone_angle_deg,
                                 surface_offset=pl.surface_offset,
                                 pattern_up_angle_deg=pl.pattern_up_angle_deg,
+                                centroid_2d=c2d,
                             )
                             poly_3d = [(float(p[0]), float(p[1]), float(p[2])) for p in world_3d]
 
@@ -538,6 +547,40 @@ class PatternCanvasRenderer:
                                 {"pos": line_loop}
                             )
                             batch_outline.draw(shader)
+
+                if piece and not rendered_bone_preview:
+                    outer = piece.paths.get(piece.outer_path_id)
+                    poly_2d = outer.sample_outline_points(steps_per_segment=16) if outer else []
+                    if len(poly_2d) >= 3:
+                        pts_arr = np.asarray(poly_2d, dtype=np.float32)
+                        c2d = compute_piece_outline_centroid_2d(piece)
+                        offset_3d = np.array(pl.offset_3d if pl else (0.0, 0.0, 0.0), dtype=np.float32)
+                        euler_3d = pl.euler_3d if pl else (0.0, 0.0, 0.0)
+                        R = _euler_to_rotation_matrix(euler_3d)
+                        local_3d = np.column_stack([
+                            pts_arr[:, 0] - c2d[0],
+                            np.zeros(len(pts_arr), dtype=np.float32),
+                            pts_arr[:, 1] - c2d[1],
+                        ])
+                        world_3d = (local_3d @ R.T) + offset_3d
+                        poly_3d = [(float(p[0]), float(p[1]), float(p[2])) for p in world_3d]
+
+                        tri_indices = triangulate_polygon_2d(poly_2d)
+                        tri_pts_3d = []
+                        for i0, i1, i2 in tri_indices:
+                            tri_pts_3d.extend([poly_3d[i0], poly_3d[i1], poly_3d[i2]])
+
+                        shader.bind()
+                        if tri_pts_3d:
+                            shader.uniform_float("color", (0.2, 0.75, 1.0, 0.35))
+                            batch_poly = batch_for_shader(shader, 'TRIS', {"pos": tri_pts_3d})
+                            batch_poly.draw(shader)
+
+                        gpu.state.line_width_set(2.2)
+                        shader.uniform_float("color", (0.3, 0.9, 1.0, 0.95))
+                        line_loop = poly_3d + [poly_3d[0]]
+                        batch_outline = batch_for_shader(shader, 'LINE_STRIP', {"pos": line_loop})
+                        batch_outline.draw(shader)
 
             # 3. ボーン巻付け (BONE_WRAP) 縫合の裏側迂回ルートプレビュー
             preview_seams = []

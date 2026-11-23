@@ -19,10 +19,6 @@ from .bezier import (
     match_segment_shape,
     adjust_segment_arc_length,
 )
-from .sampling import (
-    compute_seam_subdivision_count,
-    sample_edge_range_by_count,
-)
 from .polygon import (
     signed_area,
     ensure_ccw,
@@ -54,8 +50,6 @@ __all__ = [
     "extract_sub_cubic",
     "match_segment_shape",
     "adjust_segment_arc_length",
-    "compute_seam_subdivision_count",
-    "sample_edge_range_by_count",
     "signed_area",
     "ensure_ccw",
     "point_in_polygon",

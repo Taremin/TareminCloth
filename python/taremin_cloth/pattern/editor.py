@@ -117,6 +117,16 @@ PIECE_CARD_FIELDS: tuple[str, ...] = (
     "surface_offset",
     "pattern_up_angle_deg",
 )
+
+PIECE_NONBONE_CARD_FIELDS: tuple[str, ...] = (
+    "placement_preset",
+    "offset_3d_x",
+    "offset_3d_y",
+    "offset_3d_z",
+    "euler_3d_x",
+    "euler_3d_y",
+    "euler_3d_z",
+)
 REF_IMAGE_CARD_FIELDS: tuple[str, ...] = (
     "ref_visible",
     "ref_opacity",
@@ -171,6 +181,7 @@ class EditorController:
         self.slide_start_val: float = 0.0
         self.is_slider_dragging: bool = False
         self.slide_before_doc: Optional[Document] = None
+        self._placement_preset_index: int = 0
 
         # 画面サイズおよびHUDイベントフラグ
         self.screen_size: tuple[int, int] = (1280, 720)
@@ -605,6 +616,18 @@ class EditorController:
                                 # 100px で 0.1m = 10cm (感度: 0.001)
                                 new_val = self.slide_start_val + dx * 0.001 * shift_mod
                                 pl.surface_offset = max(0.001, min(1.0, new_val))
+                            elif self.sliding_field in ("offset_3d_x", "offset_3d_y", "offset_3d_z"):
+                                axis_idx = ("offset_3d_x", "offset_3d_y", "offset_3d_z").index(self.sliding_field)
+                                new_val = max(-10.0, min(10.0, self.slide_start_val + dx * 0.002 * shift_mod))
+                                off = list(pl.offset_3d)
+                                off[axis_idx] = float(new_val)
+                                pl.offset_3d = (off[0], off[1], off[2])
+                            elif self.sliding_field in ("euler_3d_x", "euler_3d_y", "euler_3d_z"):
+                                axis_idx = ("euler_3d_x", "euler_3d_y", "euler_3d_z").index(self.sliding_field)
+                                new_deg = normalize_angle_deg(self.slide_start_val + dx * 1.0 * shift_mod)
+                                rot = list(pl.euler_3d)
+                                rot[axis_idx] = math.radians(new_deg)
+                                pl.euler_3d = (rot[0], rot[1], rot[2])
                         self.is_dirty = True
                 return True
             elif event.is_release and event.button == "LEFT":
@@ -655,6 +678,12 @@ class EditorController:
                             self.editing_buffer = f"{int(round(pl.pattern_up_angle_deg))}"
                         elif field == "surface_offset":
                             self.editing_buffer = f"{m_to_cm(pl.surface_offset):.1f}"
+                        elif field in ("offset_3d_x", "offset_3d_y", "offset_3d_z"):
+                            axis_idx = ("offset_3d_x", "offset_3d_y", "offset_3d_z").index(field)
+                            self.editing_buffer = f"{m_to_cm(pl.offset_3d[axis_idx]):.1f}"
+                        elif field in ("euler_3d_x", "euler_3d_y", "euler_3d_z"):
+                            axis_idx = ("euler_3d_x", "euler_3d_y", "euler_3d_z").index(field)
+                            self.editing_buffer = f"{int(round(math.degrees(pl.euler_3d[axis_idx])))}"
                         self.is_dirty = True
                     return True
 
@@ -779,8 +808,17 @@ class EditorController:
                 p = self.doc.pieces.get(first_pid) if first_pid else None
                 if p and first_pid:
                     pl = self._get_or_create_placement(first_pid)
+                    has_target_bone = any(
+                        (pl_i := self.doc.placements.get(pid)) is not None and bool(pl_i.target_bone)
+                        for pid in self.selection.piece_ids
+                    )
+                    fields_to_check = (
+                        PIECE_CARD_FIELDS
+                        if has_target_bone
+                        else (PIECE_CARD_FIELDS + PIECE_NONBONE_CARD_FIELDS)
+                    )
 
-                    for field_name in PIECE_CARD_FIELDS:
+                    for field_name in fields_to_check:
                         f_rect = layout.card_fields.get(field_name)
                         if not f_rect or not f_rect.contains(px, py):
                             continue
@@ -789,8 +827,43 @@ class EditorController:
                             self.picking_bone = True
                             self.is_dirty = True
                             return True
+                        elif field_name == "placement_preset":
+                            from .placement import QUICK_PLACEMENT_PRESETS, get_quick_placement_transform
+                            preset_tuple = QUICK_PLACEMENT_PRESETS[
+                                self._placement_preset_index % len(QUICK_PLACEMENT_PRESETS)
+                            ]
+                            preset_id, preset_label = preset_tuple[0], preset_tuple[1]
+                            self._placement_preset_index = (
+                                self._placement_preset_index + 1
+                            ) % len(QUICK_PLACEMENT_PRESETS)
+                            offset_p, euler_p = get_quick_placement_transform(preset_id)
+                            before_doc = self.doc.clone()
+                            for pid in self.selection.piece_ids:
+                                if pid in self.doc.pieces:
+                                    pl_target = self._get_or_create_placement(pid)
+                                    pl_target.preset = preset_id
+                                    pl_target.offset_3d = offset_p
+                                    pl_target.euler_3d = euler_p
+                            self._record_doc_change(
+                                description=f"Apply 3D Placement Preset ({preset_id})",
+                                before_doc=before_doc,
+                            )
+                            self.status_message = f"{trans('3D Preset')}: {preset_label}"
+                            self.is_dirty = True
+                            return True
 
-                        elif field_name in ("bone_t", "bone_angle_deg", "surface_offset", "pattern_up_angle_deg"):
+                        elif field_name in (
+                            "bone_t",
+                            "bone_angle_deg",
+                            "surface_offset",
+                            "pattern_up_angle_deg",
+                            "offset_3d_x",
+                            "offset_3d_y",
+                            "offset_3d_z",
+                            "euler_3d_x",
+                            "euler_3d_y",
+                            "euler_3d_z",
+                        ):
                             # スライダー操作の準備（ドラッグでスライド調整、3px以内クリックでインライン直接入力）
                             self.sliding_field = field_name
                             self.slide_start_pos = event.screen_pos
@@ -804,6 +877,12 @@ class EditorController:
                                 self.slide_start_val = pl.pattern_up_angle_deg
                             elif field_name == "surface_offset":
                                 self.slide_start_val = pl.surface_offset
+                            elif field_name in ("offset_3d_x", "offset_3d_y", "offset_3d_z"):
+                                axis_idx = ("offset_3d_x", "offset_3d_y", "offset_3d_z").index(field_name)
+                                self.slide_start_val = pl.offset_3d[axis_idx]
+                            elif field_name in ("euler_3d_x", "euler_3d_y", "euler_3d_z"):
+                                axis_idx = ("euler_3d_x", "euler_3d_y", "euler_3d_z").index(field_name)
+                                self.slide_start_val = math.degrees(pl.euler_3d[axis_idx])
                             return True
 
                         self.editing_field = field_name
@@ -866,6 +945,7 @@ class EditorController:
                     "shape_match_flip_curvature",
                     "shape_match_ease",
                     "edge_match_seam",
+                    "edge_toggle_hole",
                 ):
                     f_rect = layout.card_fields.get(f_name)
                     if f_rect and f_rect.contains(px, py):
@@ -880,7 +960,11 @@ class EditorController:
                         elif f_name == "edge_paste_shape":
                             self.paste_edge_shape()
                         elif f_name == "edge_match_seam":
-                            self.match_selected_seam(source_side="A")
+                            if not self.match_selected_seam(source_side="A"):
+                                continue
+                        elif f_name == "edge_toggle_hole":
+                            if not self.toggle_selected_internal_hole():
+                                continue
                         elif f_name == "shape_match_mode":
                             modes = ["SIMILAR", "LENGTH_ADJUST_BULGE", "LENGTH_MOVE_END"]
                             cur_idx = modes.index(self.shape_match_mode) if self.shape_match_mode in modes else 0
@@ -1105,6 +1189,11 @@ class EditorController:
                 self.is_dirty = True
                 return True
 
+            # 閉じた内部線の穴属性 (INTERNAL <-> HOLE) トグル (H)
+            if not event.ctrl and not event.alt and k_up == "H":
+                if self.toggle_selected_internal_hole():
+                    return True
+
             # 縫合ボーン巻付けトグル / ボーン選択モードトグル (B)
             if not event.ctrl and not event.alt and k_up == "B":
                 if self.selection.seam_ids:
@@ -1148,6 +1237,13 @@ class EditorController:
                 consumed = True
         elif is_mouse_action and event.is_press:
             consumed = tool.on_mouse_down(self, event)
+            if not consumed and event.button == "RIGHT":
+                if self._is_active_tool_busy():
+                    tool.cancel(self)
+                    consumed = True
+                elif self.active_tool_name != "SELECT":
+                    self.set_active_tool("SELECT")
+                    consumed = True
         elif event.is_move and not event.key:
             consumed = tool.on_mouse_move(self, event)
         elif is_mouse_action and event.is_release:
@@ -1656,12 +1752,80 @@ class EditorController:
                         modified = True
                 except ValueError:
                     pass
+            elif self.editing_field in ("offset_3d_x", "offset_3d_y", "offset_3d_z"):
+                try:
+                    val_m = parse_length_input(self.editing_buffer, default_unit="cm")
+                    if -10.0 <= val_m <= 10.0:
+                        axis_idx = ("offset_3d_x", "offset_3d_y", "offset_3d_z").index(self.editing_field)
+                        off = list(pl.offset_3d)
+                        off[axis_idx] = float(val_m)
+                        pl.offset_3d = (off[0], off[1], off[2])
+                        modified = True
+                except ValueError:
+                    pass
+            elif self.editing_field in ("euler_3d_x", "euler_3d_y", "euler_3d_z"):
+                try:
+                    clean_buf = self.editing_buffer.replace("°", "").replace("deg", "").strip()
+                    val_deg = normalize_angle_deg(float(clean_buf))
+                    axis_idx = ("euler_3d_x", "euler_3d_y", "euler_3d_z").index(self.editing_field)
+                    rot = list(pl.euler_3d)
+                    rot[axis_idx] = math.radians(val_deg)
+                    pl.euler_3d = (rot[0], rot[1], rot[2])
+                    modified = True
+                except ValueError:
+                    pass
         if modified:
             self._record_doc_change(
                 description=f"Edit {self.editing_field}",
                 before_doc=before_doc,
             )
             self.is_dirty = True
+
+    def toggle_selected_internal_hole(self) -> bool:
+        """選択中の閉じた内部線パスについて INTERNAL <-> HOLE の役割を切り替える."""
+        target_paths: list[tuple[str, str, Path]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for er in self.selection.edge_ranges:
+            key = (er.piece_id, er.path_id)
+            if key in seen_keys:
+                continue
+            piece = self.doc.pieces.get(er.piece_id)
+            path = piece.paths.get(er.path_id) if piece else None
+            if path and path.role in (PathRole.INTERNAL, PathRole.HOLE) and path.closed:
+                seen_keys.add(key)
+                target_paths.append((er.piece_id, er.path_id, path))
+
+        if not target_paths and self.selection.node_ids:
+            for pid, piece in self.doc.pieces.items():
+                for path_id, path in piece.paths.items():
+                    if path.role in (PathRole.INTERNAL, PathRole.HOLE) and path.closed:
+                        if any(nd.id in self.selection.node_ids for nd in path.nodes):
+                            key = (pid, path_id)
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                target_paths.append((pid, path_id, path))
+
+        if not target_paths:
+            return False
+
+        before_doc = self.doc.clone()
+        new_roles: list[PathRole] = []
+        for _, _, path in target_paths:
+            path.role = PathRole.HOLE if path.role == PathRole.INTERNAL else PathRole.INTERNAL
+            new_roles.append(path.role)
+
+        self._record_doc_change(
+            description="Toggle Internal Line / Hole",
+            before_doc=before_doc,
+        )
+        if len(new_roles) == 1:
+            role_lbl = trans("Hole: ON") if new_roles[0] == PathRole.HOLE else trans("Hole: OFF")
+        else:
+            hole_cnt = sum(1 for r in new_roles if r == PathRole.HOLE)
+            role_lbl = f"{trans('Hole')}: {hole_cnt}/{len(new_roles)}"
+        self.status_message = role_lbl
+        self.is_dirty = True
+        return True
 
     def flip_selected_seams(self) -> bool:
         """選択中の縫合（または直近/選択ピースに関連する縫合）の方向 (reverse) を反転する."""
@@ -2022,7 +2186,7 @@ class EditorController:
         res = self.history.undo()
         if res:
             self.doc, _ = res
-            self.selection.clear()
+            self.selection.prune_missing(self.doc)
             self._invalidate_notch_preview()
             self.is_dirty = True
             return True
@@ -2033,7 +2197,7 @@ class EditorController:
         res = self.history.redo()
         if res:
             self.doc, _ = res
-            self.selection.clear()
+            self.selection.prune_missing(self.doc)
             self._invalidate_notch_preview()
             self.is_dirty = True
             return True

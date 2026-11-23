@@ -139,25 +139,35 @@ pub fn segments_properly_intersect_2d(
     b1: [f32; 2],
     endpoint_eps: f32,
 ) -> bool {
-    let eps_sq = endpoint_eps * endpoint_eps;
+    let eps64 = endpoint_eps as f64;
+    let eps_sq = eps64 * eps64;
     let same = |p: [f32; 2], q: [f32; 2]| -> bool {
-        let dx = p[0] - q[0];
-        let dy = p[1] - q[1];
+        let dx = (p[0] as f64) - (q[0] as f64);
+        let dy = (p[1] as f64) - (q[1] as f64);
         dx * dx + dy * dy <= eps_sq
     };
     // 端点を共有している場合の共線重なりチェックは簡略化し、隣接辺同士の交差誤爆を防ぐ
     let shares_endpoint =
         same(a0, b0) || same(a0, b1) || same(a1, b0) || same(a1, b1);
 
-    let d1 = cross_2d(a0, a1, b0);
-    let d2 = cross_2d(a0, a1, b1);
-    let d3 = cross_2d(b0, b1, a0);
-    let d4 = cross_2d(b0, b1, a1);
+    let cross64 = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| -> f64 {
+        ((q[0] as f64) - (p[0] as f64)) * ((r[1] as f64) - (p[1] as f64))
+            - ((q[1] as f64) - (p[1] as f64)) * ((r[0] as f64) - (p[0] as f64))
+    };
+    let d1 = cross64(a0, a1, b0);
+    let d2 = cross64(a0, a1, b1);
+    let d3 = cross64(b0, b1, a0);
+    let d4 = cross64(b0, b1, a1);
 
-    let straddles_a = (d1 > endpoint_eps && d2 < -endpoint_eps)
-        || (d1 < -endpoint_eps && d2 > endpoint_eps);
-    let straddles_b = (d3 > endpoint_eps && d4 < -endpoint_eps)
-        || (d3 < -endpoint_eps && d4 > endpoint_eps);
+    let len_a = (a1[0] as f64 - a0[0] as f64).hypot(a1[1] as f64 - a0[1] as f64);
+    let len_b = (b1[0] as f64 - b0[0] as f64).hypot(b1[1] as f64 - b0[1] as f64);
+    let cross_eps_a = (len_a * eps64).max(1e-18);
+    let cross_eps_b = (len_b * eps64).max(1e-18);
+
+    let straddles_a = (d1 > cross_eps_a && d2 < -cross_eps_a)
+        || (d1 < -cross_eps_a && d2 > cross_eps_a);
+    let straddles_b = (d3 > cross_eps_b && d4 < -cross_eps_b)
+        || (d3 < -cross_eps_b && d4 > cross_eps_b);
     if straddles_a && straddles_b {
         return true;
     }
@@ -295,6 +305,26 @@ mod tests {
             [1.0, 0.0],
             [1.0, 0.0],
             [1.0, 1.0],
+            1e-6,
+        ));
+    }
+
+    #[test]
+    fn test_segments_properly_intersect_submillimeter_scale() {
+        // 長さ 0.1mm (1e-4) の十字交差が endpoint_eps=1e-6 でも見逃されないこと
+        assert!(segments_properly_intersect_2d(
+            [0.0, 0.0],
+            [1e-4, 1e-4],
+            [0.0, 1e-4],
+            [1e-4, 0.0],
+            1e-6,
+        ));
+        // 0.1mm 辺同士の共有端点 L 字接続は交差扱いしないこと
+        assert!(!segments_properly_intersect_2d(
+            [0.0, 0.0],
+            [1e-4, 0.0],
+            [1e-4, 0.0],
+            [1e-4, 1e-4],
             1e-6,
         ));
     }

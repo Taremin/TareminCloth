@@ -556,14 +556,31 @@ def build_render_commands(
                         width=2.0,
                     ))
 
-        # パス輪郭線および内部線（ベジェ曲線の分割サンプリング）
+        # パス輪郭線・穴領域および内部線（ベジェ曲線の分割サンプリング）
         for path_id, path in piece.paths.items():
             n_nodes = len(path.nodes)
             if n_nodes < 2:
                 continue
 
+            is_hole = (path.role == PathRole.HOLE)
             is_internal = (path.role == PathRole.INTERNAL)
-            if is_internal:
+            if is_hole:
+                line_col = (1.0, 0.45, 0.35, 1.0) if is_piece_selected else (0.95, 0.3, 0.3, 0.9)
+                line_w = 2.2 if is_piece_selected else 1.6
+                if path.closed and n_nodes >= 3:
+                    hole_world_pts = path.sample_outline_points(steps_per_segment=12)
+                    if len(hole_world_pts) >= 3:
+                        s_hole_pts = [
+                            view.world_to_screen(piece.transform.transform_point(pt))
+                            for pt in hole_world_pts
+                        ]
+                        commands.append(DrawCommand(
+                            kind=DrawCommandKind.POLYGON,
+                            color=(0.9, 0.25, 0.25, 0.14),
+                            points=s_hole_pts,
+                            filled=True,
+                        ))
+            elif is_internal:
                 line_col = th.internal_line_selected if is_piece_selected else th.internal_line
                 line_w = 1.8 if is_piece_selected else 1.2
             else:
@@ -1240,6 +1257,12 @@ def build_render_commands(
                 "bone_angle_deg": trans("Bone Angle"),
                 "surface_offset": trans("Bone Offset"),
                 "pattern_up_angle_deg": trans("Pattern Up (T)"),
+                "offset_3d_x": trans("3D Pos X"),
+                "offset_3d_y": trans("3D Pos Y"),
+                "offset_3d_z": trans("3D Pos Z"),
+                "euler_3d_x": trans("3D Rot X"),
+                "euler_3d_y": trans("3D Rot Y"),
+                "euler_3d_z": trans("3D Rot Z"),
                 "notch_from_start": trans("From Start"),
                 "notch_ratio": trans("Ratio"),
                 "shape_match_ease": trans("Ease"),

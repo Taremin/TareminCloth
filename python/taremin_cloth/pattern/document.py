@@ -2843,7 +2843,9 @@ class Document:
 
     def clone(self) -> Document:
         """現在のドキュメントの完全なディープコピー（スナップショット）を返す."""
-        return self.from_dict(self.to_dict())
+        cloned = self.from_dict(self.to_dict())
+        cloned._load_failed = getattr(self, "_load_failed", False)
+        return cloned
 
     def to_json(self, *, indent: Optional[int] = None) -> str:
         """JSON文字列として直列化する."""

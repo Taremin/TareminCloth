@@ -21,22 +21,10 @@ from ..pattern.canvas import PatternCanvasRenderer
 from ..pattern.document import Document
 from ..pattern.editor import EditorController, EditorEvent
 from ..pattern.keymap import resolve_tool_hotkey
+from ..pattern.placement import sync_document_to_proxy_objects, sync_proxy_objects_to_document
 from ..properties import FloatProperty, StringProperty, EnumProperty, BoolProperty
 from ..utils.drawing import is_interactive_active
 from ..utils.logger import logger
-from ..utils.pattern_builder import build_garment_from_patterns
-from ..utils.pattern_proxy import (
-    QUICK_PLACEMENT_PRESETS,
-    get_or_create_arrangement_proxy,
-    get_quick_placement_transform,
-    sync_pattern_to_proxy,
-    sync_proxy_to_pattern,
-)
-from ..utils.pattern_view import (
-    is_pattern_view_active,
-    restore_3d_viewport,
-    setup_2d_pattern_viewport,
-)
 from ..utils.view3d import (
     extract_armature_bones_for_canvas,
     get_viewport_overlay_offsets,
@@ -171,11 +159,25 @@ def _resolve_editor_space_and_rv3d(op, *, context=None):
     return space, rv3d
 
 
+def _has_existing_garment_object(scene) -> bool:
+    """シーン内に既存のビルド済み衣装オブジェクト（Garment_Cloth）が存在するかを返す."""
+    if scene is None:
+        return False
+    objects = getattr(scene, "objects", None)
+    if objects is None:
+        return False
+    try:
+        return "Garment_Cloth" in objects
+    except Exception:
+        return False
+
+
 def _cleanup_pattern_editor_session(
     op,
     *,
     context=None,
     save_and_build: bool = False,
+    save_doc_on_cancel: bool = False,
     reason: str = "",
 ) -> None:
     """型紙エディタセッションの後始末を一元的にかつ冪等に実行する."""
@@ -186,6 +188,7 @@ def _cleanup_pattern_editor_session(
     ctrl = None
     canvas = None
     op_scene = None
+    initial_doc_json = None
 
     if op is not None:
         try:
@@ -207,6 +210,10 @@ def _cleanup_pattern_editor_session(
                 op_scene = getattr(op, "_session_scene", None)
             except (ReferenceError, AttributeError):
                 op_scene = None
+            try:
+                initial_doc_json = getattr(op, "_initial_doc_json", None)
+            except (ReferenceError, AttributeError):
+                initial_doc_json = None
 
             # 1. ツールバー（Tパネル）およびツールヘッダー表示状態の復元
             try:
@@ -247,18 +254,33 @@ def _cleanup_pattern_editor_session(
     _sync_pattern_editor_active_flag(scene=op_scene, active=False)
     _sync_pattern_editor_active_flag(scene=ctx_scene, active=False)
 
-    # 6. 通常終了時のみドキュメント保存および 3D 衣装メッシュの自動ビルドを実行
-    if save_and_build and not already_closed and ctrl is not None:
+    # 6. 通常終了時はドキュメント保存および（変更時または未ビルド時）3D衣装メッシュの自動ビルドを実行
+    #    Modal cancel 時も未保存編集がある場合はドキュメントのみ保存して編集ロストを防ぐ
+    if not already_closed and ctrl is not None:
         target_scene = ctx_scene or op_scene
         if target_scene is not None:
-            try:
-                save_document_to_scene(ctrl.doc, scene=target_scene)
-            except Exception as exc:
-                logger.warning(f"[Pattern] Auto save on editor close error: {exc}")
-            try:
-                build_garment_mesh_in_place(ctrl.doc, scene=target_scene)
-            except Exception as exc:
-                logger.warning(f"[Pattern] Auto build on editor close error: {exc}")
+            doc_changed = True
+            if initial_doc_json is not None:
+                try:
+                    doc_changed = ctrl.doc.to_json() != initial_doc_json
+                except Exception:
+                    doc_changed = True
+
+            if save_and_build:
+                try:
+                    save_document_to_scene(ctrl.doc, scene=target_scene)
+                except Exception as exc:
+                    logger.warning(f"[Pattern] Auto save on editor close error: {exc}")
+                if doc_changed or not _has_existing_garment_object(target_scene):
+                    try:
+                        build_garment_mesh_in_place(ctrl.doc, scene=target_scene)
+                    except Exception as exc:
+                        logger.warning(f"[Pattern] Auto build on editor close error: {exc}")
+            elif save_doc_on_cancel and doc_changed:
+                try:
+                    save_document_to_scene(ctrl.doc, scene=target_scene)
+                except Exception as exc:
+                    logger.warning(f"[Pattern] Auto save on editor cancel error: {exc}")
 
     # 7. 再描画要求
     if context is not None:
@@ -298,215 +320,84 @@ def get_active_pattern_canvas():
         return None
 
 
-class TAREMIN_OT_create_pattern_piece(Operator):
-    """2D型紙パーツを新規作成するオペレーター"""
-    bl_idname = "taremin_cloth.create_pattern_piece"
-    bl_label = "New Pattern Piece"
-    bl_description = "Create a new 2D pattern piece in current view"
-    bl_translation_context = i18n.CONTEXT
-    bl_options = {'REGISTER', 'UNDO'}
-
-    name: StringProperty(
-        name="Piece Name",
-        description="Name of the new pattern piece",
-        default="Pattern_Piece",
-    )
-    shape_type: EnumProperty(
-        name="Shape Type",
-        description="Type of base 2D object for pattern drawing",
-        items=[
-            ('CURVE', "2D Curve", "Bezier / Poly curve for smooth CAD drafting", 'CURVE_DATA', 0),
-            ('MESH', "Plane Mesh", "Flat polygon mesh for box modeling", 'MESH_PLANE', 1),
-        ],
-        default='CURVE',
-    )
-    width: FloatProperty(
-        name="Width",
-        description="Initial width in meters",
-        default=0.20,
-        min=0.01,
-        max=5.0,
-        unit='LENGTH',
-    )
-    height: FloatProperty(
-        name="Height",
-        description="Initial height in meters",
-        default=0.30,
-        min=0.01,
-        max=5.0,
-        unit='LENGTH',
-    )
-
-    def execute(self, context):
-        w = self.width
-        h = self.height
-
-        if self.shape_type == 'CURVE':
-            curve_data = bpy.data.curves.new(name=f"{self.name}_Curve", type='CURVE')
-            curve_data.dimensions = '2D'
-            spline = curve_data.splines.new(type='POLY')
-            spline.points.add(3)
-            coords = [(0.0, 0.0, 0.0, 1.0), (w, 0.0, 0.0, 1.0), (w, h, 0.0, 1.0), (0.0, h, 0.0, 1.0)]
-            for i, co in enumerate(coords):
-                spline.points[i].co = co
-            spline.use_cyclic_u = True
-
-            obj = bpy.data.objects.new(self.name, curve_data)
-            context.collection.objects.link(obj)
-        else:
-            mesh = bpy.data.meshes.new(name=f"{self.name}_Mesh")
-            verts = [(0.0, 0.0, 0.0), (w, 0.0, 0.0), (w, h, 0.0), (0.0, h, 0.0)]
-            faces = [(0, 1, 2, 3)]
-            mesh.from_pydata(verts, [], faces)
-            mesh.update()
-
-            obj = bpy.data.objects.new(self.name, mesh)
-            context.collection.objects.link(obj)
-
-        if hasattr(obj, "taremin_pattern"):
-            obj.taremin_pattern.is_pattern_piece = True
-            obj.taremin_pattern.target_edge_length = 0.020
-
-        # 作成したオブジェクトを選択・アクティブ化
-        for o in context.selected_objects:
-            o.select_set(False)
-        obj.select_set(True)
-        context.view_layer.objects.active = obj
-
-        # 自動的に新規オブジェクト単体のみの2D製図ビュー（ローカルビュー・Top直交）に切り替える
-        setup_2d_pattern_viewport(context, target_objects=[obj])
-
-        # 作成した型紙にカメラをフォーカス
-        try:
-            bpy.ops.view3d.view_selected()
-        except Exception:
-            pass
-
-        self.report({'INFO'}, i18n.trans("Created pattern piece: %s") % obj.name)
-        return {'FINISHED'}
-
-
-class TAREMIN_OT_toggle_pattern_2d_view(Operator):
-    """3Dビューポートの2D型紙視点切替オペレーター"""
-    bl_idname = "taremin_cloth.toggle_pattern_2d_view"
-    bl_label = "Toggle 2D Pattern View"
-    bl_description = "Switch 3D viewport between 2D CAD drafting view and 3D view"
-    bl_translation_context = i18n.CONTEXT
-
-    def execute(self, context):
-        if is_pattern_view_active(context):
-            restore_3d_viewport(context)
-            self.report({'INFO'}, i18n.trans("Switched to standard 3D view"))
-        else:
-            setup_2d_pattern_viewport(context)
-            self.report({'INFO'}, i18n.trans("Switched to 2D pattern view (Rotation locked)"))
-        return {'FINISHED'}
-
-
-class TAREMIN_OT_apply_quick_arrangement(Operator):
-    """型紙パーツに素体周辺のクイック配置プリセットを適用するオペレーター"""
-    bl_idname = "taremin_cloth.apply_quick_arrangement"
-    bl_label = "Apply Quick Placement"
-    bl_description = "Quickly position and orient pattern piece around body"
-    bl_translation_context = i18n.CONTEXT
-    bl_options = {'REGISTER', 'UNDO'}
-
-    preset: EnumProperty(
-        name="Placement Position",
-        description="Standard body region for pattern arrangement",
-        items=QUICK_PLACEMENT_PRESETS,
-        default='CHEST_FRONT',
-    )
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return bool(obj and hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece)
-
-    def execute(self, context):
-        obj = context.active_object
-        if not obj or not hasattr(obj, "taremin_pattern"):
-            return {'CANCELLED'}
-
-        offset, euler = get_quick_placement_transform(self.preset, scene=context.scene)
-        pat = obj.taremin_pattern
-        pat.arrangement_offset = offset
-        pat.arrangement_euler = euler
-
-        # 3Dプロキシが存在すればプロキシ側も同期
-        sync_pattern_to_proxy(obj)
-
-        self.report({'INFO'}, i18n.trans("Applied placement preset: %s") % self.preset)
-        return {'FINISHED'}
-
-
-class TAREMIN_OT_edit_arrangement_3d(Operator):
-    """3D空間で型紙の配置プロキシ（ゴースト）を直感移動・回転するオペレーター"""
-    bl_idname = "taremin_cloth.edit_arrangement_3d"
-    bl_label = "Edit 3D Arrangement"
-    bl_description = "Show interactive 3D proxy object and switch to 3D view for easy G/R placement"
+class TAREMIN_OT_edit_pattern_proxies_3d(Operator):
+    """Document内の全型紙ピースに対する3D配置プロキシを生成・同期して編集可能にするオペレーター"""
+    bl_idname = "taremin_cloth.edit_pattern_proxies_3d"
+    bl_label = "Edit 3D Proxies"
+    bl_description = "Generate or update 3D arrangement proxy wireframes for all pattern pieces"
     bl_translation_context = i18n.CONTEXT
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return bool(obj and hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece)
-
-    def execute(self, context):
-        obj = context.active_object
-        if not obj or not hasattr(obj, "taremin_pattern"):
-            return {'CANCELLED'}
-
-        # 2Dビュー中であれば標準3Dビューに復帰
-        if is_pattern_view_active(context):
-            restore_3d_viewport(context)
-
-        # 3Dプロキシを取得または生成
-        proxy_obj = get_or_create_arrangement_proxy(context, obj)
-
-        # プロキシを選択・アクティブ化
-        for o in context.selected_objects:
-            o.select_set(False)
-        proxy_obj.select_set(True)
-        context.view_layer.objects.active = proxy_obj
-
-        # プロキシにフォーカス
-        try:
-            bpy.ops.view3d.view_selected()
-        except Exception:
-            pass
-
-        self.report({'INFO'}, i18n.trans("Move or rotate 3D proxy to arrange pattern: %s") % proxy_obj.name)
-        return {'FINISHED'}
-
-
-class TAREMIN_OT_sync_arrangement_proxy(Operator):
-    """3D配置プロキシの位置・回転を型紙パラメータに同期するオペレーター"""
-    bl_idname = "taremin_cloth.sync_arrangement_proxy"
-    bl_label = "Sync Proxy Transforms"
-    bl_description = "Sync 3D proxy transforms back to pattern arrangement properties"
-    bl_translation_context = i18n.CONTEXT
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        if not obj:
+        if is_interactive_active():
             return False
-        return "taremin_pattern_source" in obj or (hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece)
+        scene = getattr(context, "scene", None)
+        raw_doc = getattr(scene, "taremin_pattern_document", "") if scene else ""
+        return bool(raw_doc and raw_doc.strip())
 
     def execute(self, context):
-        obj = context.active_object
-        if not obj:
+        doc = load_document_from_scene(context.scene)
+        if not doc.pieces:
+            self.report({'WARNING'}, i18n.trans("No pattern pieces found in document"))
             return {'CANCELLED'}
 
-        if "taremin_pattern_source" in obj:
-            sync_proxy_to_pattern(obj, scene=context.scene)
-            self.report({'INFO'}, i18n.trans("Synced 3D proxy transform to pattern properties"))
+        proxies = sync_document_to_proxy_objects(context, doc)
+        save_document_to_scene(doc, scene=context.scene, push_undo=False)
+
+        if proxies:
+            for o in getattr(context, "selected_objects", []):
+                o.select_set(False)
+            for p_obj in proxies:
+                p_obj.select_set(True)
+            view_layer = getattr(context, "view_layer", None)
+            if view_layer is not None:
+                view_layer.objects.active = proxies[0]
+            try:
+                bpy.ops.view3d.view_selected()
+            except Exception:
+                pass
+
+        tag_redraw_view3d(context)
+        self.report({'INFO'}, i18n.trans("Synced %d 3D pattern proxy object(s)") % len(proxies))
+        return {'FINISHED'}
+
+
+class TAREMIN_OT_sync_pattern_proxies_3d(Operator):
+    """3D配置プロキシオブジェクトの移動・回転をDocument.placementsへ書き戻すオペレーター"""
+    bl_idname = "taremin_cloth.sync_pattern_proxies_3d"
+    bl_label = "Sync 3D Proxies"
+    bl_description = "Apply 3D proxy object positions and rotations back to the pattern document"
+    bl_translation_context = i18n.CONTEXT
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if is_interactive_active():
+            return False
+        scene = getattr(context, "scene", None)
+        raw_doc = getattr(scene, "taremin_pattern_document", "") if scene else ""
+        return bool(raw_doc and raw_doc.strip())
+
+    def execute(self, context):
+        doc = load_document_from_scene(context.scene)
+        if not doc.pieces:
+            self.report({'WARNING'}, i18n.trans("No pattern pieces found in document"))
+            return {'CANCELLED'}
+
+        modified = sync_proxy_objects_to_document(context, doc)
+        active_ctrl = get_active_pattern_editor_controller()
+        if active_ctrl is not None:
+            if sync_proxy_objects_to_document(context, active_ctrl.doc):
+                active_ctrl.is_dirty = True
+                modified = True
+
+        if modified:
+            save_document_to_scene(doc, scene=context.scene)
+            tag_redraw_view3d(context)
+            self.report({'INFO'}, i18n.trans("Synced 3D proxy transforms to pattern document"))
         else:
-            sync_pattern_to_proxy(obj)
-            self.report({'INFO'}, i18n.trans("Synced pattern properties to 3D proxy"))
+            self.report({'INFO'}, i18n.trans("No 3D proxy changes detected"))
         return {'FINISHED'}
 
 
@@ -632,6 +523,15 @@ class TAREMIN_OT_pattern_editor(Operator):
                 space.show_region_tool_header = False
 
             doc = load_document_from_scene(scene)
+            if getattr(doc, "_load_failed", False):
+                self.report(
+                    {'WARNING'},
+                    i18n.trans("Failed to parse saved pattern JSON. Started empty with save lock enabled."),
+                )
+            try:
+                self._initial_doc_json = doc.to_json()
+            except Exception:
+                self._initial_doc_json = None
             self.controller = EditorController(doc=doc)
             region = getattr(context, "region", None)
             rv3d = getattr(context, "region_data", None)
@@ -904,7 +804,7 @@ class TAREMIN_OT_pattern_editor(Operator):
         if consumed:
             return {'RUNNING_MODAL'}
 
-        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+        if event.type == 'ESC' and event.value == 'PRESS':
             return self._finish(context)
 
         # 型紙エディタ起動中は、Blender 本体のショートカット（Cのサークル選択、Iのキーフレーム挿入等）の
@@ -930,6 +830,7 @@ class TAREMIN_OT_pattern_editor(Operator):
             self,
             context=context,
             save_and_build=False,
+            save_doc_on_cancel=True,
             reason="cancelled",
         )
 
@@ -994,76 +895,51 @@ class TAREMIN_OT_build_garment(Operator):
         # シミュレーション実行中はトポロジー変更をロック
         if is_interactive_active():
             return False
-        # Document JSON が存在するか、従来の型紙パーツが存在するか
-        raw_doc = getattr(context.scene, "taremin_pattern_document", "")
-        if raw_doc and raw_doc.strip():
-            return True
-        for obj in context.scene.objects:
-            if hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece:
-                return True
-        return False
+        scene = getattr(context, "scene", None)
+        raw_doc = getattr(scene, "taremin_pattern_document", "") if scene else ""
+        return bool(raw_doc and raw_doc.strip())
 
     def execute(self, context):
-        # 1. Document ベースのビルド
         raw_doc = getattr(context.scene, "taremin_pattern_document", "")
-        if raw_doc and raw_doc.strip():
-            doc = load_document_from_scene(context.scene)
-            if doc.pieces:
-                try:
-                    obj = build_garment_mesh_in_place(
-                        doc,
-                        target_object_name=self.target_name,
-                        scene=context.scene,
-                    )
-                    if obj:
-                        for o in context.selected_objects:
-                            o.select_set(False)
-                        obj.select_set(True)
-                        context.view_layer.objects.active = obj
-                        tag_redraw_view3d(context)
-                        self.report({'INFO'}, i18n.trans("Successfully built garment mesh: %s") % obj.name)
-                        return {'FINISHED'}
-                except Exception as e:
-                    self.report({'ERROR'}, i18n.trans("Failed to build garment: %s") % str(e))
-                    return {'CANCELLED'}
-
-        # 2. 従来の型紙パーツからのフォールバックビルド
-        pattern_objects = [
-            obj for obj in context.scene.objects
-            if hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece
-        ]
-        if not pattern_objects:
+        if not (raw_doc and raw_doc.strip()):
             self.report({'WARNING'}, i18n.trans("No active pattern pieces found in scene"))
             return {'CANCELLED'}
 
-        # プロキシが存在していれば最新のトランスフォームを同期
-        for p in pattern_objects:
-            proxy_name = f"{p.name}_Proxy3D"
-            proxy_obj = bpy.data.objects.get(proxy_name)
-            if proxy_obj:
-                sync_proxy_to_pattern(proxy_obj, scene=context.scene)
+        doc = load_document_from_scene(context.scene)
+        if not doc.pieces:
+            self.report({'WARNING'}, i18n.trans("No active pattern pieces found in scene"))
+            return {'CANCELLED'}
+
+        # 3D配置プロキシがシーンに存在する場合は最新のトランスフォームをDocumentへ同期
+        if hasattr(context.scene, "objects"):
+            try:
+                if sync_proxy_objects_to_document(context, doc):
+                    save_document_to_scene(doc, scene=context.scene, push_undo=False)
+            except Exception as exc:
+                logger.warning(f"[Pattern] Proxy sync before build failed: {exc}")
 
         try:
-            garment_obj = build_garment_from_patterns(
-                context.scene,
-                pattern_objects=pattern_objects,
-                target_name=self.target_name,
+            obj = build_garment_mesh_in_place(
+                doc,
+                target_object_name=self.target_name,
+                scene=context.scene,
             )
+            if not obj:
+                self.report({'WARNING'}, i18n.trans("Failed to build garment mesh"))
+                return {'CANCELLED'}
 
-            if is_pattern_view_active(context):
-                restore_3d_viewport(context)
-
-            for o in context.selected_objects:
+            for o in getattr(context, "selected_objects", []):
                 o.select_set(False)
-            garment_obj.select_set(True)
-            context.view_layer.objects.active = garment_obj
-
+            obj.select_set(True)
+            view_layer = getattr(context, "view_layer", None)
+            if view_layer is not None:
+                view_layer.objects.active = obj
             try:
                 bpy.ops.view3d.view_selected()
             except Exception:
                 pass
-
-            self.report({'INFO'}, i18n.trans("Successfully built garment mesh: %s") % garment_obj.name)
+            tag_redraw_view3d(context)
+            self.report({'INFO'}, i18n.trans("Successfully built garment mesh: %s") % obj.name)
             return {'FINISHED'}
         except Exception as e:
             self.report({'ERROR'}, i18n.trans("Failed to build garment: %s") % str(e))
@@ -1615,36 +1491,6 @@ class TAREMIN_OT_clear_reference_image(Operator):
         return {'FINISHED'}
 
 
-class TAREMIN_OT_migrate_curves_to_pattern(Operator):
-    """シーン内の既存 2D Curve 型紙オブジェクトを Document に変換統合する"""
-    bl_idname = "taremin_cloth.migrate_curves_to_pattern"
-    bl_label = "Migrate 2D Curves to Pattern Document"
-    bl_description = "Convert legacy 2D Curve pattern objects in the scene to the unified Pattern Document"
-    bl_translation_context = i18n.CONTEXT
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        from ..pattern.migration import migrate_curve_objects_to_document
-        curve_objs = [
-            obj for obj in context.scene.objects
-            if obj.type == 'CURVE' and hasattr(obj, "taremin_pattern") and obj.taremin_pattern.is_pattern_piece
-        ]
-        if not curve_objs:
-            curve_objs = [obj for obj in context.selected_objects if obj.type == 'CURVE']
-
-        if not curve_objs:
-            self.report({'WARNING'}, i18n.trans("No 2D Curve pattern objects found to migrate"))
-            return {'CANCELLED'}
-
-        doc = load_document_from_scene(context.scene)
-        doc = migrate_curve_objects_to_document(curve_objs, target_doc=doc)
-        save_document_to_scene(doc, scene=context.scene)
-        build_garment_mesh_in_place(doc, scene=context.scene)
-        tag_redraw_view3d(context)
-        self.report({'INFO'}, i18n.trans("Migrated %d curve object(s) to pattern document") % len(curve_objs))
-        return {'FINISHED'}
-
-
 def _persistent(func):
     """Blender環境では@persistentを適用し、モックテスト環境では元の関数をそのまま返す."""
     app = getattr(bpy, "app", None)
@@ -1749,12 +1595,8 @@ classes = (
     TAREMIN_OT_set_reference_image,
     TAREMIN_OT_toggle_reference_image,
     TAREMIN_OT_clear_reference_image,
-    TAREMIN_OT_migrate_curves_to_pattern,
-    TAREMIN_OT_create_pattern_piece,
-    TAREMIN_OT_toggle_pattern_2d_view,
-    TAREMIN_OT_apply_quick_arrangement,
-    TAREMIN_OT_edit_arrangement_3d,
-    TAREMIN_OT_sync_arrangement_proxy,
+    TAREMIN_OT_edit_pattern_proxies_3d,
+    TAREMIN_OT_sync_pattern_proxies_3d,
     TAREMIN_OT_build_garment,
     TAREMIN_OT_remesh_to_quad,
 )

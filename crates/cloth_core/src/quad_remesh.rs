@@ -411,25 +411,40 @@ fn detect_loop_corners(boundary_loop: &[[f32; 2]]) -> Vec<usize> {
         dot_products.push(cos_theta);
     }
 
-    // cos_theta < 0.707 (約 45度以上の折れ曲がり) かつ厳密な局所極小（同値連続は先頭のみ）を検出
+    // 全頂点が45度以上曲がる多角形（例: 4頂点矩形）では全頂点をコーナーとして扱う
+    if dot_products.iter().all(|&c| c < 0.707) {
+        return (0..b_len).collect();
+    }
+
+    // cos_theta < 0.707 (約 45度以上の折れ曲がり) のコーナーを検出する。
+    // 明瞭な角 (cos_theta <= 0.35 ≈ 70度以上) は隣接プラトー抑制を掛けず保持し、
+    // 緩やかな曲線上の折れ曲がり (0.35 < cos_theta < 0.707) は局所極小の先頭側のみ採用する。
     let mut corners = Vec::new();
     for i in 0..b_len {
         let cos_val = dot_products[i];
         if cos_val < 0.707 {
-            let prev_val = dot_products[(i + b_len - 1) % b_len];
-            let next_val = dot_products[(i + 1) % b_len];
-            // 等値プラトーでは先頭側のみ採用して重複登録を防ぐ
-            if cos_val < prev_val - 1e-6 && cos_val <= next_val + 1e-6 {
-                if let Some(&last) = corners.last() {
-                    if i - last <= 1 {
-                        continue;
-                    }
-                }
+            if cos_val <= 0.35 {
                 corners.push(i);
+            } else {
+                let prev_val = dot_products[(i + b_len - 1) % b_len];
+                let next_val = dot_products[(i + 1) % b_len];
+                if cos_val < prev_val - 1e-6 && cos_val <= next_val + 1e-6 {
+                    if let Some(&last) = corners.last() {
+                        if i - last <= 1 && dot_products[last] > 0.35 {
+                            continue;
+                        }
+                    }
+                    corners.push(i);
+                }
             }
         }
     }
-    if corners.len() >= 2 && corners[0] == 0 && corners[corners.len() - 1] == b_len - 1 {
+    if corners.len() >= 2
+        && corners[0] == 0
+        && corners[corners.len() - 1] == b_len - 1
+        && dot_products[0] > 0.35
+        && dot_products[b_len - 1] > 0.35
+    {
         corners.pop();
     }
 
@@ -1487,6 +1502,9 @@ fn generate_hybrid_quad_dominant(
         let mut next_outer_indices = cur_outer_indices.clone();
 
         {
+            let cp_uvs = out_uvs_2d.len();
+            let cp_quads = quads.len();
+            let cp_tris = belt_triangles.len();
             let mut obs: Vec<&[[f32; 2]]> = Vec::with_capacity(1 + cur_hole_pts.len());
             obs.push(&cur_outer_pts);
             for h in &cur_hole_pts {
@@ -1506,12 +1524,20 @@ fn generate_hybrid_quad_dominant(
             if np.len() >= 3 && !has_loop_self_intersection(&np, 1e-6) {
                 next_outer_pts = np;
                 next_outer_indices = ni;
+            } else {
+                // 不採用ベルトの頂点・面をロールバックし重複面生成を防ぐ
+                out_uvs_2d.truncate(cp_uvs);
+                quads.truncate(cp_quads);
+                belt_triangles.truncate(cp_tris);
             }
         }
 
         let mut next_holes_pts: Vec<Vec<[f32; 2]>> = Vec::with_capacity(cur_hole_pts.len());
         let mut next_holes_indices: Vec<Vec<u32>> = Vec::with_capacity(cur_hole_indices.len());
         for hi in 0..cur_hole_pts.len() {
+            let cp_uvs = out_uvs_2d.len();
+            let cp_quads = quads.len();
+            let cp_tris = belt_triangles.len();
             let mut obs: Vec<&[[f32; 2]]> = Vec::with_capacity(1 + cur_hole_pts.len());
             obs.push(&next_outer_pts);
             for (hj, h) in cur_hole_pts.iter().enumerate() {
@@ -1536,6 +1562,9 @@ fn generate_hybrid_quad_dominant(
                 next_holes_pts.push(np);
                 next_holes_indices.push(ni);
             } else {
+                out_uvs_2d.truncate(cp_uvs);
+                quads.truncate(cp_quads);
+                belt_triangles.truncate(cp_tris);
                 next_holes_pts.push(cur_hole_pts[hi].clone());
                 next_holes_indices.push(cur_hole_indices[hi].clone());
             }
@@ -1547,7 +1576,7 @@ fn generate_hybrid_quad_dominant(
         cur_hole_indices = next_holes_indices;
     }
 
-    // 2. 残余領域 AABB と内部正方格子点の生成
+    // 2. 残余領域 AABB と内部正方格子点の生成（整数カウンタでULP無限ループを防止）
     let mut min_u = f32::INFINITY;
     let mut max_u = f32::NEG_INFINITY;
     let mut min_v = f32::INFINITY;
@@ -1563,10 +1592,21 @@ fn generate_hybrid_quad_dominant(
     let min_clear = 0.42 * step;
 
     let mut interior_grid_pts = Vec::new();
-    let mut y = min_v + 0.5 * step;
-    while y < max_v {
-        let mut x = min_u + 0.5 * step;
-        while x < max_u {
+    let span_u = (max_u as f64 - min_u as f64).max(0.0);
+    let span_v = (max_v as f64 - min_v as f64).max(0.0);
+    let step64 = (step as f64).max(1e-6);
+    let nx = ((span_u / step64).ceil() as usize).min(256);
+    let ny = ((span_v / step64).ceil() as usize).min(256);
+    for iy in 0..ny {
+        let y = (min_v as f64 + (iy as f64 + 0.5) * step64) as f32;
+        if y >= max_v {
+            break;
+        }
+        for ix in 0..nx {
+            let x = (min_u as f64 + (ix as f64 + 0.5) * step64) as f32;
+            if x >= max_u {
+                break;
+            }
             let p = [x, y];
             if is_point_strictly_inside_polygon_with_holes(
                 p,
@@ -1576,9 +1616,7 @@ fn generate_hybrid_quad_dominant(
             ) {
                 interior_grid_pts.push(p);
             }
-            x += step;
         }
-        y += step;
     }
 
     // 3. spade CDT 構築と頂点ハンドル管理
@@ -1950,5 +1988,66 @@ mod tests {
             let nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
             assert!(nz > 0.0, "鏡像UV変換後の3D法線が反転しました: nz={nz}");
         }
+    }
+
+    #[test]
+    fn test_four_vertex_rectangle_detects_four_corners_and_structured_quad() {
+        let rect = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        assert_eq!(detect_loop_corners(&rect), vec![0, 1, 2, 3]);
+
+        let (pos, uv, tris) = make_rect_sim_mesh(1.0, 1.0, 2, 2);
+        let out = remesh_cloth_to_quad_3d_core(&pos, &uv, &tris, &rect, 1.0, 1, 4).unwrap();
+        assert_eq!(out.quads.len(), 1);
+        assert!(out.triangles.is_empty());
+    }
+
+    #[test]
+    fn test_rejected_belt_rolls_back_without_overlapping_faces() {
+        let (pos, uv, tris) = make_rect_sim_mesh(1.0, 1.0, 8, 8);
+        // 中央に極細くびれを持つ砂時計形凹ポリゴン（多段ベルトで自己交差棄却が生じやすい形状）
+        let hourglass = vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.4],
+            [0.505, 0.5],
+            [1.0, 0.6],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.6],
+            [0.495, 0.5],
+            [0.0, 0.4],
+        ];
+        let expected_area = polygon_signed_area_2d(&hourglass).abs();
+        let out = remesh_cloth_to_quad_3d_core(&pos, &uv, &tris, &hourglass, 0.20, 2, 4).unwrap();
+
+        let mut total_face_area = 0.0_f32;
+        for q in &out.quads {
+            let a0 = triangle_signed_area_2d(
+                out.uvs_2d[q[0] as usize],
+                out.uvs_2d[q[1] as usize],
+                out.uvs_2d[q[2] as usize],
+            );
+            let a1 = triangle_signed_area_2d(
+                out.uvs_2d[q[0] as usize],
+                out.uvs_2d[q[2] as usize],
+                out.uvs_2d[q[3] as usize],
+            );
+            assert!(a0 > 0.0 && a1 > 0.0);
+            total_face_area += a0 + a1;
+        }
+        for t in &out.triangles {
+            let a = triangle_signed_area_2d(
+                out.uvs_2d[t[0] as usize],
+                out.uvs_2d[t[1] as usize],
+                out.uvs_2d[t[2] as usize],
+            );
+            assert!(a > 0.0);
+            total_face_area += a;
+        }
+
+        assert!(
+            (total_face_area - expected_area).abs() <= expected_area * 0.01,
+            "ベルト棄却後の総面積が入力と一致せず二重面が生成された可能性: total={total_face_area}, expected={expected_area}"
+        );
     }
 }

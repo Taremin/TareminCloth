@@ -260,14 +260,61 @@ class CutTool(BaseTool):
                 if len(path_a_nodes) < 3 or len(path_b_nodes) < 3:
                     continue
 
-                # 2つの新規ピースを構築
+                # 2つの新規ピースを構築（既存ピースとの名前衝突を回避）
                 id_a, id_b = new_id(), new_id()
                 path_id_a, path_id_b = new_id(), new_id()
 
+                name_a = doc._unique_piece_name(f"{piece.name}_A")
+                name_b = doc._unique_piece_name(f"{piece.name}_B")
+                if name_b == name_a:
+                    existing_plus_a = {p.name for p in doc.pieces.values()} | {name_a}
+                    idx_b = 1
+                    while f"{piece.name}_B_{idx_b}" in existing_plus_a:
+                        idx_b += 1
+                    name_b = f"{piece.name}_B_{idx_b}"
+
+                paths_a = {path_id_a: Path(id=path_id_a, role=PathRole.OUTER, nodes=path_a_nodes, closed=True)}
+                paths_b = {path_id_b: Path(id=path_id_b, role=PathRole.OUTER, nodes=path_b_nodes, closed=True)}
+
+                # 元の内部線 (INTERNAL) および穴パス (HOLE) を重心・ノード包含判定により A / B へ継承
+                poly_a = [nd.position for nd in path_a_nodes]
+                poly_b = [nd.position for nd in path_b_nodes]
+                for sub_pid, sub_path in piece.paths.items():
+                    if sub_pid == piece.outer_path_id or not sub_path.nodes:
+                        continue
+                    cx = sum(nd.position[0] for nd in sub_path.nodes) / len(sub_path.nodes)
+                    cy = sum(nd.position[1] for nd in sub_path.nodes) / len(sub_path.nodes)
+                    in_a = point_in_polygon((cx, cy), poly_a)
+                    in_b = point_in_polygon((cx, cy), poly_b)
+                    if not in_a and not in_b:
+                        cnt_a = sum(1 for nd in sub_path.nodes if point_in_polygon(nd.position, poly_a))
+                        cnt_b = sum(1 for nd in sub_path.nodes if point_in_polygon(nd.position, poly_b))
+                        in_a = cnt_a >= cnt_b
+                        in_b = cnt_b > cnt_a
+                    target_paths = paths_a if in_a else (paths_b if in_b else None)
+                    if target_paths is not None:
+                        copied_pid = new_id()
+                        copied_nodes = [
+                            Node(
+                                id=new_id(),
+                                position=nd.position,
+                                kind=nd.kind,
+                                in_handle=nd.in_handle,
+                                out_handle=nd.out_handle,
+                            )
+                            for nd in sub_path.nodes
+                        ]
+                        target_paths[copied_pid] = Path(
+                            id=copied_pid,
+                            role=sub_path.role,
+                            nodes=copied_nodes,
+                            closed=sub_path.closed,
+                        )
+
                 piece_a = Piece(
                     id=id_a,
-                    name=f"{piece.name}_A",
-                    paths={path_id_a: Path(id=path_id_a, role=PathRole.OUTER, nodes=path_a_nodes, closed=True)},
+                    name=name_a,
+                    paths=paths_a,
                     outer_path_id=path_id_a,
                     transform=piece.transform,
                     target_edge_length=piece.target_edge_length,
@@ -275,8 +322,8 @@ class CutTool(BaseTool):
                 )
                 piece_b = Piece(
                     id=id_b,
-                    name=f"{piece.name}_B",
-                    paths={path_id_b: Path(id=path_id_b, role=PathRole.OUTER, nodes=path_b_nodes, closed=True)},
+                    name=name_b,
+                    paths=paths_b,
                     outer_path_id=path_id_b,
                     transform=piece.transform,
                     target_edge_length=piece.target_edge_length,
@@ -479,7 +526,7 @@ class CutTool(BaseTool):
             handled = False
             for hit, seg_start_node_b, cut_node_b, cut_node_a, seg_end_node_a in (
                 (hit0, nodes[hit0.seg_idx], node_cut0_b, node_cut0_a, nodes[(hit0.seg_idx + 1) % len(nodes)]),
-                (hit1, nodes[hit1.seg_idx], node_cut1_a, node_cut1_b, nodes[(hit1.seg_idx + 1) % len(nodes)]),
+                (hit1, nodes[hit1.seg_idx], node_cut1_b, node_cut1_a, nodes[(hit1.seg_idx + 1) % len(nodes)]),
             ):
                 if notch.segment_start_id == seg_start_node_b.id:
                     # カット点直上または端点直上のノッチは削除

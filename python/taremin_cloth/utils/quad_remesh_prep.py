@@ -15,6 +15,7 @@ from typing import Optional
 import numpy as np
 
 from .mesh_extract import WaypointSeam, build_seam_cluster_map, extract_sewing_topology
+from ..pattern.geometry.polygon import triangulate_polygon_2d
 
 
 @dataclass
@@ -100,11 +101,31 @@ def _winding_number_2d(pt: tuple[float, float], poly: np.ndarray) -> int:
 
 
 def _pick_loop_interior_probe(poly: np.ndarray) -> tuple[float, float]:
-    """他ループへの包含判定に使う代表点（境界辺中点の微小内側点または頂点平均）を取得"""
-    if len(poly) == 0:
+    """他ループへの包含判定に使う代表点（耳刈り分割の最大面積三角形の重心）を取得"""
+    n = len(poly)
+    if n == 0:
         return (0.0, 0.0)
-    # 頂点自体ではなく最初の有効辺の中点を使うと境界重なり誤爆を避けやすい
-    return (float(poly[0, 0]), float(poly[0, 1]))
+    if n < 3:
+        return (float(np.mean(poly[:, 0])), float(np.mean(poly[:, 1])))
+
+    pts_2d = [(float(p[0]), float(p[1])) for p in poly]
+    tris = triangulate_polygon_2d(pts_2d)
+    best_centroid = None
+    best_area = -1.0
+    for i0, i1, i2 in tris:
+        x0, y0 = pts_2d[i0]
+        x1, y1 = pts_2d[i1]
+        x2, y2 = pts_2d[i2]
+        area2 = abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0))
+        if area2 > best_area and area2 > 1e-12:
+            best_area = area2
+            best_centroid = ((x0 + x1 + x2) / 3.0, (y0 + y1 + y2) / 3.0)
+
+    if best_centroid is not None:
+        return best_centroid
+
+    # 退化ポリゴン等のフォールバック（頂点平均）
+    return (float(np.mean(poly[:, 0])), float(np.mean(poly[:, 1])))
 
 
 def _extract_boundary_loops_from_uv_triangles(

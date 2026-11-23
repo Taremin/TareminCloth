@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 
-from .document import Document, NodeKind, SeamRouting
+from .document import Document, NodeKind, PathRole, SeamRouting
 from .session import SelectionState
 from .transform_ops import summarize_multi_node_info
 from .units import format_cm
@@ -144,6 +145,9 @@ def format_selection_card_lines(
             )
             if has_connected_seam:
                 lines.append(f"[{trans('Match Seam (Ctrl+M)')}]")
+            elif path is not None and path.role in (PathRole.INTERNAL, PathRole.HOLE) and path.closed:
+                hole_lbl = trans("Hole: ON (H)") if path.role == PathRole.HOLE else trans("Hole: OFF (H)")
+                lines.append(f"[{hole_lbl}]")
             return lines
 
     # ピース非選択時のノード選択（1点 / 複数点）
@@ -210,6 +214,16 @@ def format_selection_card_lines(
             lines.append(f"{trans('Bone Offset')}: {format_cm(offset_val)}")
             up_angle_val = pl.pattern_up_angle_deg if pl else 0.0
             lines.append(f"{trans('Pattern Up (T)')}: {int(round(up_angle_val))}°")
+            if not (pl and pl.target_bone):
+                ox, oy, oz = pl.offset_3d if pl else (0.0, 0.0, 0.0)
+                rx, ry, rz = pl.euler_3d if pl else (0.0, 0.0, 0.0)
+                lines.append(f"[{trans('3D Preset')}]")
+                lines.append(f"{trans('3D Pos X')}: {format_cm(ox)}")
+                lines.append(f"{trans('3D Pos Y')}: {format_cm(oy)}")
+                lines.append(f"{trans('3D Pos Z')}: {format_cm(oz)}")
+                lines.append(f"{trans('3D Rot X')}: {int(round(math.degrees(rx)))}°")
+                lines.append(f"{trans('3D Rot Y')}: {int(round(math.degrees(ry)))}°")
+                lines.append(f"{trans('3D Rot Z')}: {int(round(math.degrees(rz)))}°")
             if selection.node_ids:
                 lines.append(f"{trans('Selected Nodes')}: {len(selection.node_ids)}")
     elif len(selection.piece_ids) > 1:
@@ -245,6 +259,30 @@ def format_selection_card_lines(
             lines.append(f"{trans('Bone Angle')}: {angle_str}")
             lines.append(f"{trans('Bone Offset')}: {offset_str}")
             lines.append(f"{trans('Pattern Up (T)')}: {up_str}")
+            all_nonbone = all(not (pl and pl.target_bone) for pl in pls)
+            if all_nonbone:
+                ox_str = fmt_uniform([pl.offset_3d[0] if pl else 0.0 for pl in pls], format_cm)
+                oy_str = fmt_uniform([pl.offset_3d[1] if pl else 0.0 for pl in pls], format_cm)
+                oz_str = fmt_uniform([pl.offset_3d[2] if pl else 0.0 for pl in pls], format_cm)
+                rx_str = fmt_uniform(
+                    [pl.euler_3d[0] if pl else 0.0 for pl in pls],
+                    lambda v: f"{int(round(math.degrees(v)))}°",
+                )
+                ry_str = fmt_uniform(
+                    [pl.euler_3d[1] if pl else 0.0 for pl in pls],
+                    lambda v: f"{int(round(math.degrees(v)))}°",
+                )
+                rz_str = fmt_uniform(
+                    [pl.euler_3d[2] if pl else 0.0 for pl in pls],
+                    lambda v: f"{int(round(math.degrees(v)))}°",
+                )
+                lines.append(f"[{trans('3D Preset')}]")
+                lines.append(f"{trans('3D Pos X')}: {ox_str}")
+                lines.append(f"{trans('3D Pos Y')}: {oy_str}")
+                lines.append(f"{trans('3D Pos Z')}: {oz_str}")
+                lines.append(f"{trans('3D Rot X')}: {rx_str}")
+                lines.append(f"{trans('3D Rot Y')}: {ry_str}")
+                lines.append(f"{trans('3D Rot Z')}: {rz_str}")
             if selection.node_ids:
                 lines.append(f"{trans('Selected Nodes')}: {len(selection.node_ids)}")
 

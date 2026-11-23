@@ -108,7 +108,7 @@ def compute_hud_layout(
 
     # 4. 情報カード (画面右上・Nパネルオフセット考慮)
     card_w = 250.0
-    card_h = 320.0
+    card_h = 430.0
     info_card = Rect2D(x=sw - margin - ro - card_w, y=header.y - 8.0 - card_h, w=card_w, h=card_h)
 
     # 情報カード内のクリック入力可能フィールド（テキスト描画のベースライン位置に厳密同期）
@@ -166,6 +166,48 @@ def compute_hud_layout(
             w=card_w - 12.0,
             h=field_h,
         ),
+        "placement_preset": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 182.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
+        "offset_3d_x": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 200.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
+        "offset_3d_y": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 218.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
+        "offset_3d_z": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 236.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
+        "euler_3d_x": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 254.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
+        "euler_3d_y": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 272.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
+        "euler_3d_z": Rect2D(
+            x=info_card.x + 6.0,
+            y=(info_card.top - 290.0) - 5.0,
+            w=card_w - 12.0,
+            h=field_h,
+        ),
         "notch_from_start": Rect2D(
             x=info_card.x + 6.0,
             y=(info_card.top - 38.0) - 5.0,
@@ -190,6 +232,7 @@ def compute_hud_layout(
         "shape_match_flip_curvature": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 200.0) - 5.0, w=card_w - 12.0, h=field_h),
         "shape_match_ease": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 218.0) - 5.0, w=card_w - 12.0, h=field_h),
         "edge_match_seam": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
+        "edge_toggle_hole": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 236.0) - 5.0, w=card_w - 12.0, h=field_h),
         # 縫合選択カード用フィールド (行6〜行12)
         "seam_match_a_to_b": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 128.0) - 5.0, w=card_w - 12.0, h=field_h),
         "seam_match_b_to_a": Rect2D(x=info_card.x + 6.0, y=(info_card.top - 146.0) - 5.0, w=card_w - 12.0, h=field_h),
@@ -229,9 +272,9 @@ def compute_hud_layout(
 
     compass_rect = Rect2D(
         x=info_card.x + 15.0,
-        y=info_card.y + 12.0,
+        y=info_card.y + 10.0,
         w=card_w - 30.0,
-        h=110.0,
+        h=104.0,
     )
 
     return EditorLayout(

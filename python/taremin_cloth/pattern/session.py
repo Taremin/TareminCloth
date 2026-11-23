@@ -179,6 +179,32 @@ class SelectionState:
         """すべての選択を解除する (`clear` の明示エイリアス)."""
         self.clear()
 
+    def prune_missing(self, doc: Any) -> None:
+        """Undo/Redo 後のドキュメント状態に合わせ、消滅した要素の選択だけを安全に除去する."""
+        valid_piece_ids = set(doc.pieces.keys())
+        self.piece_ids &= valid_piece_ids
+
+        valid_node_ids = {
+            nd.id
+            for piece in doc.pieces.values()
+            for path in piece.paths.values()
+            for nd in path.nodes
+        }
+        self.node_ids &= valid_node_ids
+        self.notch_ids &= set(doc.notches.keys())
+        self.seam_ids &= set(doc.seams.keys())
+
+        kept_edges: list[EdgeRange] = []
+        for er in self.edge_ranges:
+            piece = doc.pieces.get(er.piece_id)
+            path = piece.paths.get(er.path_id) if piece else None
+            if path is not None and path.resolve_edge_range(er) is not None:
+                kept_edges.append(er)
+        self.edge_ranges = kept_edges
+
+        if self.active_piece_id not in valid_piece_ids:
+            self.active_piece_id = next(iter(self.piece_ids), None)
+
     def select_piece(self, piece_id: str, *, add: bool = False) -> None:
         """ピースを選択する."""
         if not add:

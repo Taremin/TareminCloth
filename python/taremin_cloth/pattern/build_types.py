@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 
-import taremin_cloth_core as core
+try:
+    import taremin_cloth_core as core
+except ImportError:
+    from .. import taremin_cloth_core as core
 from ..utils.pattern_ir import (
     BoundarySegmentIR,
     PatternContour2D,
@@ -17,6 +20,7 @@ from ..utils.pattern_ir import (
     sample_pattern_boundary_loop,
 )
 from .document import Document, EdgeRange, PathRole, Seam, SeamRouting
+from .placement import compute_piece_outline_centroid_2d, project_2d_points_to_bone_plane
 from .geometry import (
     build_arc_table,
     point_in_polygon,
@@ -584,12 +588,18 @@ def build_garment_mesh_geometry(
         verts_2d = np.asarray(verts_2d, dtype=np.float32)
         tris = np.asarray(tris, dtype=np.uint32)
 
-        # 3D 空間への平面配置（ボーン追従またはオイラー角指定）
+        # 3D 空間への平面配置（外周サンプリング重心で統一し、ボーン追従またはオイラー角指定で変換）
+        if piece is not None and piece.outer_path_id in piece.paths:
+            centroid_2d = compute_piece_outline_centroid_2d(piece)
+        elif len(verts_2d) > 0:
+            centroid_2d = (float(np.mean(verts_2d[:, 0])), float(np.mean(verts_2d[:, 1])))
+        else:
+            centroid_2d = (0.0, 0.0)
+
         target_bone_name = placement.target_bone if placement else None
         bone_info = bones.get(target_bone_name) if (bones and target_bone_name) else None
 
         if bone_info is not None and placement is not None:
-            from .placement import project_2d_points_to_bone_plane
             world_3d = project_2d_points_to_bone_plane(
                 verts_2d,
                 head_3d=bone_info.head_3d,
@@ -598,31 +608,20 @@ def build_garment_mesh_geometry(
                 bone_angle_deg=placement.bone_angle_deg,
                 surface_offset=placement.surface_offset,
                 pattern_up_angle_deg=placement.pattern_up_angle_deg,
+                centroid_2d=centroid_2d,
             )
         else:
             offset_3d = np.array(placement.offset_3d if placement else (0.0, 0.0, 0.0), dtype=np.float32)
             euler_3d = placement.euler_3d if placement else (0.0, 0.0, 0.0)
             R = _euler_to_rotation_matrix(euler_3d)
 
-            local_3d = np.column_stack([verts_2d[:, 0], np.zeros(len(verts_2d), dtype=np.float32), verts_2d[:, 1]])
+            du = verts_2d[:, 0] - centroid_2d[0]
+            dv = verts_2d[:, 1] - centroid_2d[1]
+            local_3d = np.column_stack([du, np.zeros(len(verts_2d), dtype=np.float32), dv])
             world_3d = (local_3d @ R.T) + offset_3d
 
-        n_verts = len(verts_2d)
-        p_indices = list(range(global_vert_offset, global_vert_offset + n_verts))
-        piece_vert_indices[contour.piece_name] = p_indices
-
-        seg_global: dict[str, list[int]] = {}
-        for seg_id, local_indices in seg_map.items():
-            seg_global[seg_id] = [idx + global_vert_offset for idx in local_indices]
-        segment_global_map[contour.piece_name] = seg_global
-        if piece:
-            segment_global_map[piece.id] = seg_global
-
-        all_3d_positions.append(world_3d)
-        all_local_2d.append(verts_2d)
         # UV展開用: ピースの2Dキャンバス配置変換を適用したワールド2D座標
         uv_2d = piece.transform.apply_array(verts_2d) if piece else verts_2d
-        all_uvs_2d.append(uv_2d)
 
         # 閉じた穴パス (HOLE) のポリゴン境界を抽出
         hole_polygons: list[list[tuple[float, float]]] = []
@@ -641,6 +640,7 @@ def build_garment_mesh_geometry(
                     if len(h_pts) >= 3:
                         hole_polygons.append(h_pts)
 
+        kept_local_tris: list[tuple[int, int, int]] = []
         for tri in tris:
             ia, ib, ic = int(tri[0]), int(tri[1]), int(tri[2])
             va = verts_2d[ia]
@@ -655,9 +655,47 @@ def build_garment_mesh_geometry(
                     in_hole = True
                     break
 
-            if in_hole:
-                continue
+            if not in_hole:
+                kept_local_tris.append((ia, ib, ic))
 
+        if not kept_local_tris:
+            continue
+
+        # 穴除去等によりどの三角形にも属さなくなった孤立頂点をコンパクションする
+        used_local_set = {idx for tri in kept_local_tris for idx in tri}
+        if len(used_local_set) < len(verts_2d):
+            used_sorted = sorted(used_local_set)
+            remap = {old_i: new_i for new_i, old_i in enumerate(used_sorted)}
+            verts_2d_comp = verts_2d[used_sorted]
+            world_3d_comp = world_3d[used_sorted]
+            uv_2d_comp = uv_2d[used_sorted]
+            kept_local_tris = [(remap[ia], remap[ib], remap[ic]) for ia, ib, ic in kept_local_tris]
+            seg_map_comp = {
+                seg_id: [remap[idx] for idx in local_indices if idx in remap]
+                for seg_id, local_indices in seg_map.items()
+            }
+        else:
+            verts_2d_comp = verts_2d
+            world_3d_comp = world_3d
+            uv_2d_comp = uv_2d
+            seg_map_comp = seg_map
+
+        n_verts = len(verts_2d_comp)
+        p_indices = list(range(global_vert_offset, global_vert_offset + n_verts))
+        piece_vert_indices[contour.piece_name] = p_indices
+
+        seg_global: dict[str, list[int]] = {}
+        for seg_id, local_indices in seg_map_comp.items():
+            seg_global[seg_id] = [idx + global_vert_offset for idx in local_indices]
+        segment_global_map[contour.piece_name] = seg_global
+        if piece:
+            segment_global_map[piece.id] = seg_global
+
+        all_3d_positions.append(world_3d_comp)
+        all_local_2d.append(verts_2d_comp)
+        all_uvs_2d.append(uv_2d_comp)
+
+        for ia, ib, ic in kept_local_tris:
             all_triangles.append((
                 ia + global_vert_offset,
                 ib + global_vert_offset,
@@ -667,6 +705,18 @@ def build_garment_mesh_geometry(
             piece_face_indices.append(piece_idx)
 
         global_vert_offset += n_verts
+
+    if not all_3d_positions or not all_triangles:
+        return GarmentMeshGeometry(
+            vertices_3d=[],
+            faces=[],
+            sewing_edges=[],
+            face_uvs=[],
+            face_piece_indices=[],
+            face_layer_ids=[],
+            piece_vertex_map={},
+            pin_vertex_indices=[],
+        )
 
     base_positions_3d = np.concatenate(all_3d_positions, axis=0)
     all_uvs = np.concatenate(all_uvs_2d, axis=0)
@@ -719,3 +769,117 @@ def build_garment_mesh_geometry(
         piece_vertex_map=piece_vert_indices,
         pin_vertex_indices=pin_indices,
     )
+
+
+def transfer_vertex_weights_by_uv(
+    *,
+    old_tri_uvs: np.ndarray,
+    old_tri_weights: dict[str, np.ndarray],
+    new_uvs: np.ndarray,
+    old_point_uvs: Optional[np.ndarray] = None,
+    old_point_weights: Optional[dict[str, np.ndarray]] = None,
+) -> dict[str, np.ndarray]:
+    """旧メッシュ三角形群のUVとウェイトから新頂点群のUVへ重心補間（および最近傍フォールバック）でウェイトを転写する."""
+    new_uvs_arr = np.asarray(new_uvs, dtype=np.float64)
+    if new_uvs_arr.ndim != 2 or new_uvs_arr.shape[0] == 0:
+        return {name: np.zeros(0, dtype=np.float32) for name in old_tri_weights}
+
+    m = new_uvs_arr.shape[0]
+    tri_uvs_arr = np.asarray(old_tri_uvs, dtype=np.float64)
+    group_names = list(old_tri_weights.keys())
+    if not group_names:
+        return {}
+
+    result: dict[str, np.ndarray] = {
+        name: np.zeros(m, dtype=np.float32) for name in group_names
+    }
+
+    if tri_uvs_arr.ndim == 3 and tri_uvs_arr.shape[0] > 0:
+        a = tri_uvs_arr[:, 0, :]
+        b = tri_uvs_arr[:, 1, :]
+        c = tri_uvs_arr[:, 2, :]
+        v0 = c - a
+        v1 = b - a
+        d00 = np.sum(v0 * v0, axis=1)
+        d01 = np.sum(v0 * v1, axis=1)
+        d11 = np.sum(v1 * v1, axis=1)
+        denom = d00 * d11 - d01 * d01
+        valid_tri = np.abs(denom) > 1e-12
+        safe_denom = np.where(valid_tri, denom, 1.0)
+
+        # フォールバック用のフラット点群（未指定時は旧三角形頂点）
+        if old_point_uvs is not None and old_point_weights is not None and len(old_point_uvs) > 0:
+            ref_pts = np.asarray(old_point_uvs, dtype=np.float64)
+            ref_wts = {
+                name: np.asarray(old_point_weights.get(name, np.zeros(len(ref_pts))), dtype=np.float64)
+                for name in group_names
+            }
+        else:
+            ref_pts = tri_uvs_arr.reshape(-1, 2)
+            ref_wts = {
+                name: np.asarray(old_tri_weights[name], dtype=np.float64).reshape(-1)
+                for name in group_names
+            }
+
+        tri_wt_arrays = {
+            name: np.asarray(old_tri_weights[name], dtype=np.float64)
+            for name in group_names
+        }
+
+        chunk_size = 512
+        for start in range(0, m, chunk_size):
+            end = min(start + chunk_size, m)
+            pts = new_uvs_arr[start:end]
+            b_len = end - start
+
+            v2 = pts[:, None, :] - a[None, :, :]
+            d20 = np.sum(v2 * v0[None, :, :], axis=2)
+            d21 = np.sum(v2 * v1[None, :, :], axis=2)
+            u = (d11[None, :] * d20 - d01[None, :] * d21) / safe_denom[None, :]
+            v = (d00[None, :] * d21 - d01[None, :] * d20) / safe_denom[None, :]
+            w = 1.0 - u - v
+
+            violation = np.maximum.reduce([np.zeros_like(u), -u, -v, -w])
+            violation = np.where(valid_tri[None, :], violation, np.inf)
+
+            row_idx = np.arange(b_len)
+            best_tri = np.argmin(violation, axis=1)
+            best_viol = violation[row_idx, best_tri]
+
+            inside_mask = best_viol <= 1e-3
+            if np.any(inside_mask):
+                in_rows = np.flatnonzero(inside_mask)
+                in_tris = best_tri[in_rows]
+                w0 = np.clip(w[in_rows, in_tris], 0.0, 1.0)
+                w1 = np.clip(v[in_rows, in_tris], 0.0, 1.0)
+                w2 = np.clip(u[in_rows, in_tris], 0.0, 1.0)
+                w_sum = np.maximum(w0 + w1 + w2, 1e-12)
+                w0 /= w_sum
+                w1 /= w_sum
+                w2 /= w_sum
+                for name in group_names:
+                    tri_w = tri_wt_arrays[name][in_tris]
+                    interp_w = w0 * tri_w[:, 0] + w1 * tri_w[:, 1] + w2 * tri_w[:, 2]
+                    result[name][start + in_rows] = np.clip(interp_w, 0.0, 1.0).astype(np.float32)
+
+            outside_mask = ~inside_mask
+            if np.any(outside_mask) and len(ref_pts) > 0:
+                out_rows = np.flatnonzero(outside_mask)
+                out_pts = pts[out_rows]
+                diff = out_pts[:, None, :] - ref_pts[None, :, :]
+                dist_sq = np.sum(diff * diff, axis=2)
+                nearest_idx = np.argmin(dist_sq, axis=1)
+                for name in group_names:
+                    result[name][start + out_rows] = np.clip(
+                        ref_wts[name][nearest_idx], 0.0, 1.0
+                    ).astype(np.float32)
+    elif old_point_uvs is not None and old_point_weights is not None and len(old_point_uvs) > 0:
+        ref_pts = np.asarray(old_point_uvs, dtype=np.float64)
+        for name in group_names:
+            ref_w = np.asarray(old_point_weights.get(name, np.zeros(len(ref_pts))), dtype=np.float64)
+            diff = new_uvs_arr[:, None, :] - ref_pts[None, :, :]
+            dist_sq = np.sum(diff * diff, axis=2)
+            nearest_idx = np.argmin(dist_sq, axis=1)
+            result[name] = np.clip(ref_w[nearest_idx], 0.0, 1.0).astype(np.float32)
+
+    return result

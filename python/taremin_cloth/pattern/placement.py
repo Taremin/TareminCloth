@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
-from .document import Document, Placement, Seam
+from .document import Document, Piece, Placement, Seam
 from .geometry import triangulate_polygon_2d
 
 if TYPE_CHECKING:
@@ -66,16 +66,16 @@ def get_quick_placement_transform(
 
     if preset_name == "CHEST_FRONT":
         offset = (0.0, -ty, cz)
-        euler = (pi_half, 0.0, 0.0)
+        euler = (0.0, 0.0, 0.0)
     elif preset_name == "BACK":
         offset = (0.0, ty, cz)
-        euler = (pi_half, 0.0, math.pi)
+        euler = (0.0, 0.0, math.pi)
     elif preset_name == "ARM_LEFT":
         offset = (-ax, 0.0, az)
-        euler = (pi_half, 0.0, -pi_half)
+        euler = (0.0, 0.0, -pi_half)
     elif preset_name == "ARM_RIGHT":
         offset = (ax, 0.0, az)
-        euler = (pi_half, 0.0, pi_half)
+        euler = (0.0, 0.0, pi_half)
     elif preset_name == "COLLAR":
         offset = (0.0, 0.0, cz + 0.20)
         euler = (0.0, 0.0, 0.0)
@@ -87,6 +87,21 @@ def get_quick_placement_transform(
         euler = (0.0, 0.0, 0.0)
 
     return (offset, euler)
+
+
+def compute_piece_outline_centroid_2d(
+    piece: Piece,
+    *,
+    steps_per_segment: int = 16,
+) -> tuple[float, float]:
+    """ピース外周パスのサンプリング点平均 (2D重心) を返す (Blender非依存)."""
+    outer = piece.paths.get(piece.outer_path_id)
+    pts = outer.sample_outline_points(steps_per_segment=steps_per_segment) if outer else []
+    if not pts:
+        return (0.0, 0.0)
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    return (float(cx), float(cy))
 
 
 def compute_bone_aligned_frame(
@@ -364,12 +379,13 @@ def sync_document_to_proxy_objects(
         outer = piece.paths.get(piece.outer_path_id)
         if outer and len(outer.nodes) >= 3:
             pts_2d = outer.sample_outline_points(steps_per_segment=16)
+            cx, cy = compute_piece_outline_centroid_2d(piece)
         else:
             pts_2d = [(0.0, 0.0), (0.2, 0.0), (0.2, 0.2), (0.0, 0.2)]
+            cx = sum(p[0] for p in pts_2d) / len(pts_2d)
+            cy = sum(p[1] for p in pts_2d) / len(pts_2d)
 
         # 重心を計算してローカル中心化
-        cx = sum(p[0] for p in pts_2d) / len(pts_2d)
-        cy = sum(p[1] for p in pts_2d) / len(pts_2d)
         verts = [(p[0] - cx, 0.0, p[1] - cy) for p in pts_2d]  # (X, Z) 平面
         edges = [[i, (i + 1) % len(verts)] for i in range(len(verts))]
         tri_faces = triangulate_polygon_2d(pts_2d)

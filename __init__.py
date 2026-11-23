@@ -2,7 +2,7 @@ bl_info = {
     "name": "Taremin Cloth",
     "author": "Taremin",
     "version": (0, 1, 0),
-    "blender": (5, 2, 0),
+    "blender": (3, 6, 0),
     "location": "View3D > Sidebar > Taremin Cloth",
     "description": "GPU-accelerated XPBD Cloth Simulator for Blender",
     "category": "Physics",
@@ -61,9 +61,6 @@ subpackages = [
             "collider_detect",
             "self_collision_fit",
             "pattern_ir",
-            "pattern_builder",
-            "pattern_view",
-            "pattern_proxy",
         ],
     ),
     (
@@ -127,8 +124,6 @@ def unregister():
         if hasattr(mod, "unregister"):
             mod.unregister()
     _is_registered = False
-
-    Path(__file__).touch()
 
 
 if __name__ == "__main__":

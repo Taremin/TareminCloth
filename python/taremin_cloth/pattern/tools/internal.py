@@ -109,6 +109,12 @@ class InternalLineTool(BaseTool):
         )
         loc_pos = piece.transform.inverse_apply(snap.world_pos)
 
+        # 3点以上入力済みで始点とほぼ同一位置（1cm未満）なら閉じた内部線として確定
+        if len(self.local_points) >= 3:
+            first_loc = self.local_points[0]
+            if _dist_sq(loc_pos, first_loc) < 0.0001:  # 1cm 未満
+                return self._finish(controller, closed=True)
+
         # 直前の点とほぼ同一位置（ダブルクリック等）なら確定
         if len(self.local_points) >= 2:
             prev_loc = self.local_points[-1]
@@ -161,7 +167,7 @@ class InternalLineTool(BaseTool):
 
         return False
 
-    def _finish(self, controller: EditorController) -> bool:
+    def _finish(self, controller: EditorController, *, closed: bool = False) -> bool:
         """内部線の作成を確定する."""
         if not self.active_piece_id or len(self.local_points) < 2:
             return False
@@ -181,12 +187,12 @@ class InternalLineTool(BaseTool):
             id=path_id,
             role=PathRole.INTERNAL,
             nodes=nodes,
-            closed=False,
+            closed=closed,
         )
         piece.paths[path_id] = internal_path
 
         controller.history.record_change(
-            description="Add Internal Line",
+            description="Add Closed Internal Path" if closed else "Add Internal Line",
             before_doc=before_doc,
             after_doc=controller.doc,
         )
