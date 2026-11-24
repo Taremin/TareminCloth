@@ -20,7 +20,10 @@ from unittest import mock
 from taremin_cloth import analysis as analysis_mod
 from taremin_cloth.analysis import (
     tri_tri_intersection_sat,
+    tri_tri_intersection_segment,
     find_triangle_intersections,
+    find_triangle_intersection_segments,
+    find_mesh_collider_intersections,
     find_displacement_spikes,
     detect_inverted_faces,
     export_obj,
@@ -179,6 +182,79 @@ class TestMeshAnalysis(unittest.TestCase):
         # Python/NumPy フォールバック経路
         with mock.patch.object(analysis_mod, "_RUST_GEOMETRY", False):
             assert_cases()
+
+    def test_intersection_segments_and_mesh_collider(self):
+        """3D交差線分抽出と布-コライダー交差判定の検証 (Rust/NumPy双方)"""
+        verts = np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [0.2, -1.0, -1.0], [0.2, 2.0, -1.0], [0.2, 0.5, 2.0],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32)
+        collider_tris = np.array([
+            [0.3, -1.0, -1.0, 0.3, 2.0, -1.0, 0.3, 0.5, 2.0],
+        ], dtype=np.float32)
+
+        def check_all():
+            seg = tri_tri_intersection_segment(
+                verts[0], verts[1], verts[2], verts[3], verts[4], verts[5]
+            )
+            self.assertIsNotNone(seg)
+            p_a, p_b = seg
+            self.assertAlmostEqual(float(p_a[0]), 0.2, places=4)
+            self.assertAlmostEqual(float(p_b[0]), 0.2, places=4)
+            self.assertAlmostEqual(float(p_a[2]), 0.0, places=4)
+            self.assertAlmostEqual(float(p_b[2]), 0.0, places=4)
+
+            pairs, segs = find_triangle_intersection_segments(verts, faces)
+            self.assertEqual(pairs, [(0, 1)])
+            self.assertEqual(segs.shape, (1, 2, 3))
+
+            c_pairs, c_segs = find_mesh_collider_intersections(verts, faces, collider_tris)
+            self.assertTrue(len(c_pairs) >= 1)
+            self.assertEqual(c_segs.shape, (len(c_pairs), 2, 3))
+            self.assertEqual(c_pairs[0][0], 0)
+
+        check_all()
+        with mock.patch.object(analysis_mod, "_RUST_GEOMETRY_SEGMENTS", False):
+            check_all()
+
+    def test_shallow_curved_surface_separated_not_false_positive(self):
+        """滑らかな曲面上で0.01mm未満の浮きと5mmの横離間を持つ非交差ペアを誤検出しないこと"""
+        # 5mm四方の近傍2面（曲率によりわずかに傾き、duは全正 +0.006〜+0.017mm、面同士は5mm離間）
+        v0 = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        v1 = np.array([0.005, 0.0, 0.0], dtype=np.float32)
+        v2 = np.array([0.0, 0.005, 0.0], dtype=np.float32)
+
+        u0 = np.array([0.006, 0.0, 6e-6], dtype=np.float32)
+        u1 = np.array([0.011, 0.0, 1.0e-5], dtype=np.float32)
+        u2 = np.array([0.006, 0.005, 1.7e-5], dtype=np.float32)
+
+        # わずかに相手平面を跨ぐ（du ≈ [-1.6e-5, +0.8e-5, -0.3e-5]）が横に5mm離れた非交差ペア
+        w0 = np.array([0.006, 0.0, -1.6e-5], dtype=np.float32)
+        w1 = np.array([0.011, 0.0, 8.0e-6], dtype=np.float32)
+        w2 = np.array([0.006, 0.005, -3.0e-6], dtype=np.float32)
+
+        # 斜め同一平面上で重なり合う真の交差ペア (f32丸め込み)
+        inv_sqrt2 = np.float32(1.0 / np.sqrt(2.0))
+        c_v0 = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        c_v1 = np.array([0.01, 0.0, 0.01], dtype=np.float32)
+        c_v2 = np.array([0.0, 0.01, 0.0], dtype=np.float32)
+        c_u0 = np.array([0.002 * inv_sqrt2, 0.002, 0.002 * inv_sqrt2], dtype=np.float32)
+        c_u1 = np.array([0.012 * inv_sqrt2, 0.002, 0.012 * inv_sqrt2], dtype=np.float32)
+        c_u2 = np.array([0.002 * inv_sqrt2, 0.012, 0.002 * inv_sqrt2], dtype=np.float32)
+
+        def assert_all():
+            self.assertFalse(tri_tri_intersection_sat(v0, v1, v2, u0, u1, u2))
+            self.assertIsNone(tri_tri_intersection_segment(v0, v1, v2, u0, u1, u2))
+            self.assertFalse(tri_tri_intersection_sat(v0, v1, v2, w0, w1, w2))
+            self.assertIsNone(tri_tri_intersection_segment(v0, v1, v2, w0, w1, w2))
+            self.assertTrue(tri_tri_intersection_sat(c_v0, c_v1, c_v2, c_u0, c_u1, c_u2))
+            self.assertIsNotNone(tri_tri_intersection_segment(c_v0, c_v1, c_v2, c_u0, c_u1, c_u2))
+
+        assert_all()
+        with mock.patch.object(analysis_mod, "_RUST_GEOMETRY", False), \
+                mock.patch.object(analysis_mod, "_RUST_GEOMETRY_SEGMENTS", False):
+            assert_all()
 
 
 if __name__ == "__main__":

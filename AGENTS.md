@@ -94,9 +94,12 @@ python -m taremin_cloth.log_tools inspect path/to/cloth_debug.jsonl.gz
 
 ### Step 2: 貫通可視化レンダリング（0.1秒）
 ```bash
-python -m taremin_cloth.log_tools render path/to/cloth_debug.jsonl.gz --frame 71 --output scratch/f71.png
+python -m taremin_cloth.log_tools render path/to/cloth_debug.jsonl.gz --frame 71 --color-by intersections --output scratch/f71.png
 ```
-- 表面（白）と裏面（赤）が Unlit で描画され、赤ピクセル（裏返り・貫通箇所）の個数が出力されます。
+- **自己衝突・貫通の確認および Walkthrough での非貫通報告には、必ず `--color-by intersections`（および `find_triangle_intersections`）を使用してください**。
+  - 自己交差面＝マゼンタ、自己交差線分＝黄（X-ray透視対応）／ コライダー貫通面＝オレンジ、コライダー交差線分＝赤 ／ 両方該当＝クリムゾン。非交差面は表面白・裏面淡青グレーで描画されます。
+  - 縫合スプリング（`sewing_springs`）で結合された頂点クラスタを共有する型紙境界の隣接面は既定で除外されます（生カウントを含めたい場合は `--include-sewn-adjacent`、縫合線を重畳表示したい場合は `--show-sewing` を指定）。
+  - 従来のデフォルト表示（`--color-by none`: 表面白・裏面赤）は法線反転や布の裏返り確認用であり、表同士の貫通や遮蔽部の交差を見逃し、正常な裏地を誤検出するため、**貫通判定の根拠に赤ピクセルを使用しないでください**。
 
 ### Step 3: 最小限の再現テストスクリプトを自動生成
 ```bash
@@ -138,9 +141,9 @@ sim.save_profile_trace("scratch/trace.json")  # chrome://tracing で開ける
 | `inspect` | ログ全体の異常値を走査してサマリー表示 | `python -m taremin_cloth.log_tools inspect input.jsonl.gz` |
 | `slice` | 指定フレーム区間を切り出して新しい極小ログを作成 | `python -m taremin_cloth.log_tools slice input.jsonl.gz --start 68 --end 74 -o sliced.jsonl.gz` |
 | `make-test` | 自己完結型 unittest テストスクリプトを自動生成 | `python -m taremin_cloth.log_tools make-test input.jsonl.gz -f 71 -o tests/test_f71.py` |
-| `render` | 指定フレームまたは連番・APNG動画をレンダリング（縫合線・コライダー自動表示、速度・歪み・法線ヒートマップ対応、Blender不要） | `python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 -o f71.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz --frames all --format apng -o anim.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 20 --color-by velocity -o vel.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 40 --color-by strain -o strain.png` |
+| `render` | 指定フレームまたは連番・APNG動画をレンダリング（縫合線・コライダー自動表示、交差面/交差線分ハイライト、速度・歪み・法線ヒートマップ対応、Blender不要） | `python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 --color-by intersections -o f71_isect.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 71 -o f71.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz --frames all --format apng -o anim.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 20 --color-by velocity -o vel.png`<br>`python -m taremin_cloth.log_tools render input.jsonl.gz -f 40 --color-by strain -o strain.png` |
 | `render-coloring` | 制約グラフ彩色（Welsh-Powell法）を可視化レンダリング | `python -m taremin_cloth.log_tools render-coloring input.jsonl.gz --type distance -o coloring.png` |
-| `check-intersections` | 指定フレームの自己交差三角形ペアを検出 | `python -m taremin_cloth.log_tools check-intersections input.jsonl.gz -f 71` |
+| `check-intersections` | 指定フレームの自己交差三角形ペアを検出（`--with-colliders` でコライダー交差も併検） | `python -m taremin_cloth.log_tools check-intersections input.jsonl.gz -f 71 --with-colliders` |
 | `diff` | 2つのシミュレーションログ間で頂点位置の差分・誤差を比較 | `python -m taremin_cloth.log_tools diff log1.jsonl.gz log2.jsonl.gz --tolerance 1.0` |
 | `export-obj` | 指定フレームをOBJ形式でエクスポート | `python -m taremin_cloth.log_tools export-obj input.jsonl.gz -f 71 -o f71.obj` |
 | `watch` | 条件付きブレーク付きリプレイで最初のHitフレームを特定し前後を切り出す | `python -m taremin_cloth.log_tools watch input.jsonl.gz --stop-on "disp>5,vt_sat" -o hit.jsonl.gz` |

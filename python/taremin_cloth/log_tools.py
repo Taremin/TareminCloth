@@ -238,11 +238,12 @@ class TestIssueFrame{target_f}(unittest.TestCase):
         print(f"Frame {target_f}: Max difference from log = {{target_res['max_diff']:.6f}} m")
         self.assertLess(target_res["max_diff"], 1e-3, "シミュレーション再現値が実ログと乖離しています")
 
-        # 2. 幾何交差判定
+        # 2. 幾何交差判定（自己貫通の主指標）
         intersections = find_triangle_intersections(sim_pos, faces)
         print(f"Frame {target_f}: Self-intersections = {{len(intersections)}}")
 
-        # 3. ソフトウェアレンダリングによる裏面（赤）判定
+        # 3. ソフトウェアレンダリングによる裏面露出判定（法線・裏返り確認用）
+        #    ※自己交差・コライダー貫通の可視化には mesh_renderer.compute_intersection_overlay を使用
         img = render_mesh_to_image(sim_pos, faces, width=400, height=300)
         red_pixels = count_red_pixels(img)
         print(f"Frame {target_f}: Backface (red) pixels = {{red_pixels}}")
@@ -352,28 +353,32 @@ def cmd_render(args: argparse.Namespace) -> None:
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
 
+    sew_raw = meta.get("sewing_springs")
+    sew_all = np.array(sew_raw, dtype=np.uint32) if sew_raw else None
+
     wire_width = getattr(args, "wire_width", 1.0)
     draw_wire = not getattr(args, "no_wireframe", False)
     no_colliders = getattr(args, "no_colliders", False)
     color_by = getattr(args, "color_by", "none")
     vel_max = getattr(args, "vel_max", None)
     show_sdf_bbox = getattr(args, "show_sdf_bbox", False)
+    include_sewn_adjacent = getattr(args, "include_sewn_adjacent", False)
+    show_sewing = getattr(args, "show_sewing", False)
+
+    # intersections モードでは交差面・交差線を見やすくするため、--show-sewing 明示時のみ縫合線を描画
+    draw_sewing_springs = sewing_springs
+    if color_by == "intersections" and not show_sewing:
+        draw_sewing_springs = None
 
     def prepare_frame_data(frame_obj):
         p = np.array(frame_obj["positions"], dtype=np.float32).reshape((-1, 3))
 
         vc = None
-        if color_by == "velocity":
-            vels = frame_obj.get("velocities")
-            if vels:
-                vc = mesh_renderer.compute_velocity_colors(vels, vmax=vel_max)
-        elif color_by == "strain":
-            edg = meta.get("edges")
-            rl = meta.get("initial_rest_lengths")
-            if edg and rl:
-                vc = mesh_renderer.compute_strain_colors(p, edg, rl)
-        elif color_by == "normal":
-            vc = mesh_renderer.compute_normal_colors(p, faces)
+        fc = None
+        f_col = None
+        b_col = None
+        line_w = None
+        isect_info = None
 
         c_tris = None
         if not no_colliders:
@@ -386,23 +391,83 @@ def cmd_render(args: argparse.Namespace) -> None:
             if b_infos and b_trans:
                 lines = mesh_renderer.generate_sdf_bbox_lines(b_infos, b_trans)
 
-        return p, c_tris, vc, lines
+        if color_by == "velocity":
+            vels = frame_obj.get("velocities")
+            if vels:
+                vc = mesh_renderer.compute_velocity_colors(vels, vmax=vel_max)
+        elif color_by == "strain":
+            edg = meta.get("edges")
+            rl = meta.get("initial_rest_lengths")
+            if edg and rl:
+                vc = mesh_renderer.compute_strain_colors(p, edg, rl)
+        elif color_by == "normal":
+            vc = mesh_renderer.compute_normal_colors(p, faces)
+        elif color_by == "intersections":
+            overlay = mesh_renderer.compute_intersection_overlay(
+                p,
+                faces,
+                mesh_colliders=c_tris,
+                sewing_springs=sew_all,
+                exclude_sewn_adjacent=not include_sewn_adjacent,
+            )
+            fc = overlay["face_colors"]
+            f_col = overlay["front_color"]
+            b_col = overlay["back_color"]
+            line_w = overlay["line_width"]
+            ov_lines = overlay["lines"]
+            if ov_lines is not None:
+                lines = ov_lines if lines is None else np.vstack([lines, ov_lines])
+            has_prim_col = (not no_colliders) and any(
+                c.get("type") in ("sphere", "capsule", "plane")
+                for c in frame_obj.get("colliders", [])
+            )
+            isect_info = {
+                "self_pairs": len(overlay["self_pairs"]),
+                "self_faces": len(overlay["self_faces"]),
+                "col_pairs": len(overlay["collider_pairs"]),
+                "col_faces": len(overlay["collider_faces"]),
+                "has_prim_col": has_prim_col,
+                "excluded_sewn": overlay["excluded_sewn_adjacent"],
+            }
+
+        return p, c_tris, vc, lines, fc, f_col, b_col, line_w, isect_info
+
+    def print_intersection_summary(stats_list):
+        if color_by != "intersections" or not stats_list:
+            return
+        hit_frames = sum(1 for _, st in stats_list if st["self_pairs"] > 0 or st["col_pairs"] > 0)
+        max_sf_f, max_sf_st = max(stats_list, key=lambda item: item[1]["self_pairs"])
+        max_cl_f, max_cl_st = max(stats_list, key=lambda item: item[1]["col_pairs"])
+        sewn_note = " (縫合隣接除外済み)" if any(st["excluded_sewn"] for _, st in stats_list) else ""
+        print(f"交差サマリー{sewn_note}: 交差検出フレーム {hit_frames}/{len(stats_list)}")
+        print(f"  最大自己交差: {max_sf_st['self_pairs']} ペア ({max_sf_st['self_faces']} 面) at Frame {max_sf_f}")
+        if no_colliders:
+            print("  最大コライダー交差: (スキップ: --no-colliders)")
+        else:
+            print(f"  最大コライダー交差: {max_cl_st['col_pairs']} ペア ({max_cl_st['col_faces']} 面) at Frame {max_cl_f}")
 
     if is_animation:
         # アニメーション (APNG / GIF) 生成
         fps = getattr(args, "fps", 30) or 30
         print(f"アニメーションレンダリング開始: {len(valid_frames)} フレーム -> {out_path} (FPS: {fps})")
         rendered_images = []
+        stats_list = []
         for i, f_idx in enumerate(valid_frames):
             frame = available_frames[f_idx]
-            pos, cols, vc, lines = prepare_frame_data(frame)
+            pos, cols, vc, lines, fc, f_col, b_col, line_w, isect_info = prepare_frame_data(frame)
+            if isect_info is not None:
+                stats_list.append((f_idx, isect_info))
 
             img = mesh_renderer.render_mesh_to_image(
                 pos, faces,
-                sewing_springs=sewing_springs,
+                sewing_springs=draw_sewing_springs,
                 mesh_colliders=cols,
                 vertex_colors=vc,
+                face_colors=fc,
+                front_color=f_col,
+                back_color=b_col,
                 extra_lines=lines,
+                extra_line_width=line_w,
                 width=args.width, height=args.height,
                 draw_wireframe=draw_wire,
                 wire_width=wire_width,
@@ -413,45 +478,76 @@ def cmd_render(args: argparse.Namespace) -> None:
 
         mesh_renderer.create_animation_file(rendered_images, out_path, fps=fps)
         print(f"アニメーション保存完了: {out_path}")
+        print_intersection_summary(stats_list)
     elif len(valid_frames) == 1:
         # 単一フレーム保存
         f_idx = valid_frames[0]
         frame = available_frames[f_idx]
-        pos, cols, vc, lines = prepare_frame_data(frame)
+        pos, cols, vc, lines, fc, f_col, b_col, line_w, isect_info = prepare_frame_data(frame)
 
         _, red_count = mesh_renderer.render_scene_to_file(
             out_path, pos, faces,
-            sewing_springs=sewing_springs,
+            sewing_springs=draw_sewing_springs,
             mesh_colliders=cols,
             vertex_colors=vc,
+            face_colors=fc,
+            front_color=f_col,
+            back_color=b_col,
             extra_lines=lines,
+            extra_line_width=line_w,
             width=args.width, height=args.height,
             draw_wireframe=draw_wire,
             wire_width=wire_width,
         )
         print(f"レンダリング完了: Frame {f_idx} -> {out_path}")
-        print(f"裏面（赤）ピクセル数: {red_count} (貫通・裏返り指標)")
+        if color_by == "intersections" and isect_info is not None:
+            sewn_note = " (縫合隣接除外済み)" if isect_info["excluded_sewn"] else (" (縫合隣接含む)" if sew_all is not None else "")
+            print(
+                f"自己交差: {isect_info['self_pairs']} ペア ({isect_info['self_faces']} 面){sewn_note} "
+                f"[面: マゼンタ / 交差線: 黄]"
+            )
+            if no_colliders:
+                print("コライダー交差: (スキップ: --no-colliders)")
+            else:
+                prim_note = " (球/カプセル/平面は近似メッシュ)" if isect_info["has_prim_col"] else ""
+                print(
+                    f"コライダー交差: {isect_info['col_pairs']} ペア ({isect_info['col_faces']} 面) "
+                    f"[面: オレンジ / 交差線: 赤]{prim_note}"
+                )
+        else:
+            print(
+                f"裏面（赤）ピクセル数: {red_count} "
+                f"(法線・裏返り指標 ※貫通可視化には --color-by intersections を使用)"
+            )
     else:
         # 連番PNG保存
         pattern = out_path if "%" in out_path else os.path.join(out_path, "f_%04d.png")
         print(f"連番画像レンダリング開始: {len(valid_frames)} フレーム -> {pattern}")
+        stats_list = []
         for i, f_idx in enumerate(valid_frames):
             frame = available_frames[f_idx]
-            pos, cols, vc, lines = prepare_frame_data(frame)
+            pos, cols, vc, lines, fc, f_col, b_col, line_w, isect_info = prepare_frame_data(frame)
+            if isect_info is not None:
+                stats_list.append((f_idx, isect_info))
 
             cur_path = pattern % f_idx if "%" in pattern else pattern.format(f_idx)
             os.makedirs(os.path.dirname(os.path.abspath(cur_path)) or ".", exist_ok=True)
             mesh_renderer.render_scene_to_file(
                 cur_path, pos, faces,
-                sewing_springs=sewing_springs,
+                sewing_springs=draw_sewing_springs,
                 mesh_colliders=cols,
                 vertex_colors=vc,
+                face_colors=fc,
+                front_color=f_col,
+                back_color=b_col,
                 extra_lines=lines,
+                extra_line_width=line_w,
                 width=args.width, height=args.height,
                 draw_wireframe=draw_wire,
                 wire_width=wire_width,
             )
         print(f"連番画像保存完了: {len(valid_frames)} 枚")
+        print_intersection_summary(stats_list)
 
 
 def cmd_render_coloring(args: argparse.Namespace) -> None:
@@ -603,14 +699,31 @@ def cmd_check_intersections(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     pos = np.array(frame["positions"], dtype=np.float32).reshape((-1, 3))
-    pairs = analysis.find_triangle_intersections(pos, faces)
+    sew_raw = meta.get("sewing_springs")
+    include_sewn = getattr(args, "include_sewn_adjacent", False)
+    sew_arr = np.array(sew_raw, dtype=np.uint32) if (sew_raw and not include_sewn) else None
+    pairs = analysis.find_triangle_intersections(pos, faces, sewing_springs=sew_arr)
 
-    print(f"Frame {target_f}: 自己交差三角形ペア数 = {len(pairs)}")
+    sewn_note = " (縫合隣接除外済み)" if sew_arr is not None else (" (縫合隣接含む)" if sew_raw else "")
+    print(f"Frame {target_f}: 自己交差三角形ペア数 = {len(pairs)}{sewn_note}")
     if pairs:
         for p in pairs[:20]:
             print(f"   Intersection: Face {p[0]} <--> Face {p[1]}")
         if len(pairs) > 20:
             print(f"   ... and {len(pairs) - 20} more pairs")
+
+    if getattr(args, "with_colliders", False):
+        c_tris = mesh_renderer.convert_colliders_to_mesh(frame.get("colliders", []))
+        if c_tris is not None and len(c_tris) > 0:
+            col_pairs, _ = analysis.find_mesh_collider_intersections(pos, faces, c_tris)
+        else:
+            col_pairs = []
+        print(f"Frame {target_f}: コライダー交差ペア数 = {len(col_pairs)}")
+        if col_pairs:
+            for p in col_pairs[:20]:
+                print(f"   Collider Intersection: ClothFace {p[0]} <--> ColliderTri {p[1]}")
+            if len(col_pairs) > 20:
+                print(f"   ... and {len(col_pairs) - 20} more pairs")
 
 
 def cmd_export_obj(args: argparse.Namespace) -> None:
@@ -1115,9 +1228,17 @@ def main() -> None:
     p_render.add_argument("--no-wireframe", action="store_true", help="ワイヤーフレームを非表示")
     p_render.add_argument("--no-sewing", action="store_true", help="縫合エッジを非表示")
     p_render.add_argument("--no-colliders", action="store_true", help="コライダーを非表示")
-    p_render.add_argument("--color-by", type=str, default="none", choices=["none", "velocity", "strain", "normal"], help="頂点カラー表示モード (none: 白/赤, velocity: 速度ヒートマップ, strain: 歪みヒートマップ, normal: 法線カラーマップ)")
+    p_render.add_argument(
+        "--color-by",
+        type=str,
+        default="none",
+        choices=["none", "velocity", "strain", "normal", "intersections"],
+        help="表示カラーモード (none: 表面白/裏面赤, velocity: 速度, strain: 歪み, normal: 法線, intersections: 交差面/交差線分ハイライト)",
+    )
     p_render.add_argument("--show-sdf-bbox", action="store_true", help="ボーンSDFの有効範囲AABBボックスを3D表示")
     p_render.add_argument("--vel-max", type=float, default=None, help="速度ヒートマップの最大速度 (m/s)")
+    p_render.add_argument("--include-sewn-adjacent", action="store_true", help="intersections時に縫合結合された境界隣接面も除外せず生カウント表示")
+    p_render.add_argument("--show-sewing", action="store_true", help="intersectionsモードでも縫合エッジ(シアン)を重ねて表示")
     p_render.set_defaults(func=cmd_render)
 
     # 5. render-coloring
@@ -1134,6 +1255,8 @@ def main() -> None:
     p_check = subparsers.add_parser("check-intersections", help="指定フレームの三角形交差ペアを検出")
     p_check.add_argument("log_file", help="対象ログファイル (.jsonl.gz)")
     p_check.add_argument("--frame", "-f", type=int, required=True, help="検証フレーム番号")
+    p_check.add_argument("--with-colliders", action="store_true", help="布とコライダーメッシュの交差ペアも併せて検出")
+    p_check.add_argument("--include-sewn-adjacent", action="store_true", help="縫合結合された境界隣接面も除外せず生カウント表示")
     p_check.set_defaults(func=cmd_check_intersections)
 
     # 7. export-obj

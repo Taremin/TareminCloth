@@ -4,7 +4,12 @@ pub mod mesh;
 pub mod coloring;
 pub use coloring::color_edge_pairs;
 pub mod geometry;
-pub use geometry::{find_proximity_violations, find_triangle_intersections, tri_tri_intersect};
+pub use geometry::{
+    find_mesh_collider_intersections, find_proximity_violations,
+    find_triangle_intersection_segments, find_triangle_intersection_segments_with_sewing,
+    find_triangle_intersections, find_triangle_intersections_with_sewing, tri_tri_intersect,
+    tri_tri_intersection_segment,
+};
 pub mod pair_audit;
 pub use pair_audit::{audit_pairs, AuditResult};
 pub mod smooth;

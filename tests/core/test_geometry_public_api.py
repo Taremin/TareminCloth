@@ -21,7 +21,10 @@ try:
             "compute_areal_inv_masses",
             "color_edge_pairs",
             "tri_tri_intersect",
+            "tri_tri_intersection_segment",
             "find_triangle_intersections",
+            "find_triangle_intersection_segments",
+            "find_mesh_collider_intersections",
             "find_proximity_violations",
             "audit_pairs",
         )
@@ -274,6 +277,136 @@ class TestIntersectionParity(unittest.TestCase):
             _an._RUST_GEOMETRY = old
         got = _an.find_triangle_intersections(pos3, faces3, False)
         self.assertEqual(got, want)
+
+    def test_intersection_segments_parity(self):
+        from taremin_cloth import analysis as _an
+
+        rng = np.random.default_rng(7)
+        for _ in range(25):
+            tris = (rng.random((2, 3, 3)).astype(np.float64) - 0.5).astype(np.float32)
+            old_seg = _an._RUST_GEOMETRY_SEGMENTS
+            try:
+                _an._RUST_GEOMETRY_SEGMENTS = False
+                want = _an.tri_tri_intersection_segment(
+                    tris[0][0], tris[0][1], tris[0][2],
+                    tris[1][0], tris[1][1], tris[1][2],
+                )
+            finally:
+                _an._RUST_GEOMETRY_SEGMENTS = old_seg
+            got = _an.tri_tri_intersection_segment(
+                tris[0][0], tris[0][1], tris[0][2],
+                tris[1][0], tris[1][1], tris[1][2],
+            )
+            bool_got = bool(
+                _core.tri_tri_intersect(
+                    tris[0][0].tolist(), tris[0][1].tolist(), tris[0][2].tolist(),
+                    tris[1][0].tolist(), tris[1][1].tolist(), tris[1][2].tolist(),
+                )
+            )
+            self.assertEqual(got is not None, bool_got)
+            self.assertEqual(want is not None, bool_got)
+            if got is not None and want is not None:
+                # 線分端点順を正規化して一致検証
+                g_pts = sorted([got[0].tolist(), got[1].tolist()])
+                w_pts = sorted([want[0].tolist(), want[1].tolist()])
+                np.testing.assert_allclose(g_pts, w_pts, atol=1e-4)
+
+        for seed in range(3):
+            pos, faces = _grid_mesh(noise=0.03, seed=seed)
+            old_seg = _an._RUST_GEOMETRY_SEGMENTS
+            try:
+                _an._RUST_GEOMETRY_SEGMENTS = False
+                want_pairs, want_segs = _an.find_triangle_intersection_segments(pos, faces)
+            finally:
+                _an._RUST_GEOMETRY_SEGMENTS = old_seg
+            got_pairs, got_segs = _an.find_triangle_intersection_segments(pos, faces)
+            self.assertEqual(got_pairs, want_pairs)
+            self.assertEqual(got_segs.shape, (len(got_pairs), 2, 3))
+            self.assertEqual(got_segs.dtype, np.float32)
+            if len(got_pairs) > 0:
+                np.testing.assert_allclose(got_segs, want_segs, atol=1e-4)
+
+    def test_mesh_collider_intersections_parity_and_large_plane(self):
+        from taremin_cloth import analysis as _an
+
+        pos, faces = _grid_mesh(side=5, noise=0.01, seed=11)
+        # 巨大平面コライダー (100m四方、z=0でグリッドと交差)
+        large_plane = np.array([
+            [-50.0, -50.0, 0.0, 50.0, -50.0, 0.0, 50.0, 50.0, 0.0],
+            [-50.0, -50.0, 0.0, 50.0, 50.0, 0.0, -50.0, 50.0, 0.0],
+        ], dtype=np.float32)
+        old_seg = _an._RUST_GEOMETRY_SEGMENTS
+        try:
+            _an._RUST_GEOMETRY_SEGMENTS = False
+            want_pairs, want_segs = _an.find_mesh_collider_intersections(pos, faces, large_plane)
+        finally:
+            _an._RUST_GEOMETRY_SEGMENTS = old_seg
+        got_pairs, got_segs = _an.find_mesh_collider_intersections(pos, faces, large_plane)
+        self.assertEqual(got_pairs, want_pairs)
+        self.assertEqual(got_segs.shape, (len(got_pairs), 2, 3))
+        self.assertGreater(len(got_pairs), 0)
+        if len(got_pairs) > 0:
+            np.testing.assert_allclose(got_segs, want_segs, atol=1e-4)
+
+        # 空コライダーは shape (0, 2, 3) を返す
+        empty_pairs, empty_segs = _an.find_mesh_collider_intersections(
+            pos, faces, np.empty((0, 9), dtype=np.float32)
+        )
+        self.assertEqual(empty_pairs, [])
+        self.assertEqual(empty_segs.shape, (0, 2, 3))
+
+    def test_sewing_springs_adjacent_exclusion_parity(self):
+        from taremin_cloth import analysis as _an
+
+        pos = np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.3, 0.3, 0.0],
+            [0.2, -0.5, -0.5], [0.2, 1.5, -0.5], [0.2, 0.5, 0.5],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]], dtype=np.uint32)
+        sew = np.array([[0, 3], [1, 4]], dtype=np.uint32)
+
+        # sewing_springs あり (Rust vs NumPy パリティ)
+        old_g, old_s = _an._RUST_GEOMETRY, _an._RUST_GEOMETRY_SEGMENTS
+        try:
+            _an._RUST_GEOMETRY = False
+            _an._RUST_GEOMETRY_SEGMENTS = False
+            want_p = _an.find_triangle_intersections(pos, faces, sewing_springs=sew)
+            want_sp, want_ss = _an.find_triangle_intersection_segments(pos, faces, sewing_springs=sew)
+        finally:
+            _an._RUST_GEOMETRY = old_g
+            _an._RUST_GEOMETRY_SEGMENTS = old_s
+
+        got_p = _an.find_triangle_intersections(pos, faces, sewing_springs=sew)
+        got_sp, got_ss = _an.find_triangle_intersection_segments(pos, faces, sewing_springs=sew)
+        self.assertEqual(got_p, want_p)
+        self.assertEqual(got_sp, want_sp)
+        self.assertNotIn((0, 1), got_p)
+        self.assertIn((0, 2), got_p)
+        self.assertEqual(got_ss.shape, (len(got_sp), 2, 3))
+
+    def test_shallow_curvature_non_intersection_parity(self):
+        from taremin_cloth import analysis as _an
+
+        v0 = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        v1 = np.array([0.005, 0.0, 0.0], dtype=np.float32)
+        v2 = np.array([0.0, 0.005, 0.0], dtype=np.float32)
+        u0 = np.array([0.006, 0.0, 6e-6], dtype=np.float32)
+        u1 = np.array([0.011, 0.0, 1.0e-5], dtype=np.float32)
+        u2 = np.array([0.006, 0.005, 1.7e-5], dtype=np.float32)
+
+        old_g, old_s = _an._RUST_GEOMETRY, _an._RUST_GEOMETRY_SEGMENTS
+        try:
+            _an._RUST_GEOMETRY = False
+            _an._RUST_GEOMETRY_SEGMENTS = False
+            self.assertFalse(_an.tri_tri_intersection_moller(v0, v1, v2, u0, u1, u2))
+            self.assertIsNone(_an.tri_tri_intersection_segment(v0, v1, v2, u0, u1, u2))
+        finally:
+            _an._RUST_GEOMETRY = old_g
+            _an._RUST_GEOMETRY_SEGMENTS = old_s
+
+        self.assertFalse(_an.tri_tri_intersection_moller(v0, v1, v2, u0, u1, u2))
+        self.assertIsNone(_an.tri_tri_intersection_segment(v0, v1, v2, u0, u1, u2))
 
     def test_proximity_parity(self):
         from taremin_cloth import analysis as _an

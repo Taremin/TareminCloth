@@ -41,6 +41,7 @@ def _prepare_scene_arrays(
     vertex_colors: Optional[np.ndarray] = None,
     extra_lines: Optional[np.ndarray] = None,
     voxels: Optional[np.ndarray] = None,
+    face_colors: Optional[np.ndarray] = None,
 ):
     pos = np.ascontiguousarray(positions, dtype=np.float32)
     fcs = np.ascontiguousarray(faces, dtype=np.uint32)
@@ -60,6 +61,14 @@ def _prepare_scene_arrays(
     if vertex_colors is not None and len(vertex_colors) > 0:
         vc = np.ascontiguousarray(vertex_colors, dtype=np.uint8)
 
+    fc = None
+    if face_colors is not None and len(face_colors) > 0:
+        fc_arr = np.ascontiguousarray(face_colors, dtype=np.uint8)
+        if fc_arr.ndim == 2 and fc_arr.shape[1] == 3:
+            alpha = np.full((len(fc_arr), 1), 255, dtype=np.uint8)
+            fc_arr = np.ascontiguousarray(np.hstack([fc_arr, alpha]), dtype=np.uint8)
+        fc = fc_arr
+
     lines = None
     if extra_lines is not None and len(extra_lines) > 0:
         lines = np.ascontiguousarray(extra_lines, dtype=np.float32)
@@ -68,7 +77,7 @@ def _prepare_scene_arrays(
     if voxels is not None and len(voxels) > 0:
         vox = np.ascontiguousarray(voxels, dtype=np.float32)
 
-    return pos, fcs, sew, cols, vc, lines, vox
+    return pos, fcs, sew, cols, vc, lines, vox, fc
 
 
 @allow_positional
@@ -93,19 +102,33 @@ def render_scene_to_file(
     collider_color: Optional[Tuple[int, int, int]] = None,
     sewing_color: Optional[Tuple[int, int, int]] = None,
     voxel_screen_size: Optional[float] = None,
+    face_colors: Optional[np.ndarray] = None,
+    front_color: Optional[Tuple[int, int, int]] = None,
+    back_color: Optional[Tuple[int, int, int]] = None,
+    extra_line_width: Optional[float] = None,
     **kwargs
 ) -> Tuple[str, int]:
     """
-    シーン（布メッシュ、縫合エッジ、コライダー、頂点カラー、追加3D線分、ボクセル）を
+    シーン（布メッシュ、縫合エッジ、コライダー、頂点カラー、面カラー、追加3D線分、ボクセル）を
     Rust内蔵のソフトウェアラスタライザで描画し、PNG画像として保存します。
     """
-    pos, fcs, sew, cols, vc, lines, vox = _prepare_scene_arrays(
-        positions, faces, sewing_springs, mesh_colliders, vertex_colors, extra_lines, voxels
+    pos, fcs, sew, cols, vc, lines, vox, fc = _prepare_scene_arrays(
+        positions, faces, sewing_springs, mesh_colliders, vertex_colors, extra_lines, voxels, face_colors
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(filepath)) or ".", exist_ok=True)
 
     if _HAS_RUST_CORE and hasattr(taremin_cloth_core, "render_scene_to_png"):
+        opt_kwargs = {}
+        if fc is not None:
+            opt_kwargs["face_colors"] = fc
+        if front_color is not None:
+            opt_kwargs["front_color"] = list(front_color)
+        if back_color is not None:
+            opt_kwargs["back_color"] = list(back_color)
+        if extra_line_width is not None:
+            opt_kwargs["extra_line_width"] = float(extra_line_width)
+
         red_pixels = taremin_cloth_core.render_scene_to_png(
             filepath,
             pos,
@@ -127,6 +150,7 @@ def render_scene_to_file(
             extra_lines=lines,
             voxels=vox,
             voxel_screen_size=float(voxel_screen_size) if voxel_screen_size is not None else None,
+            **opt_kwargs,
         )
         return filepath, red_pixels
     elif _HAS_RUST_CORE and hasattr(taremin_cloth_core, "render_mesh_to_png"):
@@ -166,6 +190,10 @@ def render_scene_to_image(
     collider_color: Optional[Tuple[int, int, int]] = None,
     sewing_color: Optional[Tuple[int, int, int]] = None,
     voxel_screen_size: Optional[float] = None,
+    face_colors: Optional[np.ndarray] = None,
+    front_color: Optional[Tuple[int, int, int]] = None,
+    back_color: Optional[Tuple[int, int, int]] = None,
+    extra_line_width: Optional[float] = None,
     **kwargs
 ):
     """
@@ -174,11 +202,21 @@ def render_scene_to_image(
     if not _HAS_PIL:
         raise RuntimeError("アニメーション生成や画像直接取得には PIL (Pillow) が必要です。")
 
-    pos, fcs, sew, cols, vc, lines, vox = _prepare_scene_arrays(
-        positions, faces, sewing_springs, mesh_colliders, vertex_colors, extra_lines, voxels
+    pos, fcs, sew, cols, vc, lines, vox, fc = _prepare_scene_arrays(
+        positions, faces, sewing_springs, mesh_colliders, vertex_colors, extra_lines, voxels, face_colors
     )
 
     if _HAS_RUST_CORE and hasattr(taremin_cloth_core, "render_scene_to_rgb"):
+        opt_kwargs = {}
+        if fc is not None:
+            opt_kwargs["face_colors"] = fc
+        if front_color is not None:
+            opt_kwargs["front_color"] = list(front_color)
+        if back_color is not None:
+            opt_kwargs["back_color"] = list(back_color)
+        if extra_line_width is not None:
+            opt_kwargs["extra_line_width"] = float(extra_line_width)
+
         raw_bytes, _red_pixels = taremin_cloth_core.render_scene_to_rgb(
             pos,
             fcs,
@@ -199,6 +237,7 @@ def render_scene_to_image(
             extra_lines=lines,
             voxels=vox,
             voxel_screen_size=float(voxel_screen_size) if voxel_screen_size is not None else None,
+            **opt_kwargs,
         )
         # raw RGB バッファから PIL.Image をコピー生成
         img = Image.frombytes("RGB", (width, height), bytes(raw_bytes))
@@ -218,6 +257,9 @@ def render_scene_to_image(
                 draw_wireframe=draw_wireframe, wire_width=wire_width,
                 wireframe_only=wireframe_only, wire_color=wire_color,
                 collider_color=collider_color, sewing_color=sewing_color,
+                voxel_screen_size=voxel_screen_size,
+                face_colors=face_colors, front_color=front_color, back_color=back_color,
+                extra_line_width=extra_line_width,
                 **kwargs
             )
             img = Image.open(tmp_path)
@@ -1027,6 +1069,103 @@ def compute_wrinkle_texture_2d_weight_colors(
 
     weights = np.maximum(r_val, g_val) / 255.0
     return colormap_jet(weights, vmin=0.0, vmax=1.0)
+
+
+def compute_intersection_overlay(
+    positions: np.ndarray,
+    faces: np.ndarray,
+    *,
+    mesh_colliders: Optional[np.ndarray] = None,
+    sewing_springs: Optional[np.ndarray] = None,
+    exclude_sewn_adjacent: bool = True,
+    ignore_adjacent: bool = True,
+    front_color: Tuple[int, int, int] = (245, 248, 250),
+    back_color: Tuple[int, int, int] = (185, 200, 220),
+    self_face_color: Tuple[int, int, int] = (235, 0, 220),
+    self_line_color: Tuple[int, int, int] = (255, 245, 0),
+    collider_face_color: Tuple[int, int, int] = (255, 120, 0),
+    collider_line_color: Tuple[int, int, int] = (255, 30, 30),
+    both_face_color: Tuple[int, int, int] = (255, 0, 90),
+    line_width: float = 1.2,
+) -> dict:
+    """
+    布の自己交差（面・3D交差線分）およびコライダーメッシュとの交差（面・3D交差線分）を検出し、
+    レンダラー用の `face_colors` `[M, 4]` と `lines` `[L, 9]` を生成します。
+    `exclude_sewn_adjacent=True` かつ `sewing_springs` 指定時は、縫合結合された境界隣接面を除外します。
+    """
+    try:
+        from . import analysis
+    except ImportError:
+        from taremin_cloth import analysis
+
+    pos = np.ascontiguousarray(positions, dtype=np.float32)
+    fcs = np.ascontiguousarray(faces, dtype=np.uint32)
+    sew_arr = None
+    if exclude_sewn_adjacent and sewing_springs is not None and len(sewing_springs) > 0:
+        sew_arr = np.ascontiguousarray(sewing_springs, dtype=np.uint32)
+
+    self_pairs, self_segs = analysis.find_triangle_intersection_segments(
+        pos,
+        fcs,
+        ignore_adjacent=ignore_adjacent,
+        sewing_springs=sew_arr,
+    )
+
+    if mesh_colliders is not None and len(mesh_colliders) > 0:
+        collider_pairs, collider_segs = analysis.find_mesh_collider_intersections(
+            pos, fcs, mesh_colliders
+        )
+    else:
+        collider_pairs = []
+        collider_segs = np.empty((0, 2, 3), dtype=np.float32)
+
+    n_faces = len(fcs)
+    face_colors = np.zeros((n_faces, 4), dtype=np.uint8)
+    self_face_set = set()
+    for f0, f1 in self_pairs:
+        if 0 <= f0 < n_faces:
+            self_face_set.add(int(f0))
+        if 0 <= f1 < n_faces:
+            self_face_set.add(int(f1))
+
+    collider_face_set = set()
+    for cf, _ in collider_pairs:
+        if 0 <= cf < n_faces:
+            collider_face_set.add(int(cf))
+
+    for fi in self_face_set:
+        if fi in collider_face_set:
+            face_colors[fi] = [both_face_color[0], both_face_color[1], both_face_color[2], 255]
+        else:
+            face_colors[fi] = [self_face_color[0], self_face_color[1], self_face_color[2], 255]
+
+    for fi in collider_face_set - self_face_set:
+        face_colors[fi] = [collider_face_color[0], collider_face_color[1], collider_face_color[2], 255]
+
+    line_chunks = []
+    if len(self_segs) > 0:
+        n_s = len(self_segs)
+        s_rgb = np.broadcast_to(np.asarray(self_line_color, dtype=np.float32), (n_s, 3))
+        line_chunks.append(np.hstack([self_segs.reshape((n_s, 6)), s_rgb]).astype(np.float32))
+    if len(collider_segs) > 0:
+        n_c = len(collider_segs)
+        c_rgb = np.broadcast_to(np.asarray(collider_line_color, dtype=np.float32), (n_c, 3))
+        line_chunks.append(np.hstack([collider_segs.reshape((n_c, 6)), c_rgb]).astype(np.float32))
+
+    lines = np.vstack(line_chunks).astype(np.float32) if line_chunks else None
+
+    return {
+        "face_colors": face_colors,
+        "lines": lines,
+        "line_width": float(line_width),
+        "excluded_sewn_adjacent": bool(sew_arr is not None and ignore_adjacent),
+        "front_color": front_color,
+        "back_color": back_color,
+        "self_pairs": self_pairs,
+        "self_faces": sorted(self_face_set),
+        "collider_pairs": collider_pairs,
+        "collider_faces": sorted(collider_face_set),
+    }
 
 
 

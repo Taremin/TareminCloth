@@ -7,14 +7,17 @@ use pyo3::types::{PyBytes, PyDict};
 use cloth_core::{
     compute_combined_inv_masses as core_combined_inv_masses,
     audit_pairs as core_audit_pairs,
+    find_mesh_collider_intersections as core_mesh_collider_intersections,
     find_proximity_violations as core_proximity_violations,
-    find_triangle_intersections as core_triangle_intersections,
+    find_triangle_intersection_segments_with_sewing as core_triangle_intersection_segments_with_sewing,
+    find_triangle_intersections_with_sewing as core_triangle_intersections_with_sewing,
     bake_bone_sdf_gpu_ext as core_bake_bone_sdf_gpu_ext,
     bake_mesh_sdf_gpu_ext as core_bake_mesh_sdf_gpu_ext,
     bake_mesh_sdf_hierarchical_ext as core_bake_mesh_sdf_hierarchical_ext,
     BoneInput, ClothMesh, DynamicBoneSdfSetup,
     color_edge_pairs as core_color_edge_pairs,
     tri_tri_intersect as core_tri_tri_intersect,
+    tri_tri_intersection_segment as core_tri_tri_intersection_segment,
     GpuBakeParams, GpuBoneInfo, GpuBoneTransform, GpuBoneTriangleSource, GpuClothSimulator,
     GpuContext, GpuMeshTriangle, GpuSkinningVertex,
     build_adjacency_csr as core_build_adjacency_csr,
@@ -147,7 +150,11 @@ fn get_device_buffer_limits<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>
     vertex_colors=None,
     extra_lines=None,
     voxels=None,
-    voxel_screen_size=None
+    voxel_screen_size=None,
+    face_colors=None,
+    front_color=None,
+    back_color=None,
+    extra_line_width=2.0
 ))]
 fn render_scene_to_png<'py>(
     _py: Python<'py>,
@@ -171,6 +178,10 @@ fn render_scene_to_png<'py>(
     extra_lines: Option<PyReadonlyArray2<f32>>,
     voxels: Option<PyReadonlyArray2<f32>>,
     voxel_screen_size: Option<f32>,
+    face_colors: Option<PyReadonlyArray2<u8>>,
+    front_color: Option<[u8; 3]>,
+    back_color: Option<[u8; 3]>,
+    extra_line_width: f32,
 ) -> PyResult<usize> {
     let pos_view = positions.as_array();
     let mut pos_vec = Vec::with_capacity(pos_view.shape()[0]);
@@ -258,6 +269,22 @@ fn render_scene_to_png<'py>(
         }
     }
 
+    let mut f_colors_vec = Vec::new();
+    let has_fc = if let Some(fc_arr) = face_colors {
+        let view = fc_arr.as_array();
+        f_colors_vec.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 4 {
+                f_colors_vec.push([row[0], row[1], row[2], row[3]]);
+            } else if row.len() == 3 {
+                f_colors_vec.push([row[0], row[1], row[2], 255]);
+            }
+        }
+        true
+    } else {
+        false
+    };
+
     let mut options = cloth_core::RenderOptions {
         width,
         height,
@@ -265,8 +292,8 @@ fn render_scene_to_png<'py>(
         camera_target,
         fov_deg: fov,
         bg_color: [35, 35, 35],
-        front_color: [255, 255, 255],
-        back_color: [255, 0, 0],
+        front_color: front_color.unwrap_or([255, 255, 255]),
+        back_color: back_color.unwrap_or([255, 0, 0]),
         collider_color: [140, 160, 180],
         sewing_color: [0, 204, 255],
         draw_wireframe,
@@ -274,6 +301,7 @@ fn render_scene_to_png<'py>(
         wireframe_only,
         wire_color,
         voxel_screen_size,
+        extra_line_width_px: extra_line_width,
     };
 
     if let Some(c) = collider_color {
@@ -289,6 +317,7 @@ fn render_scene_to_png<'py>(
         sewing_springs: &sew_vec,
         mesh_triangles: &col_tris,
         vertex_colors: if has_vc { Some(&v_colors_vec) } else { None },
+        face_colors: if has_fc { Some(&f_colors_vec) } else { None },
         extra_lines: &lines_vec,
         voxels: &voxels_vec,
     };
@@ -751,16 +780,23 @@ fn tri_tri_intersect(
     core_tri_tri_intersect(v0, v1, v2, u0, u1, u2)
 }
 
-/// 自己交差三角形ペア検出。純CPU・GPU初期化不要。
-/// Python `analysis.find_triangle_intersections` と同一仕様でRustを正本とする。
+/// Möller (1997) 三角形交差判定＋3D交差線分抽出1件。純CPU・GPU初期化不要。
 #[pyfunction]
-#[pyo3(signature = (positions, faces, ignore_adjacent=true, cell_size=None))]
-fn find_triangle_intersections(
+fn tri_tri_intersection_segment(
+    v0: [f32; 3],
+    v1: [f32; 3],
+    v2: [f32; 3],
+    u0: [f32; 3],
+    u1: [f32; 3],
+    u2: [f32; 3],
+) -> Option<([f32; 3], [f32; 3])> {
+    core_tri_tri_intersection_segment(v0, v1, v2, u0, u1, u2)
+}
+
+fn read_positions_and_faces(
     positions: PyReadonlyArray2<f32>,
     faces: PyReadonlyArray2<u32>,
-    ignore_adjacent: bool,
-    cell_size: Option<f32>,
-) -> PyResult<Vec<(u32, u32)>> {
+) -> PyResult<(Vec<[f32; 3]>, Vec<[u32; 3]>)> {
     let p_view = positions.as_array();
     let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
     for row in p_view.outer_iter() {
@@ -778,10 +814,118 @@ fn find_triangle_intersections(
             face_vec.push([row[0], row[1], row[2]]);
         }
     }
-    Ok(core_triangle_intersections(&pos_vec, &face_vec, ignore_adjacent, cell_size)
-        .into_iter()
-        .map(|[a, b]| (a, b))
-        .collect())
+    Ok((pos_vec, face_vec))
+}
+
+fn segments_to_pyarray3<'py>(
+    py: Python<'py>,
+    items: Vec<([u32; 2], [[f32; 3]; 2])>,
+) -> PyResult<(Vec<(u32, u32)>, Bound<'py, PyArray3<f32>>)> {
+    let k = items.len();
+    if k == 0 {
+        return Ok((Vec::new(), PyArray3::zeros(py, [0, 2, 3], false)));
+    }
+    let mut pairs = Vec::with_capacity(k);
+    let mut flat = Vec::with_capacity(k * 6);
+    for (pair, seg) in items {
+        pairs.push((pair[0], pair[1]));
+        flat.extend_from_slice(&seg[0]);
+        flat.extend_from_slice(&seg[1]);
+    }
+    let arr = PyArray1::from_vec(py, flat).reshape([k, 2, 3])?;
+    Ok((pairs, arr))
+}
+
+fn read_sewing_springs(
+    sewing_springs: Option<PyReadonlyArray2<u32>>,
+) -> Vec<[u32; 2]> {
+    let mut sew_vec = Vec::new();
+    if let Some(sew_arr) = sewing_springs {
+        let view = sew_arr.as_array();
+        sew_vec.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 2 {
+                sew_vec.push([row[0], row[1]]);
+            }
+        }
+    }
+    sew_vec
+}
+
+/// 自己交差三角形ペア検出。純CPU・GPU初期化不要。
+/// Python `analysis.find_triangle_intersections` と同一仕様でRustを正本とする。
+#[pyfunction]
+#[pyo3(signature = (positions, faces, ignore_adjacent=true, cell_size=None, sewing_springs=None))]
+fn find_triangle_intersections(
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    ignore_adjacent: bool,
+    cell_size: Option<f32>,
+    sewing_springs: Option<PyReadonlyArray2<u32>>,
+) -> PyResult<Vec<(u32, u32)>> {
+    let (pos_vec, face_vec) = read_positions_and_faces(positions, faces)?;
+    let sew_vec = read_sewing_springs(sewing_springs);
+    let sew_opt = if sew_vec.is_empty() { None } else { Some(sew_vec.as_slice()) };
+    Ok(core_triangle_intersections_with_sewing(
+        &pos_vec,
+        &face_vec,
+        ignore_adjacent,
+        cell_size,
+        sew_opt,
+    )
+    .into_iter()
+    .map(|[a, b]| (a, b))
+    .collect())
+}
+
+/// 自己交差三角形ペアと 3D 交差線分 `(K, 2, 3)` を同時検出。純CPU・GPU初期化不要。
+#[pyfunction]
+#[pyo3(signature = (positions, faces, ignore_adjacent=true, cell_size=None, sewing_springs=None))]
+fn find_triangle_intersection_segments<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    ignore_adjacent: bool,
+    cell_size: Option<f32>,
+    sewing_springs: Option<PyReadonlyArray2<u32>>,
+) -> PyResult<(Vec<(u32, u32)>, Bound<'py, PyArray3<f32>>)> {
+    let (pos_vec, face_vec) = read_positions_and_faces(positions, faces)?;
+    let sew_vec = read_sewing_springs(sewing_springs);
+    let sew_opt = if sew_vec.is_empty() { None } else { Some(sew_vec.as_slice()) };
+    let items = core_triangle_intersection_segments_with_sewing(
+        &pos_vec,
+        &face_vec,
+        ignore_adjacent,
+        cell_size,
+        sew_opt,
+    );
+    segments_to_pyarray3(py, items)
+}
+
+/// 布メッシュとコライダー三角形メッシュの交差ペアと 3D 交差線分 `(K, 2, 3)` を検出。純CPU・GPU初期化不要。
+#[pyfunction]
+#[pyo3(signature = (positions, faces, collider_tris, cell_size=None))]
+fn find_mesh_collider_intersections<'py>(
+    py: Python<'py>,
+    positions: PyReadonlyArray2<f32>,
+    faces: PyReadonlyArray2<u32>,
+    collider_tris: PyReadonlyArray2<f32>,
+    cell_size: Option<f32>,
+) -> PyResult<(Vec<(u32, u32)>, Bound<'py, PyArray3<f32>>)> {
+    let (pos_vec, face_vec) = read_positions_and_faces(positions, faces)?;
+    let col_view = collider_tris.as_array();
+    let mut col_vec = Vec::with_capacity(col_view.shape()[0]);
+    for row in col_view.outer_iter() {
+        if row.len() >= 9 {
+            col_vec.push([
+                row[0], row[1], row[2],
+                row[3], row[4], row[5],
+                row[6], row[7], row[8],
+            ]);
+        }
+    }
+    let items = core_mesh_collider_intersections(&pos_vec, &face_vec, &col_vec, cell_size);
+    segments_to_pyarray3(py, items)
 }
 
 /// 厚み未満接近の頂点-面ペア検出。純CPU・GPU初期化不要。
@@ -794,23 +938,7 @@ fn find_proximity_violations(
     thickness: f32,
     ignore_adjacent: bool,
 ) -> PyResult<Vec<(u32, u32, f32)>> {
-    let p_view = positions.as_array();
-    let mut pos_vec = Vec::with_capacity(p_view.shape()[0]);
-    for row in p_view.outer_iter() {
-        if row.len() != 3 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "positions配列の各頂点は3次元である必要があります",
-            ));
-        }
-        pos_vec.push([row[0], row[1], row[2]]);
-    }
-    let f_view = faces.as_array();
-    let mut face_vec = Vec::with_capacity(f_view.shape()[0]);
-    for row in f_view.outer_iter() {
-        if row.len() >= 3 {
-            face_vec.push([row[0], row[1], row[2]]);
-        }
-    }
+    let (pos_vec, face_vec) = read_positions_and_faces(positions, faces)?;
     Ok(core_proximity_violations(
         &pos_vec,
         &face_vec,
@@ -840,7 +968,11 @@ fn find_proximity_violations(
     vertex_colors=None,
     extra_lines=None,
     voxels=None,
-    voxel_screen_size=None
+    voxel_screen_size=None,
+    face_colors=None,
+    front_color=None,
+    back_color=None,
+    extra_line_width=2.0
 ))]
 fn render_scene_to_rgb<'py>(
     py: Python<'py>,
@@ -863,6 +995,10 @@ fn render_scene_to_rgb<'py>(
     extra_lines: Option<PyReadonlyArray2<f32>>,
     voxels: Option<PyReadonlyArray2<f32>>,
     voxel_screen_size: Option<f32>,
+    face_colors: Option<PyReadonlyArray2<u8>>,
+    front_color: Option<[u8; 3]>,
+    back_color: Option<[u8; 3]>,
+    extra_line_width: f32,
 ) -> PyResult<(Py<PyBytes>, usize)> {
     let pos_view = positions.as_array();
     let mut pos_vec = Vec::with_capacity(pos_view.shape()[0]);
@@ -950,6 +1086,22 @@ fn render_scene_to_rgb<'py>(
         }
     }
 
+    let mut f_colors_vec = Vec::new();
+    let has_fc = if let Some(fc_arr) = face_colors {
+        let view = fc_arr.as_array();
+        f_colors_vec.reserve(view.shape()[0]);
+        for row in view.outer_iter() {
+            if row.len() >= 4 {
+                f_colors_vec.push([row[0], row[1], row[2], row[3]]);
+            } else if row.len() == 3 {
+                f_colors_vec.push([row[0], row[1], row[2], 255]);
+            }
+        }
+        true
+    } else {
+        false
+    };
+
     let mut options = cloth_core::RenderOptions {
         width,
         height,
@@ -957,8 +1109,8 @@ fn render_scene_to_rgb<'py>(
         camera_target,
         fov_deg: fov,
         bg_color: [35, 35, 35],
-        front_color: [255, 255, 255],
-        back_color: [255, 0, 0],
+        front_color: front_color.unwrap_or([255, 255, 255]),
+        back_color: back_color.unwrap_or([255, 0, 0]),
         collider_color: [140, 160, 180],
         sewing_color: [0, 204, 255],
         draw_wireframe,
@@ -966,6 +1118,7 @@ fn render_scene_to_rgb<'py>(
         wireframe_only,
         wire_color,
         voxel_screen_size,
+        extra_line_width_px: extra_line_width,
     };
 
     if let Some(c) = collider_color {
@@ -981,6 +1134,7 @@ fn render_scene_to_rgb<'py>(
         sewing_springs: &sew_vec,
         mesh_triangles: &col_tris,
         vertex_colors: if has_vc { Some(&v_colors_vec) } else { None },
+        face_colors: if has_fc { Some(&f_colors_vec) } else { None },
         extra_lines: &lines_vec,
         voxels: &voxels_vec,
     };
@@ -1028,6 +1182,7 @@ fn render_mesh_to_png<'py>(
         width, height, camera_pos, camera_target, fov,
         true, 1.0, false, None, None, None,
         None, None, None, None,
+        None, None, None, 2.0,
     )
 }
 
@@ -3411,7 +3566,10 @@ fn taremin_cloth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compute_combined_inv_masses, m)?)?;
     m.add_function(wrap_pyfunction!(color_edge_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(tri_tri_intersect, m)?)?;
+    m.add_function(wrap_pyfunction!(tri_tri_intersection_segment, m)?)?;
     m.add_function(wrap_pyfunction!(find_triangle_intersections, m)?)?;
+    m.add_function(wrap_pyfunction!(find_triangle_intersection_segments, m)?)?;
+    m.add_function(wrap_pyfunction!(find_mesh_collider_intersections, m)?)?;
     m.add_function(wrap_pyfunction!(find_proximity_violations, m)?)?;
     m.add_function(wrap_pyfunction!(audit_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(remesh_pattern_2d, m)?)?;

@@ -384,7 +384,10 @@ Taremin Cloth では、目的に応じて **「インタラクティブモード
    # ログ全体の異常値を走査
    python -m taremin_cloth.log_tools inspect cloth_debug.jsonl.gz
 
-   # 問題フレームの貫通・裏返り確認（表面:白、裏面:赤の高速レンダリング、約0.1秒）
+   # 問題フレームの交差面・交差線分ハイライト確認（自己交差・コライダー貫通の直接可視化、約0.1秒）
+   python -m taremin_cloth.log_tools render cloth_debug.jsonl.gz --frame 71 --color-by intersections --output scratch/f71_isect.png
+
+   # 問題フレームの法線・裏返り確認（表面:白、裏面:赤）
    python -m taremin_cloth.log_tools render cloth_debug.jsonl.gz --frame 71 --output scratch/f71.png
 
    # 問題直前のフレームから始まる自己完結型 unittest スクリプトを自動生成

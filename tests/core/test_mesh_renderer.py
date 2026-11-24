@@ -518,6 +518,241 @@ class TestMeshRenderer(unittest.TestCase):
         mask = (arr[:, :, 2] > 200) & (arr[:, :, 0] < 200)
         self.assertGreater(np.sum(mask), 20, "メッシュ裏側のラインが透視合成されていません")
 
+    def test_face_colors_no_bleeding(self):
+        """face_colors が共有頂点の隣接面へ滲まず、alpha=0 は front/back にフォールバックする検証"""
+        from taremin_cloth.mesh_renderer import render_scene_to_image
+
+        positions = np.array([
+            [-0.8, -0.8, 0.0],
+            [0.8, -0.8, 0.0],
+            [0.8, 0.8, 0.0],
+            [-0.8, 0.8, 0.0],
+        ], dtype=np.float32)
+        faces = np.array([
+            [0, 1, 2],  # 面0: マゼンタ指定
+            [0, 2, 3],  # 面1: alpha=0 (front_color 白へフォールバック)
+        ], dtype=np.uint32)
+        face_colors = np.array([
+            [235, 0, 220, 255],
+            [0, 0, 0, 0],
+        ], dtype=np.uint8)
+
+        img = render_scene_to_image(
+            positions, faces,
+            face_colors=face_colors,
+            front_color=(245, 248, 250),
+            back_color=(185, 200, 220),
+            width=120, height=120,
+            camera_pos=(0.0, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=False,
+        )
+        arr = np.array(img)
+        magenta_mask = (arr[:, :, 0] > 150) & (arr[:, :, 1] < 20) & (arr[:, :, 2] > 140)
+        white_mask = (arr[:, :, 0] > 180) & (arr[:, :, 1] > 180) & (arr[:, :, 2] > 180)
+        self.assertGreater(np.sum(magenta_mask), 200, "指定面のマゼンタが描画されていません")
+        self.assertGreater(np.sum(white_mask), 200, "非指定面のfront_colorフォールバックが描画されていません")
+
+    def test_intersection_overlay_and_render(self):
+        """交差可視化オーバーレイ（表面同士・遮蔽線分・コライダー・同時該当・非交差裏面）の検証"""
+        from taremin_cloth.mesh_renderer import (
+            compute_intersection_overlay,
+            render_scene_to_image,
+        )
+
+        # (a) 交差なし（表面＋裏面）: 裏面は淡青グレーで赤ピクセル0
+        pos_no_hit = np.array([
+            [-1.0, -1.0, 0.0], [0.0, 1.0, 0.0], [1.0, -1.0, 0.0],  # CW 裏面
+        ], dtype=np.float32)
+        faces_single = np.array([[0, 1, 2]], dtype=np.uint32)
+        ov_clean = compute_intersection_overlay(pos_no_hit, faces_single)
+        self.assertEqual(len(ov_clean["self_pairs"]), 0)
+        self.assertIsNone(ov_clean["lines"])
+        img_clean = render_scene_to_image(
+            pos_no_hit, faces_single,
+            face_colors=ov_clean["face_colors"],
+            front_color=ov_clean["front_color"],
+            back_color=ov_clean["back_color"],
+            width=100, height=100,
+            camera_pos=(0.0, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=False,
+        )
+        self.assertEqual(count_red_pixels(img_clean), 0, "非交差の裏面が赤ピクセル扱いになっています")
+
+        # (b) 表面同士の貫通（従来の赤ピクセルでは 0 になり見逃すケース）
+        pos_front_cross = np.array([
+            # 面0: Z=0 で正面 (+Z) を向く
+            [-0.8, -0.8, 0.0], [0.8, -0.8, 0.0], [0.0, 0.8, 0.0],
+            # 面1: X=0 付近を斜めに貫きつつカメラ側 (+X, +Z) に表を向ける
+            [0.0, -0.5, -0.5], [0.4, 0.0, 0.5], [0.0, 0.5, -0.5],
+        ], dtype=np.float32)
+        faces_two = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32)
+        # まず従来モードでは赤ピクセル=0であることを確認
+        img_legacy = render_mesh_to_image(
+            pos_front_cross, faces_two,
+            width=140, height=140,
+            camera_pos=(0.5, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=False,
+        )
+        self.assertEqual(count_red_pixels(img_legacy), 0)
+
+        ov_self = compute_intersection_overlay(pos_front_cross, faces_two)
+        self.assertEqual(ov_self["self_pairs"], [(0, 1)])
+        self.assertIsNotNone(ov_self["lines"])
+        img_self = render_scene_to_image(
+            pos_front_cross, faces_two,
+            face_colors=ov_self["face_colors"],
+            front_color=ov_self["front_color"],
+            back_color=ov_self["back_color"],
+            extra_lines=ov_self["lines"],
+            width=140, height=140,
+            camera_pos=(0.5, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=False,
+        )
+        arr_self = np.array(img_self)
+        magenta_px = np.sum((arr_self[:, :, 0] > 140) & (arr_self[:, :, 1] < 20) & (arr_self[:, :, 2] > 130))
+        yellow_px = np.sum((arr_self[:, :, 0] > 200) & (arr_self[:, :, 1] > 200) & (arr_self[:, :, 2] < 40))
+        self.assertGreater(magenta_px, 100, "表面同士の自己交差面がマゼンタ描画されていません")
+        self.assertGreater(yellow_px, 5, "自己交差3D線分が黄色描画されていません")
+
+        # (c) 手前の白い布に遮蔽された奥の交差でも X-ray 透視線分が現れること
+        pos_occluded = np.array([
+            # 手前の布 (面0, Z=+0.5)
+            [-1.0, -1.0, 0.5], [1.0, -1.0, 0.5], [0.0, 1.0, 0.5],
+            # 奥で交差する2面 (面1, 面2, Z=-0.3)
+            [-0.5, -0.5, -0.3], [0.5, -0.5, -0.3], [0.0, 0.5, -0.3],
+            [0.0, -0.6, -0.6], [0.0, 0.6, -0.6], [0.2, 0.0, 0.0],
+        ], dtype=np.float32)
+        faces_occ = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]], dtype=np.uint32)
+        ov_occ = compute_intersection_overlay(pos_occluded, faces_occ)
+        self.assertEqual(ov_occ["self_pairs"], [(1, 2)])
+        img_occ = render_scene_to_image(
+            pos_occluded, faces_occ,
+            face_colors=ov_occ["face_colors"],
+            front_color=ov_occ["front_color"],
+            back_color=ov_occ["back_color"],
+            extra_lines=ov_occ["lines"],
+            width=140, height=140,
+            camera_pos=(0.0, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=False,
+        )
+        arr_occ = np.array(img_occ)
+        # 黄色 [255, 245, 0] が白面へ45% X-ray合成されると B チャンネルが大きく下がる
+        xray_yellow = np.sum((arr_occ[:, :, 0] > 200) & (arr_occ[:, :, 1] > 200) & (arr_occ[:, :, 2] < 180))
+        self.assertGreater(xray_yellow, 5, "遮蔽された奥の交差線分がX-ray透視で描画されていません")
+
+        # (d) 布 vs コライダー交差 (オレンジ面 + 赤線分) & (e) 自己交差+コライダー同時発生面 (クリムゾン)
+        collider_tris = np.array([
+            [-0.5, 0.0, -0.5, 0.5, 0.0, -0.5, 0.0, 0.0, 0.5],
+        ], dtype=np.float32)
+        ov_both = compute_intersection_overlay(
+            pos_front_cross, faces_two, mesh_colliders=collider_tris
+        )
+        self.assertTrue(len(ov_both["self_pairs"]) >= 1)
+        self.assertTrue(len(ov_both["collider_pairs"]) >= 1)
+        # 面0・面1のうち両方に該当する面はクリムゾン [255, 0, 90, 255] になること
+        both_faces = set(ov_both["self_faces"]) & set(ov_both["collider_faces"])
+        self.assertTrue(len(both_faces) >= 1)
+        for bf in both_faces:
+            np.testing.assert_array_equal(ov_both["face_colors"][bf], [255, 0, 90, 255])
+
+        # コライダー交差のみのケース (オレンジ面 + 赤線)
+        pos_col_only = np.array([
+            [-0.8, -0.8, 0.0], [0.8, -0.8, 0.0], [0.0, 0.8, 0.0],
+        ], dtype=np.float32)
+        ov_col = compute_intersection_overlay(
+            pos_col_only, faces_single, mesh_colliders=collider_tris
+        )
+        self.assertEqual(ov_col["self_pairs"], [])
+        self.assertEqual(ov_col["collider_pairs"], [(0, 0)])
+        np.testing.assert_array_equal(ov_col["face_colors"][0], [255, 120, 0, 255])
+
+    def test_log_tools_render_intersections_cli(self):
+        """log_tools render --color-by intersections のE2Eスモークテスト"""
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        from taremin_cloth import log_tools
+
+        fixture = os.path.join(project_root, "tests", "fixtures", "data_penetration_f23_f25.jsonl.gz")
+        if not os.path.exists(fixture):
+            self.skipTest(f"fixture が見つかりません: {fixture}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_png = os.path.join(tmpdir, "f25_isect.png")
+            args = argparse.Namespace(
+                log_file=fixture,
+                frame=25,
+                frames=None,
+                step=1,
+                output=out_png,
+                format=None,
+                fps=30,
+                width=200,
+                height=150,
+                wire_width=1.0,
+                no_wireframe=False,
+                no_sewing=False,
+                no_colliders=False,
+                color_by="intersections",
+                show_sdf_bbox=False,
+                vel_max=None,
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                log_tools.cmd_render(args)
+            out_text = buf.getvalue()
+            self.assertTrue(os.path.exists(out_png))
+            self.assertGreater(os.path.getsize(out_png), 0)
+            self.assertIn("自己交差:", out_text)
+            self.assertIn("コライダー交差:", out_text)
+
+    def test_sewn_adjacent_exclusion_and_wireframe_magenta_visibility(self):
+        """縫合結合隣接面の除外とワイヤーフレーム有効時の小三角形マゼンタ視認性検証"""
+        from taremin_cloth.mesh_renderer import (
+            compute_intersection_overlay,
+            render_scene_to_image,
+        )
+
+        # 1. 別頂点IDで密着する縫合面0・1と、貫通する第3面2
+        pos = np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.3, 0.3, 0.0],
+            [0.2, -0.5, -0.5], [0.2, 1.5, -0.5], [0.2, 0.5, 0.5],
+        ], dtype=np.float32)
+        faces = np.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]], dtype=np.uint32)
+        sew = np.array([[0, 3], [1, 4]], dtype=np.uint32)
+
+        ov_raw = compute_intersection_overlay(pos, faces, sewing_springs=sew, exclude_sewn_adjacent=False)
+        ov_filt = compute_intersection_overlay(pos, faces, sewing_springs=sew, exclude_sewn_adjacent=True)
+        self.assertIn((0, 1), ov_raw["self_pairs"])
+        self.assertNotIn((0, 1), ov_filt["self_pairs"])
+        self.assertIn((0, 2), ov_filt["self_pairs"])
+        self.assertTrue(ov_filt["excluded_sewn_adjacent"])
+
+        # 2. 小さい三角形で draw_wireframe=True でもマゼンタが黒潰れせず視認できること
+        pos_small = np.array([
+            [-0.08, -0.08, 0.0], [0.08, -0.08, 0.0], [0.0, 0.08, 0.0],
+            [-1.0, -1.0, -0.1], [1.0, -1.0, -0.1], [0.0, 1.0, -0.1],
+        ], dtype=np.float32)
+        faces_small = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32)
+        fc_small = np.array([[235, 0, 220, 255], [0, 0, 0, 0]], dtype=np.uint8)
+        img = render_scene_to_image(
+            pos_small, faces_small,
+            face_colors=fc_small,
+            width=200, height=200,
+            camera_pos=(0.0, 0.0, 3.0),
+            camera_target=(0.0, 0.0, 0.0),
+            draw_wireframe=True,
+        )
+        arr = np.array(img)
+        magenta_px = np.sum((arr[:, :, 0] > 150) & (arr[:, :, 1] < 30) & (arr[:, :, 2] > 140))
+        self.assertGreater(magenta_px, 10, f"ワイヤー有効時の小三角形マゼンタが潰れています: {magenta_px}")
+
 
 if __name__ == "__main__":
     unittest.main()

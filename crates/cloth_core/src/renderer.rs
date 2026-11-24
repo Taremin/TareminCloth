@@ -32,6 +32,8 @@ pub struct RenderOptions {
     pub wire_color: Option<[u8; 3]>,
     /// ボクセルのスクリーンスペース固定描画サイズ (ピクセル単位, None時は従来の3Dワールド空間キューブ描画)
     pub voxel_screen_size: Option<f32>,
+    /// 追加3Dライン（交差線・SDF BBOX等）の描画太さ (ピクセル単位, デフォルト 2.0px)
+    pub extra_line_width_px: f32,
 }
 
 impl Default for RenderOptions {
@@ -52,6 +54,7 @@ impl Default for RenderOptions {
             wireframe_only: false,
             wire_color: None,
             voxel_screen_size: None,
+            extra_line_width_px: 2.0,
         }
     }
 }
@@ -64,6 +67,7 @@ pub struct SceneData<'a> {
     pub sewing_springs: &'a [[u32; 2]],
     pub mesh_triangles: &'a [[f32; 9]], // コライダー三角形 [p0x..z, p1x..z, p2x..z]
     pub vertex_colors: Option<&'a [[u8; 3]]>, // 頂点ごとのRGBカラー (ヒートマップ用)
+    pub face_colors: Option<&'a [[u8; 4]]>,   // 面ごとのRGBAオーバーライド (r, g, b, mask: >0で上書き)
     pub extra_lines: &'a [[f32; 9]],    // 追加3Dライン [p0x..z, p1x..z, r, g, b] (SDF BBOX等)
     pub voxels: &'a [[f32; 7]],         // ボクセルデータ [center_x..z, size, r, g, b]
 }
@@ -216,10 +220,7 @@ fn draw_line_3d(
     let dx = p1[0] - p0[0];
     let dy = p1[1] - p0[1];
     let dist = (dx * dx + dy * dy).sqrt();
-    let steps = (dist * 1.5).ceil() as usize;
-    if steps == 0 {
-        return;
-    }
+    let steps = (dist * 1.5).ceil().max(1.0) as usize;
 
     let z_bias = -0.000005; // 布表面の上に極わずかに浮かせてZ-fightingを防止（約0.3mm相当）
     let radius = (width_px * 0.5).max(0.5);
@@ -272,6 +273,7 @@ fn rasterize_triangle(
     _is_front: bool,
     base_color: [u8; 3],
     vert_colors: Option<[[u8; 3]; 3]>,
+    is_face_override: bool,
     light_dir: [f32; 3],
     options: &RenderOptions,
     fb: &mut [u8],
@@ -296,9 +298,14 @@ fn rasterize_triangle(
     }
     let inv_denom = 1.0 / denom;
 
-    // 半球ディレクショナル・シェーディング
-    let mut ndotl = vec3_dot(norm, light_dir).abs();
-    ndotl = ndotl * 0.5 + 0.5;
+    // 半球ディレクショナル・シェーディング（face_colors上書き面は高輝度で視認性を確保）
+    let raw_ndotl = vec3_dot(norm, light_dir).abs();
+    let ndotl = if is_face_override {
+        raw_ndotl * 0.3 + 0.7
+    } else {
+        raw_ndotl * 0.5 + 0.5
+    };
+    let wire_dim = if is_face_override { 0.85 } else { 0.45 };
 
     let default_shaded_color = [
         (base_color[0] as f32 * ndotl).min(255.0) as u8,
@@ -312,9 +319,9 @@ fn rasterize_triangle(
         [255, 140, 20] // Blenderのアクティブオブジェクト選択色（鮮やかなオレンジ）
     } else {
         [
-            (default_shaded_color[0] as f32 * 0.45) as u8,
-            (default_shaded_color[1] as f32 * 0.45) as u8,
-            (default_shaded_color[2] as f32 * 0.45) as u8,
+            (default_shaded_color[0] as f32 * wire_dim) as u8,
+            (default_shaded_color[1] as f32 * wire_dim) as u8,
+            (default_shaded_color[2] as f32 * wire_dim) as u8,
         ]
     };
 
@@ -766,7 +773,7 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
 
         rasterize_triangle(
             p0_s, z0, p1_s, z1, p2_s, z2,
-            norm, is_front, options.collider_color, None,
+            norm, is_front, options.collider_color, None, false,
             light_dir, options, &mut fb, &mut z_buffer,
         );
     }
@@ -786,8 +793,8 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
         );
     }
 
-    // 3. 布メッシュの描画（表面:白、裏面:赤、または頂点カラー／ワイヤーフレーム）
-    for tri in scene.faces {
+    // 3. 布メッシュの描画（表面:白、裏面:赤、または面/頂点カラー／ワイヤーフレーム）
+    for (f_idx, tri) in scene.faces.iter().enumerate() {
         let i0 = tri[0] as usize;
         let i1 = tri[1] as usize;
         let i2 = tri[2] as usize;
@@ -801,10 +808,18 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
 
         let cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
         let is_front = cross < 0.0;
-        let base_color = if is_front {
-            options.front_color
+        let (base_color, is_face_override) = if let Some(fc) = scene.face_colors {
+            if f_idx < fc.len() && fc[f_idx][3] > 0 {
+                ([fc[f_idx][0], fc[f_idx][1], fc[f_idx][2]], true)
+            } else if is_front {
+                (options.front_color, false)
+            } else {
+                (options.back_color, false)
+            }
+        } else if is_front {
+            (options.front_color, false)
         } else {
-            options.back_color
+            (options.back_color, false)
         };
 
         let vert_colors = if let Some(vc) = scene.vertex_colors {
@@ -826,7 +841,7 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
 
         rasterize_triangle(
             p0, ndc_zs[i0], p1, ndc_zs[i1], p2, ndc_zs[i2],
-            norm, is_front, base_color, vert_colors,
+            norm, is_front, base_color, vert_colors, is_face_override,
             light_dir, options, &mut fb, &mut z_buffer,
         );
     }
@@ -853,7 +868,7 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
         );
     }
 
-    // 4. 追加3Dライン（SDF BBOX等）の描画
+    // 4. 追加3Dライン（SDF BBOX・交差線分等）の描画
     for line in scene.extra_lines {
         let p0_w = [line[0], line[1], line[2]];
         let p1_w = [line[3], line[4], line[5]];
@@ -864,7 +879,7 @@ pub fn render_scene_to_buffer(scene: &SceneData, options: &RenderOptions) -> Ren
             draw_line_3d(
                 p0_s, z0, p1_s, z1,
                 line_color,
-                2.0,
+                options.extra_line_width_px,
                 width, height,
                 &mut fb, &mut z_buffer,
             );
@@ -902,6 +917,7 @@ pub fn render_mesh_to_buffer(
         sewing_springs: &[],
         mesh_triangles: &[],
         vertex_colors: None,
+        face_colors: None,
         extra_lines: &[],
         voxels: &[],
     };
@@ -949,6 +965,7 @@ pub fn render_mesh_to_png_file(
         sewing_springs: &[],
         mesh_triangles: &[],
         vertex_colors: None,
+        face_colors: None,
         extra_lines: &[],
         voxels: &[],
     };
@@ -1028,6 +1045,7 @@ mod tests {
             sewing_springs: &sewing_springs,
             mesh_triangles: &mesh_triangles,
             vertex_colors: None,
+            face_colors: None,
             extra_lines: &extra_lines,
             voxels: &[],
         };
@@ -1092,6 +1110,7 @@ mod tests {
             sewing_springs: &[],
             mesh_triangles: &[],
             vertex_colors: Some(&v_colors),
+            face_colors: None,
             extra_lines: &[],
             voxels: &[],
         };
@@ -1229,6 +1248,7 @@ mod tests {
             sewing_springs: &[],
             mesh_triangles: &[],
             vertex_colors: None,
+            face_colors: None,
             extra_lines: &[],
             voxels: &voxels,
         };
@@ -1269,6 +1289,7 @@ mod tests {
             sewing_springs: &[],
             mesh_triangles: &[],
             vertex_colors: None,
+            face_colors: None,
             extra_lines: &[],
             voxels: &voxels,
         };
@@ -1286,5 +1307,104 @@ mod tests {
 
         // 2x2 なのでちょうど 4 ピクセル描画されること
         assert_eq!(cyan_pixels, 4, "スクリーンスペース 2x2 ボクセル描画のピクセル数が4ではありません: count={}", cyan_pixels);
+    }
+
+    #[test]
+    fn test_face_colors_rgba_override() {
+        let options = RenderOptions {
+            width: 120,
+            height: 120,
+            camera_pos: Some([0.0, 0.0, 3.0]),
+            camera_target: Some([0.0, 0.0, 0.0]),
+            draw_wireframe: false,
+            front_color: [245, 248, 250],
+            back_color: [185, 200, 220],
+            ..Default::default()
+        };
+
+        // 頂点 (0, 2) を共有する2枚の三角形
+        let positions = vec![
+            [-0.8, -0.8, 0.0],
+            [0.8, -0.8, 0.0],
+            [0.8, 0.8, 0.0],
+            [-0.8, 0.8, 0.0],
+        ];
+        let faces = vec![[0, 1, 2], [0, 2, 3]];
+        // 面0のみマゼンタ [235, 0, 220, 255]、面1は alpha=0 で front_color フォールバック
+        let face_colors = vec![[235, 0, 220, 255], [0, 0, 0, 0]];
+
+        let scene = SceneData {
+            positions: &positions,
+            faces: &faces,
+            sewing_springs: &[],
+            mesh_triangles: &[],
+            vertex_colors: None,
+            face_colors: Some(&face_colors),
+            extra_lines: &[],
+            voxels: &[],
+        };
+
+        let res = render_scene_to_buffer(&scene, &options);
+        let mut magenta_px = 0;
+        let mut white_px = 0;
+        for i in 0..(120 * 120) {
+            let r = res.framebuffer_rgb[i * 3];
+            let g = res.framebuffer_rgb[i * 3 + 1];
+            let b = res.framebuffer_rgb[i * 3 + 2];
+            if r > 150 && g < 20 && b > 140 {
+                magenta_px += 1;
+            }
+            if r > 180 && g > 180 && b > 180 {
+                white_px += 1;
+            }
+        }
+        assert!(magenta_px > 200, "指定面のマゼンタが描画されていません: {}", magenta_px);
+        assert!(white_px > 200, "非指定面のfront_colorフォールバックが描画されていません: {}", white_px);
+    }
+
+    #[test]
+    fn test_face_colors_override_visible_with_wireframe() {
+        let options = RenderOptions {
+            width: 200,
+            height: 200,
+            camera_pos: Some([0.0, 0.0, 3.0]),
+            camera_target: Some([0.0, 0.0, 0.0]),
+            draw_wireframe: true,
+            ..Default::default()
+        };
+
+        let positions = vec![
+            [-0.08, -0.08, 0.0],
+            [0.08, -0.08, 0.0],
+            [0.0, 0.08, 0.0],
+            [-1.0, -1.0, -0.1],
+            [1.0, -1.0, -0.1],
+            [0.0, 1.0, -0.1],
+        ];
+        let faces = vec![[0, 1, 2], [3, 4, 5]];
+        let face_colors = vec![[235, 0, 220, 255], [0, 0, 0, 0]];
+
+        let scene = SceneData {
+            positions: &positions,
+            faces: &faces,
+            sewing_springs: &[],
+            mesh_triangles: &[],
+            vertex_colors: None,
+            face_colors: Some(&face_colors),
+            extra_lines: &[],
+            voxels: &[],
+        };
+
+        let res = render_scene_to_buffer(&scene, &options);
+        let mut magenta_px = 0;
+        for i in 0..(200 * 200) {
+            let r = res.framebuffer_rgb[i * 3];
+            let g = res.framebuffer_rgb[i * 3 + 1];
+            let b = res.framebuffer_rgb[i * 3 + 2];
+            if r > 150 && g < 30 && b > 140 {
+                magenta_px += 1;
+            }
+        }
+        assert!(magenta_px > 10, "ワイヤー有効時の小三角形マゼンタが潰れています: {}", magenta_px);
     }
 }
